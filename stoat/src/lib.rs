@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub mod buffer {
+    pub struct Buffer;
 }
+pub mod session {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+#[derive(Default)]
+pub struct Stoat;
+impl Stoat {
+    pub fn new() -> Self {
+        Self
     }
 }
