@@ -1,0 +1,19 @@
+[package]
+name = "stoat_edit"
+version = "0.1.0"
+edition = "2021"
+description = "A exploratory text editor."
+readme = "../README.md"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[[bin]]
+name = "stoat-edit"
+path = "src/bin/stoat-edit.rs"
+
+[lib]
+name = "stoat_edit"
+path = "src/lib.rs"
+
+[dependencies]
+stoat = { path = "../stoat" }
