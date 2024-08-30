@@ -28,12 +28,13 @@
             rust-toolchain
 
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-            # Some dependencies needed for GPUI examples. Found through dumb trial and error.
-            clang
-            mold
-            cmake
-            openssl
-            xorg.libxcb
+            # NOTE: Deps copied from a Bevy project, not sure if they're all needed for Iced.
+            alsaLib
+            udev
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXi
+            xorg.libXrandr
             libxkbcommon
             vulkan-headers
             vulkan-loader
@@ -46,13 +47,10 @@
             darwin.apple_sdk.frameworks.Cocoa
             darwin.apple_sdk.frameworks.Carbon
             darwin.apple_sdk.frameworks.WebKit
-            darwin.apple_sdk.frameworks.CoreVideo
-            darwin.apple_sdk.frameworks.IOKit
-            darwin.apple_sdk.frameworks.Metal
-            darwin.apple_sdk.frameworks.MetalKit
           ];
 
-          # Seems necessary to make libxcb found. Again for GPUI.
+          # necessary for some libs. Not even sure which ones,
+          # i just copy and pasted from a Bevy repo of mine, hah.
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
         };
       }

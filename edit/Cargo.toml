@@ -7,6 +7,9 @@ readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
+[features]
+debug = ["iced/debug"]
+
 [[bin]]
 name = "stoat-edit"
 path = "src/bin/stoat-edit.rs"
@@ -16,4 +19,5 @@ name = "stoat_edit"
 path = "src/lib.rs"
 
 [dependencies]
+iced = "0.12.1"
 stoat = { path = "../stoat" }
