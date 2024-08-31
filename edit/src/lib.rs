@@ -1,10 +1,9 @@
-use iced::{
-    widget::{text, text_editor},
-    Sandbox,
-};
+use iced::{widget::text_editor, Sandbox};
+use stoat::Stoat;
 
 #[derive(Default)]
 pub struct Editor {
+    stoat: Stoat,
     content: text_editor::Content,
 }
 
@@ -26,7 +25,8 @@ impl Sandbox for Editor {
 
     fn update(&mut self, message: Self::Message) {
         match message {
-            Message::Edit(action) => self.content.perform(action),
+            // Message::Edit(action) => self.content.perform(action),
+            Message::Edit(_) => {},
         }
     }
 
