@@ -2,8 +2,8 @@
 resolver = "2"
 members = [
   "stoat",
-  "edit",
-  "gui",
+  "core",
+  "bevy",
 ]
 
 [workspace.dependencies]

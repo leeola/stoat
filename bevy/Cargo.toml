@@ -1,20 +1,16 @@
 [package]
-name = "gui"
+name = "stoat_gui_bevy"
 version = "0.1.0"
 edition = "2021"
-description = "A gui for Stoat."
+description = "An bevy based gui for Stoat."
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
 [features]
 
-[[bin]]
-name = "stoat-gui"
-path = "src/bin/stoat-gui.rs"
-
 [lib]
-name = "stoat_gui"
+name = "stoat_gui_bevy"
 path = "src/lib.rs"
 
 [dependencies]

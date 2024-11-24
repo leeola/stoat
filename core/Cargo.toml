@@ -1,15 +1,14 @@
 [package]
-name = "stoat"
+name = "stoat_core"
 version = "0.1.0"
 edition = "2021"
-description = "An exploration into a canvas modular editor."
+description = "An bevy based gui for Stoat."
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[[bin]]
-name = "stoat"
-path = "src/bin/stoat.rs"
+[lib]
+name = "stoat_core"
+path = "src/lib.rs"
 
 [dependencies]
-stoat_core = { path = "../core" }
