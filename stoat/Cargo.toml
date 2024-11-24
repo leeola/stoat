@@ -2,9 +2,13 @@
 name = "stoat"
 version = "0.1.0"
 edition = "2021"
-description = "A exploratory text editor."
+description = "An exploration into a node based modular editor."
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
+
+[[bin]]
+name = "stoat"
+path = "src/bin/stoat.rs"
 
 [dependencies]
