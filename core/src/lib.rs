@@ -1,9 +1,7 @@
 use node::NodeInit;
 use workspace::Workspace;
 
-pub mod workspace {
-    pub struct Workspace;
-}
+pub mod workspace;
 
 // TODO: New name, don't like Node. Close enough for now.
 pub mod node;
