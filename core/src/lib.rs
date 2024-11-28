@@ -1,6 +1,11 @@
+use input::Input;
 use node::NodeInit;
 use workspace::Workspace;
 
+pub mod error;
+pub mod input;
+pub mod mode;
+pub mod output;
 pub mod workspace;
 
 // TODO: New name, don't like Node. Close enough for now.
@@ -14,6 +19,16 @@ pub struct Stoat {
 impl Stoat {
     pub fn new() -> Self {
         Self::builder().std().build()
+    }
+    /// Push an input into Stoat.
+    pub fn input(&mut self, _input: impl Into<Input>) {
+        todo!()
+    }
+    /// Push multiple inputs into Stoat.
+    pub fn inputs<T: Into<Input>>(&mut self, inputs: impl IntoIterator<Item = T>) {
+        for t in inputs {
+            self.input(t)
+        }
     }
     pub fn builder() -> StoatBuilder {
         Default::default()
