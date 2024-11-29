@@ -1,19 +1,25 @@
 use input::Input;
-use node::NodeInit;
+use plugin::Plugin;
 use workspace::Workspace;
 
 pub mod error;
+pub mod config {
+    pub struct Config;
+    // TODO: impl loading over generic FS.
+}
+pub mod persist {
+    // TODO: save state over generic FS. Ideally configurable serialization format.
+}
 pub mod input;
 pub mod mode;
-pub mod output;
-pub mod workspace;
-
-// TODO: New name, don't like Node. Close enough for now.
 pub mod node;
+pub mod plugin;
+pub mod view;
+pub mod workspace;
 
 #[derive(Default)]
 pub struct Stoat {
-    node_inits: Vec<Box<dyn NodeInit>>,
+    plugins: Vec<Box<dyn Plugin>>,
     workspaces: Vec<Workspace>,
 }
 impl Stoat {
@@ -39,11 +45,11 @@ impl Stoat {
 pub struct StoatBuilder(Stoat);
 impl StoatBuilder {
     /// Include standard configuration and plugins.
-    pub fn std(mut self) -> Self {
+    pub fn std(self) -> Self {
         self
     }
-    pub fn node_init(mut self, node_init: impl NodeInit + 'static) -> Self {
-        self.0.node_inits.push(Box::new(node_init));
+    pub fn plugin(mut self, node_init: impl Plugin + 'static) -> Self {
+        self.0.plugins.push(Box::new(node_init));
         self
     }
     pub fn build(self) -> Stoat {
