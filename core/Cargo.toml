@@ -14,3 +14,6 @@ path = "src/lib.rs"
 [dependencies]
 thiserror.workspace = true
 async-trait.workspace = true
+serde.workspace = true
+ron = "0.8"
+rkyv = "0.8"

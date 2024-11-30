@@ -2,11 +2,8 @@ use input::Input;
 use plugin::Plugin;
 use workspace::Workspace;
 
+pub mod config;
 pub mod error;
-pub mod config {
-    pub struct Config;
-    // TODO: impl loading over generic FS.
-}
 pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }
@@ -14,6 +11,7 @@ pub mod input;
 pub mod mode;
 pub mod node;
 pub mod plugin;
+pub mod value;
 pub mod view;
 pub mod workspace;
 
