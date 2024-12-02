@@ -17,3 +17,6 @@ async-trait.workspace = true
 serde.workspace = true
 ron = "0.8"
 rkyv = "0.8"
+compact_str = { version = "0.8", features = ["rkyv", "serde"] }
+ordered-float = { version = "4.5", features = ["rkyv", "serde"] }
+indexmap = { version = "2.7", features = ["serde"] }
