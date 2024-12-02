@@ -1,5 +1,5 @@
 use input::Input;
-use plugin::Plugin;
+use plugin::IoPlugin;
 use workspace::Workspace;
 
 pub mod config;
@@ -7,6 +7,7 @@ pub mod error;
 pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }
+pub mod data;
 pub mod input;
 pub mod mode;
 pub mod node;
@@ -15,9 +16,11 @@ pub mod value;
 pub mod view;
 pub mod workspace;
 
+pub use error::{Error, Result};
+
 #[derive(Default)]
 pub struct Stoat {
-    plugins: Vec<Box<dyn Plugin>>,
+    io_plugin: Vec<Box<dyn IoPlugin>>,
     workspaces: Vec<Workspace>,
 }
 impl Stoat {
@@ -46,8 +49,8 @@ impl StoatBuilder {
     pub fn std(self) -> Self {
         self
     }
-    pub fn plugin(mut self, node_init: impl Plugin + 'static) -> Self {
-        self.0.plugins.push(Box::new(node_init));
+    pub fn plugin(mut self, node_init: impl IoPlugin + 'static) -> Self {
+        self.0.io_plugin.push(Box::new(node_init));
         self
     }
     pub fn build(self) -> Stoat {
