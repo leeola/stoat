@@ -3,10 +3,11 @@ resolver = "2"
 members = [
   "stoat",
   "core",
-  "bevy",
+  "gui_bevy",
 ]
 
 [workspace.dependencies]
+snafu = "0.8"
 anyhow = "1.0"
 chrono = "0.4"
 thiserror = "1.0"

@@ -14,3 +14,6 @@ name = "stoat_gui_bevy"
 path = "src/lib.rs"
 
 [dependencies]
+stoat_core = { path = "../core" }
+snafu.workspace = true
+bevy = "0.15"
