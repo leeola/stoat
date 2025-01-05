@@ -2,14 +2,20 @@
 name = "stoat"
 version = "0.1.0"
 edition = "2021"
-description = "An exploration into a canvas modular editor."
+description = "An exploration into a canvas based, relational and structured text editor."
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[[bin]]
-name = "stoat"
-path = "src/bin/stoat.rs"
+[features]
+# Include CLI entrypoints.
+cli_bin = ["cli_config", "tokio/macros", "tokio/rt-multi-thread"]
+# Include CLI configuration.
+cli_config = ["clap"]
+gui = ["stoat_gui_bevy"]
 
 [dependencies]
 stoat_core = { path = "../core" }
+stoat_gui_bevy = { path = "../gui_bevy", optional = true }
+tokio = { workspace = true }
+clap = { workspace = true, optional = true }

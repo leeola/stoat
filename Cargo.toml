@@ -4,6 +4,7 @@ members = [
   "stoat",
   "core",
   "gui_bevy",
+  "bin",
 ]
 
 [workspace.dependencies]

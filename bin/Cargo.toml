@@ -1,0 +1,17 @@
+[package]
+name = "stoat_bin"
+version = "0.1.0"
+edition = "2021"
+description = "An exploration into a canvas based, relational and structured text editor."
+readme = "../README.md"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[[bin]]
+name = "stoat"
+path = "src/bin/stoat.rs"
+
+[dependencies]
+stoat = { path = "../stoat", features = ["cli_bin", "gui"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+clap.workspace = true
