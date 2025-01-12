@@ -4077,7 +4077,7 @@ dependencies = [
  "rkyv 0.8.9",
  "ron",
  "serde",
- "thiserror",
+ "snafu",
 ]
 
 [[package]]

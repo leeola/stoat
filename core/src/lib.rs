@@ -33,10 +33,10 @@ impl Stoat {
         Default::default()
     }
     // TODO: Make async?
-    // TODO: Make Result. I want to switch to Snafu first, or at least try.
-    pub fn load_state(&self) {
+    pub fn load_state(&self) -> Result<()> {
         // Just loading fake state atm, resolving to an initial hello world, as if it's a new
         // session/workspace.
+        todo!()
     }
     /// Push an input into Stoat.
     pub fn input(&mut self, _input: impl Into<Input>) {
