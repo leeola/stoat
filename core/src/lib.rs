@@ -1,5 +1,6 @@
 use input::Input;
 use plugin::IoPlugin;
+use view::View;
 use workspace::Workspace;
 
 pub mod config;
@@ -22,10 +23,20 @@ pub use error::{Error, Result};
 pub struct Stoat {
     io_plugin: Vec<Box<dyn IoPlugin>>,
     workspaces: Vec<Workspace>,
+    active: Workspace,
 }
 impl Stoat {
     pub fn new() -> Self {
         Self::builder().std().build()
+    }
+    pub fn builder() -> StoatBuilder {
+        Default::default()
+    }
+    // TODO: Make async?
+    // TODO: Make Result. I want to switch to Snafu first, or at least try.
+    pub fn load_state(&self) {
+        // Just loading fake state atm, resolving to an initial hello world, as if it's a new
+        // session/workspace.
     }
     /// Push an input into Stoat.
     pub fn input(&mut self, _input: impl Into<Input>) {
@@ -37,8 +48,8 @@ impl Stoat {
             self.input(t)
         }
     }
-    pub fn builder() -> StoatBuilder {
-        Default::default()
+    pub fn view(&self) -> &View {
+        self.active.view()
     }
 }
 
