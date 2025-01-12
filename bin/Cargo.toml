@@ -13,5 +13,14 @@ path = "src/bin/stoat.rs"
 
 [dependencies]
 stoat = { path = "../stoat", features = ["cli_bin", "gui"] }
+stoat_gui_bevy = { path = "../gui_bevy", features = [] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
+
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable a large amount of optimization in the dev profile for dependencies.
+[profile.dev.package."*"]
+opt-level = 3

@@ -4063,6 +4063,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "stoat",
+ "stoat_gui_bevy",
  "tokio",
 ]
 

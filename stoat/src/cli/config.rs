@@ -3,7 +3,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 pub struct Cli {
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
 }
 
 #[derive(Debug, Parser)]
