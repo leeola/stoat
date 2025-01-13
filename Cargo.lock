@@ -4053,7 +4053,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "stoat_core",
- "stoat_gui_bevy",
  "tokio",
 ]
 
@@ -4087,7 +4086,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "snafu",
- "stoat_core",
+ "stoat",
 ]
 
 [[package]]

@@ -1,9 +1,14 @@
 use clap::Parser;
-use stoat::cli::config::{Cli, Command};
+use stoat::{
+    cli::config::{Cli, Command},
+    Stoat,
+};
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let Command::Gui = cli.command;
-    stoat_gui_bevy::main()
+    let stoat = Stoat::new();
+    stoat.load_state();
+    stoat_gui_bevy::main(stoat)
 }
