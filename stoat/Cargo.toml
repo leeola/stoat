@@ -12,10 +12,10 @@ license-file = "../LICENSE"
 cli_bin = ["cli_config", "tokio/macros", "tokio/rt-multi-thread"]
 # Include CLI configuration.
 cli_config = ["clap"]
-gui = ["stoat_gui_bevy"]
+# Include GUI.
+gui = []
 
 [dependencies]
 stoat_core = { path = "../core" }
-stoat_gui_bevy = { path = "../gui_bevy", optional = true }
 tokio = { workspace = true }
 clap = { workspace = true, optional = true }
