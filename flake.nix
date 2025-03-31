@@ -24,7 +24,7 @@
             gcc
             rust-analyzer
             # using a hardcoded rustfmt version to support nightly rustfmt features.
-            rust-bin.nightly."2025-01-09".rustfmt
+            rust-bin.nightly."2025-03-18".rustfmt
             rust-toolchain
 
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
