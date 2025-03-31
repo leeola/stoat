@@ -12,7 +12,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        rust-toolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain).override {
+        rust-toolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
           extensions = [ "rust-analysis" ];
         };
       in
