@@ -9,6 +9,6 @@ async fn main() {
     let cli = Cli::parse();
     let Command::Gui = cli.command;
     let stoat = Stoat::new();
-    stoat.load_state();
+    stoat.load_state().unwrap();
     stoat_gui_bevy::main(stoat)
 }

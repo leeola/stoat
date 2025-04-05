@@ -22,6 +22,7 @@ pub use error::{Error, Result};
 #[derive(Default)]
 pub struct Stoat {
     io_plugin: Vec<Box<dyn IoPlugin>>,
+    #[allow(dead_code)]
     workspaces: Vec<Workspace>,
     active: Workspace,
 }

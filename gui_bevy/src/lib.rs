@@ -1,7 +1,7 @@
 use bevy::{app::App, winit::WinitSettings, DefaultPlugins};
 use stoat::Stoat;
 
-pub fn main(stoat: Stoat) {
+pub fn main(_stoat: Stoat) {
     App::new()
         .add_plugins(DefaultPlugins)
         // Power-saving reactive rendering for applications.

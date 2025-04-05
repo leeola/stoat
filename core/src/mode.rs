@@ -1,4 +1,4 @@
-use crate::{error::Result, input::Input, node::Node};
+use crate::{error::Result, input::Input};
 
 /// State to track mode input mapping.
 pub struct Mode {}
