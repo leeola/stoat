@@ -1,5 +1,6 @@
-use input::Input;
-use plugin::IoPlugin;
+/// The core implementation the [`Stoat`] editor runtime. Ie the editor minus the GUI/TUI/CLI
+/// interfaces.
+use input::UserInput;
 use view::View;
 use workspace::Workspace;
 
@@ -19,13 +20,18 @@ pub mod workspace;
 
 pub use error::{Error, Result};
 
+/// The primary interface for Stoat, a canvas and node based data and text editor.
 #[derive(Default)]
 pub struct Stoat {
-    io_plugin: Vec<Box<dyn IoPlugin>>,
-    #[allow(dead_code)]
-    workspaces: Vec<Workspace>,
+    /// The activate workspace taking user inputs.
     active: Workspace,
+    //
+    // A dedicated multi-workspace manager that manages workspaces by keys, order, finds, toggles,
+    // etc.
+    //
+    // workspaces: Workspaces,
 }
+
 impl Stoat {
     pub fn new() -> Self {
         Self::builder().std().build()
@@ -39,14 +45,16 @@ impl Stoat {
         // session/workspace.
         todo!()
     }
-    /// Push an input into Stoat.
-    pub fn input(&mut self, _input: impl Into<Input>) {
+    /// Push a user input into Stoat.
+    //
+    // TODO: UserInput needs to return available actions? For automatic ? and client validation?
+    pub fn user_input(&mut self, _ue: impl Into<UserInput>) {
         todo!()
     }
-    /// Push multiple inputs into Stoat.
-    pub fn inputs<T: Into<Input>>(&mut self, inputs: impl IntoIterator<Item = T>) {
-        for t in inputs {
-            self.input(t)
+    /// Push multiple user events into Stoat.
+    pub fn user_inputs<T: Into<UserInput>>(&mut self, user_inputs: impl IntoIterator<Item = T>) {
+        for ue in user_inputs {
+            self.user_input(ue)
         }
     }
     pub fn view(&self) -> &View {
@@ -59,10 +67,6 @@ pub struct StoatBuilder(Stoat);
 impl StoatBuilder {
     /// Include standard configuration and plugins.
     pub fn std(self) -> Self {
-        self
-    }
-    pub fn plugin(mut self, node_init: impl IoPlugin + 'static) -> Self {
-        self.0.io_plugin.push(Box::new(node_init));
         self
     }
     pub fn build(self) -> Stoat {

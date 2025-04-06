@@ -1,4 +1,4 @@
-use crate::{error::Result, input::Input};
+use crate::{error::Result, input::UserInput};
 
 /// State to track mode input mapping.
 pub struct Mode {}
@@ -10,7 +10,7 @@ impl Mode {
     // Not sure yet, about anything, at all, ever.
     //
     // pub async fn input(_input: Input, _active: Option<&'_ dyn Node>) -> Result<()> {
-    pub fn input(&mut self, _input: Input) -> Result<()> {
+    pub fn input(&mut self, _input: UserInput) -> Result<()> {
         todo!()
     }
 }
