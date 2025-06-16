@@ -28,19 +28,6 @@
             rust-toolchain
 
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-            # NOTE: Deps copied from a Bevy project, not sure if they're all needed for Iced.
-            alsaLib
-            udev
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXi
-            xorg.libXrandr
-            libxkbcommon
-            vulkan-headers
-            vulkan-loader
-            vulkan-tools
-            vulkan-validation-layers
-
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             darwin.apple_sdk.frameworks.Security
             darwin.apple_sdk.frameworks.Foundation
