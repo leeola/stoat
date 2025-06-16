@@ -10,5 +10,4 @@ async fn main() {
     let Command::Gui = cli.command;
     let stoat = Stoat::new();
     stoat.load_state().unwrap();
-    stoat_gui_bevy::main(stoat)
 }
