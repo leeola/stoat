@@ -17,3 +17,11 @@ tokio = "1.36"
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["parking_lot", "env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
+
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable a large amount of optimization in the dev profile for dependencies.
+[profile.dev.package."*"]
+opt-level = 3
