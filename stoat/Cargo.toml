@@ -14,6 +14,8 @@ cli_bin = ["cli_config", "tokio/macros", "tokio/rt-multi-thread"]
 cli_config = ["clap"]
 # Include GUI.
 gui = []
+# Include CSV functionality.
+csv = ["stoat_core/csv"]
 
 [dependencies]
 stoat_core = { path = "../core" }

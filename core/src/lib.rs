@@ -13,6 +13,7 @@ pub mod data;
 pub mod input;
 pub mod mode;
 pub mod node;
+pub mod nodes;
 pub mod plugin;
 pub mod value;
 pub mod view;

@@ -7,6 +7,10 @@ readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
+[features]
+default = []
+csv = ["dep:csv"]
+
 [lib]
 name = "stoat_core"
 path = "src/lib.rs"
@@ -20,3 +24,4 @@ rkyv = "0.8"
 compact_str = { version = "0.8", features = ["rkyv", "serde"] }
 ordered-float = { version = "4.5", features = ["rkyv", "serde"] }
 indexmap = { version = "2.7", features = ["serde"] }
+csv = { version = "1.3", optional = true }
