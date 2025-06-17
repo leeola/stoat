@@ -40,4 +40,5 @@ pub enum NodeType {
     CsvSource,
     #[cfg(feature = "json")]
     JsonSource,
+    Map,
 }

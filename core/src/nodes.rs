@@ -10,8 +10,14 @@ pub mod csv;
 #[cfg(feature = "json")]
 pub mod json;
 
+pub mod map;
+
+#[cfg(test)]
+mod integration_tests;
+
 // Re-export node implementations for convenience
 #[cfg(feature = "csv")]
 pub use csv::CsvSourceNode;
 #[cfg(feature = "json")]
 pub use json::JsonSourceNode;
+pub use map::MapNode;
