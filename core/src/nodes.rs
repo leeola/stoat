@@ -9,4 +9,4 @@ pub mod csv;
 
 // Re-export node implementations for convenience
 #[cfg(feature = "csv")]
-pub use csv::{CsvSourceNode, FilterNode};
+pub use csv::CsvSourceNode;

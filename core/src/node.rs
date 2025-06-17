@@ -38,6 +38,4 @@ impl Port {
 pub enum NodeType {
     #[cfg(feature = "csv")]
     CsvSource,
-    #[cfg(feature = "csv")]
-    Filter,
 }

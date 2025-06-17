@@ -1,5 +1,6 @@
 use crate::{
     node::{Node, NodeId},
+    transform::Transformation,
     view::View,
     Result,
 };
@@ -29,6 +30,7 @@ pub struct Link {
     pub from_port: String,
     pub to_node: NodeId,
     pub to_port: String,
+    pub transformation: Option<Transformation>,
 }
 
 impl Workspace {
@@ -61,6 +63,18 @@ impl Workspace {
         to_node: NodeId,
         to_port: String,
     ) -> Result<()> {
+        self.link_nodes_with_transform(from_node, from_port, to_node, to_port, None)
+    }
+
+    /// Create a link between two nodes with an optional transformation
+    pub fn link_nodes_with_transform(
+        &mut self,
+        from_node: NodeId,
+        from_port: String,
+        to_node: NodeId,
+        to_port: String,
+        transformation: Option<Transformation>,
+    ) -> Result<()> {
         // Validate nodes exist
         if !self.nodes.contains_key(&from_node) {
             return Err(crate::Error::Node {
@@ -80,6 +94,7 @@ impl Workspace {
             from_port,
             to_node,
             to_port,
+            transformation,
         };
 
         self.links.push(link);
@@ -110,7 +125,13 @@ impl Workspace {
                 let from_outputs = from_node.execute(&HashMap::new())?;
 
                 if let Some(value) = from_outputs.get(&link.from_port) {
-                    inputs.insert(link.to_port.clone(), value.clone());
+                    // Apply transformation if present
+                    let transformed_value = if let Some(ref transformation) = link.transformation {
+                        transformation.apply(value)?
+                    } else {
+                        value.clone()
+                    };
+                    inputs.insert(link.to_port.clone(), transformed_value);
                 }
             }
         }

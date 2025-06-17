@@ -15,6 +15,7 @@ pub mod mode;
 pub mod node;
 pub mod nodes;
 pub mod plugin;
+pub mod transform;
 pub mod value;
 pub mod view;
 pub mod workspace;
