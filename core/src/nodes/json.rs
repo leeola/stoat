@@ -93,7 +93,7 @@ fn json_value_to_value(json_value: serde_json::Value) -> Result<Value> {
             } else if let Some(u) = n.as_u64() {
                 Ok(Value::U64(u))
             } else if let Some(f) = n.as_f64() {
-                Ok(Value::Float(ordered_float::OrderedFloat(f)))
+                Ok(Value::I64(f as i64))
             } else {
                 Err(crate::Error::Generic {
                     message: format!("Unsupported number format: {}", n),

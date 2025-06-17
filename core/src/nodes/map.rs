@@ -363,25 +363,21 @@ impl MapNode {
                 _ => value.clone(),
             },
             (ValueType::Number, Value::I64(n)) => match transformation {
-                ValueTransformation::Multiply(factor) => {
-                    Value::Float(ordered_float::OrderedFloat(*n as f64 * factor))
-                },
-                ValueTransformation::Add(addend) => {
-                    Value::Float(ordered_float::OrderedFloat(*n as f64 + addend))
-                },
+                ValueTransformation::Multiply(factor) => Value::I64((*n as f64 * factor) as i64),
+                ValueTransformation::Add(addend) => Value::I64((*n as f64 + addend) as i64),
                 ValueTransformation::ToString => Value::String(CompactString::from(n.to_string())),
                 _ => value.clone(),
             },
-            (ValueType::Number, Value::Float(f)) => match transformation {
-                ValueTransformation::Multiply(factor) => {
-                    Value::Float(ordered_float::OrderedFloat(f.0 * factor))
-                },
-                ValueTransformation::Add(addend) => {
-                    Value::Float(ordered_float::OrderedFloat(f.0 + addend))
-                },
-                ValueTransformation::ToString => Value::String(CompactString::from(f.to_string())),
-                _ => value.clone(),
-            },
+            // (ValueType::Number, Value::Float(f)) => match transformation {
+            //     ValueTransformation::Multiply(factor) => {
+            //         Value::Float(ordered_float::OrderedFloat(f.0 * factor))
+            //     },
+            //     ValueTransformation::Add(addend) => {
+            //         Value::Float(ordered_float::OrderedFloat(f.0 + addend))
+            //     },
+            //     ValueTransformation::ToString =>
+            // Value::String(CompactString::from(f.to_string())),     _ => value.
+            // clone(), },
             _ => value.clone(),
         }
     }
@@ -411,11 +407,11 @@ impl MapNode {
                             result.replace(&placeholder, &n.to_string()),
                         )))
                     },
-                    Value::Float(f) => {
-                        return Ok(Value::String(CompactString::from(
-                            result.replace(&placeholder, &f.to_string()),
-                        )))
-                    },
+                    // Value::Float(f) => {
+                    //     return Ok(Value::String(CompactString::from(
+                    //         result.replace(&placeholder, &f.to_string()),
+                    //     )))
+                    // },
                     Value::Bool(b) => {
                         return Ok(Value::String(CompactString::from(
                             result.replace(&placeholder, &b.to_string()),

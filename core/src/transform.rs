@@ -168,7 +168,7 @@ fn match_values(field_value: &Value, filter_value: &str) -> bool {
         Value::String(s) => s.as_str() == filter_value,
         Value::I64(i) => filter_value.parse::<i64>() == Ok(*i),
         Value::U64(u) => filter_value.parse::<u64>() == Ok(*u),
-        Value::Float(f) => filter_value.parse::<f64>() == Ok(f.0),
+        // Value::Float(f) => filter_value.parse::<f64>() == Ok(f.0),
         Value::Bool(b) => filter_value.parse::<bool>() == Ok(*b),
         _ => false,
     }
@@ -184,7 +184,7 @@ fn extract_sort_value(value: &Value, field: &str) -> String {
                 Value::String(s) => s.to_string(),
                 Value::I64(i) => format!("{:020}", i), // Zero-pad for proper string sorting
                 Value::U64(u) => format!("{:020}", u),
-                Value::Float(f) => format!("{:020.10}", f.0),
+                // Value::Float(f) => format!("{:020.10}", f.0),
                 Value::Bool(b) => {
                     if *b {
                         "true".to_string()
