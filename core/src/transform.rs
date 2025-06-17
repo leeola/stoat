@@ -101,7 +101,7 @@ fn apply_filter(value: &Value, expression: &str) -> Result<Value> {
 
 /// Apply a sort transformation to array data
 fn apply_sort(value: &Value, field: &str, ascending: bool) -> Result<Value> {
-    use crate::value::{Array, Map};
+    use crate::value::Array;
 
     let Value::Array(Array(rows)) = value else {
         return Err(crate::Error::Generic {
@@ -166,10 +166,10 @@ fn parse_filter_expression(expression: &str) -> Result<(&str, FilterOperator, &s
 fn match_values(field_value: &Value, filter_value: &str) -> bool {
     match field_value {
         Value::String(s) => s.as_str() == filter_value,
-        Value::I64(i) => filter_value.parse::<i64>().map_or(false, |v| *i == v),
-        Value::U64(u) => filter_value.parse::<u64>().map_or(false, |v| *u == v),
-        Value::Float(f) => filter_value.parse::<f64>().map_or(false, |v| f.0 == v),
-        Value::Bool(b) => filter_value.parse::<bool>().map_or(false, |v| *b == v),
+        Value::I64(i) => filter_value.parse::<i64>() == Ok(*i),
+        Value::U64(u) => filter_value.parse::<u64>() == Ok(*u),
+        Value::Float(f) => filter_value.parse::<f64>() == Ok(f.0),
+        Value::Bool(b) => filter_value.parse::<bool>() == Ok(*b),
         _ => false,
     }
 }
