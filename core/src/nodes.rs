@@ -7,6 +7,11 @@
 #[cfg(feature = "csv")]
 pub mod csv;
 
+#[cfg(feature = "json")]
+pub mod json;
+
 // Re-export node implementations for convenience
 #[cfg(feature = "csv")]
 pub use csv::CsvSourceNode;
+#[cfg(feature = "json")]
+pub use json::JsonSourceNode;

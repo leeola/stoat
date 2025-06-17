@@ -38,4 +38,6 @@ impl Port {
 pub enum NodeType {
     #[cfg(feature = "csv")]
     CsvSource,
+    #[cfg(feature = "json")]
+    JsonSource,
 }

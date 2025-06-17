@@ -16,6 +16,8 @@ cli_config = ["clap"]
 gui = []
 # Include CSV functionality.
 csv = ["stoat_core/csv"]
+# Include JSON functionality.
+json = ["stoat_core/json"]
 
 [dependencies]
 stoat_core = { path = "../core" }
