@@ -7,8 +7,9 @@
 mod tests {
     // Import node types conditionally based on features
     #[cfg(any(feature = "csv", feature = "json"))]
-    use crate::node::{Node, NodeId, NodeType, Port};
+    use crate::node::{NodeType, Port};
     use crate::{
+        node::{Node, NodeId},
         nodes::map::{MapNode, MapOperation},
         value::Value,
         workspace::Workspace,
