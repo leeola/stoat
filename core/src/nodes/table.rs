@@ -10,11 +10,13 @@ use crate::{
     Result,
 };
 use compact_str::CompactString;
-// Note: rkyv serialization will be implemented later when Value types are compatible
-use std::collections::HashMap;
+use rkyv::{Archive, Deserialize, Serialize};
+use std::{collections::HashMap, path::PathBuf};
 
 /// Optimized tabular data structure for efficient storage and access
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 pub struct TableData {
     /// Column names in order
     pub columns: Vec<CompactString>,
@@ -25,14 +27,18 @@ pub struct TableData {
 }
 
 /// A single row in the table
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 pub struct TableRow {
     /// Cell values in column order
     pub cells: Vec<TableCell>,
 }
 
 /// Individual cell value optimized for tabular display
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 pub enum TableCell {
     Text(CompactString),
     Integer(i64),
@@ -43,7 +49,9 @@ pub enum TableCell {
 }
 
 /// Metadata about the table structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 pub struct TableMetadata {
     /// Total number of rows
     pub row_count: usize,
@@ -54,7 +62,9 @@ pub struct TableMetadata {
 }
 
 /// Column type information for display optimization
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+#[rkyv(deserialize_bounds(__D::Error: rkyv::rancor::Source))]
 pub enum ColumnType {
     Text,
     Integer,
@@ -174,23 +184,21 @@ impl TableData {
         }
     }
 
-    /// Serialize to bytes using rkyv (TODO: implement when Value types support rkyv)
+    /// Serialize to bytes using rkyv
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        // For now, use a simple placeholder serialization
-        // This will be replaced with proper rkyv serialization later
-        Ok(format!(
-            "TableData with {} rows, {} columns",
-            self.metadata.row_count, self.metadata.column_count
-        )
-        .into_bytes())
+        rkyv::api::high::to_bytes::<rkyv::rancor::Error>(self)
+            .map(|aligned_vec| aligned_vec.into_vec())
+            .map_err(|e| crate::Error::Generic {
+                message: format!("Failed to serialize table data: {}", e),
+            })
     }
 
-    /// Deserialize from bytes using rkyv (TODO: implement when Value types support rkyv)
-    pub fn from_bytes(_bytes: &[u8]) -> Result<Self> {
-        // Placeholder implementation
-        Err(crate::Error::Generic {
-            message: "TableData deserialization not yet implemented".to_string(),
-        })
+    /// Deserialize from bytes using rkyv
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        unsafe { rkyv::api::high::from_bytes_unchecked::<Self, rkyv::rancor::Error>(bytes) }
+            .map_err(|e| crate::Error::Generic {
+                message: format!("Failed to deserialize table data: {}", e),
+            })
     }
 }
 
@@ -200,17 +208,29 @@ pub struct TableViewerNode {
     name: String,
     /// Cached table data in optimized format
     cached_data: Option<TableData>,
-    /// Serialized cache for potential mmap usage (TODO: implement with rkyv)
+    /// Serialized cache for potential mmap usage
     cached_bytes: Option<Vec<u8>>,
+    /// Cache ID for disk persistence
+    cache_id: Option<u64>,
+    /// Cache directory for storing table data
+    cache_dir: PathBuf,
 }
 
 impl TableViewerNode {
     pub fn new(id: NodeId, name: String) -> Self {
+        // Default cache directory - in real usage this would come from config
+        Self::new_with_cache_dir(id, name, PathBuf::from(".stoat_cache"))
+    }
+
+    /// Create a new node with a specific cache directory
+    pub fn new_with_cache_dir(id: NodeId, name: String, cache_dir: PathBuf) -> Self {
         Self {
             id,
             name,
             cached_data: None,
             cached_bytes: None,
+            cache_id: None,
+            cache_dir,
         }
     }
 
@@ -224,11 +244,107 @@ impl TableViewerNode {
         self.cached_bytes.as_deref()
     }
 
+    /// Get the current cache ID
+    pub fn get_cache_id(&self) -> Option<u64> {
+        self.cache_id
+    }
+
+    /// Get the next available cache ID (simple counter starting at 1)
+    fn get_next_cache_id() -> u64 {
+        // For now, simple counter starting at 1
+        // In the future this could be more sophisticated with state persistence
+        1
+    }
+
+    /// Ensure the cache directory exists
+    fn ensure_cache_dir(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.cache_dir).map_err(|e| crate::Error::Generic {
+            message: format!("Failed to create cache directory: {}", e),
+        })?;
+        Ok(self.cache_dir.clone())
+    }
+
+    /// Get the cache file path for a given cache ID
+    fn get_cache_file_path(&self, cache_id: u64) -> Result<PathBuf> {
+        let cache_dir = self.ensure_cache_dir()?;
+        Ok(cache_dir.join(format!("table_{}", cache_id)))
+    }
+
+    /// Load table data from disk cache
+    fn load_from_disk(&self, cache_id: u64) -> Option<TableData> {
+        match self.get_cache_file_path(cache_id) {
+            Ok(cache_path) => {
+                if cache_path.exists() {
+                    match std::fs::read(&cache_path) {
+                        Ok(bytes) => match TableData::from_bytes(&bytes) {
+                            Ok(data) => {
+                                println!(
+                                    "Cache hit: Loaded table data from {}",
+                                    cache_path.display()
+                                );
+                                Some(data)
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "Failed to deserialize cache file {}: {}",
+                                    cache_path.display(),
+                                    e
+                                );
+                                None
+                            },
+                        },
+                        Err(e) => {
+                            eprintln!("Failed to read cache file {}: {}", cache_path.display(), e);
+                            None
+                        },
+                    }
+                } else {
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    }
+
+    /// Save table data to disk cache
+    fn save_to_disk(&self, cache_id: u64, data: &TableData) -> Result<()> {
+        let cache_path = self.get_cache_file_path(cache_id)?;
+        let bytes = data.to_bytes()?;
+
+        std::fs::write(&cache_path, bytes).map_err(|e| crate::Error::Generic {
+            message: format!("Failed to write cache file {}: {}", cache_path.display(), e),
+        })?;
+
+        println!("Saved table data to cache: {}", cache_path.display());
+        Ok(())
+    }
+
     /// Update the cached data with new input
     fn update_cache(&mut self, input_data: &Value) -> Result<()> {
-        let table_data = TableData::from_value(input_data)?;
-        let serialized = table_data.to_bytes()?;
+        // If we don't have a cache ID yet, assign one
+        if self.cache_id.is_none() {
+            self.cache_id = Some(Self::get_next_cache_id());
+        }
 
+        let cache_id = self.cache_id.unwrap();
+
+        // Try loading from disk cache first
+        if let Some(cached_data) = self.load_from_disk(cache_id) {
+            // Cache hit - use existing data
+            let serialized = cached_data.to_bytes()?;
+            self.cached_data = Some(cached_data);
+            self.cached_bytes = Some(serialized);
+            return Ok(());
+        }
+
+        // Cache miss - convert from Value and save to disk
+        let table_data = TableData::from_value(input_data)?;
+
+        // Save to disk cache
+        self.save_to_disk(cache_id, &table_data)?;
+
+        // Update in-memory cache
+        let serialized = table_data.to_bytes()?;
         self.cached_data = Some(table_data);
         self.cached_bytes = Some(serialized);
 
@@ -338,27 +454,42 @@ mod tests {
         let value = create_test_table_data();
         let table_data = TableData::from_value(&value).unwrap();
 
-        // Test serialization (placeholder implementation)
+        // Test rkyv serialization round trip
         let bytes = table_data.to_bytes().unwrap();
         assert!(!bytes.is_empty());
 
-        // Test that the bytes contain expected content
-        let serialized_str = String::from_utf8(bytes).unwrap();
-        assert!(serialized_str.contains("2 rows"));
-        assert!(serialized_str.contains("3 columns"));
+        let deserialized = TableData::from_bytes(&bytes).unwrap();
 
-        // Deserialization is not implemented yet, so test that it returns an error
-        let deserialize_result = TableData::from_bytes(&[]);
-        assert!(deserialize_result.is_err());
-        assert!(deserialize_result
-            .unwrap_err()
-            .to_string()
-            .contains("not yet implemented"));
+        // Verify the data is the same
+        assert_eq!(
+            table_data.metadata.row_count,
+            deserialized.metadata.row_count
+        );
+        assert_eq!(
+            table_data.metadata.column_count,
+            deserialized.metadata.column_count
+        );
+        assert_eq!(table_data.columns, deserialized.columns);
+        assert_eq!(table_data.rows.len(), deserialized.rows.len());
+
+        // Check first row data
+        if !table_data.rows.is_empty() && !deserialized.rows.is_empty() {
+            let original_row = &table_data.rows[0];
+            let deserialized_row = &deserialized.rows[0];
+            assert_eq!(original_row.cells.len(), deserialized_row.cells.len());
+        }
     }
 
     #[test]
     fn table_viewer_node_execution() {
-        let mut table_node = TableViewerNode::new(NodeId(1), "test_table".to_string());
+        use tempfile::TempDir;
+
+        // Create a temporary directory for cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        let mut table_node =
+            TableViewerNode::new_with_cache_dir(NodeId(1), "test_table".to_string(), cache_dir);
 
         // Initially no cached data
         assert!(table_node.get_table_data().is_none());
@@ -413,7 +544,14 @@ mod tests {
 
     #[test]
     fn table_viewer_socket_configuration() {
-        let table_node = TableViewerNode::new(NodeId(1), "test_table".to_string());
+        use tempfile::TempDir;
+
+        // Create a temporary directory for cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        let table_node =
+            TableViewerNode::new_with_cache_dir(NodeId(1), "test_table".to_string(), cache_dir);
 
         // Test socket configuration
         let sockets = table_node.sockets();
@@ -431,5 +569,153 @@ mod tests {
 
         // Test node type
         assert_eq!(table_node.node_type(), NodeType::TableViewer);
+    }
+
+    #[test]
+    fn table_viewer_disk_caching() {
+        use tempfile::TempDir;
+
+        // Create a temporary directory for cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        let mut table_node = TableViewerNode::new_with_cache_dir(
+            NodeId(1),
+            "test_cache_table".to_string(),
+            cache_dir.clone(),
+        );
+
+        // Initially no cache ID
+        assert!(table_node.get_cache_id().is_none());
+
+        // Execute with test data - should create cache
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), create_test_table_data());
+
+        let result = table_node.execute(&inputs).unwrap();
+        assert!(result.is_empty()); // Table viewer is a sink
+
+        // Should now have a cache ID
+        assert!(table_node.get_cache_id().is_some());
+        let cache_id = table_node.get_cache_id().unwrap();
+
+        // Verify cache file was created
+        let cache_path = cache_dir.join(format!("table_{}", cache_id));
+        assert!(cache_path.exists());
+
+        // Create a new table node with same cache ID and verify it loads from cache
+        let mut table_node2 = TableViewerNode::new_with_cache_dir(
+            NodeId(2),
+            "test_cache_table2".to_string(),
+            cache_dir,
+        );
+
+        // Manually set the cache ID to test loading
+        table_node2.cache_id = Some(cache_id);
+
+        // Execute - should load from cache
+        let result2 = table_node2.execute(&inputs).unwrap();
+        assert!(result2.is_empty());
+
+        // Should have loaded the cached data
+        assert!(table_node2.get_table_data().is_some());
+        let cached_table = table_node2.get_table_data().unwrap();
+        assert_eq!(cached_table.metadata.row_count, 2);
+        assert_eq!(cached_table.metadata.column_count, 3);
+
+        // tempdir automatically cleans up when dropped
+    }
+
+    #[test]
+    fn complete_table_viewer_workflow() {
+        use crate::value::{Array, Map};
+        use tempfile::TempDir;
+
+        // Create a temporary directory for cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        // Create test data representing CSV-like input
+        let mut rows = Vec::new();
+        let mut row1 = indexmap::IndexMap::new();
+        row1.insert(
+            CompactString::from("product"),
+            Value::String(CompactString::from("Laptop")),
+        );
+        row1.insert(CompactString::from("price"), Value::I64(1200));
+        row1.insert(CompactString::from("in_stock"), Value::Bool(true));
+        rows.push(Value::Map(Map(row1)));
+
+        let mut row2 = indexmap::IndexMap::new();
+        row2.insert(
+            CompactString::from("product"),
+            Value::String(CompactString::from("Mouse")),
+        );
+        row2.insert(CompactString::from("price"), Value::I64(25));
+        row2.insert(CompactString::from("in_stock"), Value::Bool(false));
+        rows.push(Value::Map(Map(row2)));
+
+        let input_data = Value::Array(Array(rows));
+
+        // Create table viewer and process data
+        let mut table_viewer = TableViewerNode::new_with_cache_dir(
+            NodeId(42),
+            "product_table".to_string(),
+            cache_dir.clone(),
+        );
+
+        // First execution - should create cache
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), input_data.clone());
+
+        let result1 = table_viewer.execute(&inputs).unwrap();
+        assert!(result1.is_empty()); // Sink node
+
+        // Verify cache was created
+        assert!(table_viewer.get_cache_id().is_some());
+        let cache_id = table_viewer.get_cache_id().unwrap();
+
+        let cache_file = cache_dir.join(format!("table_{}", cache_id));
+        assert!(cache_file.exists());
+
+        // Verify data structure is optimized
+        let table_data = table_viewer.get_table_data().unwrap();
+        assert_eq!(table_data.metadata.row_count, 2);
+        assert_eq!(table_data.metadata.column_count, 3);
+        assert_eq!(table_data.columns.len(), 3);
+
+        // Verify column types were inferred
+        let has_text = table_data
+            .metadata
+            .column_types
+            .iter()
+            .any(|t| matches!(t, ColumnType::Text));
+        let has_int = table_data
+            .metadata
+            .column_types
+            .iter()
+            .any(|t| matches!(t, ColumnType::Integer));
+        let has_bool = table_data
+            .metadata
+            .column_types
+            .iter()
+            .any(|t| matches!(t, ColumnType::Boolean));
+        assert!(has_text && has_int && has_bool);
+
+        // Second execution - should load from cache
+        let mut table_viewer2 = TableViewerNode::new_with_cache_dir(
+            NodeId(43),
+            "product_table2".to_string(),
+            cache_dir.clone(),
+        );
+        table_viewer2.cache_id = Some(cache_id); // Simulate same cache ID
+
+        let result2 = table_viewer2.execute(&inputs).unwrap();
+        assert!(result2.is_empty());
+
+        // Should have same data as first execution
+        let cached_data = table_viewer2.get_table_data().unwrap();
+        assert_eq!(cached_data.metadata.row_count, 2);
+        assert_eq!(cached_data.metadata.column_count, 3);
     }
 }
