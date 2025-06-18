@@ -40,13 +40,14 @@ impl Port {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NodeType {
     #[cfg(feature = "csv")]
     CsvSource,
     #[cfg(feature = "json")]
     JsonSource,
     Map,
+    TableViewer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,5 +92,5 @@ pub enum NodePresentation {
     // ConfigPanel,    // TODO: Future
     // TextEditor,     // TODO: Future
     // ImageViewer,    // TODO: Future
-    // TableViewer,    // TODO: Future
+    TableViewer,
 }

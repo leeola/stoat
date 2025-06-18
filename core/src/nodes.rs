@@ -11,6 +11,7 @@ pub mod csv;
 pub mod json;
 
 pub mod map;
+pub mod table;
 
 #[cfg(test)]
 mod integration_tests;
@@ -21,3 +22,4 @@ pub use csv::CsvSourceNode;
 #[cfg(feature = "json")]
 pub use json::JsonSourceNode;
 pub use map::MapNode;
+pub use table::TableViewerNode;
