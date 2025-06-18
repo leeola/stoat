@@ -8,7 +8,7 @@
 //! - Structure changes
 
 use crate::{
-    node::{Node, NodeId, NodeType, Port},
+    node::{Node, NodeId, NodePresentation, NodeSockets, NodeType, Port, SocketInfo, SocketType},
     value::Value,
     Result,
 };
@@ -458,6 +458,17 @@ impl Node for MapNode {
 
     fn output_ports(&self) -> Vec<Port> {
         vec![Port::new("data", "Transformed data")]
+    }
+
+    fn sockets(&self) -> NodeSockets {
+        NodeSockets::new(
+            vec![SocketInfo::new(SocketType::Data, "data", true)], // Input required
+            vec![SocketInfo::new(SocketType::Data, "data", false)], // Output available
+        )
+    }
+
+    fn presentation(&self) -> NodePresentation {
+        NodePresentation::Minimal
     }
 }
 

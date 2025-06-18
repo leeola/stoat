@@ -5,7 +5,7 @@
 //! the node graph.
 
 use crate::{
-    node::{Node, NodeId, NodeType, Port},
+    node::{Node, NodeId, NodePresentation, NodeSockets, NodeType, Port, SocketInfo, SocketType},
     value::Value,
     Result,
 };
@@ -76,6 +76,17 @@ impl Node for JsonSourceNode {
 
     fn output_ports(&self) -> Vec<Port> {
         vec![Port::new("data", "JSON data as Value")]
+    }
+
+    fn sockets(&self) -> NodeSockets {
+        NodeSockets::new(
+            vec![], // No inputs
+            vec![SocketInfo::new(SocketType::Data, "data", false)],
+        )
+    }
+
+    fn presentation(&self) -> NodePresentation {
+        NodePresentation::Minimal
     }
 }
 
@@ -212,6 +223,17 @@ mod tests {
         fn output_ports(&self) -> Vec<Port> {
             vec![Port::new("data", "Test JSON data")]
         }
+
+        fn sockets(&self) -> NodeSockets {
+            NodeSockets::new(
+                vec![], // No inputs
+                vec![SocketInfo::new(SocketType::Data, "data", false)],
+            )
+        }
+
+        fn presentation(&self) -> NodePresentation {
+            NodePresentation::Minimal
+        }
     }
 
     /// A simple consumer node for testing transformations
@@ -260,6 +282,17 @@ mod tests {
         }
         fn output_ports(&self) -> Vec<Port> {
             vec![]
+        }
+
+        fn sockets(&self) -> NodeSockets {
+            NodeSockets::new(
+                vec![SocketInfo::new(SocketType::Data, "data", false)], // Input available
+                vec![],                                                 // No outputs
+            )
+        }
+
+        fn presentation(&self) -> NodePresentation {
+            NodePresentation::Minimal
         }
     }
 
