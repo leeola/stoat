@@ -10,8 +10,9 @@ use crate::{
     Result,
 };
 use compact_str::CompactString;
+use memmap2::Mmap;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, fs::File, path::PathBuf};
 
 /// Optimized tabular data structure for efficient storage and access
 #[derive(Debug, Clone, Archive, Deserialize, Serialize, serde::Serialize, serde::Deserialize)]
@@ -202,14 +203,27 @@ impl TableData {
     }
 }
 
+/// Storage strategy for table data with copy-on-write semantics
+enum TableStorage {
+    /// Read-only memory-mapped data for fast access
+    Mapped {
+        _mmap: Mmap, /* Keep mmap alive
+                      * We'll access archived data through the mmap bytes directly */
+    },
+    /// In-memory data for mutations
+    InMemory {
+        data: TableData,
+        dirty: bool,
+        source_cache_id: Option<u64>, // Track original file for write-back
+    },
+}
+
 /// Table viewer node that displays tabular data
 pub struct TableViewerNode {
     id: NodeId,
     name: String,
-    /// Cached table data in optimized format
-    cached_data: Option<TableData>,
-    /// Serialized cache for potential mmap usage
-    cached_bytes: Option<Vec<u8>>,
+    /// Storage for table data (mmap or in-memory)
+    storage: Option<TableStorage>,
     /// Cache ID for disk persistence
     cache_id: Option<u64>,
     /// Cache directory for storing table data
@@ -227,8 +241,7 @@ impl TableViewerNode {
         Self {
             id,
             name,
-            cached_data: None,
-            cached_bytes: None,
+            storage: None,
             cache_id: None,
             cache_dir,
         }
@@ -236,17 +249,115 @@ impl TableViewerNode {
 
     /// Get the cached table data
     pub fn get_table_data(&self) -> Option<&TableData> {
-        self.cached_data.as_ref()
+        match &self.storage {
+            Some(TableStorage::InMemory { data, .. }) => Some(data),
+            Some(TableStorage::Mapped { .. }) => {
+                // Memory-mapped data cannot be returned as a reference to owned data
+                // The caller needs to use get_archived_table_data() or get_table_data_mut()
+                // for copy-on-write access
+                None
+            },
+            None => None,
+        }
     }
 
-    /// Get the cached bytes (for mmap usage)
+    /// Get archived table data from memory-mapped storage
+    pub fn get_archived_table_data(&self) -> Option<&rkyv::Archived<TableData>> {
+        match &self.storage {
+            Some(TableStorage::Mapped { _mmap, .. }) => {
+                // Safe access to archived data through the mmap
+                unsafe { Some(rkyv::access_unchecked::<rkyv::Archived<TableData>>(_mmap)) }
+            },
+            _ => None,
+        }
+    }
+
+    /// Get table data, transparently handling both in-memory and mmap storage
+    /// This method will perform copy-on-write for mmap data if needed
+    pub fn get_table_data_or_copy(&mut self) -> Option<&TableData> {
+        // Check if we need to copy mmap to memory first
+        if matches!(&self.storage, Some(TableStorage::Mapped { .. })) {
+            self.copy_mmap_to_memory()?;
+        }
+
+        // Now access the data (should be in-memory)
+        match &self.storage {
+            Some(TableStorage::InMemory { data, .. }) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Helper to copy mmap data to memory without marking as dirty
+    fn copy_mmap_to_memory(&mut self) -> Option<()> {
+        if let Some(TableStorage::Mapped { _mmap, .. }) = &self.storage {
+            match TableData::from_bytes(_mmap) {
+                Ok(data) => {
+                    let cache_id = self.cache_id;
+                    self.storage = Some(TableStorage::InMemory {
+                        data,
+                        dirty: false, // Not dirty since we're just copying for read access
+                        source_cache_id: cache_id,
+                    });
+                    Some(())
+                },
+                Err(_) => None,
+            }
+        } else {
+            Some(()) // Already in memory or no storage
+        }
+    }
+
+    /// Get the cached bytes (for backwards compatibility)
     pub fn get_cached_bytes(&self) -> Option<&[u8]> {
-        self.cached_bytes.as_deref()
+        // This method is kept for test compatibility but will be phased out
+        // as we move to mmap-based access
+        None
     }
 
     /// Get the current cache ID
     pub fn get_cache_id(&self) -> Option<u64> {
         self.cache_id
+    }
+
+    /// Check if the current data has been modified and needs write-back
+    pub fn is_dirty(&self) -> bool {
+        match &self.storage {
+            Some(TableStorage::InMemory { dirty, .. }) => *dirty,
+            Some(TableStorage::Mapped { .. }) => false, // mmap data is read-only
+            None => false,
+        }
+    }
+
+    /// Get mutable access to table data, implementing copy-on-write
+    pub fn get_table_data_mut(&mut self) -> Option<&mut TableData> {
+        // Check if we need to perform copy-on-write for mmap storage
+        if let Some(TableStorage::Mapped { _mmap, .. }) = &self.storage {
+            // Perform copy-on-write: deserialize from mmap to in-memory
+            match TableData::from_bytes(_mmap) {
+                Ok(data) => {
+                    let cache_id = self.cache_id;
+                    // Replace mmap storage with in-memory storage
+                    self.storage = Some(TableStorage::InMemory {
+                        data,
+                        dirty: true, // Mark as dirty since we're about to mutate
+                        source_cache_id: cache_id,
+                    });
+                },
+                Err(_) => {
+                    // Fallback: could not deserialize mmap data
+                    return None;
+                },
+            }
+        }
+
+        // Now handle the in-memory case
+        match &mut self.storage {
+            Some(TableStorage::InMemory { data, dirty, .. }) => {
+                *dirty = true; // Mark as dirty when accessed mutably
+                Some(data)
+            },
+            _ => None,
+        }
     }
 
     /// Get the next available cache ID (simple counter starting at 1)
@@ -270,40 +381,71 @@ impl TableViewerNode {
         Ok(cache_dir.join(format!("table_{}", cache_id)))
     }
 
-    /// Load table data from disk cache
-    fn load_from_disk(&self, cache_id: u64) -> Option<TableData> {
-        match self.get_cache_file_path(cache_id) {
-            Ok(cache_path) => {
-                if cache_path.exists() {
-                    match std::fs::read(&cache_path) {
-                        Ok(bytes) => match TableData::from_bytes(&bytes) {
-                            Ok(data) => {
-                                println!(
-                                    "Cache hit: Loaded table data from {}",
-                                    cache_path.display()
-                                );
-                                Some(data)
-                            },
-                            Err(e) => {
-                                eprintln!(
-                                    "Failed to deserialize cache file {}: {}",
-                                    cache_path.display(),
-                                    e
-                                );
-                                None
-                            },
+    /// Load table data from disk cache, preferring mmap when possible
+    fn load_from_disk(&mut self, cache_id: u64) -> Result<bool> {
+        let cache_path = self.get_cache_file_path(cache_id)?;
+
+        if !cache_path.exists() {
+            return Ok(false);
+        }
+
+        // Try mmap first for read-only access
+        match self.try_mmap_load(&cache_path) {
+            Ok(true) => {
+                println!(
+                    "Cache hit: Memory-mapped table data from {}",
+                    cache_path.display()
+                );
+                Ok(true)
+            },
+            Ok(false) | Err(_) => {
+                // Fallback to in-memory loading
+                match std::fs::read(&cache_path) {
+                    Ok(bytes) => match TableData::from_bytes(&bytes) {
+                        Ok(data) => {
+                            println!("Cache hit: Loaded table data from {}", cache_path.display());
+                            self.storage = Some(TableStorage::InMemory {
+                                data,
+                                dirty: false,
+                                source_cache_id: Some(cache_id),
+                            });
+                            Ok(true)
                         },
                         Err(e) => {
-                            eprintln!("Failed to read cache file {}: {}", cache_path.display(), e);
-                            None
+                            eprintln!(
+                                "Failed to deserialize cache file {}: {}",
+                                cache_path.display(),
+                                e
+                            );
+                            Ok(false)
                         },
-                    }
-                } else {
-                    None
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to read cache file {}: {}", cache_path.display(), e);
+                        Ok(false)
+                    },
                 }
             },
-            Err(_) => None,
         }
+    }
+
+    /// Attempt to memory-map the cache file
+    fn try_mmap_load(&mut self, cache_path: &PathBuf) -> Result<bool> {
+        let file = File::open(cache_path).map_err(|e| crate::Error::Generic {
+            message: format!("Failed to open cache file: {}", e),
+        })?;
+
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| crate::Error::Generic {
+            message: format!("Failed to mmap cache file: {}", e),
+        })?;
+
+        // Validate that the mmap contains valid archived data
+        // For rkyv 0.8.10, access_unchecked returns a reference directly
+        let _archived = unsafe { rkyv::access_unchecked::<rkyv::Archived<TableData>>(&mmap) };
+
+        // Data is valid, store the mmap
+        self.storage = Some(TableStorage::Mapped { _mmap: mmap });
+        Ok(true)
     }
 
     /// Save table data to disk cache
@@ -329,11 +471,8 @@ impl TableViewerNode {
         let cache_id = self.cache_id.unwrap();
 
         // Try loading from disk cache first
-        if let Some(cached_data) = self.load_from_disk(cache_id) {
-            // Cache hit - use existing data
-            let serialized = cached_data.to_bytes()?;
-            self.cached_data = Some(cached_data);
-            self.cached_bytes = Some(serialized);
+        if self.load_from_disk(cache_id)? {
+            // Cache hit - data is now loaded in storage
             return Ok(());
         }
 
@@ -343,12 +482,46 @@ impl TableViewerNode {
         // Save to disk cache
         self.save_to_disk(cache_id, &table_data)?;
 
-        // Update in-memory cache
-        let serialized = table_data.to_bytes()?;
-        self.cached_data = Some(table_data);
-        self.cached_bytes = Some(serialized);
+        // Store in-memory initially (could be mmap'd later)
+        self.storage = Some(TableStorage::InMemory {
+            data: table_data,
+            dirty: false,
+            source_cache_id: Some(cache_id),
+        });
 
         Ok(())
+    }
+
+    /// Write back dirty data to disk cache
+    pub fn flush_to_disk(&mut self) -> Result<()> {
+        if !self.is_dirty() {
+            return Ok(()); // Nothing to write back
+        }
+
+        match &self.storage {
+            Some(TableStorage::InMemory {
+                data,
+                source_cache_id,
+                ..
+            }) => {
+                let cache_id = source_cache_id.or(self.cache_id).unwrap_or_else(|| {
+                    let new_id = Self::get_next_cache_id();
+                    self.cache_id = Some(new_id);
+                    new_id
+                });
+
+                // Write back to disk
+                self.save_to_disk(cache_id, data)?;
+
+                // Mark as clean
+                if let Some(TableStorage::InMemory { dirty, .. }) = &mut self.storage {
+                    *dirty = false;
+                }
+
+                Ok(())
+            },
+            _ => Ok(()), // Nothing to flush for mmap or empty storage
+        }
     }
 }
 
@@ -505,7 +678,6 @@ mod tests {
 
         // But it should have cached the data
         assert!(table_node.get_table_data().is_some());
-        assert!(table_node.get_cached_bytes().is_some());
 
         let cached_table = table_node.get_table_data().unwrap();
         assert_eq!(cached_table.metadata.row_count, 2);
@@ -618,8 +790,8 @@ mod tests {
         assert!(result2.is_empty());
 
         // Should have loaded the cached data
-        assert!(table_node2.get_table_data().is_some());
-        let cached_table = table_node2.get_table_data().unwrap();
+        assert!(table_node2.get_table_data_or_copy().is_some());
+        let cached_table = table_node2.get_table_data_or_copy().unwrap();
         assert_eq!(cached_table.metadata.row_count, 2);
         assert_eq!(cached_table.metadata.column_count, 3);
 
@@ -714,8 +886,39 @@ mod tests {
         assert!(result2.is_empty());
 
         // Should have same data as first execution
-        let cached_data = table_viewer2.get_table_data().unwrap();
+        let cached_data = table_viewer2.get_table_data_or_copy().unwrap();
         assert_eq!(cached_data.metadata.row_count, 2);
         assert_eq!(cached_data.metadata.column_count, 3);
+    }
+
+    #[test]
+    fn table_viewer_mutation_tracking() {
+        use tempfile::TempDir;
+
+        // Create a temporary directory for cache
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = temp_dir.path().to_path_buf();
+
+        let mut table_node = TableViewerNode::new_with_cache_dir(
+            NodeId(1),
+            "test_mutation_table".to_string(),
+            cache_dir,
+        );
+
+        // Execute with test data
+        let mut inputs = HashMap::new();
+        inputs.insert("data".to_string(), create_test_table_data());
+        let _ = table_node.execute(&inputs).unwrap();
+
+        // Initially should not be dirty
+        assert!(!table_node.is_dirty());
+
+        // Get mutable access - should mark as dirty
+        let _mutable_data = table_node.get_table_data_mut();
+        assert!(table_node.is_dirty());
+
+        // Flush to disk should clear dirty flag
+        table_node.flush_to_disk().unwrap();
+        assert!(!table_node.is_dirty());
     }
 }

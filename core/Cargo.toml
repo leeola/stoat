@@ -25,6 +25,7 @@ rkyv = { version = "0.8.10", features = ["indexmap-2"], default-features = false
 compact_str = { version = "0.9", features = ["rkyv", "serde"] }
 ordered-float = { git = "https://github.com/leeola/rust-ordered-float", rev = "3c03870f8c27fa6c2148fa9fdb5bfd8146a48dc4", features = ["rkyv", "serde"] }
 indexmap = { version = "2.7", features = ["serde"] }
+memmap2 = "0.9"
 csv = { version = "1.3", optional = true }
 serde_json = { version = "1.0", optional = true }
 
