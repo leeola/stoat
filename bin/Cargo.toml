@@ -12,6 +12,6 @@ name = "stoat"
 path = "src/bin/stoat.rs"
 
 [dependencies]
-stoat = { path = "../stoat", features = ["cli_bin", "gui"] }
+stoat = { path = "../stoat", features = ["cli_bin"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
