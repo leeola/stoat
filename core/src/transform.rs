@@ -7,7 +7,7 @@
 use crate::{value::Value, Result};
 
 /// Represents a data transformation that can be applied to values flowing through links
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Transformation {
     /// Filter data based on a simple expression
     Filter { expression: String },

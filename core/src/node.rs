@@ -22,7 +22,7 @@ pub trait Node: Send + Sync {
     fn presentation(&self) -> NodePresentation;
 }
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodeId(pub u64);
 
 #[derive(Debug, Clone)]

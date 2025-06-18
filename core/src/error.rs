@@ -13,4 +13,10 @@ pub enum Error {
 
     #[snafu(display("General error: {message}"))]
     Generic { message: String },
+
+    #[snafu(display("IO error: {message}"))]
+    Io { message: String },
+
+    #[snafu(display("Serialization error: {message}"))]
+    Serialization { message: String },
 }

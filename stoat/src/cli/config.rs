@@ -14,6 +14,10 @@ pub struct Cli {
     /// Workspace to use (overrides current)
     #[arg(short, long, global = true)]
     pub workspace: Option<String>,
+
+    /// Directory for storing state files (overrides default)
+    #[arg(long, env, global = true)]
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -31,11 +35,9 @@ pub enum Command {
 
     // /// Run workspace or nodes
     // Run(RunArgs),
-
     /// Quick CSV operations
     #[command(subcommand)]
     Csv(CsvCommand),
-
     // /// Show workspace status
     // Status(StatusArgs),
 

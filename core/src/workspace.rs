@@ -4,6 +4,7 @@ use crate::{
     view::View,
     Result,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub struct Workspace {
@@ -24,7 +25,7 @@ impl Default for Workspace {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Link {
     pub from_node: NodeId,
     pub from_port: String,
@@ -33,9 +34,39 @@ pub struct Link {
     pub transformation: Option<Transformation>,
 }
 
+/// Serializable representation of workspace state
+/// This is a simplified version for persistence that doesn't include the actual node
+/// implementations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableWorkspace {
+    pub links: Vec<Link>,
+    pub next_id: u64,
+    pub view_data: Option<String>, // Simplified view serialization
+}
+
+impl From<&Workspace> for SerializableWorkspace {
+    fn from(workspace: &Workspace) -> Self {
+        Self {
+            links: workspace.links.clone(),
+            next_id: workspace.next_id,
+            view_data: None, // TODO: implement view serialization
+        }
+    }
+}
+
 impl Workspace {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a workspace from a serializable representation
+    pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
+        Self {
+            nodes: HashMap::new(), // Nodes will be empty for now
+            links: serializable.links,
+            view: View::default(), // TODO: deserialize view from view_data
+            next_id: serializable.next_id,
+        }
     }
 
     /// Add a node to the workspace
