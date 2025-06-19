@@ -91,8 +91,11 @@ mod tests {
     #[test]
     fn test_simple_value_basic_functionality() {
         // Test basic SimpleValue functionality with Float variant
-        let simple_float = SimpleValue::Float(OrderedFloat(2.718));
-        assert_eq!(simple_float, SimpleValue::Float(OrderedFloat(2.718)));
+        let simple_float = SimpleValue::Float(OrderedFloat(std::f64::consts::E));
+        assert_eq!(
+            simple_float,
+            SimpleValue::Float(OrderedFloat(std::f64::consts::E))
+        );
 
         let value = SimpleValue::String(CompactString::new("test"));
         assert_eq!(value, SimpleValue::String(CompactString::new("test")));
@@ -104,7 +107,7 @@ mod tests {
         let recursive_value = Value::Array(Array(vec![
             Value::String(CompactString::new("test")),
             Value::I64(42),
-            Value::Float(OrderedFloat(3.14159)),
+            Value::Float(OrderedFloat(std::f64::consts::PI)),
             Value::Map(Map(IndexMap::new())),
         ]));
 
@@ -112,7 +115,7 @@ mod tests {
         let expected = Value::Array(Array(vec![
             Value::String(CompactString::new("test")),
             Value::I64(42),
-            Value::Float(OrderedFloat(3.14159)),
+            Value::Float(OrderedFloat(std::f64::consts::PI)),
             Value::Map(Map(IndexMap::new())),
         ]));
         assert_eq!(recursive_value, expected);
@@ -125,12 +128,12 @@ mod tests {
     #[test]
     fn test_ordered_float_basic_functionality() {
         // Test basic OrderedFloat functionality works
-        let float_val = OrderedFloat(3.14159);
-        assert_eq!(float_val, OrderedFloat(3.14159));
+        let float_val = OrderedFloat(std::f64::consts::PI);
+        assert_eq!(float_val, OrderedFloat(std::f64::consts::PI));
 
         // Test Value::Float creation and equality
-        let value_float = Value::Float(OrderedFloat(2.718));
-        assert_eq!(value_float, Value::Float(OrderedFloat(2.718)));
+        let value_float = Value::Float(OrderedFloat(std::f64::consts::E));
+        assert_eq!(value_float, Value::Float(OrderedFloat(std::f64::consts::E)));
 
         // Test that we can create the Value::Float variant
         let test_cases = vec![
@@ -151,7 +154,7 @@ mod tests {
         use rkyv::api::high::{from_bytes_unchecked, to_bytes};
 
         // Test Value::Float rkyv round-trip serialization
-        let original = Value::Float(OrderedFloat(3.14159265359));
+        let original = Value::Float(OrderedFloat(std::f64::consts::PI));
 
         // Serialize using high-level API (blazing fast!)
         let bytes =
@@ -164,7 +167,10 @@ mod tests {
 
         // Verify round-trip worked
         assert_eq!(original, deserialized);
-        assert_eq!(deserialized, Value::Float(OrderedFloat(3.14159265359)));
+        assert_eq!(
+            deserialized,
+            Value::Float(OrderedFloat(std::f64::consts::PI))
+        );
     }
 
     #[test]
@@ -211,7 +217,7 @@ mod tests {
         use rkyv::api::high::{from_bytes_unchecked, to_bytes};
 
         // Test SimpleValue::Float rkyv round-trip
-        let original = SimpleValue::Float(OrderedFloat(2.718281828));
+        let original = SimpleValue::Float(OrderedFloat(std::f64::consts::E));
 
         // Serialize using high-level API (blazing fast!)
         let bytes = to_bytes::<rkyv::rancor::Error>(&original)
@@ -224,6 +230,9 @@ mod tests {
 
         // Verify round-trip worked
         assert_eq!(original, deserialized);
-        assert_eq!(deserialized, SimpleValue::Float(OrderedFloat(2.718281828)));
+        assert_eq!(
+            deserialized,
+            SimpleValue::Float(OrderedFloat(std::f64::consts::E))
+        );
     }
 }

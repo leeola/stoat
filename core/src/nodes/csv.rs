@@ -230,10 +230,6 @@ mod tests {
                 last_input: None,
             }
         }
-
-        fn get_last_input(&self) -> Option<&Value> {
-            self.last_input.as_ref()
-        }
     }
 
     impl Node for TestConsumerNode {

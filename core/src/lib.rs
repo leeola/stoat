@@ -142,7 +142,7 @@ pub mod state {
             }
 
             let contents = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-                .map_err(|e| StateError::Serialization { source: e.into() })?;
+                .map_err(|e| StateError::Serialization { source: e })?;
 
             fs::write(path, contents).map_err(|e| StateError::Io {
                 path: path.to_path_buf(),
@@ -328,7 +328,7 @@ impl Stoat {
         let state_path = config
             .state_dir
             .map(|dir| dir.join("state.ron"))
-            .unwrap_or_else(|| state::default_state_path());
+            .unwrap_or_else(state::default_state_path);
 
         // Load or create state
         let mut state = state::State::load_from(&state_path).map_err(|e| Error::Generic {
