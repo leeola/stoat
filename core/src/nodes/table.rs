@@ -204,6 +204,7 @@ impl TableData {
 }
 
 /// Storage strategy for table data with copy-on-write semantics
+#[derive(Debug)]
 enum TableStorage {
     /// Read-only memory-mapped data for fast access
     Mapped {
@@ -219,6 +220,7 @@ enum TableStorage {
 }
 
 /// Table viewer node that displays tabular data
+#[derive(Debug)]
 pub struct TableViewerNode {
     id: NodeId,
     name: String,

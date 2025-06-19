@@ -6,6 +6,7 @@ use crate::{
 use std::collections::HashMap;
 
 /// CSV data source node that loads data from a file
+#[derive(Debug)]
 pub struct CsvSourceNode {
     id: NodeId,
     name: String,
@@ -160,6 +161,7 @@ mod tests {
     }
 
     /// Mock CSV node for testing (doesn't read from file)
+    #[derive(Debug)]
     struct MockCsvNode {
         id: NodeId,
         name: String,
@@ -216,6 +218,7 @@ mod tests {
     }
 
     /// A simple consumer node for testing transformations
+    #[derive(Debug)]
     struct TestConsumerNode {
         id: NodeId,
         name: String,

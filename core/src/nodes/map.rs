@@ -71,6 +71,7 @@ pub enum ValueTransformation {
 }
 
 /// Map node that transforms data structures
+#[derive(Debug)]
 pub struct MapNode {
     id: NodeId,
     name: String,

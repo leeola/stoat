@@ -13,14 +13,14 @@ async fn main() {
         workspace: cli.workspace,
     };
 
-    let stoat = Stoat::new_with_config(config).unwrap_or_else(|e| {
+    let mut stoat = Stoat::new_with_config(config).unwrap_or_else(|e| {
         eprintln!("Error: Failed to initialize Stoat: {}", e);
         std::process::exit(1);
     });
 
     // Execute command
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        Command::Node(node_cmd) => commands::node::handle(node_cmd, &stoat),
+        Command::Node(node_cmd) => commands::node::handle(node_cmd, &mut stoat),
     };
 
     // Handle command result and save state
@@ -34,4 +34,3 @@ async fn main() {
         eprintln!("Warning: Failed to save: {}", e);
     }
 }
-

@@ -12,6 +12,7 @@ use crate::{
 use std::collections::HashMap;
 
 /// JSON data source node that loads data from a file
+#[derive(Debug)]
 pub struct JsonSourceNode {
     id: NodeId,
     name: String,
@@ -181,6 +182,7 @@ mod tests {
     }
 
     /// Mock JSON node for testing (doesn't read from file)
+    #[derive(Debug)]
     struct MockJsonNode {
         id: NodeId,
         name: String,
@@ -237,6 +239,7 @@ mod tests {
     }
 
     /// A simple consumer node for testing transformations
+    #[derive(Debug)]
     struct TestConsumerNode {
         id: NodeId,
         name: String,

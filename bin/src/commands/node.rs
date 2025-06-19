@@ -1,56 +1,128 @@
+use std::path::PathBuf;
 use stoat::cli::node::{AddNodeCommand, NodeCommand};
-use stoat_core::Stoat;
+use stoat_core::{node::NodeId, nodes, Stoat};
 
-pub fn handle(node_cmd: NodeCommand, stoat: &Stoat) -> Result<(), Box<dyn std::error::Error>> {
+/// Generic node factory that creates nodes based on type and parameters
+fn create_node(
+    node_type: &str,
+    name: Option<String>,
+    config: NodeConfig,
+) -> Result<Box<dyn stoat_core::node::Node>, Box<dyn std::error::Error>> {
+    let node_name = name.unwrap_or_else(|| format!("{}_node", node_type));
+
+    match node_type {
+        "csv" => {
+            if let NodeConfig::Csv {
+                path,
+                delimiter: _,
+                headers: _,
+            } = config
+            {
+                Ok(Box::new(nodes::CsvSourceNode::new(
+                    NodeId(0), // Will be replaced by workspace
+                    node_name,
+                    path.to_string_lossy().to_string(),
+                )))
+            } else {
+                Err("Invalid config for CSV node".into())
+            }
+        },
+        "table" => {
+            if let NodeConfig::Table { max_rows: _ } = config {
+                Ok(Box::new(nodes::TableViewerNode::new(
+                    NodeId(0), // Will be replaced by workspace
+                    node_name,
+                )))
+            } else {
+                Err("Invalid config for Table node".into())
+            }
+        },
+        "json" => {
+            if let NodeConfig::Json { path } = config {
+                Ok(Box::new(nodes::JsonSourceNode::new(
+                    NodeId(0), // Will be replaced by workspace
+                    node_name,
+                    path.to_string_lossy().to_string(),
+                )))
+            } else {
+                Err("Invalid config for JSON node".into())
+            }
+        },
+        _ => Err(format!("Unknown node type: {}", node_type).into()),
+    }
+}
+
+/// Configuration enum for different node types
+#[derive(Debug)]
+enum NodeConfig {
+    Csv {
+        path: PathBuf,
+        delimiter: char,
+        headers: bool,
+    },
+    Table {
+        max_rows: Option<usize>,
+    },
+    Json {
+        path: PathBuf,
+    },
+    Api {
+        url: String,
+        method: String,
+        headers: Vec<String>,
+    },
+}
+
+/// Generic node addition function
+fn add_node(
+    stoat: &mut Stoat,
+    node_type: &str,
+    name: Option<String>,
+    config: NodeConfig,
+) -> Result<NodeId, Box<dyn std::error::Error>> {
+    let node = create_node(node_type, name.clone(), config)?;
+    let node_name = node.name().to_string();
+    let id = stoat.workspace_mut().add_node(node);
+
+    println!(
+        "✓ Added {} node '{}' with ID {:?}",
+        node_type, node_name, id
+    );
+    Ok(id)
+}
+
+pub fn handle(node_cmd: NodeCommand, stoat: &mut Stoat) -> Result<(), Box<dyn std::error::Error>> {
     match node_cmd {
-        NodeCommand::Add(add_cmd) => {
-            match add_cmd {
-                AddNodeCommand::Csv {
+        NodeCommand::Add(add_cmd) => match add_cmd {
+            AddNodeCommand::Csv {
+                path,
+                name,
+                delimiter,
+                headers,
+            } => {
+                let config = NodeConfig::Csv {
                     path,
-                    name,
                     delimiter,
                     headers,
-                } => {
-                    println!(
-                        "Adding CSV node: path={:?}, name={:?}, delimiter={}, headers={}",
-                        path, name, delimiter, headers
-                    );
-                    // TODO: Implement CSV node creation
-                },
-                AddNodeCommand::Table { name, max_rows } => {
-                    let node_name = name.unwrap_or_else(|| "table_viewer".to_string());
-                    println!(
-                        "Adding Table node: name={}, max_rows={:?}",
-                        node_name, max_rows
-                    );
-
-                    // Create a table viewer node
-                    let _node = Box::new(stoat_core::nodes::table::TableViewerNode::new(
-                        stoat_core::node::NodeId(0), // Will be replaced by workspace
-                        node_name.clone(),
-                    ));
-
-                    // This would need mutable access to stoat, which we don't have here
-                    // For now, just show what would happen
-                    println!("Created table viewer node '{}' (note: actual addition to workspace requires mutable access)", node_name);
-                },
-                AddNodeCommand::Json { path, name } => {
-                    println!("Adding JSON node: path={:?}, name={:?}", path, name);
-                    // TODO: Implement JSON node creation
-                },
-                AddNodeCommand::Api {
-                    url,
-                    name,
-                    method,
-                    headers,
-                } => {
-                    println!(
-                        "Adding API node: url={}, name={:?}, method={:?}, headers={:?}",
-                        url, name, method, headers
-                    );
-                    // TODO: Implement API node creation
-                },
-            }
+                };
+                add_node(stoat, "csv", name, config)?;
+            },
+            AddNodeCommand::Table { name, max_rows } => {
+                let config = NodeConfig::Table { max_rows };
+                add_node(stoat, "table", name, config)?;
+            },
+            AddNodeCommand::Json { path, name } => {
+                let config = NodeConfig::Json { path };
+                add_node(stoat, "json", name, config)?;
+            },
+            AddNodeCommand::Api {
+                url: _,
+                name: _,
+                method: _,
+                headers: _,
+            } => {
+                return Err("API nodes are not yet implemented".into());
+            },
         },
         NodeCommand::List {
             detailed,
@@ -162,6 +234,9 @@ pub fn handle(node_cmd: NodeCommand, stoat: &Stoat) -> Result<(), Box<dyn std::e
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use stoat::cli::node::{AddNodeCommand, NodeCommand};
     use stoat_core::{node::NodeId, nodes::table::TableViewerNode, Stoat};
 
     #[test]
@@ -199,5 +274,209 @@ mod tests {
         }
 
         println!("Node listing test passed - found {} nodes", nodes.len());
+    }
+
+    #[test]
+    fn test_table_node_creation_via_command() {
+        let (mut stoat, _temp_dir) = Stoat::test();
+
+        // Initially workspace should be empty
+        assert_eq!(stoat.workspace().list_nodes().len(), 0);
+
+        // Create a table node command
+        let add_cmd = AddNodeCommand::Table {
+            name: Some("test_table".to_string()),
+            max_rows: Some(100),
+        };
+        let node_cmd = NodeCommand::Add(add_cmd);
+
+        // Execute the command
+        let result = handle(node_cmd, &mut stoat);
+        assert!(result.is_ok());
+
+        // Verify node was added
+        let nodes = stoat.workspace().list_nodes();
+        assert_eq!(nodes.len(), 1);
+
+        let (_, node) = &nodes[0];
+        assert_eq!(node.name(), "test_table");
+        assert_eq!(node.node_type(), stoat_core::node::NodeType::TableViewer);
+    }
+
+    #[test]
+    fn test_csv_node_creation_via_command() {
+        let (mut stoat, _temp_dir) = Stoat::test();
+
+        // Initially workspace should be empty
+        assert_eq!(stoat.workspace().list_nodes().len(), 0);
+
+        // Create a CSV node command
+        let add_cmd = AddNodeCommand::Csv {
+            path: PathBuf::from("test.csv"),
+            name: Some("csv_data".to_string()),
+            delimiter: ',',
+            headers: true,
+        };
+        let node_cmd = NodeCommand::Add(add_cmd);
+
+        // Execute the command
+        let result = handle(node_cmd, &mut stoat);
+        assert!(result.is_ok());
+
+        // Verify node was added
+        let nodes = stoat.workspace().list_nodes();
+        assert_eq!(nodes.len(), 1);
+
+        let (_, node) = &nodes[0];
+        assert_eq!(node.name(), "csv_data");
+        assert_eq!(node.node_type(), stoat_core::node::NodeType::CsvSource);
+    }
+
+    #[test]
+    fn test_json_node_creation_via_command() {
+        let (mut stoat, _temp_dir) = Stoat::test();
+
+        // Initially workspace should be empty
+        assert_eq!(stoat.workspace().list_nodes().len(), 0);
+
+        // Create a JSON node command
+        let add_cmd = AddNodeCommand::Json {
+            path: PathBuf::from("test.json"),
+            name: Some("json_data".to_string()),
+        };
+        let node_cmd = NodeCommand::Add(add_cmd);
+
+        // Execute the command
+        let result = handle(node_cmd, &mut stoat);
+        assert!(result.is_ok());
+
+        // Verify node was added
+        let nodes = stoat.workspace().list_nodes();
+        assert_eq!(nodes.len(), 1);
+
+        let (_, node) = &nodes[0];
+        assert_eq!(node.name(), "json_data");
+        assert_eq!(node.node_type(), stoat_core::node::NodeType::JsonSource);
+    }
+
+    #[test]
+    fn test_multiple_node_creation() {
+        let (mut stoat, _temp_dir) = Stoat::test();
+
+        // Create multiple nodes of different types
+        let commands = vec![
+            NodeCommand::Add(AddNodeCommand::Table {
+                name: Some("table1".to_string()),
+                max_rows: None,
+            }),
+            NodeCommand::Add(AddNodeCommand::Csv {
+                path: PathBuf::from("data.csv"),
+                name: Some("csv1".to_string()),
+                delimiter: ';',
+                headers: false,
+            }),
+            NodeCommand::Add(AddNodeCommand::Json {
+                path: PathBuf::from("config.json"),
+                name: None, // Test default naming
+            }),
+        ];
+
+        // Execute all commands
+        for cmd in commands {
+            let result = handle(cmd, &mut stoat);
+            assert!(result.is_ok());
+        }
+
+        // Verify all nodes were added
+        let nodes = stoat.workspace().list_nodes();
+        assert_eq!(nodes.len(), 3);
+
+        // Check node names and types
+        let node_names: Vec<&str> = nodes.iter().map(|(_, node)| node.name()).collect();
+        assert!(node_names.contains(&"table1"));
+        assert!(node_names.contains(&"csv1"));
+        assert!(node_names.contains(&"json_node")); // Default name
+
+        // Check types
+        let mut type_counts = std::collections::HashMap::new();
+        for (_, node) in &nodes {
+            *type_counts.entry(node.node_type()).or_insert(0) += 1;
+        }
+        assert_eq!(
+            type_counts.get(&stoat_core::node::NodeType::TableViewer),
+            Some(&1)
+        );
+        assert_eq!(
+            type_counts.get(&stoat_core::node::NodeType::CsvSource),
+            Some(&1)
+        );
+        assert_eq!(
+            type_counts.get(&stoat_core::node::NodeType::JsonSource),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn test_api_node_not_implemented() {
+        let (mut stoat, _temp_dir) = Stoat::test();
+
+        // Try to create an API node
+        let add_cmd = AddNodeCommand::Api {
+            url: "https://api.example.com".to_string(),
+            name: Some("api_test".to_string()),
+            method: stoat::cli::node::HttpMethod::Get,
+            headers: vec!["Authorization=Bearer token".to_string()],
+        };
+        let node_cmd = NodeCommand::Add(add_cmd);
+
+        // Execute the command - should fail
+        let result = handle(node_cmd, &mut stoat);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not yet implemented"));
+
+        // Verify no node was added
+        let nodes = stoat.workspace().list_nodes();
+        assert_eq!(nodes.len(), 0);
+    }
+
+    #[test]
+    fn test_node_factory_functions() {
+        // Test CSV node creation
+        let csv_config = NodeConfig::Csv {
+            path: PathBuf::from("test.csv"),
+            delimiter: ',',
+            headers: true,
+        };
+        let csv_node = create_node("csv", Some("test_csv".to_string()), csv_config);
+        assert!(csv_node.is_ok());
+        let csv_node = csv_node.unwrap();
+        assert_eq!(csv_node.name(), "test_csv");
+
+        // Test Table node creation
+        let table_config = NodeConfig::Table { max_rows: Some(50) };
+        let table_node = create_node("table", None, table_config);
+        assert!(table_node.is_ok());
+        let table_node = table_node.unwrap();
+        assert_eq!(table_node.name(), "table_node"); // Default name
+
+        // Test JSON node creation
+        let json_config = NodeConfig::Json {
+            path: PathBuf::from("data.json"),
+        };
+        let json_node = create_node("json", Some("my_json".to_string()), json_config);
+        assert!(json_node.is_ok());
+        let json_node = json_node.unwrap();
+        assert_eq!(json_node.name(), "my_json");
+
+        // Test unknown node type
+        let unknown_result = create_node("unknown", None, NodeConfig::Table { max_rows: None });
+        assert!(unknown_result.is_err());
+        assert!(unknown_result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown node type"));
     }
 }

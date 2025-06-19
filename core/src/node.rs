@@ -1,7 +1,7 @@
 use crate::{value::Value, Result};
 use std::collections::HashMap;
 
-pub trait Node: Send + Sync {
+pub trait Node: Send + Sync + std::fmt::Debug {
     fn id(&self) -> NodeId;
     fn node_type(&self) -> NodeType;
     fn name(&self) -> &str;
@@ -40,7 +40,7 @@ impl Port {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeType {
     #[cfg(feature = "csv")]
     CsvSource,
