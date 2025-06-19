@@ -11,6 +11,7 @@ license-file = "../LICENSE"
 default = []
 csv = ["dep:csv"]
 json = ["dep:serde_json"]
+test-utils = ["dep:tempfile"]
 
 [lib]
 name = "stoat_core"
@@ -31,6 +32,7 @@ serde_json = { version = "1.0", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 dirs = "5.0"
+tempfile = { version = "3.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

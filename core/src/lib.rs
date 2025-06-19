@@ -24,21 +24,12 @@ pub mod workspace;
 pub use error::{Error, Result};
 
 /// Configuration for initializing Stoat with state management
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct StoatConfig {
     /// Custom state directory (overrides platform default)
     pub state_dir: Option<PathBuf>,
     /// Override active workspace
     pub workspace: Option<String>,
-}
-
-impl Default for StoatConfig {
-    fn default() -> Self {
-        Self {
-            state_dir: None,
-            workspace: None,
-        }
-    }
 }
 
 /// CLI state management types - re-exported for convenience
@@ -86,7 +77,7 @@ pub mod state {
         fn default() -> Self {
             let default_workspace = "default".to_string();
             let mut workspaces = HashMap::new();
-            
+
             workspaces.insert(
                 default_workspace.clone(),
                 WorkspaceMetadata {
@@ -128,14 +119,12 @@ pub mod state {
                 return Ok(state);
             }
 
-            let contents = fs::read_to_string(path)
-                .map_err(|e| StateError::Io { 
-                    path: path.to_path_buf(), 
-                    source: e 
-                })?;
+            let contents = fs::read_to_string(path).map_err(|e| StateError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
 
-            ron::from_str(&contents)
-                .map_err(|e| StateError::Serialization { source: e.into() })
+            ron::from_str(&contents).map_err(|e| StateError::Serialization { source: e.into() })
         }
 
         /// Save state to the default location
@@ -146,21 +135,19 @@ pub mod state {
         /// Save state to a specific path
         pub fn save_to(&self, path: &Path) -> Result<(), StateError> {
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| StateError::Io { 
-                        path: parent.to_path_buf(), 
-                        source: e 
-                    })?;
+                fs::create_dir_all(parent).map_err(|e| StateError::Io {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
             }
 
             let contents = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
                 .map_err(|e| StateError::Serialization { source: e.into() })?;
 
-            fs::write(path, contents)
-                .map_err(|e| StateError::Io { 
-                    path: path.to_path_buf(), 
-                    source: e 
-                })
+            fs::write(path, contents).map_err(|e| StateError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })
         }
 
         /// Get the current workspace metadata
@@ -178,12 +165,18 @@ pub mod state {
         }
 
         /// Add a new workspace
-        pub fn add_workspace(&mut self, name: String, description: Option<String>) -> Result<(), StateError> {
+        pub fn add_workspace(
+            &mut self,
+            name: String,
+            description: Option<String>,
+        ) -> Result<(), StateError> {
             if self.workspaces.contains_key(&name) {
                 return Err(StateError::WorkspaceExists { name });
             }
 
-            let data_path = default_state_dir().join("workspaces").join(format!("{}.ron", name));
+            let data_path = default_state_dir()
+                .join("workspaces")
+                .join(format!("{}.ron", name));
             let metadata = WorkspaceMetadata {
                 name: name.clone(),
                 description,
@@ -224,14 +217,10 @@ pub mod state {
         },
 
         #[error("Workspace '{name}' not found")]
-        WorkspaceNotFound {
-            name: String,
-        },
+        WorkspaceNotFound { name: String },
 
         #[error("Workspace '{name}' already exists")]
-        WorkspaceExists {
-            name: String,
-        },
+        WorkspaceExists { name: String },
     }
 }
 
@@ -257,23 +246,100 @@ impl Stoat {
             .expect("Failed to initialize Stoat with default config")
     }
 
+    /// Create a test Stoat instance with isolated temporary state
+    /// Returns both the Stoat instance and the TempDir to keep it alive
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test() -> (Self, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp directory for test");
+        let config = StoatConfig {
+            state_dir: Some(temp_dir.path().to_path_buf()),
+            workspace: None,
+        };
+        let stoat = Self::new_with_config(config).expect("Failed to create test Stoat instance");
+        (stoat, temp_dir)
+    }
+
+    /// Create a test Stoat instance with a specific workspace
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_with_workspace(workspace_name: impl Into<String>) -> (Self, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp directory for test");
+        let mut stoat = {
+            let config = StoatConfig {
+                state_dir: Some(temp_dir.path().to_path_buf()),
+                workspace: None,
+            };
+            Self::new_with_config(config).expect("Failed to create test Stoat instance")
+        };
+
+        let workspace_name = workspace_name.into();
+        stoat
+            .state_mut()
+            .add_workspace(workspace_name.clone(), None)
+            .expect("Failed to add workspace in test");
+        stoat
+            .state_mut()
+            .set_active_workspace(workspace_name)
+            .expect("Failed to set active workspace in test");
+
+        (stoat, temp_dir)
+    }
+
+    /// Create a test Stoat instance with multiple workspaces
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_with_workspaces<S: Into<String>>(
+        workspaces: impl IntoIterator<Item = (S, Option<S>)>,
+        active: Option<S>,
+    ) -> (Self, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().expect("Failed to create temp directory for test");
+        let mut stoat = {
+            let config = StoatConfig {
+                state_dir: Some(temp_dir.path().to_path_buf()),
+                workspace: None,
+            };
+            Self::new_with_config(config).expect("Failed to create test Stoat instance")
+        };
+
+        let mut active_workspace = None;
+        for (name, description) in workspaces {
+            let name = name.into();
+            let description = description.map(|d| d.into());
+            stoat
+                .state_mut()
+                .add_workspace(name.clone(), description)
+                .expect("Failed to add workspace in test");
+            if active_workspace.is_none() {
+                active_workspace = Some(name);
+            }
+        }
+
+        if let Some(active_name) = active.map(|s| s.into()).or(active_workspace) {
+            stoat
+                .state_mut()
+                .set_active_workspace(active_name)
+                .expect("Failed to set active workspace in test");
+        }
+
+        (stoat, temp_dir)
+    }
+
     /// Create a new Stoat instance with the given configuration
     pub fn new_with_config(config: StoatConfig) -> Result<Self> {
         // Determine state path
-        let state_path = config.state_dir
+        let state_path = config
+            .state_dir
             .map(|dir| dir.join("state.ron"))
             .unwrap_or_else(|| state::default_state_path());
 
         // Load or create state
-        let mut state = state::State::load_from(&state_path)
-            .map_err(|e| Error::Generic { 
-                message: format!("Failed to load state: {}", e),
-            })?;
+        let mut state = state::State::load_from(&state_path).map_err(|e| Error::Generic {
+            message: format!("Failed to load state: {}", e),
+        })?;
 
         // Override active workspace if specified
         if let Some(workspace_name) = &config.workspace {
-            state.set_active_workspace(workspace_name.clone())
-                .map_err(|e| Error::Generic { 
+            state
+                .set_active_workspace(workspace_name.clone())
+                .map_err(|e| Error::Generic {
                     message: format!("Failed to set workspace: {}", e),
                 })?;
         }
@@ -296,7 +362,7 @@ impl Stoat {
     pub fn with_workspace(workspace: Workspace) -> Self {
         let state_path = state::default_state_path();
         let state = state::State::default();
-        Self { 
+        Self {
             active: workspace,
             state,
             state_path,
@@ -363,8 +429,9 @@ impl Stoat {
         }
 
         // Save the state
-        self.state.save_to(&self.state_path)
-            .map_err(|e| Error::Generic { 
+        self.state
+            .save_to(&self.state_path)
+            .map_err(|e| Error::Generic {
                 message: format!("Failed to save state: {}", e),
             })?;
 
@@ -418,63 +485,103 @@ mod tests {
 
     #[test]
     fn test_stoat_new_with_default_config() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = StoatConfig {
-            state_dir: Some(temp_dir.path().to_path_buf()),
-            workspace: None,
-        };
-
-        let stoat = Stoat::new_with_config(config).unwrap();
+        let (stoat, _temp_dir) = Stoat::test();
         assert_eq!(stoat.state().active_workspace, "default");
     }
 
     #[test]
     fn test_stoat_config_with_custom_workspace() {
-        let temp_dir = TempDir::new().unwrap();
-        
-        // First create a stoat instance and add a workspace
-        let config1 = StoatConfig {
-            state_dir: Some(temp_dir.path().to_path_buf()),
-            workspace: None,
-        };
-        let mut stoat1 = Stoat::new_with_config(config1).unwrap();
-        stoat1.state_mut().add_workspace("test".to_string(), None).unwrap();
-        stoat1.save().unwrap();
-
-        // Now create a new instance that should load the existing state and switch to "test" workspace
-        let config2 = StoatConfig {
-            state_dir: Some(temp_dir.path().to_path_buf()),
-            workspace: Some("test".to_string()),
-        };
-        let stoat2 = Stoat::new_with_config(config2).unwrap();
-        assert_eq!(stoat2.state().active_workspace, "test");
+        let (stoat, _temp_dir) = Stoat::test_with_workspace("test");
+        assert_eq!(stoat.state().active_workspace, "test");
     }
 
     #[test]
     fn test_stoat_save_and_load_state() {
         let temp_dir = TempDir::new().unwrap();
-        let config = StoatConfig {
-            state_dir: Some(temp_dir.path().to_path_buf()),
-            workspace: None,
-        };
+        let state_dir = temp_dir.path().to_path_buf();
 
-        let stoat1 = Stoat::new_with_config(config.clone()).unwrap();
+        // Create first instance and save state
+        let stoat1 = {
+            let config = StoatConfig {
+                state_dir: Some(state_dir.clone()),
+                workspace: None,
+            };
+            Stoat::new_with_config(config).unwrap()
+        };
         stoat1.save().unwrap();
 
-        // Create a new instance that should load the saved state
-        let stoat2 = Stoat::new_with_config(config).unwrap();
-        assert_eq!(stoat1.state().active_workspace, stoat2.state().active_workspace);
+        // Create second instance that loads the saved state
+        let stoat2 = {
+            let config = StoatConfig {
+                state_dir: Some(state_dir),
+                workspace: None,
+            };
+            Stoat::new_with_config(config).unwrap()
+        };
+
+        assert_eq!(
+            stoat1.state().active_workspace,
+            stoat2.state().active_workspace
+        );
     }
 
     #[test]
     fn test_stoat_invalid_workspace_fails() {
-        let temp_dir = TempDir::new().unwrap();
+        // This should fail because we're trying to switch to a non-existent workspace
         let config = StoatConfig {
-            state_dir: Some(temp_dir.path().to_path_buf()),
+            state_dir: Some(TempDir::new().unwrap().path().to_path_buf()),
             workspace: Some("nonexistent".to_string()),
         };
-
         let result = Stoat::new_with_config(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stoat_multiple_workspaces() {
+        let workspaces = [
+            ("dev", Some("Development workspace")),
+            ("prod", Some("Production workspace")),
+        ];
+        let (stoat, _temp_dir) = Stoat::test_with_workspaces(workspaces, Some("dev"));
+
+        assert_eq!(stoat.state().active_workspace, "dev");
+        assert!(stoat.state().workspaces.contains_key("dev"));
+        assert!(stoat.state().workspaces.contains_key("prod"));
+        assert_eq!(stoat.state().workspaces.len(), 3); // default + dev + prod
+    }
+
+    #[test]
+    fn test_stoat_custom_state_dir() {
+        // This test uses the new_with_config directly since we need custom state dir
+        let temp_dir = TempDir::new().unwrap();
+        let custom_state_dir = temp_dir.path().join("custom/path");
+        let config = StoatConfig {
+            state_dir: Some(custom_state_dir),
+            workspace: None,
+        };
+        let stoat = Stoat::new_with_config(config).unwrap();
+
+        assert_eq!(stoat.state().active_workspace, "default");
+        // State should be saved in the custom directory
+        stoat.save().unwrap();
+    }
+
+    #[test]
+    fn demo_old_vs_new_test_style() {
+        // OLD STYLE (8+ lines of boilerplate):
+        // let temp_dir = TempDir::new().unwrap();
+        // let config = StoatConfig {
+        //     state_dir: Some(temp_dir.path().to_path_buf()),
+        //     workspace: None,
+        // };
+        // let mut stoat = Stoat::new_with_config(config).unwrap();
+        // stoat.state_mut().add_workspace("test".to_string(), None).unwrap();
+        // stoat.state_mut().set_active_workspace("test".to_string()).unwrap();
+
+        // NEW STYLE (1 line):
+        let (stoat, _temp_dir) = Stoat::test_with_workspace("test");
+
+        assert_eq!(stoat.state().active_workspace, "test");
+        assert!(stoat.state().workspaces.contains_key("test"));
     }
 }

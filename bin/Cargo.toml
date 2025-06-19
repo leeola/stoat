@@ -18,4 +18,5 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
 
 [dev-dependencies]
+stoat_core = { path = "../core", features = ["test-utils"] }
 tempfile = "3.8"
