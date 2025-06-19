@@ -5,7 +5,10 @@
 //! and future mmap support.
 
 use crate::{
-    node::{Node, NodeId, NodePresentation, NodeSockets, NodeType, Port, SocketInfo, SocketType},
+    node::{
+        Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port, SocketInfo,
+        SocketType,
+    },
     value::Value,
     Result,
 };
@@ -569,6 +572,11 @@ impl Node for TableViewerNode {
 
     fn presentation(&self) -> NodePresentation {
         NodePresentation::TableViewer
+    }
+
+    fn status(&self) -> NodeStatus {
+        // Table viewer nodes are always ready to accept data
+        NodeStatus::Ready
     }
 }
 

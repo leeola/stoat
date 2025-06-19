@@ -20,6 +20,19 @@ pub trait Node: Send + Sync + std::fmt::Debug {
 
     /// Get presentation type for this node
     fn presentation(&self) -> NodePresentation;
+
+    /// Current node status
+    fn status(&self) -> NodeStatus;
+
+    /// Whether node can execute (Ready or Idle)
+    fn can_execute(&self) -> bool {
+        matches!(self.status(), NodeStatus::Ready | NodeStatus::Idle)
+    }
+
+    /// Whether node has an error
+    fn has_error(&self) -> bool {
+        matches!(self.status(), NodeStatus::Error { .. })
+    }
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -93,4 +106,34 @@ pub enum NodePresentation {
     // TextEditor,     // TODO: Future
     // ImageViewer,    // TODO: Future
     TableViewer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeStatus {
+    /// Node is ready to execute
+    Ready,
+    /// Node currently executing
+    Running,
+    /// Node completed successfully, idle
+    Idle,
+    /// Node has an error with user-facing message
+    Error {
+        message: String,
+        error_type: ErrorType,
+        recoverable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ErrorType {
+    /// Missing or invalid configuration
+    Configuration,
+    /// Runtime execution error
+    Execution,
+    /// I/O or resource error
+    Resource,
+    /// Dependency/connection error
+    Dependency,
+    /// Internal node error
+    Internal,
 }

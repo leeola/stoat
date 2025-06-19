@@ -8,7 +8,10 @@
 //! - Structure changes
 
 use crate::{
-    node::{Node, NodeId, NodePresentation, NodeSockets, NodeType, Port, SocketInfo, SocketType},
+    node::{
+        Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port, SocketInfo,
+        SocketType,
+    },
     value::Value,
     Result,
 };
@@ -470,6 +473,11 @@ impl Node for MapNode {
 
     fn presentation(&self) -> NodePresentation {
         NodePresentation::Minimal
+    }
+
+    fn status(&self) -> NodeStatus {
+        // Map nodes are always ready to execute when they have an operation configured
+        NodeStatus::Ready
     }
 }
 

@@ -1,5 +1,8 @@
 use crate::{
-    node::{Node, NodeId, NodePresentation, NodeSockets, NodeType, Port, SocketInfo, SocketType},
+    node::{
+        ErrorType, Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port,
+        SocketInfo, SocketType,
+    },
     value::Value,
     Result,
 };
@@ -106,6 +109,24 @@ impl Node for CsvSourceNode {
 
     fn presentation(&self) -> NodePresentation {
         NodePresentation::Minimal
+    }
+
+    fn status(&self) -> NodeStatus {
+        // Check if file exists
+        if !std::path::Path::new(&self.file_path).exists() {
+            return NodeStatus::Error {
+                message: format!("File not found: {}", self.file_path),
+                error_type: ErrorType::Resource,
+                recoverable: true,
+            };
+        }
+
+        // If data is loaded, we're idle; if not, we're ready to execute
+        if self.data.is_some() {
+            NodeStatus::Idle
+        } else {
+            NodeStatus::Ready
+        }
     }
 }
 
@@ -215,6 +236,10 @@ mod tests {
         fn presentation(&self) -> NodePresentation {
             NodePresentation::Minimal
         }
+
+        fn status(&self) -> NodeStatus {
+            NodeStatus::Ready
+        }
     }
 
     /// A simple consumer node for testing transformations
@@ -270,6 +295,10 @@ mod tests {
 
         fn presentation(&self) -> NodePresentation {
             NodePresentation::Minimal
+        }
+
+        fn status(&self) -> NodeStatus {
+            NodeStatus::Ready
         }
     }
 

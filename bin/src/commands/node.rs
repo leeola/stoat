@@ -54,18 +54,23 @@ fn create_node(
 
 /// Configuration enum for different node types
 #[derive(Debug)]
+#[allow(dead_code)]
 enum NodeConfig {
     Csv {
         path: PathBuf,
+        #[allow(dead_code)]
         delimiter: char,
+        #[allow(dead_code)]
         headers: bool,
     },
     Table {
+        #[allow(dead_code)]
         max_rows: Option<usize>,
     },
     Json {
         path: PathBuf,
     },
+    #[allow(dead_code)]
     Api {
         url: String,
         method: String,
