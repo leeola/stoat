@@ -5,7 +5,14 @@ use std::path::PathBuf;
 #[derive(Debug, Subcommand)]
 pub enum NodeCommand {
     /// Add a new node
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        after_help = r#"EXAMPLES:
+    stoat node add csv data.csv
+    stoat node add csv data.csv --name sales_data --delimiter ';'
+    stoat node add table --name results_viewer
+    stoat node add json config.json --name app_config"#
+    )]
     Add(AddNodeCommand),
 
     /// List all nodes
