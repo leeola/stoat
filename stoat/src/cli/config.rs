@@ -1,6 +1,4 @@
-use super::csv::*;
-// Future command imports (commented out with their respective commands):
-// use super::{link::*, node::*, run::*, workspace::*};
+use super::node::*;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
@@ -22,27 +20,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    // /// Manage workspaces
-    // #[command(subcommand)]
-    // Workspace(WorkspaceCommand),
-
-    // /// Manage nodes in the workspace
-    // #[command(subcommand)]
-    // Node(NodeCommand),
-
-    // /// Create links between nodes
-    // Link(LinkArgs),
-
-    // /// Run workspace or nodes
-    // Run(RunArgs),
-    /// Quick CSV operations
+    /// Manage nodes in the workspace
     #[command(subcommand)]
-    Csv(CsvCommand),
-    // /// Show workspace status
-    // Status(StatusArgs),
-
-    // /// Interactive REPL mode
-    // Repl,
+    Node(NodeCommand),
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -52,23 +32,4 @@ pub enum OutputFormat {
     Csv,
     Yaml,
     Plain,
-}
-
-#[derive(Debug, clap::Args)]
-pub struct StatusArgs {
-    /// Show execution history
-    #[arg(long)]
-    pub history: bool,
-
-    /// Number of history entries
-    #[arg(long, default_value = "10")]
-    pub last: usize,
-
-    /// Show node details
-    #[arg(long)]
-    pub nodes: bool,
-
-    /// Show link details
-    #[arg(long)]
-    pub links: bool,
 }

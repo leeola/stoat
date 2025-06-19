@@ -9,6 +9,7 @@ pub enum NodeCommand {
     Add(AddNodeCommand),
 
     /// List all nodes
+    #[command(alias = "ls")]
     List {
         /// Show detailed information
         #[arg(short, long)]
@@ -30,7 +31,7 @@ pub enum NodeCommand {
     },
 
     /// Execute a specific node
-    Execute {
+    Exec {
         /// Node ID or name
         node: String,
 
@@ -44,6 +45,7 @@ pub enum NodeCommand {
     },
 
     /// Remove a node
+    #[command(alias = "rm")]
     Remove {
         /// Node ID or name
         node: String,
@@ -51,6 +53,20 @@ pub enum NodeCommand {
         /// Force removal (even if linked)
         #[arg(short, long)]
         force: bool,
+    },
+
+    /// Configure a node
+    Config {
+        /// Node ID or name
+        node: String,
+
+        /// Configuration options in key=value format
+        #[arg(short, long)]
+        config: Vec<String>,
+
+        /// Data source path (for data source nodes)
+        #[arg(long)]
+        data: Option<PathBuf>,
     },
 }
 

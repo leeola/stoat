@@ -1,6 +1,89 @@
 use clap::Parser;
-use stoat::cli::config::{Cli, Command};
+use stoat::cli::{
+    config::{Cli, Command},
+    node::{AddNodeCommand, NodeCommand},
+};
 use stoat_core::{Stoat, StoatConfig};
+
+fn handle_node_command(
+    node_cmd: NodeCommand,
+    _stoat: &Stoat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match node_cmd {
+        NodeCommand::Add(add_cmd) => {
+            match add_cmd {
+                AddNodeCommand::Csv {
+                    path,
+                    name,
+                    delimiter,
+                    headers,
+                } => {
+                    println!(
+                        "Adding CSV node: path={:?}, name={:?}, delimiter={}, headers={}",
+                        path, name, delimiter, headers
+                    );
+                    // TODO: Implement CSV node creation
+                },
+                AddNodeCommand::Table { name, max_rows } => {
+                    println!(
+                        "Adding Table node: name={:?}, max_rows={:?}",
+                        name, max_rows
+                    );
+                    // TODO: Implement Table node creation
+                },
+                AddNodeCommand::Json { path, name } => {
+                    println!("Adding JSON node: path={:?}, name={:?}", path, name);
+                    // TODO: Implement JSON node creation
+                },
+                AddNodeCommand::Api {
+                    url,
+                    name,
+                    method,
+                    headers,
+                } => {
+                    println!(
+                        "Adding API node: url={}, name={:?}, method={:?}, headers={:?}",
+                        url, name, method, headers
+                    );
+                    // TODO: Implement API node creation
+                },
+            }
+        },
+        NodeCommand::List {
+            detailed,
+            type_filter,
+        } => {
+            println!(
+                "Listing nodes: detailed={}, type_filter={:?}",
+                detailed, type_filter
+            );
+            // TODO: Implement node listing
+        },
+        NodeCommand::Show { node, outputs } => {
+            println!("Showing node '{}': outputs={}", node, outputs);
+            // TODO: Implement node details display
+        },
+        NodeCommand::Exec { node, format, save } => {
+            println!(
+                "Executing node '{}': format={:?}, save={:?}",
+                node, format, save
+            );
+            // TODO: Implement node execution
+        },
+        NodeCommand::Remove { node, force } => {
+            println!("Removing node '{}': force={}", node, force);
+            // TODO: Implement node removal
+        },
+        NodeCommand::Config { node, config, data } => {
+            println!(
+                "Configuring node '{}': config={:?}, data={:?}",
+                node, config, data
+            );
+            // TODO: Implement node configuration
+        },
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() {
@@ -19,36 +102,7 @@ async fn main() {
 
     // Execute command
     let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        // Command::Workspace(workspace_cmd) => {
-        //     println!("Workspace command: {:?}", workspace_cmd);
-        //     // TODO: Implement workspace command handling
-        // },
-        // Command::Node(node_cmd) => {
-        //     println!("Node command: {:?}", node_cmd);
-        //     // TODO: Implement node command handling
-        // },
-        // Command::Link(link_args) => {
-        //     println!("Link command: {:?}", link_args);
-        //     // TODO: Implement link command handling
-        // },
-        // Command::Run(run_args) => {
-        //     println!("Run command: {:?}", run_args);
-        //     // TODO: Implement run command handling
-        // },
-        Command::Csv(csv_cmd) => {
-            println!("CSV command: {:?}", csv_cmd);
-            // TODO: Implement CSV command handling
-            Ok(())
-        },
-        // Command::Status(status_args) => {
-        //     println!("Status command: {:?}", status_args);
-        //     // TODO: Implement status command handling
-        // },
-        // Command::Repl => {
-        //     println!("Starting REPL mode...");
-        //     // TODO: Implement REPL mode
-        //     Ok(())
-        // },
+        Command::Node(node_cmd) => handle_node_command(node_cmd, &stoat),
     };
 
     // Handle command result and save state
