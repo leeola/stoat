@@ -11,6 +11,10 @@ license-file = "../LICENSE"
 name = "stoat"
 path = "src/bin/stoat.rs"
 
+[lib]
+name = "stoat_bin"
+path = "src/lib.rs"
+
 [dependencies]
 stoat = { path = "../stoat", features = ["cli_bin"] }
 stoat_core = { path = "../core" }
