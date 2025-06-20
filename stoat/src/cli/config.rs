@@ -14,7 +14,7 @@ pub struct Cli {
     pub workspace: Option<String>,
 
     /// Directory for storing state files (overrides default)
-    #[arg(long, env, global = true)]
+    #[arg(long = "stoat-dir", env = "STOAT_DIR", global = true)]
     pub state_dir: Option<std::path::PathBuf>,
 }
 

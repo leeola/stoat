@@ -479,6 +479,11 @@ impl Node for MapNode {
         // Map nodes are always ready to execute when they have an operation configured
         NodeStatus::Ready
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        // TODO: Remove this ASAP - bad implementation pattern
+        self
+    }
 }
 
 #[cfg(test)]

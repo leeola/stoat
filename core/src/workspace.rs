@@ -11,7 +11,6 @@ pub struct Workspace {
     nodes: HashMap<NodeId, Box<dyn Node>>,
     links: Vec<Link>,
     view: View,
-    next_id: u64,
 }
 
 impl Default for Workspace {
@@ -20,7 +19,6 @@ impl Default for Workspace {
             nodes: HashMap::new(),
             links: Vec::new(),
             view: View::default(),
-            next_id: 1,
         }
     }
 }
@@ -40,7 +38,7 @@ pub struct SerializableNode {
     pub id: NodeId,
     pub node_type: String,
     pub name: String,
-    pub config: serde_json::Value, // Node-specific configuration as JSON
+    pub config: crate::value::Value, // Node-specific configuration
 }
 
 /// Serializable representation of workspace state
@@ -48,7 +46,6 @@ pub struct SerializableNode {
 pub struct SerializableWorkspace {
     pub links: Vec<Link>,
     pub nodes: Vec<SerializableNode>,
-    pub next_id: u64,
     pub view_data: Option<String>, // Simplified view serialization
 }
 
@@ -61,15 +58,14 @@ impl From<&Workspace> for SerializableWorkspace {
                 id: *id,
                 node_type: node.node_type().to_string(),
                 name: node.name().to_string(),
-                config: serde_json::Value::Null, /* TODO: implement node-specific config
-                                                  * serialization */
+                config: crate::value::Value::Null, /* TODO: implement node-specific config
+                                                    * serialization */
             })
             .collect();
 
         Self {
             links: workspace.links.clone(),
             nodes,
-            next_id: workspace.next_id,
             view_data: None, // TODO: implement view serialization
         }
     }
@@ -96,15 +92,11 @@ impl Workspace {
             nodes: HashMap::new(), // Nodes will be empty until node factory is implemented
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
-            next_id: serializable.next_id,
         }
     }
 
-    /// Add a node to the workspace
-    pub fn add_node(&mut self, node: Box<dyn Node>) -> NodeId {
-        let id = NodeId(self.next_id);
-        self.next_id += 1;
-
+    /// Add a node to the workspace with a specific ID
+    pub fn add_node_with_id(&mut self, id: NodeId, node: Box<dyn Node>) {
         // Get node type before moving
         let node_type = node.node_type();
 
@@ -113,8 +105,6 @@ impl Workspace {
 
         // Add to view
         self.view.add_node_view(id, node_type, (0, 0));
-
-        id
     }
 
     /// Create a link between two nodes

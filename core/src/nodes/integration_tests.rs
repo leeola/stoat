@@ -206,28 +206,31 @@ mod tests {
                 expression: "{first_name} {last_name}".to_string(),
             },
         ));
-        let map_id1 = workspace.add_node(map_node1);
+        let map_id1 = NodeId(1);
+        workspace.add_node_with_id(map_id1, map_node1);
 
         // Step 2: Uppercase all string values
+        let map_id2 = NodeId(2);
         let map_node2 = Box::new(MapNode::new(
-            NodeId(2),
+            map_id2,
             "uppercase_strings".to_string(),
             MapOperation::TransformValues {
                 target_type: crate::nodes::map::ValueType::String,
                 transformation: crate::nodes::map::ValueTransformation::ToUppercase,
             },
         ));
-        let map_id2 = workspace.add_node(map_node2);
+        workspace.add_node_with_id(map_id2, map_node2);
 
         // Step 3: Select only relevant columns
+        let map_id3 = NodeId(3);
         let map_node3 = Box::new(MapNode::new(
-            NodeId(3),
+            map_id3,
             "select_final_columns".to_string(),
             MapOperation::SelectColumns {
                 fields: vec!["full_name".to_string(), "age".to_string()],
             },
         ));
-        let map_id3 = workspace.add_node(map_node3);
+        workspace.add_node_with_id(map_id3, map_node3);
 
         // Link the nodes: data -> step1 -> step2 -> step3
         workspace

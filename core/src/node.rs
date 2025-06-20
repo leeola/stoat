@@ -33,6 +33,11 @@ pub trait Node: Send + Sync + std::fmt::Debug {
     fn has_error(&self) -> bool {
         matches!(self.status(), NodeStatus::Error { .. })
     }
+
+    /// Allow downcasting to concrete types for type-specific operations
+    /// TODO: Remove this ASAP - bad implementation. Type-specific setup should be handled
+    /// through proper trait methods or configuration, not downcasting.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

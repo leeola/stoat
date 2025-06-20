@@ -237,8 +237,8 @@ pub struct TableViewerNode {
 
 impl TableViewerNode {
     pub fn new(id: NodeId, name: String) -> Self {
-        // Default cache directory - in real usage this would come from config
-        Self::new_with_cache_dir(id, name, PathBuf::from(".stoat_cache"))
+        // Default cache directory - will be updated by Stoat when adding to workspace
+        Self::new_with_cache_dir(id, name, PathBuf::from("cache"))
     }
 
     /// Create a new node with a specific cache directory
@@ -366,10 +366,34 @@ impl TableViewerNode {
     }
 
     /// Get the next available cache ID (simple counter starting at 1)
+    /// This is deprecated - cache IDs should come from global state
     fn get_next_cache_id() -> u64 {
-        // For now, simple counter starting at 1
-        // In the future this could be more sophisticated with state persistence
         1
+    }
+
+    /// Set the cache ID for this node (used when creating with global state)
+    pub fn set_cache_id(&mut self, cache_id: u64) {
+        self.cache_id = Some(cache_id);
+    }
+
+    /// Set the cache directory for this node (used when creating with global state)
+    pub fn set_cache_dir(&mut self, cache_dir: PathBuf) {
+        self.cache_dir = cache_dir;
+    }
+
+    /// Execute with a provided cache ID if one doesn't exist
+    pub fn execute_with_cache_id(
+        &mut self,
+        inputs: &HashMap<String, Value>,
+        cache_id: Option<u64>,
+    ) -> Result<HashMap<String, Value>> {
+        // Update cache if we receive new data
+        if let Some(input_data) = inputs.get("data") {
+            self.update_cache(input_data, cache_id)?;
+        }
+
+        // Table viewer is a sink - it doesn't produce output
+        Ok(HashMap::new())
     }
 
     /// Ensure the cache directory exists
@@ -466,11 +490,11 @@ impl TableViewerNode {
         Ok(())
     }
 
-    /// Update the cached data with new input
-    fn update_cache(&mut self, input_data: &Value) -> Result<()> {
-        // If we don't have a cache ID yet, assign one
+    /// Update the cached data with new input, using provided cache ID if none exists
+    fn update_cache(&mut self, input_data: &Value, new_cache_id: Option<u64>) -> Result<()> {
+        // If we don't have a cache ID yet, use the provided one or generate a default
         if self.cache_id.is_none() {
-            self.cache_id = Some(Self::get_next_cache_id());
+            self.cache_id = new_cache_id.or_else(|| Some(Self::get_next_cache_id()));
         }
 
         let cache_id = self.cache_id.unwrap();
@@ -546,7 +570,7 @@ impl Node for TableViewerNode {
     fn execute(&mut self, inputs: &HashMap<String, Value>) -> Result<HashMap<String, Value>> {
         // Update cache if we receive new data
         if let Some(input_data) = inputs.get("data") {
-            self.update_cache(input_data)?;
+            self.update_cache(input_data, None)?;
         }
 
         // Table viewer is a sink - it doesn't produce output
@@ -577,6 +601,11 @@ impl Node for TableViewerNode {
     fn status(&self) -> NodeStatus {
         // Table viewer nodes are always ready to accept data
         NodeStatus::Ready
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        // TODO: Remove this ASAP - bad implementation pattern
+        self
     }
 }
 

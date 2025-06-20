@@ -128,6 +128,11 @@ impl Node for CsvSourceNode {
             NodeStatus::Ready
         }
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        // TODO: Remove this ASAP - bad implementation pattern
+        self
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +245,11 @@ mod tests {
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            // TODO: Remove this ASAP - bad implementation pattern
+            self
+        }
     }
 
     /// A simple consumer node for testing transformations
@@ -300,6 +310,11 @@ mod tests {
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            // TODO: Remove this ASAP - bad implementation pattern
+            self
+        }
     }
 
     #[test]
@@ -309,15 +324,17 @@ mod tests {
         let mut workspace = Workspace::new();
 
         // Add CSV source node
-        let csv_node = Box::new(MockCsvNode::new(NodeId(0), "test_csv".to_string()));
-        let csv_id = workspace.add_node(csv_node);
+        let csv_id = NodeId(1);
+        let csv_node = Box::new(MockCsvNode::new(csv_id, "test_csv".to_string()));
+        workspace.add_node_with_id(csv_id, csv_node);
 
         // Add consumer node that outputs received data
+        let consumer_id = NodeId(2);
         let consumer_node = Box::new(TestConsumerNode::new(
-            NodeId(1),
+            consumer_id,
             "test_consumer".to_string(),
         ));
-        let consumer_id = workspace.add_node(consumer_node);
+        workspace.add_node_with_id(consumer_id, consumer_node);
 
         // Link CSV output to consumer input with filter transformation
         let filter_transform = Transformation::filter("name=Alice");

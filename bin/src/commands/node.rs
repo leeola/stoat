@@ -87,7 +87,7 @@ fn add_node(
 ) -> Result<NodeId, Box<dyn std::error::Error>> {
     let node = create_node(node_type, name.clone(), config)?;
     let node_name = node.name().to_string();
-    let id = stoat.workspace_mut().add_node(node);
+    let id = stoat.add_node(node);
 
     println!(
         "✓ Added {} node '{}' with ID {:?}",
@@ -256,8 +256,8 @@ mod tests {
         let table_node1 = Box::new(TableViewerNode::new(NodeId(1), "sales_table".to_string()));
         let table_node2 = Box::new(TableViewerNode::new(NodeId(2), "users_table".to_string()));
 
-        let id1 = stoat.workspace_mut().add_node(table_node1);
-        let id2 = stoat.workspace_mut().add_node(table_node2);
+        let id1 = stoat.add_node(table_node1);
+        let id2 = stoat.add_node(table_node2);
 
         // Verify nodes were added
         let nodes = stoat.workspace().list_nodes();
@@ -496,7 +496,7 @@ mod tests {
             headers: true,
         };
         let node = create_node("csv", Some("test_node".to_string()), csv_config).unwrap();
-        let node_id = stoat.workspace_mut().add_node(node);
+        let node_id = stoat.add_node(node);
 
         // Verify node exists before save
         let nodes_before_save = stoat.workspace().list_nodes();

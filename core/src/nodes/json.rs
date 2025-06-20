@@ -110,6 +110,11 @@ impl Node for JsonSourceNode {
             NodeStatus::Ready
         }
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        // TODO: Remove this ASAP - bad implementation pattern
+        self
+    }
 }
 
 /// Convert serde_json::Value to our internal Value type
@@ -261,6 +266,11 @@ mod tests {
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            // TODO: Remove this ASAP - bad implementation pattern
+            self
+        }
     }
 
     /// A simple consumer node for testing transformations
@@ -326,6 +336,11 @@ mod tests {
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            // TODO: Remove this ASAP - bad implementation pattern
+            self
+        }
     }
 
     #[test]
@@ -351,15 +366,17 @@ mod tests {
         let mut workspace = Workspace::new();
 
         // Add JSON source node
-        let json_node = Box::new(MockJsonNode::new(NodeId(0), "test_json".to_string()));
-        let json_id = workspace.add_node(json_node);
+        let json_id = NodeId(1);
+        let json_node = Box::new(MockJsonNode::new(json_id, "test_json".to_string()));
+        workspace.add_node_with_id(json_id, json_node);
 
         // Add consumer node
+        let consumer_id = NodeId(2);
         let consumer_node = Box::new(TestConsumerNode::new(
-            NodeId(1),
+            consumer_id,
             "test_consumer".to_string(),
         ));
-        let consumer_id = workspace.add_node(consumer_node);
+        workspace.add_node_with_id(consumer_id, consumer_node);
 
         // Link JSON output to consumer input with filter transformation
         let filter_transform = Transformation::filter("name=Alice");

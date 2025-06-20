@@ -51,6 +51,14 @@ pub mod state {
         pub workspaces: HashMap<String, WorkspaceMetadata>,
         /// CLI-specific configuration
         pub config: Config,
+        /// Global ID counter for nodes, workspaces, and other entities
+        #[serde(default = "default_next_global_id")]
+        pub next_global_id: u64,
+    }
+
+    /// Default value for next_global_id for migration from old state files
+    fn default_next_global_id() -> u64 {
+        1
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +100,7 @@ pub mod state {
                 active_workspace: default_workspace,
                 workspaces,
                 config: Config::default(),
+                next_global_id: 1,
             }
         }
     }
@@ -114,7 +123,7 @@ pub mod state {
         /// Load state from a specific path
         pub fn load_from(path: &Path) -> Result<Self, StateError> {
             if !path.exists() {
-                let state = Self::default();
+                let state = Self::new_for_directory(path.parent().unwrap_or(Path::new(".")));
                 state.save_to(path)?;
                 return Ok(state);
             }
@@ -125,6 +134,29 @@ pub mod state {
             })?;
 
             ron::from_str(&contents).map_err(|e| StateError::Serialization { source: e.into() })
+        }
+
+        /// Create a new state instance for a specific state directory
+        pub fn new_for_directory(state_dir: &Path) -> Self {
+            let default_workspace = "default".to_string();
+            let mut workspaces = HashMap::new();
+
+            workspaces.insert(
+                default_workspace.clone(),
+                WorkspaceMetadata {
+                    name: default_workspace.clone(),
+                    description: Some("Default workspace".to_string()),
+                    data_path: state_dir.join("workspaces").join("default.ron"),
+                    last_modified: None,
+                },
+            );
+
+            Self {
+                active_workspace: default_workspace,
+                workspaces,
+                config: Config::default(),
+                next_global_id: 1,
+            }
         }
 
         /// Save state to the default location
@@ -174,9 +206,19 @@ pub mod state {
                 return Err(StateError::WorkspaceExists { name });
             }
 
-            let data_path = default_state_dir()
-                .join("workspaces")
-                .join(format!("{}.ron", name));
+            // Derive state directory from existing workspace paths
+            let state_dir = if let Some(existing_workspace) = self.workspaces.values().next() {
+                existing_workspace
+                    .data_path
+                    .parent() // Remove filename
+                    .and_then(|p| p.parent()) // Remove "workspaces" directory
+                    .unwrap_or(&default_state_dir())
+                    .to_path_buf()
+            } else {
+                default_state_dir()
+            };
+
+            let data_path = state_dir.join("workspaces").join(format!("{}.ron", name));
             let metadata = WorkspaceMetadata {
                 name: name.clone(),
                 description,
@@ -186,6 +228,33 @@ pub mod state {
 
             self.workspaces.insert(name, metadata);
             Ok(())
+        }
+
+        /// Allocate a new globally unique ID
+        pub fn allocate_id(&mut self) -> u64 {
+            let id = self.next_global_id;
+            self.next_global_id += 1;
+            id
+        }
+
+        /// Get the next global ID without allocating it
+        pub fn peek_next_id(&self) -> u64 {
+            self.next_global_id
+        }
+
+        /// Get the cache directory for storing node data
+        pub fn get_cache_dir(&self) -> PathBuf {
+            // Extract the directory from any workspace data path, or use default
+            if let Some(workspace_meta) = self.workspaces.values().next() {
+                workspace_meta
+                    .data_path
+                    .parent()
+                    .and_then(|p| p.parent()) // Go up from workspaces/ to state dir
+                    .unwrap_or(&default_state_dir())
+                    .join("cache")
+            } else {
+                default_state_dir().join("cache")
+            }
         }
     }
 
@@ -447,6 +516,26 @@ impl Stoat {
     pub fn state_mut(&mut self) -> &mut state::State {
         &mut self.state
     }
+
+    /// Add a node to the active workspace with a globally unique ID
+    pub fn add_node(&mut self, mut node: Box<dyn crate::node::Node>) -> crate::node::NodeId {
+        let id = crate::node::NodeId(self.state.allocate_id());
+
+        // TODO: Remove this ASAP - bad implementation using downcasting
+        // Should use proper trait methods or node factory pattern instead
+        // If this is a table viewer node, assign it a cache ID and update cache directory
+        if let Some(table_node) = node
+            .as_any_mut()
+            .downcast_mut::<crate::nodes::table::TableViewerNode>()
+        {
+            let cache_id = self.state.allocate_id();
+            table_node.set_cache_id(cache_id);
+            table_node.set_cache_dir(self.state.get_cache_dir());
+        }
+
+        self.active.add_node_with_id(id, node);
+        id
+    }
     /// Push a user input into Stoat.
     //
     // TODO: UserInput needs to return available actions? For automatic ? and client validation?
@@ -583,5 +672,211 @@ mod tests {
 
         assert_eq!(stoat.state().active_workspace, "test");
         assert!(stoat.state().workspaces.contains_key("test"));
+    }
+
+    #[test]
+    fn test_global_id_uniqueness_across_workspaces() {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().to_path_buf();
+
+        // Create first workspace and add nodes
+        let mut stoat1 = {
+            let config = StoatConfig {
+                state_dir: Some(state_dir.clone()),
+                workspace: None,
+            };
+            Stoat::new_with_config(config).unwrap()
+        };
+
+        // Add a node in default workspace
+        let node1 = Box::new(crate::nodes::table::TableViewerNode::new(
+            crate::node::NodeId(0), // This will be replaced
+            "table1".to_string(),
+        ));
+        let id1 = stoat1.add_node(node1);
+
+        // Create second workspace
+        stoat1
+            .state_mut()
+            .add_workspace("workspace2".to_string(), None)
+            .unwrap();
+        stoat1
+            .state_mut()
+            .set_active_workspace("workspace2".to_string())
+            .unwrap();
+
+        // Add a node in second workspace
+        let node2 = Box::new(crate::nodes::table::TableViewerNode::new(
+            crate::node::NodeId(0), // This will be replaced
+            "table2".to_string(),
+        ));
+        let id2 = stoat1.add_node(node2);
+
+        // IDs should be different (globally unique)
+        assert_ne!(id1, id2);
+        assert!(
+            id1.0 < id2.0,
+            "IDs should be increasing: {} < {}",
+            id1.0,
+            id2.0
+        );
+
+        // Save state
+        stoat1.save().unwrap();
+
+        // Create new Stoat instance that loads the same state
+        let mut stoat2 = {
+            let config = StoatConfig {
+                state_dir: Some(state_dir),
+                workspace: None,
+            };
+            Stoat::new_with_config(config).unwrap()
+        };
+
+        // Add another node - should get next ID after the previous ones
+        let node3 = Box::new(crate::nodes::table::TableViewerNode::new(
+            crate::node::NodeId(0), // This will be replaced
+            "table3".to_string(),
+        ));
+        let id3 = stoat2.add_node(node3);
+
+        // ID should be greater than both previous IDs
+        assert!(
+            id3.0 > id1.0 && id3.0 > id2.0,
+            "New ID {} should be greater than previous IDs {} and {}",
+            id3.0,
+            id1.0,
+            id2.0
+        );
+    }
+
+    #[test]
+    fn test_state_directory_removal_resets_ids() {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+        let state_dir = temp_dir.path().to_path_buf();
+
+        // First session: create stoat, add node, save, drop
+        let (first_id, cache_dir) = {
+            let mut stoat1 = {
+                let config = StoatConfig {
+                    state_dir: Some(state_dir.clone()),
+                    workspace: None,
+                };
+                Stoat::new_with_config(config).unwrap()
+            };
+
+            // Add a table node
+            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
+                crate::node::NodeId(0), // This will be replaced
+                "test_table_1".to_string(),
+            ));
+            let id = stoat1.add_node(table_node);
+            let cache_dir = stoat1.state.get_cache_dir();
+
+            // Save state
+            stoat1.save().unwrap();
+
+            (id, cache_dir)
+        }; // stoat1 dropped here
+
+        // Second session: load from same state dir
+        let second_id = {
+            let mut stoat2 = {
+                let config = StoatConfig {
+                    state_dir: Some(state_dir.clone()),
+                    workspace: None,
+                };
+                Stoat::new_with_config(config).unwrap()
+            };
+
+            // Add another node - should continue from previous ID counter
+            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
+                crate::node::NodeId(0), // This will be replaced
+                "test_table_2".to_string(),
+            ));
+            stoat2.add_node(table_node)
+        }; // stoat2 dropped here
+
+        // Remove the entire state directory
+        std::fs::remove_dir_all(&state_dir).unwrap();
+
+        // Third session: should start fresh with ID 1
+        let fresh_id = {
+            let mut stoat3 = {
+                let config = StoatConfig {
+                    state_dir: Some(state_dir.clone()),
+                    workspace: None,
+                };
+                Stoat::new_with_config(config).unwrap()
+            };
+
+            // Add node - should start from 1 again
+            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
+                crate::node::NodeId(0), // This will be replaced
+                "test_table_fresh".to_string(),
+            ));
+            stoat3.add_node(table_node)
+        };
+
+        // Verify ID progression
+        assert_eq!(first_id.0, 1, "First node should get ID 1");
+        assert!(
+            second_id.0 > first_id.0,
+            "Second node should get higher ID than first"
+        );
+        assert_eq!(fresh_id.0, 1, "Fresh start should reset to ID 1");
+
+        // Verify cache directory is under state directory, not hardcoded location
+        assert!(
+            cache_dir.starts_with(&state_dir),
+            "Cache directory {:?} should be under state directory {:?}",
+            cache_dir,
+            state_dir
+        );
+        assert!(
+            !std::path::Path::new(".stoat_cache").exists(),
+            "Should not create .stoat_cache in current directory"
+        );
+    }
+
+    #[test]
+    fn test_table_cache_uses_global_state_directory() {
+        use tempfile::TempDir;
+        let temp_dir = TempDir::new().unwrap();
+        let custom_state_dir = temp_dir.path().join("custom_stoat");
+
+        let mut stoat = {
+            let config = StoatConfig {
+                state_dir: Some(custom_state_dir.clone()),
+                workspace: None,
+            };
+            Stoat::new_with_config(config).unwrap()
+        };
+
+        // Add a table node
+        let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
+            crate::node::NodeId(0), // This will be replaced
+            "test_table".to_string(),
+        ));
+        let _id = stoat.add_node(table_node);
+
+        // Cache directory should be under the custom state directory
+        let _expected_cache_dir = custom_state_dir.join("cache");
+
+        // Save to ensure directories are created
+        stoat.save().unwrap();
+
+        // The cache directory should exist under the custom state directory, not in .stoat_cache
+        assert!(
+            !std::path::Path::new(".stoat_cache").exists(),
+            "Should not create .stoat_cache in current directory"
+        );
+
+        // Note: We can't easily verify the cache directory was used since the table node
+        // only creates the cache directory when it actually caches data, but we can verify
+        // the state directory structure is correct
+        assert!(custom_state_dir.exists());
     }
 }
