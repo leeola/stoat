@@ -34,20 +34,41 @@ pub struct Link {
     pub transformation: Option<Transformation>,
 }
 
+/// Serializable representation of a node
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableNode {
+    pub id: NodeId,
+    pub node_type: String,
+    pub name: String,
+    pub config: serde_json::Value, // Node-specific configuration as JSON
+}
+
 /// Serializable representation of workspace state
-/// This is a simplified version for persistence that doesn't include the actual node
-/// implementations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializableWorkspace {
     pub links: Vec<Link>,
+    pub nodes: Vec<SerializableNode>,
     pub next_id: u64,
     pub view_data: Option<String>, // Simplified view serialization
 }
 
 impl From<&Workspace> for SerializableWorkspace {
     fn from(workspace: &Workspace) -> Self {
+        let nodes = workspace
+            .nodes
+            .iter()
+            .map(|(id, node)| SerializableNode {
+                id: *id,
+                node_type: node.node_type().to_string(),
+                name: node.name().to_string(),
+                config: serde_json::Value::Null, /* TODO: implement node-specific config
+                                                  * serialization */
+            })
+            .collect();
+
         Self {
             links: workspace.links.clone(),
+            nodes,
             next_id: workspace.next_id,
             view_data: None, // TODO: implement view serialization
         }
@@ -61,8 +82,18 @@ impl Workspace {
 
     /// Create a workspace from a serializable representation
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
+        // TODO: Implement node reconstruction from SerializableNode
+        // For now, we store the serializable nodes but can't recreate the actual Node objects
+        // because that requires a node factory with access to node implementations
+        if !serializable.nodes.is_empty() {
+            eprintln!(
+                "Warning: {} serialized nodes found but node reconstruction not yet implemented",
+                serializable.nodes.len()
+            );
+        }
+
         Self {
-            nodes: HashMap::new(), // Nodes will be empty for now
+            nodes: HashMap::new(), // Nodes will be empty until node factory is implemented
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
             next_id: serializable.next_id,

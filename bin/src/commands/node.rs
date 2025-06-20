@@ -484,4 +484,39 @@ mod tests {
             .to_string()
             .contains("Unknown node type"));
     }
+
+    #[test]
+    fn test_node_persistence_after_save_and_load() {
+        let (mut stoat, temp_dir) = stoat_core::Stoat::test();
+
+        // Add a node
+        let csv_config = NodeConfig::Csv {
+            path: PathBuf::from("test.csv"),
+            delimiter: ',',
+            headers: true,
+        };
+        let node = create_node("csv", Some("test_node".to_string()), csv_config).unwrap();
+        let node_id = stoat.workspace_mut().add_node(node);
+
+        // Verify node exists before save
+        let nodes_before_save = stoat.workspace().list_nodes();
+        assert_eq!(nodes_before_save.len(), 1);
+        assert_eq!(nodes_before_save[0].0, node_id);
+
+        // Save and reload
+        stoat.save().unwrap();
+        let config = stoat_core::StoatConfig {
+            state_dir: Some(temp_dir.path().to_path_buf()),
+            workspace: None,
+        };
+        let reloaded_stoat = stoat_core::Stoat::new_with_config(config).unwrap();
+
+        // BUG: Nodes are serialized but not reconstructed, so they appear to be lost
+        let nodes_after_reload = reloaded_stoat.workspace().list_nodes();
+        assert_eq!(
+            nodes_after_reload.len(),
+            0,
+            "BUG: Nodes are serialized but not reconstructed on load"
+        );
+    }
 }

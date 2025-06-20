@@ -63,6 +63,20 @@ pub enum NodeType {
     TableViewer,
 }
 
+impl std::fmt::Display for NodeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            #[cfg(feature = "csv")]
+            NodeType::CsvSource => "csv",
+            #[cfg(feature = "json")]
+            NodeType::JsonSource => "json",
+            NodeType::Map => "map",
+            NodeType::TableViewer => "table",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketType {
     Data, /* Main data flow - circles
