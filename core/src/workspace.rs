@@ -78,18 +78,32 @@ impl Workspace {
 
     /// Create a workspace from a serializable representation
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
-        // TODO: Implement node reconstruction from SerializableNode
-        // For now, we store the serializable nodes but can't recreate the actual Node objects
-        // because that requires a node factory with access to node implementations
-        if !serializable.nodes.is_empty() {
-            eprintln!(
-                "Warning: {} serialized nodes found but node reconstruction not yet implemented",
-                serializable.nodes.len()
-            );
+        let mut nodes = HashMap::new();
+
+        // Reconstruct nodes using the registry
+        for serializable_node in serializable.nodes {
+            let node_name = serializable_node.name.clone();
+            let node_type = serializable_node.node_type.clone();
+            match crate::node::create_node_from_registry(
+                &serializable_node.node_type,
+                serializable_node.id,
+                serializable_node.name,
+                serializable_node.config,
+            ) {
+                Ok(node) => {
+                    nodes.insert(serializable_node.id, node);
+                },
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to reconstruct node {} ({}): {}",
+                        node_name, node_type, e
+                    );
+                },
+            }
         }
 
         Self {
-            nodes: HashMap::new(), // Nodes will be empty until node factory is implemented
+            nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
         }

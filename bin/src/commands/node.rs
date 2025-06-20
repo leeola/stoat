@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use stoat::cli::node::{AddNodeCommand, NodeCommand};
-use stoat_core::{node::NodeId, nodes, Stoat};
+use stoat_core::{node::NodeId, value::Value, Stoat};
 
-/// Generic node factory that creates nodes based on type and parameters
+/// Generic node factory that creates nodes based on type and parameters using the registry
 fn create_node(
     node_type: &str,
     name: Option<String>,
@@ -10,46 +10,33 @@ fn create_node(
 ) -> Result<Box<dyn stoat_core::node::Node>, Box<dyn std::error::Error>> {
     let node_name = name.unwrap_or_else(|| format!("{}_node", node_type));
 
-    match node_type {
-        "csv" => {
-            if let NodeConfig::Csv {
-                path,
-                delimiter: _,
-                headers: _,
-            } = config
-            {
-                Ok(Box::new(nodes::CsvSourceNode::new(
-                    NodeId(0), // Will be replaced by workspace
-                    node_name,
-                    path.to_string_lossy().to_string(),
-                )))
-            } else {
-                Err("Invalid config for CSV node".into())
-            }
+    // Convert NodeConfig to Value
+    let config_value = match config {
+        NodeConfig::Csv { path, .. } => {
+            // For CSV nodes, just pass the path as a string
+            Value::String(path.to_string_lossy().into())
         },
-        "table" => {
-            if let NodeConfig::Table { max_rows: _ } = config {
-                Ok(Box::new(nodes::TableViewerNode::new(
-                    NodeId(0), // Will be replaced by workspace
-                    node_name,
-                )))
-            } else {
-                Err("Invalid config for Table node".into())
-            }
+        NodeConfig::Table { max_rows: _ } => {
+            // For table nodes, just pass empty config (table init doesn't need max_rows for now)
+            Value::Empty
         },
-        "json" => {
-            if let NodeConfig::Json { path } = config {
-                Ok(Box::new(nodes::JsonSourceNode::new(
-                    NodeId(0), // Will be replaced by workspace
-                    node_name,
-                    path.to_string_lossy().to_string(),
-                )))
-            } else {
-                Err("Invalid config for JSON node".into())
-            }
+        NodeConfig::Json { path } => {
+            // For JSON nodes, just pass the path as a string
+            Value::String(path.to_string_lossy().into())
         },
-        _ => Err(format!("Unknown node type: {}", node_type).into()),
-    }
+        NodeConfig::Api { .. } => {
+            return Err("API nodes are not yet implemented".into());
+        },
+    };
+
+    // Use the registry to create the node
+    stoat_core::node::create_node_from_registry(
+        node_type,
+        NodeId(0), // Will be replaced by workspace
+        node_name,
+        config_value,
+    )
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 /// Configuration enum for different node types

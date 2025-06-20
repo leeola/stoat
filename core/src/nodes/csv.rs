@@ -1,7 +1,7 @@
 use crate::{
     node::{
-        ErrorType, Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port,
-        SocketInfo, SocketType,
+        ErrorType, Node, NodeId, NodeInit, NodePresentation, NodeSockets, NodeStatus, NodeType,
+        Port, SocketInfo, SocketType,
     },
     value::Value,
     Result,
@@ -132,6 +132,48 @@ impl Node for CsvSourceNode {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self
+    }
+}
+
+/// NodeInit implementation for CSV source nodes
+#[derive(Debug)]
+pub struct CsvInit;
+
+impl NodeInit for CsvInit {
+    fn init(&self, id: NodeId, name: String, config: Value) -> Result<Box<dyn Node>> {
+        // Extract file path from config
+        let file_path = match config {
+            Value::String(path) => path.to_string(),
+            Value::Map(ref map) => {
+                // Support both direct string and map with "path" key
+                if let Some(path_value) = map.0.get("path") {
+                    match path_value {
+                        Value::String(path) => path.to_string(),
+                        _ => {
+                            return Err(crate::Error::Generic {
+                                message: "CSV node config 'path' must be a string".to_string(),
+                            })
+                        },
+                    }
+                } else {
+                    return Err(crate::Error::Generic {
+                        message: "CSV node config must contain 'path' field".to_string(),
+                    });
+                }
+            },
+            _ => {
+                return Err(crate::Error::Generic {
+                    message: "CSV node config must be a string path or map with 'path' field"
+                        .to_string(),
+                })
+            },
+        };
+
+        Ok(Box::new(CsvSourceNode::new(id, name, file_path)))
+    }
+
+    fn name(&self) -> &'static str {
+        "csv"
     }
 }
 

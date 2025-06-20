@@ -6,8 +6,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port, SocketInfo,
-        SocketType,
+        Node, NodeId, NodeInit, NodePresentation, NodeSockets, NodeStatus, NodeType, Port,
+        SocketInfo, SocketType,
     },
     value::Value,
     Result,
@@ -606,6 +606,60 @@ impl Node for TableViewerNode {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self
+    }
+}
+
+/// NodeInit implementation for Table viewer nodes
+#[derive(Debug)]
+pub struct TableInit;
+
+impl NodeInit for TableInit {
+    fn init(&self, id: NodeId, name: String, config: Value) -> Result<Box<dyn Node>> {
+        // Table viewer nodes can be created with optional configuration
+        let (max_rows, cache_dir) = match config {
+            Value::Map(ref map) => {
+                let max_rows = map.0.get("max_rows").and_then(|v| match v {
+                    Value::I64(n) => Some(*n as usize),
+                    Value::U64(n) => Some(*n as usize),
+                    _ => None,
+                });
+
+                let cache_dir = map
+                    .0
+                    .get("cache_dir")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(PathBuf::from(s.as_str())),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| PathBuf::from("cache"));
+
+                (max_rows, cache_dir)
+            },
+            Value::Empty | Value::Null => {
+                // Default configuration
+                (None, PathBuf::from("cache"))
+            },
+            _ => {
+                return Err(crate::Error::Generic {
+                    message: "Table node config must be an object or empty".to_string(),
+                })
+            },
+        };
+
+        // Create the table node with specified or default cache directory
+        let node = TableViewerNode::new_with_cache_dir(id, name, cache_dir);
+
+        // Apply max_rows limit if specified
+        if let Some(_max_rows) = max_rows {
+            // TableViewerNode doesn't currently support max_rows configuration
+            // This could be added to the node implementation in the future
+        }
+
+        Ok(Box::new(node))
+    }
+
+    fn name(&self) -> &'static str {
+        "table"
     }
 }
 

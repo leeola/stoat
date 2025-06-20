@@ -9,8 +9,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, NodePresentation, NodeSockets, NodeStatus, NodeType, Port, SocketInfo,
-        SocketType,
+        Node, NodeId, NodeInit, NodePresentation, NodeSockets, NodeStatus, NodeType, Port,
+        SocketInfo, SocketType,
     },
     value::Value,
     Result,
@@ -483,6 +483,145 @@ impl Node for MapNode {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self
+    }
+}
+
+/// NodeInit implementation for Map nodes
+#[derive(Debug)]
+pub struct MapInit;
+
+impl NodeInit for MapInit {
+    fn init(&self, id: NodeId, name: String, config: Value) -> Result<Box<dyn Node>> {
+        // Parse the operation from config
+        let operation = match config {
+            Value::Map(ref map) => {
+                if let Some(op_type) = map.0.get("operation") {
+                    match op_type {
+                        Value::String(op) => match op.as_str() {
+                            "extract_column" => {
+                                if let Some(Value::String(field)) = map.0.get("field") {
+                                    MapOperation::ExtractColumn {
+                                        field: field.to_string(),
+                                    }
+                                } else {
+                                    return Err(crate::Error::Generic {
+                                        message:
+                                            "ExtractColumn operation requires 'field' parameter"
+                                                .to_string(),
+                                    });
+                                }
+                            },
+                            "select_columns" => {
+                                if let Some(Value::Array(crate::value::Array(fields))) =
+                                    map.0.get("fields")
+                                {
+                                    let field_names: Result<Vec<String>, _> = fields
+                                        .iter()
+                                        .map(|v| match v {
+                                            Value::String(s) => Ok(s.to_string()),
+                                            _ => Err(crate::Error::Generic {
+                                                message: "SelectColumns fields must be strings"
+                                                    .to_string(),
+                                            }),
+                                        })
+                                        .collect();
+                                    MapOperation::SelectColumns {
+                                        fields: field_names?,
+                                    }
+                                } else {
+                                    return Err(crate::Error::Generic {
+                                        message: "SelectColumns operation requires 'fields' array parameter".to_string(),
+                                    });
+                                }
+                            },
+                            "rename_fields" => {
+                                if let Some(Value::Map(mappings_map)) = map.0.get("mappings") {
+                                    let mut mappings = HashMap::new();
+                                    for (key, value) in mappings_map.0.iter() {
+                                        if let Value::String(new_name) = value {
+                                            mappings.insert(key.to_string(), new_name.to_string());
+                                        } else {
+                                            return Err(crate::Error::Generic {
+                                                message:
+                                                    "RenameFields mapping values must be strings"
+                                                        .to_string(),
+                                            });
+                                        }
+                                    }
+                                    MapOperation::RenameFields { mappings }
+                                } else {
+                                    return Err(crate::Error::Generic {
+                                        message: "RenameFields operation requires 'mappings' object parameter".to_string(),
+                                    });
+                                }
+                            },
+                            "add_computed_field" => {
+                                let field_name = map.0.get("field_name")
+                                    .and_then(|v| match v {
+                                        Value::String(s) => Some(s.to_string()),
+                                        _ => None,
+                                    })
+                                    .ok_or_else(|| crate::Error::Generic {
+                                        message: "AddComputedField requires 'field_name' string parameter".to_string(),
+                                    })?;
+
+                                let expression = map.0.get("expression")
+                                    .and_then(|v| match v {
+                                        Value::String(s) => Some(s.to_string()),
+                                        _ => None,
+                                    })
+                                    .ok_or_else(|| crate::Error::Generic {
+                                        message: "AddComputedField requires 'expression' string parameter".to_string(),
+                                    })?;
+
+                                MapOperation::AddComputedField {
+                                    field_name,
+                                    expression,
+                                }
+                            },
+                            "flatten_object" => {
+                                let separator = map
+                                    .0
+                                    .get("separator")
+                                    .and_then(|v| match v {
+                                        Value::String(s) => Some(s.to_string()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| "_".to_string());
+
+                                MapOperation::FlattenObject { separator }
+                            },
+                            "transpose" => MapOperation::Transpose,
+                            _ => {
+                                return Err(crate::Error::Generic {
+                                    message: format!("Unknown map operation: {}", op),
+                                })
+                            },
+                        },
+                        _ => {
+                            return Err(crate::Error::Generic {
+                                message: "Map operation must be a string".to_string(),
+                            })
+                        },
+                    }
+                } else {
+                    return Err(crate::Error::Generic {
+                        message: "Map node config must contain 'operation' field".to_string(),
+                    });
+                }
+            },
+            _ => {
+                return Err(crate::Error::Generic {
+                    message: "Map node config must be an object with 'operation' field".to_string(),
+                })
+            },
+        };
+
+        Ok(Box::new(MapNode::new(id, name, operation)))
+    }
+
+    fn name(&self) -> &'static str {
+        "map"
     }
 }
 
