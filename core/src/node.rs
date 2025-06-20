@@ -1,5 +1,9 @@
-use crate::{value::Value, Result};
-use std::collections::HashMap;
+use crate::{
+    plugin::{NodeLoadData, NodeLoadResult, NodeSaveData, NodeSaveResult},
+    value::Value,
+    Result,
+};
+use std::{collections::HashMap, future::Future};
 
 pub trait Node: Send + Sync + std::fmt::Debug {
     fn id(&self) -> NodeId;
@@ -38,6 +42,44 @@ pub trait Node: Send + Sync + std::fmt::Debug {
     /// TODO: Remove this ASAP - bad implementation. Type-specific setup should be handled
     /// through proper trait methods or configuration, not downcasting.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+    /// Save node state to disk
+    ///
+    /// Default implementation returns an error indicating persistence is not supported.
+    /// Nodes that support persistence should override this method.
+    ///
+    /// See also: [`Node::load_state`]
+    fn save_state(
+        &self,
+        _save_data: NodeSaveData,
+    ) -> Box<dyn Future<Output = Result<NodeSaveResult>> + Send + '_> {
+        Box::new(std::future::ready(Err(crate::error::Error::Unsupported {
+            operation: "Node persistence".to_string(),
+            reason: format!(
+                "Node type {} does not support save/load operations",
+                self.node_type()
+            ),
+        })))
+    }
+
+    /// Load node state from disk
+    ///
+    /// Default implementation returns an error indicating persistence is not supported.
+    /// Nodes that support persistence should override this method.
+    ///
+    /// See also: [`Node::save_state`]
+    fn load_state(
+        &mut self,
+        _load_data: NodeLoadData,
+    ) -> Box<dyn Future<Output = Result<NodeLoadResult>> + Send + '_> {
+        Box::new(std::future::ready(Err(crate::error::Error::Unsupported {
+            operation: "Node persistence".to_string(),
+            reason: format!(
+                "Node type {} does not support save/load operations",
+                self.node_type()
+            ),
+        })))
+    }
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -155,4 +197,94 @@ pub enum ErrorType {
     Dependency,
     /// Internal node error
     Internal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        plugin::{NodeLoadData, NodeSaveData},
+        value::Value,
+    };
+    use std::{collections::HashMap, path::PathBuf};
+
+    #[derive(Debug)]
+    struct MockNode {
+        id: NodeId,
+        name: String,
+    }
+
+    impl Node for MockNode {
+        fn id(&self) -> NodeId {
+            self.id
+        }
+
+        fn node_type(&self) -> NodeType {
+            NodeType::Map
+        }
+
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn execute(
+            &mut self,
+            _inputs: &HashMap<String, Value>,
+        ) -> crate::Result<HashMap<String, Value>> {
+            Ok(HashMap::new())
+        }
+
+        fn input_ports(&self) -> Vec<Port> {
+            vec![]
+        }
+
+        fn output_ports(&self) -> Vec<Port> {
+            vec![]
+        }
+
+        fn sockets(&self) -> NodeSockets {
+            NodeSockets::new(vec![], vec![])
+        }
+
+        fn presentation(&self) -> NodePresentation {
+            NodePresentation::Minimal
+        }
+
+        fn status(&self) -> NodeStatus {
+            NodeStatus::Idle
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn node_save_load_trait_exists() {
+        let node1 = MockNode {
+            id: NodeId(1),
+            name: "test_node".to_string(),
+        };
+
+        let mut node2 = MockNode {
+            id: NodeId(2),
+            name: "test_node_2".to_string(),
+        };
+
+        let save_data = NodeSaveData {
+            save_dir: PathBuf::from("/tmp"),
+            node_id: NodeId(1),
+            node_data: Value::Empty,
+            metadata: None,
+        };
+
+        let load_data = NodeLoadData {
+            load_dir: PathBuf::from("/tmp"),
+            node_id: NodeId(2),
+            metadata: None,
+        };
+
+        let _save_future = node1.save_state(save_data);
+        let _load_future = node2.load_state(load_data);
+    }
 }

@@ -36,3 +36,4 @@ tempfile = { version = "3.8", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"
+tokio = { workspace = true, features = ["rt"] }

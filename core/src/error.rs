@@ -19,4 +19,7 @@ pub enum Error {
 
     #[snafu(display("Serialization error: {message}"))]
     Serialization { message: String },
+
+    #[snafu(display("Unsupported operation '{operation}': {reason}"))]
+    Unsupported { operation: String, reason: String },
 }
