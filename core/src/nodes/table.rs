@@ -603,6 +603,21 @@ impl Node for TableViewerNode {
         NodeStatus::Ready
     }
 
+    fn config(&self) -> Value {
+        // Return the cache directory configuration
+        use crate::value::Map;
+
+        let mut config_map = indexmap::IndexMap::new();
+        config_map.insert(
+            compact_str::CompactString::from("cache_dir"),
+            Value::String(compact_str::CompactString::from(
+                self.cache_dir.to_string_lossy().as_ref(),
+            )),
+        );
+
+        Value::Map(Map(config_map))
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self

@@ -480,6 +480,102 @@ impl Node for MapNode {
         NodeStatus::Ready
     }
 
+    fn config(&self) -> Value {
+        // Convert the MapOperation back to a Value configuration
+        use crate::value::{Array, Map};
+
+        let mut config_map = indexmap::IndexMap::new();
+
+        match &self.operation {
+            MapOperation::ExtractColumn { field } => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("extract_column")),
+                );
+                config_map.insert(
+                    CompactString::from("field"),
+                    Value::String(CompactString::from(field)),
+                );
+            },
+            MapOperation::SelectColumns { fields } => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("select_columns")),
+                );
+                let field_values: Vec<Value> = fields
+                    .iter()
+                    .map(|f| Value::String(CompactString::from(f)))
+                    .collect();
+                config_map.insert(
+                    CompactString::from("fields"),
+                    Value::Array(Array(field_values)),
+                );
+            },
+            MapOperation::RenameFields { mappings } => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("rename_fields")),
+                );
+                let mut mappings_map = indexmap::IndexMap::new();
+                for (key, value) in mappings {
+                    mappings_map.insert(
+                        CompactString::from(key),
+                        Value::String(CompactString::from(value)),
+                    );
+                }
+                config_map.insert(
+                    CompactString::from("mappings"),
+                    Value::Map(Map(mappings_map)),
+                );
+            },
+            MapOperation::AddComputedField {
+                field_name,
+                expression,
+            } => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("add_computed_field")),
+                );
+                config_map.insert(
+                    CompactString::from("field_name"),
+                    Value::String(CompactString::from(field_name)),
+                );
+                config_map.insert(
+                    CompactString::from("expression"),
+                    Value::String(CompactString::from(expression)),
+                );
+            },
+            MapOperation::FlattenObject { separator } => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("flatten_object")),
+                );
+                config_map.insert(
+                    CompactString::from("separator"),
+                    Value::String(CompactString::from(separator)),
+                );
+            },
+            MapOperation::Transpose => {
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("transpose")),
+                );
+            },
+            MapOperation::TransformValues {
+                target_type: _,
+                transformation: _,
+            } => {
+                // TODO: Implement serialization for TransformValues when it's fully implemented
+                config_map.insert(
+                    CompactString::from("operation"),
+                    Value::String(CompactString::from("transform_values")),
+                );
+            },
+        }
+
+        Value::Map(Map(config_map))
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self

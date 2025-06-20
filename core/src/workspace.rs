@@ -58,8 +58,7 @@ impl From<&Workspace> for SerializableWorkspace {
                 id: *id,
                 node_type: node.node_type().to_string(),
                 name: node.name().to_string(),
-                config: crate::value::Value::Null, /* TODO: implement node-specific config
-                                                    * serialization */
+                config: node.config(), // Use the node's config() method
             })
             .collect();
 

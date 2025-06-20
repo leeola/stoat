@@ -58,6 +58,15 @@ pub trait Node: Send + Sync + Debug {
         matches!(self.status(), NodeStatus::Error { .. })
     }
 
+    /// Get the current configuration of this node for serialization
+    ///
+    /// This method returns the node's configuration as a Value that can be used
+    /// to recreate the node through the NodeInit registry. The returned configuration
+    /// should contain all necessary parameters to restore the node's state.
+    ///
+    /// See also: [`NodeInit::init`]
+    fn config(&self) -> Value;
+
     /// Allow downcasting to concrete types for type-specific operations
     /// TODO: Remove this ASAP - bad implementation. Type-specific setup should be handled
     /// through proper trait methods or configuration, not downcasting.
@@ -370,6 +379,11 @@ mod tests {
 
         fn status(&self) -> NodeStatus {
             NodeStatus::Idle
+        }
+
+        fn config(&self) -> Value {
+            // Mock node has no configuration
+            Value::Empty
         }
 
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

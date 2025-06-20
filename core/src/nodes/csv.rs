@@ -129,6 +129,11 @@ impl Node for CsvSourceNode {
         }
     }
 
+    fn config(&self) -> Value {
+        // Return the file path as the configuration
+        Value::String(compact_str::CompactString::from(&self.file_path))
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         // TODO: Remove this ASAP - bad implementation pattern
         self
@@ -288,6 +293,11 @@ mod tests {
             NodeStatus::Ready
         }
 
+        fn config(&self) -> Value {
+            // Mock node returns test configuration
+            Value::String(compact_str::CompactString::from("test.csv"))
+        }
+
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             // TODO: Remove this ASAP - bad implementation pattern
             self
@@ -351,6 +361,11 @@ mod tests {
 
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
+        }
+
+        fn config(&self) -> Value {
+            // Consumer node has no configuration
+            Value::Empty
         }
 
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

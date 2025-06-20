@@ -498,12 +498,17 @@ mod tests {
         };
         let reloaded_stoat = stoat_core::Stoat::new_with_config(config).unwrap();
 
-        // BUG: Nodes are serialized but not reconstructed, so they appear to be lost
+        // FIXED: Nodes are now properly serialized AND reconstructed via NodeInit registry
         let nodes_after_reload = reloaded_stoat.workspace().list_nodes();
         assert_eq!(
             nodes_after_reload.len(),
-            0,
-            "BUG: Nodes are serialized but not reconstructed on load"
+            1,
+            "Nodes should be properly reconstructed after save/load"
         );
+
+        // Verify the reconstructed node has the same properties
+        assert_eq!(nodes_after_reload[0].0, node_id);
+        assert_eq!(nodes_after_reload[0].1.name(), "test_node");
+        assert_eq!(nodes_after_reload[0].1.node_type().to_string(), "csv");
     }
 }
