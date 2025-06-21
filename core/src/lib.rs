@@ -594,6 +594,36 @@ impl Stoat {
 
             let csv_node = crate::nodes::csv::CsvSourceNode::new(id, name, file_path);
             self.active.add_csv_node(id, csv_node);
+        } else if node_type == "json" {
+            // Extract file path from config
+            let file_path = match &final_config {
+                crate::value::Value::String(path) => path.to_string(),
+                crate::value::Value::Map(ref map) => {
+                    if let Some(path_value) = map.0.get("path") {
+                        match path_value {
+                            crate::value::Value::String(path) => path.to_string(),
+                            _ => {
+                                return Err(crate::error::Error::Generic {
+                                    message: "JSON node config 'path' must be a string".to_string(),
+                                })
+                            },
+                        }
+                    } else {
+                        return Err(crate::error::Error::Generic {
+                            message: "JSON node config must contain 'path' field".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(crate::error::Error::Generic {
+                        message: "JSON node config must be a string path or map with 'path' field"
+                            .to_string(),
+                    })
+                },
+            };
+
+            let json_node = crate::nodes::json::JsonSourceNode::new(id, name, file_path);
+            self.active.add_json_node(id, json_node);
         } else if node_type == "table" {
             // Extract cache_dir from config - it should already be added to final_config
             let cache_dir = match &final_config {

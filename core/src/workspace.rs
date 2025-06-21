@@ -1,6 +1,6 @@
 use crate::{
     node::{Node, NodeId},
-    nodes::{csv::CsvSourceNode, table::TableViewerNode},
+    nodes::{csv::CsvSourceNode, json::JsonSourceNode, table::TableViewerNode},
     transform::Transformation,
     view::View,
     Result,
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub struct Workspace {
     nodes: HashMap<NodeId, Box<dyn Node>>,
     csv_nodes: HashMap<NodeId, CsvSourceNode>,
+    json_nodes: HashMap<NodeId, JsonSourceNode>,
     table_nodes: HashMap<NodeId, TableViewerNode>,
     links: Vec<Link>,
     view: View,
@@ -55,6 +56,28 @@ impl From<&Workspace> for SerializableWorkspace {
                 name: csv_node.name().to_string(),
                 config: {
                     let config_values = csv_node.get_config_values();
+                    if config_values.is_empty() {
+                        crate::value::Value::Empty
+                    } else {
+                        use crate::value::Map;
+                        let mut config_map = indexmap::IndexMap::new();
+                        for (key, value) in config_values {
+                            config_map.insert(compact_str::CompactString::from(key), value);
+                        }
+                        crate::value::Value::Map(Map(config_map))
+                    }
+                },
+            });
+        }
+
+        // Add JSON nodes
+        for (id, json_node) in &workspace.json_nodes {
+            nodes.push(SerializableNode {
+                id: *id,
+                node_type: json_node.node_type().to_string(),
+                name: json_node.name().to_string(),
+                config: {
+                    let config_values = json_node.get_config_values();
                     if config_values.is_empty() {
                         crate::value::Value::Empty
                     } else {
@@ -142,6 +165,7 @@ impl Workspace {
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
         let mut nodes = HashMap::new();
         let mut csv_nodes = HashMap::new();
+        let mut json_nodes = HashMap::new();
         let mut table_nodes = HashMap::new();
 
         // Reconstruct nodes using the registry
@@ -170,6 +194,26 @@ impl Workspace {
                 let csv_node =
                     CsvSourceNode::new(serializable_node.id, serializable_node.name, file_path);
                 csv_nodes.insert(serializable_node.id, csv_node);
+            } else if serializable_node.node_type == "json" {
+                // Extract file path from config
+                let file_path = match &serializable_node.config {
+                    crate::value::Value::String(path) => path.to_string(),
+                    crate::value::Value::Map(ref map) => {
+                        if let Some(path_value) = map.0.get("path") {
+                            match path_value {
+                                crate::value::Value::String(path) => path.to_string(),
+                                _ => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        }
+                    },
+                    _ => String::new(),
+                };
+
+                let json_node =
+                    JsonSourceNode::new(serializable_node.id, serializable_node.name, file_path);
+                json_nodes.insert(serializable_node.id, json_node);
             } else if serializable_node.node_type == "table" {
                 // Extract cache_dir from config
                 let cache_dir = match &serializable_node.config {
@@ -218,6 +262,7 @@ impl Workspace {
         Self {
             nodes,
             csv_nodes,
+            json_nodes,
             table_nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
@@ -242,6 +287,17 @@ impl Workspace {
 
         // Add to CSV nodes collection
         self.csv_nodes.insert(id, csv_node);
+
+        // Add to view
+        self.view.add_node_view(id, node_type, (0, 0));
+    }
+
+    /// Add a JSON node directly to the workspace
+    pub fn add_json_node(&mut self, id: NodeId, json_node: JsonSourceNode) {
+        let node_type = json_node.node_type();
+
+        // Add to JSON nodes collection
+        self.json_nodes.insert(id, json_node);
 
         // Add to view
         self.view.add_node_view(id, node_type, (0, 0));
@@ -320,6 +376,8 @@ impl Workspace {
                 // Execute source node first (simplified - no cycle detection)
                 let from_outputs = if let Some(csv_node) = self.csv_nodes.get_mut(&link.from_node) {
                     csv_node.execute(&HashMap::new())?
+                } else if let Some(json_node) = self.json_nodes.get_mut(&link.from_node) {
+                    json_node.execute(&HashMap::new())?
                 } else if let Some(table_node) = self.table_nodes.get_mut(&link.from_node) {
                     table_node.execute(&HashMap::new())?
                 } else if let Some(from_node) = self.nodes.get_mut(&link.from_node) {
@@ -345,6 +403,8 @@ impl Workspace {
         // Execute the target node
         if let Some(csv_node) = self.csv_nodes.get_mut(&node_id) {
             csv_node.execute(&inputs)
+        } else if let Some(json_node) = self.json_nodes.get_mut(&node_id) {
+            json_node.execute(&inputs)
         } else if let Some(table_node) = self.table_nodes.get_mut(&node_id) {
             table_node.execute(&inputs)
         } else if let Some(node) = self.nodes.get_mut(&node_id) {
@@ -359,6 +419,8 @@ impl Workspace {
     pub fn get_node(&self, id: NodeId) -> Option<&dyn Node> {
         if let Some(csv_node) = self.csv_nodes.get(&id) {
             Some(csv_node as &dyn Node)
+        } else if let Some(json_node) = self.json_nodes.get(&id) {
+            Some(json_node as &dyn Node)
         } else if let Some(table_node) = self.table_nodes.get(&id) {
             Some(table_node as &dyn Node)
         } else {
@@ -372,6 +434,11 @@ impl Workspace {
         // Add CSV nodes
         for (id, csv_node) in &self.csv_nodes {
             nodes.push((*id, csv_node as &dyn Node));
+        }
+
+        // Add JSON nodes
+        for (id, json_node) in &self.json_nodes {
+            nodes.push((*id, json_node as &dyn Node));
         }
 
         // Add Table nodes
