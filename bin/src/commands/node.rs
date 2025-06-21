@@ -1,43 +1,6 @@
 use std::path::PathBuf;
 use stoat::cli::node::{AddNodeCommand, NodeCommand};
-use stoat_core::{node::NodeId, value::Value, Stoat};
-
-/// Generic node factory that creates nodes based on type and parameters using the registry
-fn create_node(
-    node_type: &str,
-    name: Option<String>,
-    config: NodeConfig,
-) -> Result<Box<dyn stoat_core::node::Node>, Box<dyn std::error::Error>> {
-    let node_name = name.unwrap_or_else(|| format!("{}_node", node_type));
-
-    // Convert NodeConfig to Value
-    let config_value = match config {
-        NodeConfig::Csv { path, .. } => {
-            // For CSV nodes, just pass the path as a string
-            Value::String(path.to_string_lossy().into())
-        },
-        NodeConfig::Table { max_rows: _ } => {
-            // For table nodes, just pass empty config (table init doesn't need max_rows for now)
-            Value::Empty
-        },
-        NodeConfig::Json { path } => {
-            // For JSON nodes, just pass the path as a string
-            Value::String(path.to_string_lossy().into())
-        },
-        NodeConfig::Api { .. } => {
-            return Err("API nodes are not yet implemented".into());
-        },
-    };
-
-    // Use the registry to create the node
-    stoat_core::node::create_node_from_registry(
-        node_type,
-        NodeId(0), // Will be replaced by workspace
-        node_name,
-        config_value,
-    )
-    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
+use stoat_core::{node::NodeId, Stoat};
 
 /// Configuration enum for different node types
 #[derive(Debug)]
@@ -72,9 +35,28 @@ fn add_node(
     name: Option<String>,
     config: NodeConfig,
 ) -> Result<NodeId, Box<dyn std::error::Error>> {
-    let node = create_node(node_type, name.clone(), config)?;
-    let node_name = node.name().to_string();
-    let id = stoat.add_node(node);
+    let node_name = name.unwrap_or_else(|| format!("{}_node", node_type));
+
+    // Convert NodeConfig to Value
+    let config_value = match config {
+        NodeConfig::Csv { path, .. } => {
+            // For CSV nodes, just pass the path as a string
+            stoat_core::value::Value::String(path.to_string_lossy().into())
+        },
+        NodeConfig::Table { max_rows: _ } => {
+            // For table nodes, pass empty config - cache configuration will be added by create_node
+            stoat_core::value::Value::Empty
+        },
+        NodeConfig::Json { path } => {
+            // For JSON nodes, just pass the path as a string
+            stoat_core::value::Value::String(path.to_string_lossy().into())
+        },
+        NodeConfig::Api { .. } => {
+            return Err("API nodes are not yet implemented".into());
+        },
+    };
+
+    let id = stoat.create_node(node_type, node_name.clone(), config_value)?;
 
     println!(
         "✓ Added {} node '{}' with ID {:?}",
@@ -436,35 +418,41 @@ mod tests {
 
     #[test]
     fn test_node_factory_functions() {
+        let (mut stoat, _temp_dir) = stoat_core::Stoat::test();
+
         // Test CSV node creation
-        let csv_config = NodeConfig::Csv {
-            path: PathBuf::from("test.csv"),
-            delimiter: ',',
-            headers: true,
-        };
-        let csv_node = create_node("csv", Some("test_csv".to_string()), csv_config);
-        assert!(csv_node.is_ok());
-        let csv_node = csv_node.unwrap();
+        let csv_config_value = stoat_core::value::Value::String("test.csv".into());
+        let csv_result = stoat.create_node("csv", "test_csv".to_string(), csv_config_value);
+        assert!(csv_result.is_ok());
+        let csv_id = csv_result.unwrap();
+        let nodes = stoat.workspace().list_nodes();
+        let csv_node = nodes.iter().find(|(id, _)| *id == csv_id).unwrap().1;
         assert_eq!(csv_node.name(), "test_csv");
 
         // Test Table node creation
-        let table_config = NodeConfig::Table { max_rows: Some(50) };
-        let table_node = create_node("table", None, table_config);
-        assert!(table_node.is_ok());
-        let table_node = table_node.unwrap();
-        assert_eq!(table_node.name(), "table_node"); // Default name
+        let table_config_value = stoat_core::value::Value::Empty;
+        let table_result = stoat.create_node("table", "table_node".to_string(), table_config_value);
+        assert!(table_result.is_ok());
+        let table_id = table_result.unwrap();
+        let nodes = stoat.workspace().list_nodes();
+        let table_node = nodes.iter().find(|(id, _)| *id == table_id).unwrap().1;
+        assert_eq!(table_node.name(), "table_node");
 
         // Test JSON node creation
-        let json_config = NodeConfig::Json {
-            path: PathBuf::from("data.json"),
-        };
-        let json_node = create_node("json", Some("my_json".to_string()), json_config);
-        assert!(json_node.is_ok());
-        let json_node = json_node.unwrap();
+        let json_config_value = stoat_core::value::Value::String("data.json".into());
+        let json_result = stoat.create_node("json", "my_json".to_string(), json_config_value);
+        assert!(json_result.is_ok());
+        let json_id = json_result.unwrap();
+        let nodes = stoat.workspace().list_nodes();
+        let json_node = nodes.iter().find(|(id, _)| *id == json_id).unwrap().1;
         assert_eq!(json_node.name(), "my_json");
 
         // Test unknown node type
-        let unknown_result = create_node("unknown", None, NodeConfig::Table { max_rows: None });
+        let unknown_result = stoat.create_node(
+            "unknown",
+            "unknown_node".to_string(),
+            stoat_core::value::Value::Empty,
+        );
         assert!(unknown_result.is_err());
         assert!(unknown_result
             .unwrap_err()
@@ -476,14 +464,11 @@ mod tests {
     fn test_node_persistence_after_save_and_load() {
         let (mut stoat, temp_dir) = stoat_core::Stoat::test();
 
-        // Add a node
-        let csv_config = NodeConfig::Csv {
-            path: PathBuf::from("test.csv"),
-            delimiter: ',',
-            headers: true,
-        };
-        let node = create_node("csv", Some("test_node".to_string()), csv_config).unwrap();
-        let node_id = stoat.add_node(node);
+        // Add a node using the new create_node method
+        let csv_config_value = stoat_core::value::Value::String("test.csv".into());
+        let node_id = stoat
+            .create_node("csv", "test_node".to_string(), csv_config_value)
+            .unwrap();
 
         // Verify node exists before save
         let nodes_before_save = stoat.workspace().list_nodes();

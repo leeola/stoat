@@ -575,11 +575,6 @@ impl Node for MapNode {
 
         Value::Map(Map(config_map))
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        // TODO: Remove this ASAP - bad implementation pattern
-        self
-    }
 }
 
 /// NodeInit implementation for Map nodes

@@ -617,11 +617,6 @@ impl Node for TableViewerNode {
 
         Value::Map(Map(config_map))
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        // TODO: Remove this ASAP - bad implementation pattern
-        self
-    }
 }
 
 /// NodeInit implementation for Table viewer nodes
@@ -631,7 +626,7 @@ pub struct TableInit;
 impl NodeInit for TableInit {
     fn init(&self, id: NodeId, name: String, config: Value) -> Result<Box<dyn Node>> {
         // Table viewer nodes can be created with optional configuration
-        let (max_rows, cache_dir) = match config {
+        let (max_rows, cache_dir, cache_id) = match config {
             Value::Map(ref map) => {
                 let max_rows = map.0.get("max_rows").and_then(|v| match v {
                     Value::I64(n) => Some(*n as usize),
@@ -648,11 +643,17 @@ impl NodeInit for TableInit {
                     })
                     .unwrap_or_else(|| PathBuf::from("cache"));
 
-                (max_rows, cache_dir)
+                let cache_id = map.0.get("cache_id").and_then(|v| match v {
+                    Value::U64(n) => Some(*n),
+                    Value::I64(n) => Some(*n as u64),
+                    _ => None,
+                });
+
+                (max_rows, cache_dir, cache_id)
             },
             Value::Empty | Value::Null => {
                 // Default configuration
-                (None, PathBuf::from("cache"))
+                (None, PathBuf::from("cache"), None)
             },
             _ => {
                 return Err(crate::Error::Generic {
@@ -662,7 +663,12 @@ impl NodeInit for TableInit {
         };
 
         // Create the table node with specified or default cache directory
-        let node = TableViewerNode::new_with_cache_dir(id, name, cache_dir);
+        let mut node = TableViewerNode::new_with_cache_dir(id, name, cache_dir);
+
+        // Set cache ID if provided
+        if let Some(cache_id) = cache_id {
+            node.set_cache_id(cache_id);
+        }
 
         // Apply max_rows limit if specified
         if let Some(_max_rows) = max_rows {

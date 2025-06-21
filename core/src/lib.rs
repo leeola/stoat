@@ -516,22 +516,64 @@ impl Stoat {
         &mut self.state
     }
 
-    /// Add a node to the active workspace with a globally unique ID
-    pub fn add_node(&mut self, mut node: Box<dyn crate::node::Node>) -> crate::node::NodeId {
+    /// Create a node using the registry with proper configuration
+    pub fn create_node(
+        &mut self,
+        node_type: &str,
+        name: String,
+        config: crate::value::Value,
+    ) -> crate::Result<crate::node::NodeId> {
         let id = crate::node::NodeId(self.state.allocate_id());
 
-        // TODO: Remove this ASAP - bad implementation using downcasting
-        // Should use proper trait methods or node factory pattern instead
-        // If this is a table viewer node, assign it a cache ID and update cache directory
-        if let Some(table_node) = node
-            .as_any_mut()
-            .downcast_mut::<crate::nodes::table::TableViewerNode>()
-        {
+        // For table nodes, add cache configuration
+        let final_config = if node_type == "table" {
             let cache_id = self.state.allocate_id();
-            table_node.set_cache_id(cache_id);
-            table_node.set_cache_dir(self.state.get_cache_dir());
-        }
+            let cache_dir = self.state.get_cache_dir();
 
+            let mut config_map = indexmap::IndexMap::new();
+            config_map.insert(
+                compact_str::CompactString::from("cache_id"),
+                crate::value::Value::U64(cache_id),
+            );
+            config_map.insert(
+                compact_str::CompactString::from("cache_dir"),
+                crate::value::Value::String(compact_str::CompactString::from(
+                    cache_dir.to_string_lossy().as_ref(),
+                )),
+            );
+
+            // Merge with any existing config
+            match config {
+                crate::value::Value::Map(ref existing_map) => {
+                    // Add existing config to our config
+                    for (key, value) in &existing_map.0 {
+                        config_map.insert(key.clone(), value.clone());
+                    }
+                },
+                crate::value::Value::Empty | crate::value::Value::Null => {
+                    // Just use our config
+                },
+                _ => {
+                    // Non-map config, just use our config
+                },
+            }
+
+            crate::value::Value::Map(crate::value::Map(config_map))
+        } else {
+            config
+        };
+
+        let node = crate::node::create_node_from_registry(node_type, id, name, final_config)?;
+        self.active.add_node_with_id(id, node);
+        Ok(id)
+    }
+
+    /// Add a node to the active workspace with a globally unique ID
+    ///
+    /// Note: For new code, prefer using `create_node` which handles proper configuration
+    /// including cache setup for table nodes.
+    pub fn add_node(&mut self, node: Box<dyn crate::node::Node>) -> crate::node::NodeId {
+        let id = crate::node::NodeId(self.state.allocate_id());
         self.active.add_node_with_id(id, node);
         id
     }

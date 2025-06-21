@@ -115,11 +115,6 @@ impl Node for JsonSourceNode {
         // Return the file path as the configuration
         Value::String(compact_str::CompactString::from(&self.file_path))
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        // TODO: Remove this ASAP - bad implementation pattern
-        self
-    }
 }
 
 /// Convert serde_json::Value to our internal Value type
@@ -318,11 +313,6 @@ mod tests {
             // Mock node returns test configuration
             Value::String(compact_str::CompactString::from("test.json"))
         }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            // TODO: Remove this ASAP - bad implementation pattern
-            self
-        }
     }
 
     /// A simple consumer node for testing transformations
@@ -392,11 +382,6 @@ mod tests {
         fn config(&self) -> Value {
             // Consumer node has no configuration
             Value::Empty
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            // TODO: Remove this ASAP - bad implementation pattern
-            self
         }
     }
 

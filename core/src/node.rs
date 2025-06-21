@@ -63,11 +63,6 @@ pub trait Node: Send + Sync + Debug {
     /// See also: [`NodeInit::init`]
     fn config(&self) -> Value;
 
-    /// Allow downcasting to concrete types for type-specific operations
-    /// TODO: Remove this ASAP - bad implementation. Type-specific setup should be handled
-    /// through proper trait methods or configuration, not downcasting.
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-
     /// Save node state to disk
     ///
     /// Default implementation returns an error indicating persistence is not supported.
@@ -421,10 +416,6 @@ mod tests {
         fn config(&self) -> Value {
             // Mock node has no configuration
             Value::Empty
-        }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
         }
     }
 
