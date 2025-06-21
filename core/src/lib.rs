@@ -563,8 +563,42 @@ impl Stoat {
             config
         };
 
-        let node = crate::node::create_node_from_registry(node_type, id, name, final_config)?;
-        self.active.add_node_with_id(id, node);
+        // Handle CSV nodes specially
+        if node_type == "csv" {
+            // Extract file path from config
+            let file_path = match &final_config {
+                crate::value::Value::String(path) => path.to_string(),
+                crate::value::Value::Map(ref map) => {
+                    if let Some(path_value) = map.0.get("path") {
+                        match path_value {
+                            crate::value::Value::String(path) => path.to_string(),
+                            _ => {
+                                return Err(crate::error::Error::Generic {
+                                    message: "CSV node config 'path' must be a string".to_string(),
+                                })
+                            },
+                        }
+                    } else {
+                        return Err(crate::error::Error::Generic {
+                            message: "CSV node config must contain 'path' field".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(crate::error::Error::Generic {
+                        message: "CSV node config must be a string path or map with 'path' field"
+                            .to_string(),
+                    })
+                },
+            };
+
+            let csv_node = crate::nodes::csv::CsvSourceNode::new(id, name, file_path);
+            self.active.add_csv_node(id, csv_node);
+        } else {
+            // Handle other node types through registry
+            let node = crate::node::create_node_from_registry(node_type, id, name, final_config)?;
+            self.active.add_node_with_id(id, node);
+        }
         Ok(id)
     }
 

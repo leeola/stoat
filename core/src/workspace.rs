@@ -1,5 +1,6 @@
 use crate::{
     node::{Node, NodeId},
+    nodes::csv::CsvSourceNode,
     transform::Transformation,
     view::View,
     Result,
@@ -7,20 +8,12 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct Workspace {
     nodes: HashMap<NodeId, Box<dyn Node>>,
+    csv_nodes: HashMap<NodeId, CsvSourceNode>,
     links: Vec<Link>,
     view: View,
-}
-
-impl Default for Workspace {
-    fn default() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            links: Vec::new(),
-            view: View::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,16 +44,39 @@ pub struct SerializableWorkspace {
 
 impl From<&Workspace> for SerializableWorkspace {
     fn from(workspace: &Workspace) -> Self {
-        let nodes = workspace
-            .nodes
-            .iter()
-            .map(|(id, node)| SerializableNode {
+        let mut nodes = Vec::new();
+
+        // Add CSV nodes
+        for (id, csv_node) in &workspace.csv_nodes {
+            nodes.push(SerializableNode {
+                id: *id,
+                node_type: csv_node.node_type().to_string(),
+                name: csv_node.name().to_string(),
+                config: {
+                    let config_values = csv_node.get_config_values();
+                    if config_values.is_empty() {
+                        crate::value::Value::Empty
+                    } else {
+                        use crate::value::Map;
+                        let mut config_map = indexmap::IndexMap::new();
+                        for (key, value) in config_values {
+                            config_map.insert(compact_str::CompactString::from(key), value);
+                        }
+                        crate::value::Value::Map(Map(config_map))
+                    }
+                },
+            });
+        }
+
+        // Add other nodes
+        for (id, node) in &workspace.nodes {
+            nodes.push(SerializableNode {
                 id: *id,
                 node_type: node.node_type().to_string(),
                 name: node.name().to_string(),
                 config: Self::get_node_config_for_serialization(node.as_ref()),
-            })
-            .collect();
+            });
+        }
 
         Self {
             links: workspace.links.clone(),
@@ -102,31 +118,58 @@ impl Workspace {
     /// Create a workspace from a serializable representation
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
         let mut nodes = HashMap::new();
+        let mut csv_nodes = HashMap::new();
 
         // Reconstruct nodes using the registry
         for serializable_node in serializable.nodes {
             let node_name = serializable_node.name.clone();
             let node_type = serializable_node.node_type.clone();
-            match crate::node::create_node_from_registry(
-                &serializable_node.node_type,
-                serializable_node.id,
-                serializable_node.name,
-                serializable_node.config,
-            ) {
-                Ok(node) => {
-                    nodes.insert(serializable_node.id, node);
-                },
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to reconstruct node {} ({}): {}",
-                        node_name, node_type, e
-                    );
-                },
+
+            // Handle CSV nodes specially - create them directly
+            if serializable_node.node_type == "csv" {
+                // Extract file path from config
+                let file_path = match &serializable_node.config {
+                    crate::value::Value::String(path) => path.to_string(),
+                    crate::value::Value::Map(ref map) => {
+                        if let Some(path_value) = map.0.get("path") {
+                            match path_value {
+                                crate::value::Value::String(path) => path.to_string(),
+                                _ => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        }
+                    },
+                    _ => String::new(),
+                };
+
+                let csv_node =
+                    CsvSourceNode::new(serializable_node.id, serializable_node.name, file_path);
+                csv_nodes.insert(serializable_node.id, csv_node);
+            } else {
+                // Handle other node types through registry
+                match crate::node::create_node_from_registry(
+                    &serializable_node.node_type,
+                    serializable_node.id,
+                    serializable_node.name,
+                    serializable_node.config,
+                ) {
+                    Ok(node) => {
+                        nodes.insert(serializable_node.id, node);
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to reconstruct node {} ({}): {}",
+                            node_name, node_type, e
+                        );
+                    },
+                }
             }
         }
 
         Self {
             nodes,
+            csv_nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
         }
@@ -137,8 +180,19 @@ impl Workspace {
         // Get node type before moving
         let node_type = node.node_type();
 
-        // Add to nodes
+        // Add to general nodes (we'll handle CSV nodes in a dedicated method)
         self.nodes.insert(id, node);
+
+        // Add to view
+        self.view.add_node_view(id, node_type, (0, 0));
+    }
+
+    /// Add a CSV node directly to the workspace
+    pub fn add_csv_node(&mut self, id: NodeId, csv_node: CsvSourceNode) {
+        let node_type = csv_node.node_type();
+
+        // Add to CSV nodes collection
+        self.csv_nodes.insert(id, csv_node);
 
         // Add to view
         self.view.add_node_view(id, node_type, (0, 0));
@@ -204,14 +258,15 @@ impl Workspace {
         for link in &links {
             if link.to_node == node_id {
                 // Execute source node first (simplified - no cycle detection)
-                let from_node =
-                    self.nodes
-                        .get_mut(&link.from_node)
-                        .ok_or_else(|| crate::Error::Node {
-                            message: format!("Source node {:?} not found", link.from_node),
-                        })?;
-
-                let from_outputs = from_node.execute(&HashMap::new())?;
+                let from_outputs = if let Some(csv_node) = self.csv_nodes.get_mut(&link.from_node) {
+                    csv_node.execute(&HashMap::new())?
+                } else if let Some(from_node) = self.nodes.get_mut(&link.from_node) {
+                    from_node.execute(&HashMap::new())?
+                } else {
+                    return Err(crate::Error::Node {
+                        message: format!("Source node {:?} not found", link.from_node),
+                    });
+                };
 
                 if let Some(value) = from_outputs.get(&link.from_port) {
                     // Apply transformation if present
@@ -226,25 +281,39 @@ impl Workspace {
         }
 
         // Execute the target node
-        let node = self
-            .nodes
-            .get_mut(&node_id)
-            .ok_or_else(|| crate::Error::Node {
+        if let Some(csv_node) = self.csv_nodes.get_mut(&node_id) {
+            csv_node.execute(&inputs)
+        } else if let Some(node) = self.nodes.get_mut(&node_id) {
+            node.execute(&inputs)
+        } else {
+            Err(crate::Error::Node {
                 message: format!("Node {:?} not found", node_id),
-            })?;
-
-        node.execute(&inputs)
+            })
+        }
     }
 
     pub fn get_node(&self, id: NodeId) -> Option<&dyn Node> {
-        self.nodes.get(&id).map(|n| n.as_ref())
+        if let Some(csv_node) = self.csv_nodes.get(&id) {
+            Some(csv_node as &dyn Node)
+        } else {
+            self.nodes.get(&id).map(|n| n.as_ref())
+        }
     }
 
     pub fn list_nodes(&self) -> Vec<(NodeId, &dyn Node)> {
-        self.nodes
-            .iter()
-            .map(|(id, node)| (*id, node.as_ref()))
-            .collect()
+        let mut nodes = Vec::new();
+
+        // Add CSV nodes
+        for (id, csv_node) in &self.csv_nodes {
+            nodes.push((*id, csv_node as &dyn Node));
+        }
+
+        // Add other nodes
+        for (id, node) in &self.nodes {
+            nodes.push((*id, node.as_ref()));
+        }
+
+        nodes
     }
 
     pub fn view(&self) -> &View {
