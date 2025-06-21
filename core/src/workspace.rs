@@ -1,6 +1,6 @@
 use crate::{
     node::{Node, NodeId},
-    nodes::csv::CsvSourceNode,
+    nodes::{csv::CsvSourceNode, table::TableViewerNode},
     transform::Transformation,
     view::View,
     Result,
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub struct Workspace {
     nodes: HashMap<NodeId, Box<dyn Node>>,
     csv_nodes: HashMap<NodeId, CsvSourceNode>,
+    table_nodes: HashMap<NodeId, TableViewerNode>,
     links: Vec<Link>,
     view: View,
 }
@@ -54,6 +55,28 @@ impl From<&Workspace> for SerializableWorkspace {
                 name: csv_node.name().to_string(),
                 config: {
                     let config_values = csv_node.get_config_values();
+                    if config_values.is_empty() {
+                        crate::value::Value::Empty
+                    } else {
+                        use crate::value::Map;
+                        let mut config_map = indexmap::IndexMap::new();
+                        for (key, value) in config_values {
+                            config_map.insert(compact_str::CompactString::from(key), value);
+                        }
+                        crate::value::Value::Map(Map(config_map))
+                    }
+                },
+            });
+        }
+
+        // Add Table nodes
+        for (id, table_node) in &workspace.table_nodes {
+            nodes.push(SerializableNode {
+                id: *id,
+                node_type: table_node.node_type().to_string(),
+                name: table_node.name().to_string(),
+                config: {
+                    let config_values = table_node.get_config_values();
                     if config_values.is_empty() {
                         crate::value::Value::Empty
                     } else {
@@ -119,13 +142,14 @@ impl Workspace {
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
         let mut nodes = HashMap::new();
         let mut csv_nodes = HashMap::new();
+        let mut table_nodes = HashMap::new();
 
         // Reconstruct nodes using the registry
         for serializable_node in serializable.nodes {
             let node_name = serializable_node.name.clone();
             let node_type = serializable_node.node_type.clone();
 
-            // Handle CSV nodes specially - create them directly
+            // Handle special node types - create them directly
             if serializable_node.node_type == "csv" {
                 // Extract file path from config
                 let file_path = match &serializable_node.config {
@@ -146,6 +170,30 @@ impl Workspace {
                 let csv_node =
                     CsvSourceNode::new(serializable_node.id, serializable_node.name, file_path);
                 csv_nodes.insert(serializable_node.id, csv_node);
+            } else if serializable_node.node_type == "table" {
+                // Extract cache_dir from config
+                let cache_dir = match &serializable_node.config {
+                    crate::value::Value::Map(ref map) => {
+                        if let Some(cache_dir_value) = map.0.get("cache_dir") {
+                            match cache_dir_value {
+                                crate::value::Value::String(path) => {
+                                    std::path::PathBuf::from(path.as_str())
+                                },
+                                _ => std::path::PathBuf::from("/tmp"), // Default fallback
+                            }
+                        } else {
+                            std::path::PathBuf::from("/tmp") // Default fallback
+                        }
+                    },
+                    _ => std::path::PathBuf::from("/tmp"), // Default fallback
+                };
+
+                let table_node = TableViewerNode::new_with_cache_dir(
+                    serializable_node.id,
+                    serializable_node.name,
+                    cache_dir,
+                );
+                table_nodes.insert(serializable_node.id, table_node);
             } else {
                 // Handle other node types through registry
                 match crate::node::create_node_from_registry(
@@ -170,6 +218,7 @@ impl Workspace {
         Self {
             nodes,
             csv_nodes,
+            table_nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
         }
@@ -193,6 +242,17 @@ impl Workspace {
 
         // Add to CSV nodes collection
         self.csv_nodes.insert(id, csv_node);
+
+        // Add to view
+        self.view.add_node_view(id, node_type, (0, 0));
+    }
+
+    /// Add a Table node directly to the workspace
+    pub fn add_table_node(&mut self, id: NodeId, table_node: TableViewerNode) {
+        let node_type = table_node.node_type();
+
+        // Add to Table nodes collection
+        self.table_nodes.insert(id, table_node);
 
         // Add to view
         self.view.add_node_view(id, node_type, (0, 0));
@@ -260,6 +320,8 @@ impl Workspace {
                 // Execute source node first (simplified - no cycle detection)
                 let from_outputs = if let Some(csv_node) = self.csv_nodes.get_mut(&link.from_node) {
                     csv_node.execute(&HashMap::new())?
+                } else if let Some(table_node) = self.table_nodes.get_mut(&link.from_node) {
+                    table_node.execute(&HashMap::new())?
                 } else if let Some(from_node) = self.nodes.get_mut(&link.from_node) {
                     from_node.execute(&HashMap::new())?
                 } else {
@@ -283,6 +345,8 @@ impl Workspace {
         // Execute the target node
         if let Some(csv_node) = self.csv_nodes.get_mut(&node_id) {
             csv_node.execute(&inputs)
+        } else if let Some(table_node) = self.table_nodes.get_mut(&node_id) {
+            table_node.execute(&inputs)
         } else if let Some(node) = self.nodes.get_mut(&node_id) {
             node.execute(&inputs)
         } else {
@@ -295,6 +359,8 @@ impl Workspace {
     pub fn get_node(&self, id: NodeId) -> Option<&dyn Node> {
         if let Some(csv_node) = self.csv_nodes.get(&id) {
             Some(csv_node as &dyn Node)
+        } else if let Some(table_node) = self.table_nodes.get(&id) {
+            Some(table_node as &dyn Node)
         } else {
             self.nodes.get(&id).map(|n| n.as_ref())
         }
@@ -306,6 +372,11 @@ impl Workspace {
         // Add CSV nodes
         for (id, csv_node) in &self.csv_nodes {
             nodes.push((*id, csv_node as &dyn Node));
+        }
+
+        // Add Table nodes
+        for (id, table_node) in &self.table_nodes {
+            nodes.push((*id, table_node as &dyn Node));
         }
 
         // Add other nodes

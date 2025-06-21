@@ -563,7 +563,7 @@ impl Stoat {
             config
         };
 
-        // Handle CSV nodes specially
+        // Handle special node types
         if node_type == "csv" {
             // Extract file path from config
             let file_path = match &final_config {
@@ -594,6 +594,39 @@ impl Stoat {
 
             let csv_node = crate::nodes::csv::CsvSourceNode::new(id, name, file_path);
             self.active.add_csv_node(id, csv_node);
+        } else if node_type == "table" {
+            // Extract cache_dir from config - it should already be added to final_config
+            let cache_dir = match &final_config {
+                crate::value::Value::Map(ref map) => {
+                    if let Some(cache_dir_value) = map.0.get("cache_dir") {
+                        match cache_dir_value {
+                            crate::value::Value::String(path) => {
+                                std::path::PathBuf::from(path.as_str())
+                            },
+                            _ => {
+                                return Err(crate::error::Error::Generic {
+                                    message: "Table node config 'cache_dir' must be a string"
+                                        .to_string(),
+                                })
+                            },
+                        }
+                    } else {
+                        return Err(crate::error::Error::Generic {
+                            message: "Table node config must contain 'cache_dir' field".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(crate::error::Error::Generic {
+                        message: "Table node config must be a map with 'cache_dir' field"
+                            .to_string(),
+                    })
+                },
+            };
+
+            let table_node =
+                crate::nodes::table::TableViewerNode::new_with_cache_dir(id, name, cache_dir);
+            self.active.add_table_node(id, table_node);
         } else {
             // Handle other node types through registry
             let node = crate::node::create_node_from_registry(node_type, id, name, final_config)?;
