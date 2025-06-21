@@ -15,7 +15,6 @@ pub mod input;
 pub mod mode;
 pub mod node;
 pub mod nodes;
-pub mod plugin;
 pub mod transform;
 pub mod value;
 pub mod view;
@@ -556,7 +555,7 @@ impl Stoat {
 #[derive(Default)]
 pub struct StoatBuilder(Stoat);
 impl StoatBuilder {
-    /// Include standard configuration and plugins.
+    /// Include standard configuration and node types.
     pub fn std(self) -> Self {
         self
     }

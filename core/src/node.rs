@@ -1,9 +1,5 @@
-use crate::{
-    plugin::{NodeLoadData, NodeLoadResult, NodeSaveData, NodeSaveResult},
-    value::Value,
-    Result,
-};
-use std::{collections::HashMap, fmt::Debug, future::Future, sync::LazyLock};
+use crate::{value::Value, Result};
+use std::{collections::HashMap, fmt::Debug, future::Future, path::PathBuf, sync::LazyLock};
 
 /// Initialization data for node creation and persistence
 ///
@@ -127,6 +123,50 @@ impl Port {
             description: description.into(),
         }
     }
+}
+
+/// Data structure for saving node state to disk
+#[derive(Debug, Clone)]
+pub struct NodeSaveData {
+    /// Directory where node data should be saved
+    pub save_dir: PathBuf,
+    /// ID of the node being saved
+    pub node_id: NodeId,
+    /// Current node data/state
+    pub node_data: Value,
+    /// Optional metadata for the save operation
+    pub metadata: Option<Value>,
+}
+
+/// Data structure for loading node state from disk
+#[derive(Debug, Clone)]
+pub struct NodeLoadData {
+    /// Directory where node data should be loaded from
+    pub load_dir: PathBuf,
+    /// ID of the node being loaded
+    pub node_id: NodeId,
+    /// Optional metadata for the load operation
+    pub metadata: Option<Value>,
+}
+
+/// Result of a node save operation
+#[derive(Debug, Clone)]
+pub struct NodeSaveResult {
+    /// Whether the save operation was successful
+    pub success: bool,
+    /// Optional message about the save operation
+    pub message: Option<String>,
+}
+
+/// Result of a node load operation
+#[derive(Debug, Clone)]
+pub struct NodeLoadResult {
+    /// Whether the load operation was successful
+    pub success: bool,
+    /// Optional message about the load operation
+    pub message: Option<String>,
+    /// Loaded data, if any
+    pub data: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -329,10 +369,7 @@ pub fn create_node_from_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        plugin::{NodeLoadData, NodeSaveData},
-        value::Value,
-    };
+    use crate::value::Value;
     use std::{collections::HashMap, path::PathBuf};
 
     #[derive(Debug)]

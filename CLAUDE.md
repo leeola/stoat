@@ -20,7 +20,7 @@ The backend for the text editor represents both code and data as interconnected 
 - Will eventually have a GUI showing nodes on a 2D canvas with visual links between them
 - Nodes will support real-time execution where changing one node's output updates downstream nodes
 - Will support a DSL for querying the graph (e.g., "find all functions that eventually send data to this channel")
-- Should support plugins for custom node types
+- Should support extensible custom node types
 - Will need to handle large codebases with thousands of nodes efficiently
 
 The initial CLI phase is about proving the core concepts work - nodes, contracts, links, and workspaces - before adding the visual layer. Every CLI command is designing the API that the future GUI will use.
@@ -36,7 +36,7 @@ The initial CLI phase is about proving the core concepts work - nodes, contracts
 - **Canvas-Based Model**: Workspace → View → NodeView (positioned nodes on canvas)
 - **Input Pipeline**: UserInput (keyboard only, mouse disabled) → Mode → Command → Node operations
 - **Unified Value System**: All data represented as JSON-like `Value` enum (Bool, I64, U64, Float, String, Array, Map, Empty, Null)
-- **Plugin Architecture**: Trait-based I/O plugins with async `Value` input/output
+- **Node System**: Trait-based node architecture with async `Value` input/output
 
 ### Core Modules
 - `workspace.rs` - Editor workspace management
@@ -45,7 +45,6 @@ The initial CLI phase is about proving the core concepts work - nodes, contracts
 - `input/user.rs` - User input abstraction (keyboard-focused)
 - `mode.rs` - Mode-based input handling (vim-like)
 - `value.rs` - Unified data format
-- `plugin.rs` - Plugin system for I/O operations
 
 ## Development Commands
 
@@ -65,7 +64,7 @@ cargo test --package stoat_core <test_name>  # Run test in specific package
 
 - **Rust 1.87.0** with custom rustfmt configuration
 - **Feature gates**: `cli_bin`, `cli_config`, `gui` for modular compilation
-- **Async runtime**: tokio for plugin system
+- **Async runtime**: tokio for node operations
 - **Serialization**: Multiple formats (serde, ron, rkyv) for different needs
 - **Data optimization**: Uses `compact_str`, `ordered-float`, `indexmap` for performance
 - **Error handling**: `snafu` for structured error types
@@ -73,4 +72,4 @@ cargo test --package stoat_core <test_name>  # Run test in specific package
 
 ## Current Status
 
-The project is in active development with core data structures and plugin traits implemented. GUI implementation and state persistence are key areas still being developed. The architecture supports both traditional editor concepts (modes, workspaces) and modern visual programming paradigms (canvas, spatial node organization).
+The project is in active development with core data structures and node traits implemented. GUI implementation and state persistence are key areas still being developed. The architecture supports both traditional editor concepts (modes, workspaces) and modern visual programming paradigms (canvas, spatial node organization).
