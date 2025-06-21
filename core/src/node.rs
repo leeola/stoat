@@ -54,14 +54,17 @@ pub trait Node: Send + Sync + Debug {
         matches!(self.status(), NodeStatus::Error { .. })
     }
 
-    /// Get the current configuration of this node for serialization
+    /// Get configuration data from config sockets
     ///
-    /// This method returns the node's configuration as a Value that can be used
-    /// to recreate the node through the NodeInit registry. The returned configuration
-    /// should contain all necessary parameters to restore the node's state.
+    /// Returns a map of configuration values by socket name. This replaces the old
+    /// config() method and allows nodes to expose multiple configuration parameters
+    /// through different sockets (e.g., API nodes could have separate sockets for
+    /// headers, request body, etc.).
     ///
-    /// See also: [`NodeInit::init`]
-    fn config(&self) -> Value;
+    /// Returns empty map for nodes with no configuration sockets.
+    fn get_config_values(&self) -> HashMap<String, Value> {
+        HashMap::new()
+    }
 
     /// Save node state to disk
     ///
@@ -190,9 +193,11 @@ impl std::fmt::Display for NodeType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketType {
-    Data, /* Main data flow - circles
-           * Config,   // TODO: Configuration parameters - squares
-           * Control,  // TODO: Triggers/events - diamonds */
+    /// Main data flow - circles
+    Data,
+    /// Configuration parameters - squares
+    Config,
+    // Control,  // TODO: Triggers/events - diamonds
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,11 +416,6 @@ mod tests {
 
         fn status(&self) -> NodeStatus {
             NodeStatus::Idle
-        }
-
-        fn config(&self) -> Value {
-            // Mock node has no configuration
-            Value::Empty
         }
     }
 

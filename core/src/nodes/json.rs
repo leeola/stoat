@@ -84,7 +84,7 @@ impl Node for JsonSourceNode {
 
     fn sockets(&self) -> NodeSockets {
         NodeSockets::new(
-            vec![], // No inputs
+            vec![SocketInfo::new(SocketType::Config, "path", true)], // Config input for file path
             vec![SocketInfo::new(SocketType::Data, "data", false)],
         )
     }
@@ -111,9 +111,13 @@ impl Node for JsonSourceNode {
         }
     }
 
-    fn config(&self) -> Value {
-        // Return the file path as the configuration
-        Value::String(compact_str::CompactString::from(&self.file_path))
+    fn get_config_values(&self) -> HashMap<String, Value> {
+        let mut config = HashMap::new();
+        config.insert(
+            "path".to_string(), // Use "path" key to match NodeInit expectations
+            Value::String(compact_str::CompactString::from(&self.file_path)),
+        );
+        config
     }
 }
 
@@ -308,11 +312,6 @@ mod tests {
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
         }
-
-        fn config(&self) -> Value {
-            // Mock node returns test configuration
-            Value::String(compact_str::CompactString::from("test.json"))
-        }
     }
 
     /// A simple consumer node for testing transformations
@@ -377,11 +376,6 @@ mod tests {
 
         fn status(&self) -> NodeStatus {
             NodeStatus::Ready
-        }
-
-        fn config(&self) -> Value {
-            // Consumer node has no configuration
-            Value::Empty
         }
     }
 

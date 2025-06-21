@@ -466,7 +466,10 @@ impl Node for MapNode {
 
     fn sockets(&self) -> NodeSockets {
         NodeSockets::new(
-            vec![SocketInfo::new(SocketType::Data, "data", true)], // Input required
+            vec![
+                SocketInfo::new(SocketType::Data, "data", true), // Input required
+                SocketInfo::new(SocketType::Config, "operation", true), // Operation configuration
+            ],
             vec![SocketInfo::new(SocketType::Data, "data", false)], // Output available
         )
     }
@@ -480,10 +483,11 @@ impl Node for MapNode {
         NodeStatus::Ready
     }
 
-    fn config(&self) -> Value {
-        // Convert the MapOperation back to a Value configuration
-        use crate::value::{Array, Map};
+    fn get_config_values(&self) -> HashMap<String, Value> {
+        let mut config = HashMap::new();
 
+        // Convert the MapOperation back to a Value configuration for the operation socket
+        use crate::value::{Array, Map};
         let mut config_map = indexmap::IndexMap::new();
 
         match &self.operation {
@@ -573,7 +577,8 @@ impl Node for MapNode {
             },
         }
 
-        Value::Map(Map(config_map))
+        config.insert("operation".to_string(), Value::Map(Map(config_map)));
+        config
     }
 }
 

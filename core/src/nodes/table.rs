@@ -588,8 +588,12 @@ impl Node for TableViewerNode {
 
     fn sockets(&self) -> NodeSockets {
         NodeSockets::new(
-            vec![SocketInfo::new(SocketType::Data, "data", false)], /* Input available but not
-                                                                     * required */
+            vec![
+                SocketInfo::new(SocketType::Data, "data", false), /* Input available but not
+                                                                   * required */
+                SocketInfo::new(SocketType::Config, "cache_dir", true), /* Cache directory
+                                                                         * configuration */
+            ],
             vec![], // No outputs - this is a sink node
         )
     }
@@ -603,19 +607,15 @@ impl Node for TableViewerNode {
         NodeStatus::Ready
     }
 
-    fn config(&self) -> Value {
-        // Return the cache directory configuration
-        use crate::value::Map;
-
-        let mut config_map = indexmap::IndexMap::new();
-        config_map.insert(
-            compact_str::CompactString::from("cache_dir"),
+    fn get_config_values(&self) -> HashMap<String, Value> {
+        let mut config = HashMap::new();
+        config.insert(
+            "cache_dir".to_string(),
             Value::String(compact_str::CompactString::from(
                 self.cache_dir.to_string_lossy().as_ref(),
             )),
         );
-
-        Value::Map(Map(config_map))
+        config
     }
 }
 
@@ -841,14 +841,26 @@ mod tests {
 
         // Test socket configuration
         let sockets = table_node.sockets();
-        assert_eq!(sockets.inputs.len(), 1);
+        assert_eq!(sockets.inputs.len(), 2); // data + cache_dir config socket
         assert_eq!(sockets.outputs.len(), 0);
 
-        // Input should be data socket, not required
-        let input_socket = &sockets.inputs[0];
-        assert_eq!(input_socket.name, "data");
-        assert_eq!(input_socket.socket_type, SocketType::Data);
-        assert!(!input_socket.required);
+        // Find the data socket
+        let data_socket = sockets
+            .inputs
+            .iter()
+            .find(|s| s.name == "data")
+            .expect("Should have data socket");
+        assert_eq!(data_socket.socket_type, SocketType::Data);
+        assert!(!data_socket.required);
+
+        // Find the config socket
+        let config_socket = sockets
+            .inputs
+            .iter()
+            .find(|s| s.name == "cache_dir")
+            .expect("Should have cache_dir config socket");
+        assert_eq!(config_socket.socket_type, SocketType::Config);
+        assert!(config_socket.required);
 
         // Test presentation
         assert_eq!(table_node.presentation(), NodePresentation::TableViewer);

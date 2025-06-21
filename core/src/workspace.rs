@@ -58,7 +58,7 @@ impl From<&Workspace> for SerializableWorkspace {
                 id: *id,
                 node_type: node.node_type().to_string(),
                 name: node.name().to_string(),
-                config: node.config(), // Use the node's config() method
+                config: Self::get_node_config_for_serialization(node.as_ref()),
             })
             .collect();
 
@@ -66,6 +66,30 @@ impl From<&Workspace> for SerializableWorkspace {
             links: workspace.links.clone(),
             nodes,
             view_data: None, // TODO: implement view serialization
+        }
+    }
+}
+
+impl SerializableWorkspace {
+    /// Get configuration for serialization from a node's config sockets
+    ///
+    /// This method converts config socket values to a format suitable for serialization
+    /// and node reconstruction through the NodeInit registry.
+    fn get_node_config_for_serialization(node: &dyn crate::node::Node) -> crate::value::Value {
+        let config_values = node.get_config_values();
+
+        if config_values.is_empty() {
+            // No config sockets - return empty value
+            crate::value::Value::Empty
+        } else {
+            // Convert config socket values to a map for serialization
+            // This ensures that NodeInit implementations receive the expected map format
+            use crate::value::Map;
+            let mut config_map = indexmap::IndexMap::new();
+            for (key, value) in config_values {
+                config_map.insert(compact_str::CompactString::from(key), value);
+            }
+            crate::value::Value::Map(Map(config_map))
         }
     }
 }
