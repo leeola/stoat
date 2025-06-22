@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use stoat::cli::node::{AddNodeCommand, NodeCommand};
-    use stoat_core::{node::NodeId, nodes::table::TableViewerNode, Stoat};
+    use stoat_core::Stoat;
 
     #[test]
     fn test_node_listing_functionality() {
@@ -222,11 +222,20 @@ mod tests {
         assert_eq!(nodes.len(), 0);
 
         // Add some test nodes
-        let table_node1 = Box::new(TableViewerNode::new(NodeId(1), "sales_table".to_string()));
-        let table_node2 = Box::new(TableViewerNode::new(NodeId(2), "users_table".to_string()));
-
-        let id1 = stoat.add_node(table_node1);
-        let id2 = stoat.add_node(table_node2);
+        let id1 = stoat
+            .create_node(
+                "table",
+                "sales_table".to_string(),
+                stoat_core::value::Value::Empty,
+            )
+            .unwrap();
+        let id2 = stoat
+            .create_node(
+                "table",
+                "users_table".to_string(),
+                stoat_core::value::Value::Empty,
+            )
+            .unwrap();
 
         // Verify nodes were added
         let nodes = stoat.workspace().list_nodes();

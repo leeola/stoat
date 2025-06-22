@@ -657,23 +657,91 @@ impl Stoat {
             let table_node =
                 crate::nodes::table::TableViewerNode::new_with_cache_dir(id, name, cache_dir);
             self.active.add_table_node(id, table_node);
+        } else if node_type == "map" {
+            // Parse the operation from config directly
+            let operation = match &final_config {
+                crate::value::Value::Map(ref map) => {
+                    if let Some(op_type) = map.0.get("operation") {
+                        match op_type {
+                            crate::value::Value::String(op) => match op.as_str() {
+                                "extract_column" => {
+                                    if let Some(crate::value::Value::String(field)) =
+                                        map.0.get("field")
+                                    {
+                                        crate::nodes::map::MapOperation::ExtractColumn {
+                                            field: field.to_string(),
+                                        }
+                                    } else {
+                                        return Err(crate::error::Error::Generic {
+                                            message:
+                                                "ExtractColumn operation requires 'field' parameter"
+                                                    .to_string(),
+                                        });
+                                    }
+                                },
+                                "select_columns" => {
+                                    if let Some(crate::value::Value::Array(crate::value::Array(
+                                        fields,
+                                    ))) = map.0.get("fields")
+                                    {
+                                        let field_names: Result<Vec<String>, _> = fields
+                                            .iter()
+                                            .map(|v| match v {
+                                                crate::value::Value::String(s) => Ok(s.to_string()),
+                                                _ => Err(crate::error::Error::Generic {
+                                                    message: "SelectColumns fields must be strings"
+                                                        .to_string(),
+                                                }),
+                                            })
+                                            .collect();
+                                        crate::nodes::map::MapOperation::SelectColumns {
+                                            fields: field_names?,
+                                        }
+                                    } else {
+                                        return Err(crate::error::Error::Generic {
+                                            message: "SelectColumns operation requires 'fields' array parameter".to_string(),
+                                        });
+                                    }
+                                },
+                                "transpose" => crate::nodes::map::MapOperation::Transpose,
+                                _ => {
+                                    return Err(crate::error::Error::Generic {
+                                        message: format!("Unknown map operation: {}", op),
+                                    });
+                                },
+                            },
+                            _ => {
+                                return Err(crate::error::Error::Generic {
+                                    message: "Map operation must be a string".to_string(),
+                                });
+                            },
+                        }
+                    } else {
+                        // Default operation if none specified
+                        crate::nodes::map::MapOperation::ExtractColumn {
+                            field: "id".to_string(),
+                        }
+                    }
+                },
+                _ => {
+                    // Default operation for non-map configs
+                    crate::nodes::map::MapOperation::ExtractColumn {
+                        field: "id".to_string(),
+                    }
+                },
+            };
+
+            let map_node = crate::nodes::map::MapNode::new(id, name, operation);
+            self.active.add_map_node(id, map_node);
         } else {
-            // Handle other node types through registry
-            let node = crate::node::create_node_from_registry(node_type, id, name, final_config)?;
-            self.active.add_node_with_id(id, node);
+            // No other node types should exist since registry only contains csv, json, map, table
+            return Err(crate::error::Error::Generic {
+                message: format!("Unknown node type: {}", node_type),
+            });
         }
         Ok(id)
     }
 
-    /// Add a node to the active workspace with a globally unique ID
-    ///
-    /// Note: For new code, prefer using `create_node` which handles proper configuration
-    /// including cache setup for table nodes.
-    pub fn add_node(&mut self, node: Box<dyn crate::node::Node>) -> crate::node::NodeId {
-        let id = crate::node::NodeId(self.state.allocate_id());
-        self.active.add_node_with_id(id, node);
-        id
-    }
     /// Push a user input into Stoat.
     //
     // TODO: UserInput needs to return available actions? For automatic ? and client validation?
@@ -828,11 +896,9 @@ mod tests {
         };
 
         // Add a node in default workspace
-        let node1 = Box::new(crate::nodes::table::TableViewerNode::new(
-            crate::node::NodeId(0), // This will be replaced
-            "table1".to_string(),
-        ));
-        let id1 = stoat1.add_node(node1);
+        let id1 = stoat1
+            .create_node("table", "table1".to_string(), crate::value::Value::Empty)
+            .unwrap();
 
         // Create second workspace
         stoat1
@@ -845,11 +911,9 @@ mod tests {
             .unwrap();
 
         // Add a node in second workspace
-        let node2 = Box::new(crate::nodes::table::TableViewerNode::new(
-            crate::node::NodeId(0), // This will be replaced
-            "table2".to_string(),
-        ));
-        let id2 = stoat1.add_node(node2);
+        let id2 = stoat1
+            .create_node("table", "table2".to_string(), crate::value::Value::Empty)
+            .unwrap();
 
         // IDs should be different (globally unique)
         assert_ne!(id1, id2);
@@ -873,11 +937,9 @@ mod tests {
         };
 
         // Add another node - should get next ID after the previous ones
-        let node3 = Box::new(crate::nodes::table::TableViewerNode::new(
-            crate::node::NodeId(0), // This will be replaced
-            "table3".to_string(),
-        ));
-        let id3 = stoat2.add_node(node3);
+        let id3 = stoat2
+            .create_node("table", "table3".to_string(), crate::value::Value::Empty)
+            .unwrap();
 
         // ID should be greater than both previous IDs
         assert!(
@@ -906,11 +968,13 @@ mod tests {
             };
 
             // Add a table node
-            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
-                crate::node::NodeId(0), // This will be replaced
-                "test_table_1".to_string(),
-            ));
-            let id = stoat1.add_node(table_node);
+            let id = stoat1
+                .create_node(
+                    "table",
+                    "test_table_1".to_string(),
+                    crate::value::Value::Empty,
+                )
+                .unwrap();
             let cache_dir = stoat1.state.get_cache_dir();
 
             // Save state
@@ -930,11 +994,13 @@ mod tests {
             };
 
             // Add another node - should continue from previous ID counter
-            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
-                crate::node::NodeId(0), // This will be replaced
-                "test_table_2".to_string(),
-            ));
-            stoat2.add_node(table_node)
+            stoat2
+                .create_node(
+                    "table",
+                    "test_table_2".to_string(),
+                    crate::value::Value::Empty,
+                )
+                .unwrap()
         }; // stoat2 dropped here
 
         // Remove the entire state directory
@@ -951,11 +1017,13 @@ mod tests {
             };
 
             // Add node - should start from 1 again
-            let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
-                crate::node::NodeId(0), // This will be replaced
-                "test_table_fresh".to_string(),
-            ));
-            stoat3.add_node(table_node)
+            stoat3
+                .create_node(
+                    "table",
+                    "test_table_fresh".to_string(),
+                    crate::value::Value::Empty,
+                )
+                .unwrap()
         };
 
         // Verify ID progression
@@ -994,11 +1062,13 @@ mod tests {
         };
 
         // Add a table node
-        let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
-            crate::node::NodeId(0), // This will be replaced
-            "test_table".to_string(),
-        ));
-        let _id = stoat.add_node(table_node);
+        let _id = stoat
+            .create_node(
+                "table",
+                "test_table".to_string(),
+                crate::value::Value::Empty,
+            )
+            .unwrap();
 
         // Cache directory should be under the custom state directory
         let _expected_cache_dir = custom_state_dir.join("cache");

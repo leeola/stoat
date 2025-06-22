@@ -185,7 +185,6 @@ impl NodeInit for CsvInit {
 mod tests {
     use super::*;
     use crate::{value::Value, workspace::Workspace};
-    use std::collections::HashMap;
 
     fn create_test_csv_data() -> Value {
         use crate::value::{Array, Map};
@@ -232,145 +231,40 @@ mod tests {
         Value::Array(Array(rows))
     }
 
-    /// Mock CSV node for testing (doesn't read from file)
-    #[derive(Debug)]
-    struct MockCsvNode {
-        id: NodeId,
-        name: String,
-        test_data: Value,
-    }
-
-    impl MockCsvNode {
-        fn new(id: NodeId, name: String) -> Self {
-            Self {
-                id,
-                name,
-                test_data: create_test_csv_data(),
-            }
-        }
-    }
-
-    impl Node for MockCsvNode {
-        fn id(&self) -> NodeId {
-            self.id
-        }
-        fn node_type(&self) -> NodeType {
-            NodeType::CsvSource
-        }
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        fn execute(
-            &mut self,
-            _inputs: &HashMap<String, Value>,
-        ) -> crate::Result<HashMap<String, Value>> {
-            let mut outputs = HashMap::new();
-            outputs.insert("data".to_string(), self.test_data.clone());
-            Ok(outputs)
-        }
-
-        fn input_ports(&self) -> Vec<Port> {
-            vec![]
-        }
-        fn output_ports(&self) -> Vec<Port> {
-            vec![Port::new("data", "Test CSV data")]
-        }
-
-        fn sockets(&self) -> NodeSockets {
-            NodeSockets::new(
-                vec![], // No inputs
-                vec![SocketInfo::new(SocketType::Data, "data", false)],
-            )
-        }
-
-        fn presentation(&self) -> NodePresentation {
-            NodePresentation::Minimal
-        }
-
-        fn status(&self) -> NodeStatus {
-            NodeStatus::Ready
-        }
-    }
-
-    /// A simple consumer node for testing transformations
-    #[derive(Debug)]
-    struct TestConsumerNode {
-        id: NodeId,
-        name: String,
-        last_input: Option<Value>,
-    }
-
-    impl TestConsumerNode {
-        fn new(id: NodeId, name: String) -> Self {
-            Self {
-                id,
-                name,
-                last_input: None,
-            }
-        }
-    }
-
-    impl Node for TestConsumerNode {
-        fn id(&self) -> NodeId {
-            self.id
-        }
-        fn node_type(&self) -> NodeType {
-            NodeType::CsvSource // Reusing for simplicity in tests
-        }
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        fn execute(
-            &mut self,
-            inputs: &HashMap<String, Value>,
-        ) -> crate::Result<HashMap<String, Value>> {
-            self.last_input = inputs.get("data").cloned();
-            Ok(HashMap::new()) // Consumer doesn't output anything
-        }
-
-        fn input_ports(&self) -> Vec<Port> {
-            vec![Port::new("data", "Input data")]
-        }
-        fn output_ports(&self) -> Vec<Port> {
-            vec![]
-        }
-
-        fn sockets(&self) -> NodeSockets {
-            NodeSockets::new(
-                vec![SocketInfo::new(SocketType::Data, "data", false)], // Input available
-                vec![],                                                 // No outputs
-            )
-        }
-
-        fn presentation(&self) -> NodePresentation {
-            NodePresentation::Minimal
-        }
-
-        fn status(&self) -> NodeStatus {
-            NodeStatus::Ready
-        }
-    }
-
     #[test]
     fn csv_with_link_transformation() {
         use crate::transform::Transformation;
 
         let mut workspace = Workspace::new();
 
+        // Create temporary test file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_csv_path = temp_dir.path().join("test.csv");
+        std::fs::write(
+            &test_csv_path,
+            "name,age,city\nAlice,25,NYC\nBob,30,LA\nCharlie,35,Chicago",
+        )
+        .unwrap();
+
         // Add CSV source node
         let csv_id = NodeId(1);
-        let csv_node = Box::new(MockCsvNode::new(csv_id, "test_csv".to_string()));
-        workspace.add_node_with_id(csv_id, csv_node);
+        let csv_node = CsvSourceNode::new(
+            csv_id,
+            "test_csv".to_string(),
+            test_csv_path.to_string_lossy().to_string(),
+        );
+        workspace.add_csv_node(csv_id, csv_node);
 
-        // Add consumer node that outputs received data
+        // Add consumer CSV node
+        let consumer_csv_path = temp_dir.path().join("consumer.csv");
+        std::fs::write(&consumer_csv_path, "name,age,city\n").unwrap(); // Just headers
         let consumer_id = NodeId(2);
-        let consumer_node = Box::new(TestConsumerNode::new(
+        let consumer_node = CsvSourceNode::new(
             consumer_id,
             "test_consumer".to_string(),
-        ));
-        workspace.add_node_with_id(consumer_id, consumer_node);
+            consumer_csv_path.to_string_lossy().to_string(),
+        );
+        workspace.add_csv_node(consumer_id, consumer_node);
 
         // Link CSV output to consumer input with filter transformation
         let filter_transform = Transformation::filter("name=Alice");

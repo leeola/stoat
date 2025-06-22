@@ -511,11 +511,12 @@ mod tests {
         let mut workspace = Workspace::new();
 
         // Add a table node directly
-        let table_node = Box::new(crate::nodes::table::TableViewerNode::new(
+        let table_node = crate::nodes::table::TableViewerNode::new_with_cache_dir(
             NodeId(1),
             "test_table".to_string(),
-        ));
-        workspace.add_node_with_id(NodeId(1), table_node);
+            std::path::PathBuf::from("/tmp"),
+        );
+        workspace.add_table_node(NodeId(1), table_node);
 
         // Serialize the workspace
         let serializable = SerializableWorkspace::from(&workspace);

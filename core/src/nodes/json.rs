@@ -314,71 +314,6 @@ mod tests {
         }
     }
 
-    /// A simple consumer node for testing transformations
-    #[derive(Debug)]
-    struct TestConsumerNode {
-        id: NodeId,
-        name: String,
-        last_input: Option<Value>,
-    }
-
-    impl TestConsumerNode {
-        fn new(id: NodeId, name: String) -> Self {
-            Self {
-                id,
-                name,
-                last_input: None,
-            }
-        }
-
-        #[allow(dead_code)]
-        fn get_last_input(&self) -> Option<&Value> {
-            self.last_input.as_ref()
-        }
-    }
-
-    impl Node for TestConsumerNode {
-        fn id(&self) -> NodeId {
-            self.id
-        }
-        fn node_type(&self) -> NodeType {
-            NodeType::JsonSource // Reusing for simplicity in tests
-        }
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        fn execute(
-            &mut self,
-            inputs: &HashMap<String, Value>,
-        ) -> crate::Result<HashMap<String, Value>> {
-            self.last_input = inputs.get("data").cloned();
-            Ok(HashMap::new()) // Consumer doesn't output anything
-        }
-
-        fn input_ports(&self) -> Vec<Port> {
-            vec![Port::new("data", "Input data")]
-        }
-        fn output_ports(&self) -> Vec<Port> {
-            vec![]
-        }
-
-        fn sockets(&self) -> NodeSockets {
-            NodeSockets::new(
-                vec![SocketInfo::new(SocketType::Data, "data", false)], // Input available
-                vec![],                                                 // No outputs
-            )
-        }
-
-        fn presentation(&self) -> NodePresentation {
-            NodePresentation::Minimal
-        }
-
-        fn status(&self) -> NodeStatus {
-            NodeStatus::Ready
-        }
-    }
-
     #[test]
     fn json_value_conversion() {
         let json_str = r#"{"name": "Alice", "age": 25, "active": true}"#;
@@ -401,18 +336,30 @@ mod tests {
 
         let mut workspace = Workspace::new();
 
+        // Create temporary test file
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let test_json_path = temp_dir.path().join("test.json");
+        std::fs::write(&test_json_path, r#"[{"name":"Alice","age":25,"city":"NYC"},{"name":"Bob","age":30,"city":"LA"},{"name":"Charlie","age":35,"city":"Chicago"}]"#).unwrap();
+
         // Add JSON source node
         let json_id = NodeId(1);
-        let json_node = Box::new(MockJsonNode::new(json_id, "test_json".to_string()));
-        workspace.add_node_with_id(json_id, json_node);
+        let json_node = JsonSourceNode::new(
+            json_id,
+            "test_json".to_string(),
+            test_json_path.to_string_lossy().to_string(),
+        );
+        workspace.add_json_node(json_id, json_node);
 
-        // Add consumer node
+        // Add consumer JSON node
+        let consumer_json_path = temp_dir.path().join("consumer.json");
+        std::fs::write(&consumer_json_path, "[]").unwrap(); // Empty array
         let consumer_id = NodeId(2);
-        let consumer_node = Box::new(TestConsumerNode::new(
+        let consumer_node = JsonSourceNode::new(
             consumer_id,
             "test_consumer".to_string(),
-        ));
-        workspace.add_node_with_id(consumer_id, consumer_node);
+            consumer_json_path.to_string_lossy().to_string(),
+        );
+        workspace.add_json_node(consumer_id, consumer_node);
 
         // Link JSON output to consumer input with filter transformation
         let filter_transform = Transformation::filter("name=Alice");

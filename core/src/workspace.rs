@@ -10,10 +10,13 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Workspace {
-    nodes: HashMap<NodeId, Box<dyn Node>>,
+    /// Dedicated storage for CSV source nodes (high performance, direct access)
     csv_nodes: HashMap<NodeId, CsvSourceNode>,
+    /// Dedicated storage for JSON source nodes (high performance, direct access)
     json_nodes: HashMap<NodeId, JsonSourceNode>,
+    /// Dedicated storage for Map nodes (high performance, direct access)
     map_nodes: HashMap<NodeId, MapNode>,
+    /// Dedicated storage for Table viewer nodes (high performance, direct access)
     table_nodes: HashMap<NodeId, TableViewerNode>,
     links: Vec<Link>,
     view: View,
@@ -137,16 +140,6 @@ impl From<&Workspace> for SerializableWorkspace {
             });
         }
 
-        // Add other nodes
-        for (id, node) in &workspace.nodes {
-            nodes.push(SerializableNode {
-                id: *id,
-                node_type: node.node_type().to_string(),
-                name: node.name().to_string(),
-                config: Self::get_node_config_for_serialization(node.as_ref()),
-            });
-        }
-
         Self {
             links: workspace.links.clone(),
             nodes,
@@ -155,29 +148,7 @@ impl From<&Workspace> for SerializableWorkspace {
     }
 }
 
-impl SerializableWorkspace {
-    /// Get configuration for serialization from a node's config sockets
-    ///
-    /// This method converts config socket values to a format suitable for serialization
-    /// and node reconstruction through the NodeInit registry.
-    fn get_node_config_for_serialization(node: &dyn crate::node::Node) -> crate::value::Value {
-        let config_values = node.get_config_values();
-
-        if config_values.is_empty() {
-            // No config sockets - return empty value
-            crate::value::Value::Empty
-        } else {
-            // Convert config socket values to a map for serialization
-            // This ensures that NodeInit implementations receive the expected map format
-            use crate::value::Map;
-            let mut config_map = indexmap::IndexMap::new();
-            for (key, value) in config_values {
-                config_map.insert(compact_str::CompactString::from(key), value);
-            }
-            crate::value::Value::Map(Map(config_map))
-        }
-    }
-}
+impl SerializableWorkspace {}
 
 impl Workspace {
     pub fn new() -> Self {
@@ -186,7 +157,6 @@ impl Workspace {
 
     /// Create a workspace from a serializable representation
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
-        let mut nodes = HashMap::new();
         let mut csv_nodes = HashMap::new();
         let mut json_nodes = HashMap::new();
         let map_nodes = HashMap::new();
@@ -263,28 +233,15 @@ impl Workspace {
                 );
                 table_nodes.insert(serializable_node.id, table_node);
             } else {
-                // Handle other node types through registry
-                match crate::node::create_node_from_registry(
-                    &serializable_node.node_type,
-                    serializable_node.id,
-                    serializable_node.name,
-                    serializable_node.config,
-                ) {
-                    Ok(node) => {
-                        nodes.insert(serializable_node.id, node);
-                    },
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to reconstruct node {} ({}): {}",
-                            node_name, node_type, e
-                        );
-                    },
-                }
+                // Unknown node type - log warning and skip
+                eprintln!(
+                    "Warning: Unknown node type '{}' for node {} - skipping reconstruction",
+                    node_type, node_name
+                );
             }
         }
 
         Self {
-            nodes,
             csv_nodes,
             json_nodes,
             map_nodes,
@@ -292,18 +249,6 @@ impl Workspace {
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
         }
-    }
-
-    /// Add a node to the workspace with a specific ID
-    pub fn add_node_with_id(&mut self, id: NodeId, node: Box<dyn Node>) {
-        // Get node type before moving
-        let node_type = node.node_type();
-
-        // Add to general nodes (we'll handle CSV nodes in a dedicated method)
-        self.nodes.insert(id, node);
-
-        // Add to view
-        self.view.add_node_view(id, node_type, (0, 0));
     }
 
     /// Add a CSV node directly to the workspace
@@ -370,13 +315,23 @@ impl Workspace {
         to_port: String,
         transformation: Option<Transformation>,
     ) -> Result<()> {
-        // Validate nodes exist
-        if !self.nodes.contains_key(&from_node) {
+        // Validate nodes exist (check all collections)
+        let from_exists = self.csv_nodes.contains_key(&from_node)
+            || self.json_nodes.contains_key(&from_node)
+            || self.map_nodes.contains_key(&from_node)
+            || self.table_nodes.contains_key(&from_node);
+
+        let to_exists = self.csv_nodes.contains_key(&to_node)
+            || self.json_nodes.contains_key(&to_node)
+            || self.map_nodes.contains_key(&to_node)
+            || self.table_nodes.contains_key(&to_node);
+
+        if !from_exists {
             return Err(crate::Error::Node {
                 message: format!("Source node {:?} not found", from_node),
             });
         }
-        if !self.nodes.contains_key(&to_node) {
+        if !to_exists {
             return Err(crate::Error::Node {
                 message: format!("Target node {:?} not found", to_node),
             });
@@ -418,8 +373,6 @@ impl Workspace {
                     map_node.execute(&HashMap::new())?
                 } else if let Some(table_node) = self.table_nodes.get_mut(&link.from_node) {
                     table_node.execute(&HashMap::new())?
-                } else if let Some(from_node) = self.nodes.get_mut(&link.from_node) {
-                    from_node.execute(&HashMap::new())?
                 } else {
                     return Err(crate::Error::Node {
                         message: format!("Source node {:?} not found", link.from_node),
@@ -447,8 +400,6 @@ impl Workspace {
             map_node.execute(&inputs)
         } else if let Some(table_node) = self.table_nodes.get_mut(&node_id) {
             table_node.execute(&inputs)
-        } else if let Some(node) = self.nodes.get_mut(&node_id) {
-            node.execute(&inputs)
         } else {
             Err(crate::Error::Node {
                 message: format!("Node {:?} not found", node_id),
@@ -466,7 +417,7 @@ impl Workspace {
         } else if let Some(table_node) = self.table_nodes.get(&id) {
             Some(table_node as &dyn Node)
         } else {
-            self.nodes.get(&id).map(|n| n.as_ref())
+            None
         }
     }
 
@@ -491,11 +442,6 @@ impl Workspace {
         // Add Table nodes
         for (id, table_node) in &self.table_nodes {
             nodes.push((*id, table_node as &dyn Node));
-        }
-
-        // Add other nodes
-        for (id, node) in &self.nodes {
-            nodes.push((*id, node.as_ref()));
         }
 
         nodes
