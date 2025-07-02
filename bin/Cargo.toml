@@ -15,6 +15,9 @@ path = "src/bin/stoat.rs"
 name = "stoat_bin"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 stoat = { path = "../stoat", features = ["cli_bin"] }
 stoat_core = { path = "../core", features = ["csv", "json"] }

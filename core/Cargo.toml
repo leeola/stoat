@@ -17,6 +17,9 @@ test-utils = ["dep:tempfile"]
 name = "stoat_core"
 path = "src/lib.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 snafu.workspace = true
 async-trait.workspace = true

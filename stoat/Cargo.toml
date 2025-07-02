@@ -17,6 +17,9 @@ csv = ["stoat_core/csv"]
 # Include JSON functionality.
 json = ["stoat_core/json"]
 
+[lints]
+workspace = true
+
 [dependencies]
 stoat_core = { path = "../core" }
 tokio = { workspace = true }
