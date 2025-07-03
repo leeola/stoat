@@ -69,8 +69,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), csv_array);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(names)) = output {
             assert_eq!(names.len(), 2);
@@ -141,8 +145,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), json_array);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(flattened)) = output {
             assert_eq!(flattened.len(), 2);
@@ -235,11 +243,11 @@ mod tests {
         // Link the nodes: data -> step1 -> step2 -> step3
         workspace
             .link_nodes(map_id1, "data".to_string(), map_id2, "data".to_string())
-            .unwrap();
+            .expect("Failed to create map node");
 
         workspace
             .link_nodes(map_id2, "data".to_string(), map_id3, "data".to_string())
-            .unwrap();
+            .expect("Failed to create map node");
 
         // Execute the first node manually to start the pipeline
         let mut inputs = HashMap::new();
@@ -247,7 +255,9 @@ mod tests {
 
         // Simulate execution of the pipeline by manually executing each step
         let step1_result = {
-            let _node = workspace.get_node(map_id1).unwrap();
+            let _node = workspace
+                .get_node(map_id1)
+                .expect("Failed to get map node from workspace");
             let mut map_node = MapNode::new(
                 NodeId(1),
                 "add_full_name".to_string(),
@@ -256,7 +266,9 @@ mod tests {
                     expression: "{first_name} {last_name}".to_string(),
                 },
             );
-            map_node.execute(&inputs).unwrap()
+            map_node
+                .execute(&inputs)
+                .expect("Failed to execute first map node in chained transformations")
         };
 
         let step2_result = {
@@ -268,7 +280,9 @@ mod tests {
                     transformation: crate::nodes::map::ValueTransformation::ToUppercase,
                 },
             );
-            map_node.execute(&step1_result).unwrap()
+            map_node
+                .execute(&step1_result)
+                .expect("Failed to execute second map node in chained transformations")
         };
 
         let final_result = {
@@ -279,10 +293,14 @@ mod tests {
                     fields: vec!["full_name".to_string(), "age".to_string()],
                 },
             );
-            map_node.execute(&step2_result).unwrap()
+            map_node
+                .execute(&step2_result)
+                .expect("Failed to execute third map node in chained transformations")
         };
 
-        let output = final_result.get("data").unwrap();
+        let output = final_result
+            .get("data")
+            .expect("Failed to get data output from final result");
 
         if let Value::Array(Array(final_rows)) = output {
             assert_eq!(final_rows.len(), 2);

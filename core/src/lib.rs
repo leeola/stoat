@@ -217,7 +217,7 @@ pub mod state {
                 default_state_dir()
             };
 
-            let data_path = state_dir.join("workspaces").join(format!("{}.ron", name));
+            let data_path = state_dir.join("workspaces").join(format!("{name}.ron"));
             let metadata = WorkspaceMetadata {
                 name: name.clone(),
                 description,
@@ -400,7 +400,7 @@ impl Stoat {
 
         // Load or create state
         let mut state = state::State::load_from(&state_path).map_err(|e| Error::Generic {
-            message: format!("Failed to load state: {}", e),
+            message: format!("Failed to load state: {e}"),
         })?;
 
         // Override active workspace if specified
@@ -408,7 +408,7 @@ impl Stoat {
             state
                 .set_active_workspace(workspace_name.clone())
                 .map_err(|e| Error::Generic {
-                    message: format!("Failed to set workspace: {}", e),
+                    message: format!("Failed to set workspace: {e}"),
                 })?;
         }
 
@@ -453,7 +453,7 @@ impl Stoat {
 
         let serializable: workspace::SerializableWorkspace =
             ron::from_str(&contents).map_err(|e| Error::Serialization {
-                message: format!("Failed to deserialize workspace: {}", e),
+                message: format!("Failed to deserialize workspace: {e}"),
             })?;
 
         // Convert back to full workspace (nodes will be empty for now)
@@ -471,7 +471,7 @@ impl Stoat {
         let serializable = workspace::SerializableWorkspace::from(&self.active);
         let contents = ron::ser::to_string_pretty(&serializable, ron::ser::PrettyConfig::default())
             .map_err(|e| Error::Serialization {
-                message: format!("Failed to serialize workspace: {}", e),
+                message: format!("Failed to serialize workspace: {e}"),
             })?;
 
         std::fs::write(path, contents).map_err(|e| Error::Io {
@@ -500,7 +500,7 @@ impl Stoat {
         self.state
             .save_to(&self.state_path)
             .map_err(|e| Error::Generic {
-                message: format!("Failed to save state: {}", e),
+                message: format!("Failed to save state: {e}"),
             })?;
 
         Ok(())
@@ -521,9 +521,9 @@ impl Stoat {
         &mut self,
         node_type: &str,
         name: String,
-        config: crate::value::Value,
-    ) -> crate::Result<crate::node::NodeId> {
-        let id = crate::node::NodeId(self.state.allocate_id());
+        config: value::Value,
+    ) -> Result<node::NodeId> {
+        let id = node::NodeId(self.state.allocate_id());
 
         // For table nodes, add cache configuration
         let final_config = if node_type == "table" {
@@ -533,24 +533,24 @@ impl Stoat {
             let mut config_map = indexmap::IndexMap::new();
             config_map.insert(
                 compact_str::CompactString::from("cache_id"),
-                crate::value::Value::U64(cache_id),
+                value::Value::U64(cache_id),
             );
             config_map.insert(
                 compact_str::CompactString::from("cache_dir"),
-                crate::value::Value::String(compact_str::CompactString::from(
+                value::Value::String(compact_str::CompactString::from(
                     cache_dir.to_string_lossy().as_ref(),
                 )),
             );
 
             // Merge with any existing config
             match config {
-                crate::value::Value::Map(ref existing_map) => {
+                value::Value::Map(ref existing_map) => {
                     // Add existing config to our config
                     for (key, value) in &existing_map.0 {
                         config_map.insert(key.clone(), value.clone());
                     }
                 },
-                crate::value::Value::Empty | crate::value::Value::Null => {
+                value::Value::Empty | value::Value::Null => {
                     // Just use our config
                 },
                 _ => {
@@ -558,7 +558,7 @@ impl Stoat {
                 },
             }
 
-            crate::value::Value::Map(crate::value::Map(config_map))
+            value::Value::Map(value::Map(config_map))
         } else {
             config
         };
@@ -567,112 +567,107 @@ impl Stoat {
         if node_type == "csv" {
             // Extract file path from config
             let file_path = match &final_config {
-                crate::value::Value::String(path) => path.to_string(),
-                crate::value::Value::Map(ref map) => {
+                value::Value::String(path) => path.to_string(),
+                value::Value::Map(ref map) => {
                     if let Some(path_value) = map.0.get("path") {
                         match path_value {
-                            crate::value::Value::String(path) => path.to_string(),
+                            value::Value::String(path) => path.to_string(),
                             _ => {
-                                return Err(crate::error::Error::Generic {
+                                return Err(Error::Generic {
                                     message: "CSV node config 'path' must be a string".to_string(),
                                 })
                             },
                         }
                     } else {
-                        return Err(crate::error::Error::Generic {
+                        return Err(Error::Generic {
                             message: "CSV node config must contain 'path' field".to_string(),
                         });
                     }
                 },
                 _ => {
-                    return Err(crate::error::Error::Generic {
+                    return Err(Error::Generic {
                         message: "CSV node config must be a string path or map with 'path' field"
                             .to_string(),
                     })
                 },
             };
 
-            let csv_node = crate::nodes::csv::CsvSourceNode::new(id, name, file_path);
+            let csv_node = nodes::csv::CsvSourceNode::new(id, name, file_path);
             self.active.add_csv_node(id, csv_node);
         } else if node_type == "json" {
             // Extract file path from config
             let file_path = match &final_config {
-                crate::value::Value::String(path) => path.to_string(),
-                crate::value::Value::Map(ref map) => {
+                value::Value::String(path) => path.to_string(),
+                value::Value::Map(ref map) => {
                     if let Some(path_value) = map.0.get("path") {
                         match path_value {
-                            crate::value::Value::String(path) => path.to_string(),
+                            value::Value::String(path) => path.to_string(),
                             _ => {
-                                return Err(crate::error::Error::Generic {
+                                return Err(Error::Generic {
                                     message: "JSON node config 'path' must be a string".to_string(),
                                 })
                             },
                         }
                     } else {
-                        return Err(crate::error::Error::Generic {
+                        return Err(Error::Generic {
                             message: "JSON node config must contain 'path' field".to_string(),
                         });
                     }
                 },
                 _ => {
-                    return Err(crate::error::Error::Generic {
+                    return Err(Error::Generic {
                         message: "JSON node config must be a string path or map with 'path' field"
                             .to_string(),
                     })
                 },
             };
 
-            let json_node = crate::nodes::json::JsonSourceNode::new(id, name, file_path);
+            let json_node = nodes::json::JsonSourceNode::new(id, name, file_path);
             self.active.add_json_node(id, json_node);
         } else if node_type == "table" {
             // Extract cache_dir from config - it should already be added to final_config
             let cache_dir = match &final_config {
-                crate::value::Value::Map(ref map) => {
+                value::Value::Map(ref map) => {
                     if let Some(cache_dir_value) = map.0.get("cache_dir") {
                         match cache_dir_value {
-                            crate::value::Value::String(path) => {
-                                std::path::PathBuf::from(path.as_str())
-                            },
+                            value::Value::String(path) => PathBuf::from(path.as_str()),
                             _ => {
-                                return Err(crate::error::Error::Generic {
+                                return Err(Error::Generic {
                                     message: "Table node config 'cache_dir' must be a string"
                                         .to_string(),
                                 })
                             },
                         }
                     } else {
-                        return Err(crate::error::Error::Generic {
+                        return Err(Error::Generic {
                             message: "Table node config must contain 'cache_dir' field".to_string(),
                         });
                     }
                 },
                 _ => {
-                    return Err(crate::error::Error::Generic {
+                    return Err(Error::Generic {
                         message: "Table node config must be a map with 'cache_dir' field"
                             .to_string(),
                     })
                 },
             };
 
-            let table_node =
-                crate::nodes::table::TableViewerNode::new_with_cache_dir(id, name, cache_dir);
+            let table_node = nodes::table::TableViewerNode::new_with_cache_dir(id, name, cache_dir);
             self.active.add_table_node(id, table_node);
         } else if node_type == "map" {
             // Parse the operation from config directly
             let operation = match &final_config {
-                crate::value::Value::Map(ref map) => {
+                value::Value::Map(ref map) => {
                     if let Some(op_type) = map.0.get("operation") {
                         match op_type {
-                            crate::value::Value::String(op) => match op.as_str() {
+                            value::Value::String(op) => match op.as_str() {
                                 "extract_column" => {
-                                    if let Some(crate::value::Value::String(field)) =
-                                        map.0.get("field")
-                                    {
-                                        crate::nodes::map::MapOperation::ExtractColumn {
+                                    if let Some(value::Value::String(field)) = map.0.get("field") {
+                                        nodes::map::MapOperation::ExtractColumn {
                                             field: field.to_string(),
                                         }
                                     } else {
-                                        return Err(crate::error::Error::Generic {
+                                        return Err(Error::Generic {
                                             message:
                                                 "ExtractColumn operation requires 'field' parameter"
                                                     .to_string(),
@@ -680,63 +675,62 @@ impl Stoat {
                                     }
                                 },
                                 "select_columns" => {
-                                    if let Some(crate::value::Value::Array(crate::value::Array(
-                                        fields,
-                                    ))) = map.0.get("fields")
+                                    if let Some(value::Value::Array(value::Array(fields))) =
+                                        map.0.get("fields")
                                     {
                                         let field_names: Result<Vec<String>, _> = fields
                                             .iter()
                                             .map(|v| match v {
-                                                crate::value::Value::String(s) => Ok(s.to_string()),
-                                                _ => Err(crate::error::Error::Generic {
+                                                value::Value::String(s) => Ok(s.to_string()),
+                                                _ => Err(Error::Generic {
                                                     message: "SelectColumns fields must be strings"
                                                         .to_string(),
                                                 }),
                                             })
                                             .collect();
-                                        crate::nodes::map::MapOperation::SelectColumns {
+                                        nodes::map::MapOperation::SelectColumns {
                                             fields: field_names?,
                                         }
                                     } else {
-                                        return Err(crate::error::Error::Generic {
+                                        return Err(Error::Generic {
                                             message: "SelectColumns operation requires 'fields' array parameter".to_string(),
                                         });
                                     }
                                 },
-                                "transpose" => crate::nodes::map::MapOperation::Transpose,
+                                "transpose" => nodes::map::MapOperation::Transpose,
                                 _ => {
-                                    return Err(crate::error::Error::Generic {
-                                        message: format!("Unknown map operation: {}", op),
+                                    return Err(Error::Generic {
+                                        message: format!("Unknown map operation: {op}"),
                                     });
                                 },
                             },
                             _ => {
-                                return Err(crate::error::Error::Generic {
+                                return Err(Error::Generic {
                                     message: "Map operation must be a string".to_string(),
                                 });
                             },
                         }
                     } else {
                         // Default operation if none specified
-                        crate::nodes::map::MapOperation::ExtractColumn {
+                        nodes::map::MapOperation::ExtractColumn {
                             field: "id".to_string(),
                         }
                     }
                 },
                 _ => {
                     // Default operation for non-map configs
-                    crate::nodes::map::MapOperation::ExtractColumn {
+                    nodes::map::MapOperation::ExtractColumn {
                         field: "id".to_string(),
                     }
                 },
             };
 
-            let map_node = crate::nodes::map::MapNode::new(id, name, operation);
+            let map_node = nodes::map::MapNode::new(id, name, operation);
             self.active.add_map_node(id, map_node);
         } else {
             // No other node types should exist since registry only contains csv, json, map, table
-            return Err(crate::error::Error::Generic {
-                message: format!("Unknown node type: {}", node_type),
+            return Err(Error::Generic {
+                message: format!("Unknown node type: {node_type}"),
             });
         }
         Ok(id)
@@ -792,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_stoat_save_and_load_state() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for test");
         let state_dir = temp_dir.path().to_path_buf();
 
         // Create first instance and save state
@@ -801,9 +795,9 @@ mod tests {
                 state_dir: Some(state_dir.clone()),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config).expect("Failed to create Stoat instance with config")
         };
-        stoat1.save().unwrap();
+        stoat1.save().expect("Failed to save Stoat state");
 
         // Create second instance that loads the saved state
         let stoat2 = {
@@ -811,7 +805,7 @@ mod tests {
                 state_dir: Some(state_dir),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config).expect("Failed to create second Stoat instance")
         };
 
         assert_eq!(
@@ -824,7 +818,12 @@ mod tests {
     fn test_stoat_invalid_workspace_fails() {
         // This should fail because we're trying to switch to a non-existent workspace
         let config = StoatConfig {
-            state_dir: Some(TempDir::new().unwrap().path().to_path_buf()),
+            state_dir: Some(
+                TempDir::new()
+                    .expect("Failed to create temp directory for invalid workspace test")
+                    .path()
+                    .to_path_buf(),
+            ),
             workspace: Some("nonexistent".to_string()),
         };
         let result = Stoat::new_with_config(config);
@@ -848,17 +847,21 @@ mod tests {
     #[test]
     fn test_stoat_custom_state_dir() {
         // This test uses the new_with_config directly since we need custom state dir
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir =
+            TempDir::new().expect("Failed to create temporary directory for custom state dir test");
         let custom_state_dir = temp_dir.path().join("custom/path");
         let config = StoatConfig {
             state_dir: Some(custom_state_dir),
             workspace: None,
         };
-        let stoat = Stoat::new_with_config(config).unwrap();
+        let stoat =
+            Stoat::new_with_config(config).expect("Failed to create Stoat with custom state dir");
 
         assert_eq!(stoat.state().active_workspace, "default");
         // State should be saved in the custom directory
-        stoat.save().unwrap();
+        stoat
+            .save()
+            .expect("Failed to save Stoat with custom state dir");
     }
 
     #[test]
@@ -883,7 +886,8 @@ mod tests {
     #[test]
     fn test_global_id_uniqueness_across_workspaces() {
         use tempfile::TempDir;
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir =
+            TempDir::new().expect("Failed to create temporary directory for global ID test");
         let state_dir = temp_dir.path().to_path_buf();
 
         // Create first workspace and add nodes
@@ -892,28 +896,29 @@ mod tests {
                 state_dir: Some(state_dir.clone()),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config)
+                .expect("Failed to create first Stoat instance for global ID test")
         };
 
         // Add a node in default workspace
         let id1 = stoat1
-            .create_node("table", "table1".to_string(), crate::value::Value::Empty)
-            .unwrap();
+            .create_node("table", "table1".to_string(), value::Value::Empty)
+            .expect("Failed to create first table node");
 
         // Create second workspace
         stoat1
             .state_mut()
             .add_workspace("workspace2".to_string(), None)
-            .unwrap();
+            .expect("Failed to add workspace2");
         stoat1
             .state_mut()
             .set_active_workspace("workspace2".to_string())
-            .unwrap();
+            .expect("Failed to set active workspace to workspace2");
 
         // Add a node in second workspace
         let id2 = stoat1
-            .create_node("table", "table2".to_string(), crate::value::Value::Empty)
-            .unwrap();
+            .create_node("table", "table2".to_string(), value::Value::Empty)
+            .expect("Failed to create second table node");
 
         // IDs should be different (globally unique)
         assert_ne!(id1, id2);
@@ -925,7 +930,9 @@ mod tests {
         );
 
         // Save state
-        stoat1.save().unwrap();
+        stoat1
+            .save()
+            .expect("Failed to save state after adding nodes");
 
         // Create new Stoat instance that loads the same state
         let mut stoat2 = {
@@ -933,13 +940,14 @@ mod tests {
                 state_dir: Some(state_dir),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config)
+                .expect("Failed to create second Stoat instance for global ID test")
         };
 
         // Add another node - should get next ID after the previous ones
         let id3 = stoat2
-            .create_node("table", "table3".to_string(), crate::value::Value::Empty)
-            .unwrap();
+            .create_node("table", "table3".to_string(), value::Value::Empty)
+            .expect("Failed to create third table node");
 
         // ID should be greater than both previous IDs
         assert!(
@@ -954,7 +962,8 @@ mod tests {
     #[test]
     fn test_state_directory_removal_resets_ids() {
         use tempfile::TempDir;
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new()
+            .expect("Failed to create temporary directory for state directory removal test");
         let state_dir = temp_dir.path().to_path_buf();
 
         // First session: create stoat, add node, save, drop
@@ -964,21 +973,18 @@ mod tests {
                     state_dir: Some(state_dir.clone()),
                     workspace: None,
                 };
-                Stoat::new_with_config(config).unwrap()
+                Stoat::new_with_config(config)
+                    .expect("Failed to create first Stoat instance for state removal test")
             };
 
             // Add a table node
             let id = stoat1
-                .create_node(
-                    "table",
-                    "test_table_1".to_string(),
-                    crate::value::Value::Empty,
-                )
-                .unwrap();
+                .create_node("table", "test_table_1".to_string(), value::Value::Empty)
+                .expect("Failed to create first table node in state removal test");
             let cache_dir = stoat1.state.get_cache_dir();
 
             // Save state
-            stoat1.save().unwrap();
+            stoat1.save().expect("Failed to save first Stoat instance");
 
             (id, cache_dir)
         }; // stoat1 dropped here
@@ -990,21 +996,18 @@ mod tests {
                     state_dir: Some(state_dir.clone()),
                     workspace: None,
                 };
-                Stoat::new_with_config(config).unwrap()
+                Stoat::new_with_config(config)
+                    .expect("Failed to create second Stoat instance for state removal test")
             };
 
             // Add another node - should continue from previous ID counter
             stoat2
-                .create_node(
-                    "table",
-                    "test_table_2".to_string(),
-                    crate::value::Value::Empty,
-                )
-                .unwrap()
+                .create_node("table", "test_table_2".to_string(), value::Value::Empty)
+                .expect("Failed to create second table node in state removal test")
         }; // stoat2 dropped here
 
         // Remove the entire state directory
-        std::fs::remove_dir_all(&state_dir).unwrap();
+        std::fs::remove_dir_all(&state_dir).expect("Failed to remove state directory");
 
         // Third session: should start fresh with ID 1
         let fresh_id = {
@@ -1013,17 +1016,14 @@ mod tests {
                     state_dir: Some(state_dir.clone()),
                     workspace: None,
                 };
-                Stoat::new_with_config(config).unwrap()
+                Stoat::new_with_config(config)
+                    .expect("Failed to create third Stoat instance after state removal")
             };
 
             // Add node - should start from 1 again
             stoat3
-                .create_node(
-                    "table",
-                    "test_table_fresh".to_string(),
-                    crate::value::Value::Empty,
-                )
-                .unwrap()
+                .create_node("table", "test_table_fresh".to_string(), value::Value::Empty)
+                .expect("Failed to create fresh table node after state removal")
         };
 
         // Verify ID progression
@@ -1037,12 +1037,10 @@ mod tests {
         // Verify cache directory is under state directory, not hardcoded location
         assert!(
             cache_dir.starts_with(&state_dir),
-            "Cache directory {:?} should be under state directory {:?}",
-            cache_dir,
-            state_dir
+            "Cache directory {cache_dir:?} should be under state directory {state_dir:?}"
         );
         assert!(
-            !std::path::Path::new(".stoat_cache").exists(),
+            !Path::new(".stoat_cache").exists(),
             "Should not create .stoat_cache in current directory"
         );
     }
@@ -1050,7 +1048,8 @@ mod tests {
     #[test]
     fn test_table_cache_uses_global_state_directory() {
         use tempfile::TempDir;
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir =
+            TempDir::new().expect("Failed to create temporary directory for table cache test");
         let custom_state_dir = temp_dir.path().join("custom_stoat");
 
         let mut stoat = {
@@ -1058,27 +1057,26 @@ mod tests {
                 state_dir: Some(custom_state_dir.clone()),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config)
+                .expect("Failed to create Stoat instance for table cache test")
         };
 
         // Add a table node
         let _id = stoat
-            .create_node(
-                "table",
-                "test_table".to_string(),
-                crate::value::Value::Empty,
-            )
-            .unwrap();
+            .create_node("table", "test_table".to_string(), value::Value::Empty)
+            .expect("Failed to create table node for cache test");
 
         // Cache directory should be under the custom state directory
         let _expected_cache_dir = custom_state_dir.join("cache");
 
         // Save to ensure directories are created
-        stoat.save().unwrap();
+        stoat
+            .save()
+            .expect("Failed to save Stoat instance for cache test");
 
         // The cache directory should exist under the custom state directory, not in .stoat_cache
         assert!(
-            !std::path::Path::new(".stoat_cache").exists(),
+            !Path::new(".stoat_cache").exists(),
             "Should not create .stoat_cache in current directory"
         );
 

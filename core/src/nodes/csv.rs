@@ -33,13 +33,13 @@ impl CsvSourceNode {
 
         let mut reader =
             csv::Reader::from_path(&self.file_path).map_err(|e| crate::Error::Generic {
-                message: format!("Failed to read CSV: {}", e),
+                message: format!("Failed to read CSV: {e}"),
             })?;
 
         let headers: Vec<String> = reader
             .headers()
             .map_err(|e| crate::Error::Generic {
-                message: format!("Failed to read CSV headers: {}", e),
+                message: format!("Failed to read CSV headers: {e}"),
             })?
             .iter()
             .map(|h| h.to_string())
@@ -48,7 +48,7 @@ impl CsvSourceNode {
         let mut rows = Vec::new();
         for result in reader.records() {
             let record = result.map_err(|e| crate::Error::Generic {
-                message: format!("Failed to read CSV record: {}", e),
+                message: format!("Failed to read CSV record: {e}"),
             })?;
 
             let mut row_map = indexmap::IndexMap::new();
@@ -87,7 +87,10 @@ impl Node for CsvSourceNode {
         }
 
         let mut outputs = HashMap::new();
-        outputs.insert("data".to_string(), self.data.clone().unwrap());
+        outputs.insert(
+            "data".to_string(),
+            self.data.clone().expect("CSV data should be loaded by now"),
+        );
         Ok(outputs)
     }
 
@@ -238,13 +241,14 @@ mod tests {
         let mut workspace = Workspace::new();
 
         // Create temporary test file
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir =
+            tempfile::TempDir::new().expect("Failed to create temporary directory for CSV test");
         let test_csv_path = temp_dir.path().join("test.csv");
         std::fs::write(
             &test_csv_path,
             "name,age,city\nAlice,25,NYC\nBob,30,LA\nCharlie,35,Chicago",
         )
-        .unwrap();
+        .expect("Failed to write test CSV file");
 
         // Add CSV source node
         let csv_id = NodeId(1);
@@ -257,7 +261,8 @@ mod tests {
 
         // Add consumer CSV node
         let consumer_csv_path = temp_dir.path().join("consumer.csv");
-        std::fs::write(&consumer_csv_path, "name,age,city\n").unwrap(); // Just headers
+        std::fs::write(&consumer_csv_path, "name,age,city\n")
+            .expect("Failed to write consumer CSV file"); // Just headers
         let consumer_id = NodeId(2);
         let consumer_node = CsvSourceNode::new(
             consumer_id,
@@ -276,16 +281,20 @@ mod tests {
                 "data".to_string(),
                 Some(filter_transform),
             )
-            .unwrap();
+            .expect("Failed to link CSV nodes with transformation");
 
         // Execute consumer node - should pull filtered data from CSV node
-        let _result = workspace.execute_node(consumer_id).unwrap();
+        let _result = workspace
+            .execute_node(consumer_id)
+            .expect("Failed to execute consumer CSV node");
 
         // The transformation should have been applied during execution
         // We can verify this by testing the transformation directly
         let original_data = create_test_csv_data();
         let filter_transform = Transformation::filter("name=Alice");
-        let filtered_result = filter_transform.apply(&original_data).unwrap();
+        let filtered_result = filter_transform
+            .apply(&original_data)
+            .expect("Failed to apply filter transformation to test data");
 
         if let Value::Array(crate::value::Array(rows)) = filtered_result {
             assert_eq!(rows.len(), 2); // Should have 2 Alice rows

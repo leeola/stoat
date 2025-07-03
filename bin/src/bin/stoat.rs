@@ -14,7 +14,7 @@ async fn main() {
     };
 
     let mut stoat = Stoat::new_with_config(config).unwrap_or_else(|e| {
-        eprintln!("Error: Failed to initialize Stoat: {}", e);
+        eprintln!("Error: Failed to initialize Stoat: {e}");
         std::process::exit(1);
     });
 
@@ -25,12 +25,12 @@ async fn main() {
 
     // Handle command result and save state
     if let Err(e) = result {
-        eprintln!("Command failed: {}", e);
+        eprintln!("Command failed: {e}");
         std::process::exit(1);
     }
 
     // Save state and workspace
     if let Err(e) = stoat.save() {
-        eprintln!("Warning: Failed to save: {}", e);
+        eprintln!("Warning: Failed to save: {e}");
     }
 }

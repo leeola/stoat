@@ -157,7 +157,7 @@ fn parse_filter_expression(expression: &str) -> Result<(&str, FilterOperator, &s
         Ok((column, FilterOperator::Equal, value))
     } else {
         Err(crate::Error::Generic {
-            message: format!("Invalid filter expression: {}", expression),
+            message: format!("Invalid filter expression: {expression}"),
         })
     }
 }
@@ -182,8 +182,8 @@ fn extract_sort_value(value: &Value, field: &str) -> String {
         if let Some(field_value) = map.get(field) {
             match field_value {
                 Value::String(s) => s.to_string(),
-                Value::I64(i) => format!("{:020}", i), // Zero-pad for proper string sorting
-                Value::U64(u) => format!("{:020}", u),
+                Value::I64(i) => format!("{i:020}"), // Zero-pad for proper string sorting
+                Value::U64(u) => format!("{u:020}"),
                 // Value::Float(f) => format!("{:020.10}", f.0),
                 Value::Bool(b) => {
                     if *b {
@@ -267,7 +267,9 @@ mod tests {
         let data = create_test_data();
         let transform = Transformation::filter("name=Alice");
 
-        let result = transform.apply(&data).unwrap();
+        let result = transform
+            .apply(&data)
+            .expect("Failed to apply filter transformation");
 
         if let Value::Array(Array(rows)) = result {
             assert_eq!(rows.len(), 2); // Should have 2 Alice rows
@@ -281,7 +283,9 @@ mod tests {
         let data = create_test_data();
         let transform = Transformation::filter("name!=Alice");
 
-        let result = transform.apply(&data).unwrap();
+        let result = transform
+            .apply(&data)
+            .expect("Failed to apply filter transformation");
 
         if let Value::Array(Array(rows)) = result {
             assert_eq!(rows.len(), 1); // Should have 1 Bob row
@@ -295,7 +299,9 @@ mod tests {
         let data = create_test_data();
         let transform = Transformation::limit(2);
 
-        let result = transform.apply(&data).unwrap();
+        let result = transform
+            .apply(&data)
+            .expect("Failed to apply filter transformation");
 
         if let Value::Array(Array(rows)) = result {
             assert_eq!(rows.len(), 2); // Should limit to 2 rows
@@ -312,7 +318,9 @@ mod tests {
             Transformation::limit(1),
         ]);
 
-        let result = transform.apply(&data).unwrap();
+        let result = transform
+            .apply(&data)
+            .expect("Failed to apply filter transformation");
 
         if let Value::Array(Array(rows)) = result {
             assert_eq!(rows.len(), 1); // Should have 1 Alice row after filter + limit
@@ -326,7 +334,9 @@ mod tests {
         let data = create_test_data();
         let transform = Transformation::sort("age", false); // Descending by age
 
-        let result = transform.apply(&data).unwrap();
+        let result = transform
+            .apply(&data)
+            .expect("Failed to apply filter transformation");
 
         if let Value::Array(Array(rows)) = result {
             assert_eq!(rows.len(), 3);

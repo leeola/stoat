@@ -235,8 +235,7 @@ impl Workspace {
             } else {
                 // Unknown node type - log warning and skip
                 eprintln!(
-                    "Warning: Unknown node type '{}' for node {} - skipping reconstruction",
-                    node_type, node_name
+                    "Warning: Unknown node type '{node_type}' for node {node_name} - skipping reconstruction"
                 );
             }
         }
@@ -328,12 +327,12 @@ impl Workspace {
 
         if !from_exists {
             return Err(crate::Error::Node {
-                message: format!("Source node {:?} not found", from_node),
+                message: format!("Source node {from_node:?} not found"),
             });
         }
         if !to_exists {
             return Err(crate::Error::Node {
-                message: format!("Target node {:?} not found", to_node),
+                message: format!("Target node {to_node:?} not found"),
             });
         }
 
@@ -402,7 +401,7 @@ impl Workspace {
             table_node.execute(&inputs)
         } else {
             Err(crate::Error::Node {
-                message: format!("Node {:?} not found", node_id),
+                message: format!("Node {node_id:?} not found"),
             })
         }
     }

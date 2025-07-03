@@ -187,7 +187,7 @@ impl std::fmt::Display for NodeType {
             NodeType::Map => "map",
             NodeType::TableViewer => "table",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -309,7 +309,7 @@ impl NodeInitRegistry {
         self.initializers
             .get(node_type)
             .ok_or_else(|| crate::Error::Generic {
-                message: format!("Unknown node type: {}", node_type),
+                message: format!("Unknown node type: {node_type}"),
             })?
             .init(id, name, config)
     }
@@ -391,10 +391,7 @@ mod tests {
             &self.name
         }
 
-        fn execute(
-            &mut self,
-            _inputs: &HashMap<String, Value>,
-        ) -> crate::Result<HashMap<String, Value>> {
+        fn execute(&mut self, _inputs: &HashMap<String, Value>) -> Result<HashMap<String, Value>> {
             Ok(HashMap::new())
         }
 
@@ -445,7 +442,9 @@ mod tests {
 
     #[test]
     fn registry_registered_types() {
-        let registry = NODE_INIT_REGISTRY.lock().unwrap();
+        let registry = NODE_INIT_REGISTRY
+            .lock()
+            .expect("Failed to lock node registry");
         let types = registry.registered_types();
 
         // Should contain at least the built-in node types
@@ -461,7 +460,9 @@ mod tests {
 
     #[test]
     fn registry_is_registered() {
-        let registry = NODE_INIT_REGISTRY.lock().unwrap();
+        let registry = NODE_INIT_REGISTRY
+            .lock()
+            .expect("Failed to lock node registry");
 
         assert!(registry.is_registered("table"));
         assert!(registry.is_registered("map"));

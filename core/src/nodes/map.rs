@@ -252,10 +252,10 @@ impl MapNode {
     #[allow(clippy::only_used_in_recursion)]
     fn flatten_map(
         &self,
-        map: &indexmap::IndexMap<compact_str::CompactString, Value>,
+        map: &indexmap::IndexMap<CompactString, Value>,
         separator: &str,
         prefix: &str,
-    ) -> Result<indexmap::IndexMap<compact_str::CompactString, Value>> {
+    ) -> Result<indexmap::IndexMap<CompactString, Value>> {
         use crate::value::Map;
 
         let mut flattened = indexmap::IndexMap::new();
@@ -264,7 +264,7 @@ impl MapNode {
             let new_key = if prefix.is_empty() {
                 key.clone()
             } else {
-                CompactString::from(format!("{}{}{}", prefix, separator, key))
+                CompactString::from(format!("{prefix}{separator}{key}"))
             };
 
             match value {
@@ -391,13 +391,13 @@ impl MapNode {
     fn evaluate_expression(
         &self,
         expression: &str,
-        context: &indexmap::IndexMap<compact_str::CompactString, Value>,
+        context: &indexmap::IndexMap<CompactString, Value>,
     ) -> Result<Value> {
         // Simple template substitution
         let mut result = expression.to_string();
 
         for (key, value) in context {
-            let placeholder = format!("{{{}}}", key);
+            let placeholder = format!("{{{key}}}");
             if result.contains(&placeholder) {
                 let value_str = match value {
                     Value::String(s) => s.as_str(),
@@ -690,7 +690,7 @@ impl NodeInit for MapInit {
                             "transpose" => MapOperation::Transpose,
                             _ => {
                                 return Err(crate::Error::Generic {
-                                    message: format!("Unknown map operation: {}", op),
+                                    message: format!("Unknown map operation: {op}"),
                                 })
                             },
                         },
@@ -788,8 +788,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(values)) = output {
             assert_eq!(values.len(), 2);
@@ -814,8 +818,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(rows)) = output {
             assert_eq!(rows.len(), 2);
@@ -848,8 +856,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(rows)) = output {
             if let Value::Map(Map(map)) = &rows[0] {
@@ -879,8 +891,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(rows)) = output {
             if let Value::Map(Map(map)) = &rows[0] {
@@ -904,8 +920,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Map(Map(transposed)) = output {
             assert!(transposed.contains_key("name"));
@@ -936,8 +956,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(rows)) = output {
             if let Value::Map(Map(map)) = &rows[0] {
@@ -971,8 +995,12 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), data);
 
-        let result = map_node.execute(&inputs).unwrap();
-        let output = result.get("data").unwrap();
+        let result = map_node
+            .execute(&inputs)
+            .expect("Failed to execute map node");
+        let output = result
+            .get("data")
+            .expect("Failed to get data output from map node result");
 
         if let Value::Array(Array(rows)) = output {
             if let Value::Map(Map(map)) = &rows[0] {

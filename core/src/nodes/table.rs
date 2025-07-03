@@ -146,7 +146,7 @@ impl TableData {
             Value::Bool(b) => TableCell::Boolean(*b),
             Value::Empty | Value::Null => TableCell::Empty,
             // Convert other types to text representation
-            _ => TableCell::Text(CompactString::from(format!("{:?}", value))),
+            _ => TableCell::Text(CompactString::from(format!("{value:?}"))),
         }
     }
 
@@ -193,7 +193,7 @@ impl TableData {
         rkyv::api::high::to_bytes::<rkyv::rancor::Error>(self)
             .map(|aligned_vec| aligned_vec.into_vec())
             .map_err(|e| crate::Error::Generic {
-                message: format!("Failed to serialize table data: {}", e),
+                message: format!("Failed to serialize table data: {e}"),
             })
     }
 
@@ -201,7 +201,7 @@ impl TableData {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         unsafe { rkyv::api::high::from_bytes_unchecked::<Self, rkyv::rancor::Error>(bytes) }
             .map_err(|e| crate::Error::Generic {
-                message: format!("Failed to deserialize table data: {}", e),
+                message: format!("Failed to deserialize table data: {e}"),
             })
     }
 }
@@ -399,7 +399,7 @@ impl TableViewerNode {
     /// Ensure the cache directory exists
     fn ensure_cache_dir(&self) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.cache_dir).map_err(|e| crate::Error::Generic {
-            message: format!("Failed to create cache directory: {}", e),
+            message: format!("Failed to create cache directory: {e}"),
         })?;
         Ok(self.cache_dir.clone())
     }
@@ -407,7 +407,7 @@ impl TableViewerNode {
     /// Get the cache file path for a given cache ID
     fn get_cache_file_path(&self, cache_id: u64) -> Result<PathBuf> {
         let cache_dir = self.ensure_cache_dir()?;
-        Ok(cache_dir.join(format!("table_{}", cache_id)))
+        Ok(cache_dir.join(format!("table_{cache_id}")))
     }
 
     /// Load table data from disk cache, preferring mmap when possible
@@ -461,11 +461,11 @@ impl TableViewerNode {
     /// Attempt to memory-map the cache file
     fn try_mmap_load(&mut self, cache_path: &PathBuf) -> Result<bool> {
         let file = File::open(cache_path).map_err(|e| crate::Error::Generic {
-            message: format!("Failed to open cache file: {}", e),
+            message: format!("Failed to open cache file: {e}"),
         })?;
 
         let mmap = unsafe { Mmap::map(&file) }.map_err(|e| crate::Error::Generic {
-            message: format!("Failed to mmap cache file: {}", e),
+            message: format!("Failed to mmap cache file: {e}"),
         })?;
 
         // Validate that the mmap contains valid archived data
@@ -483,7 +483,7 @@ impl TableViewerNode {
         let bytes = data.to_bytes()?;
 
         std::fs::write(&cache_path, bytes).map_err(|e| crate::Error::Generic {
-            message: format!("Failed to write cache file {}: {}", cache_path.display(), e),
+            message: format!("Failed to write cache file {}: {e}", cache_path.display()),
         })?;
 
         println!("Saved table data to cache: {}", cache_path.display());
@@ -497,7 +497,7 @@ impl TableViewerNode {
             self.cache_id = new_cache_id.or_else(|| Some(Self::get_next_cache_id()));
         }
 
-        let cache_id = self.cache_id.unwrap();
+        let cache_id = self.cache_id.expect("Table node should have cache_id set");
 
         // Try loading from disk cache first
         if self.load_from_disk(cache_id)? {
@@ -611,7 +611,7 @@ impl Node for TableViewerNode {
         let mut config = HashMap::new();
         config.insert(
             "cache_dir".to_string(),
-            Value::String(compact_str::CompactString::from(
+            Value::String(CompactString::from(
                 self.cache_dir.to_string_lossy().as_ref(),
             )),
         );
@@ -718,7 +718,8 @@ mod tests {
     #[test]
     fn table_data_conversion() {
         let value = create_test_table_data();
-        let table_data = TableData::from_value(&value).unwrap();
+        let table_data =
+            TableData::from_value(&value).expect("Failed to convert value to table data");
 
         assert_eq!(table_data.columns.len(), 3);
         assert_eq!(table_data.metadata.row_count, 2);
@@ -739,13 +740,17 @@ mod tests {
     #[test]
     fn table_data_serialization() {
         let value = create_test_table_data();
-        let table_data = TableData::from_value(&value).unwrap();
+        let table_data =
+            TableData::from_value(&value).expect("Failed to convert value to table data");
 
         // Test rkyv serialization round trip
-        let bytes = table_data.to_bytes().unwrap();
+        let bytes = table_data
+            .to_bytes()
+            .expect("Failed to serialize table data to bytes");
         assert!(!bytes.is_empty());
 
-        let deserialized = TableData::from_bytes(&bytes).unwrap();
+        let deserialized =
+            TableData::from_bytes(&bytes).expect("Failed to deserialize table data from bytes");
 
         // Verify the data is the same
         assert_eq!(
@@ -772,7 +777,7 @@ mod tests {
         use tempfile::TempDir;
 
         // Create a temporary directory for cache
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for table test");
         let cache_dir = temp_dir.path().to_path_buf();
 
         let mut table_node =
@@ -785,7 +790,9 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), create_test_table_data());
 
-        let result = table_node.execute(&inputs).unwrap();
+        let result = table_node
+            .execute(&inputs)
+            .expect("Failed to execute table node");
 
         // Table viewer doesn't produce outputs
         assert!(result.is_empty());
@@ -793,7 +800,9 @@ mod tests {
         // But it should have cached the data
         assert!(table_node.get_table_data().is_some());
 
-        let cached_table = table_node.get_table_data().unwrap();
+        let cached_table = table_node
+            .get_table_data()
+            .expect("Failed to get cached table data");
         assert_eq!(cached_table.metadata.row_count, 2);
         assert_eq!(cached_table.metadata.column_count, 3);
     }
@@ -801,7 +810,8 @@ mod tests {
     #[test]
     fn column_type_inference() {
         let value = create_test_table_data();
-        let table_data = TableData::from_value(&value).unwrap();
+        let table_data =
+            TableData::from_value(&value).expect("Failed to convert value to table data");
 
         // Should infer column types correctly
         assert_eq!(table_data.metadata.column_types.len(), 3);
@@ -833,7 +843,7 @@ mod tests {
         use tempfile::TempDir;
 
         // Create a temporary directory for cache
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for table test");
         let cache_dir = temp_dir.path().to_path_buf();
 
         let table_node =
@@ -874,7 +884,7 @@ mod tests {
         use tempfile::TempDir;
 
         // Create a temporary directory for cache
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for table test");
         let cache_dir = temp_dir.path().to_path_buf();
 
         let mut table_node = TableViewerNode::new_with_cache_dir(
@@ -890,15 +900,19 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), create_test_table_data());
 
-        let result = table_node.execute(&inputs).unwrap();
+        let result = table_node
+            .execute(&inputs)
+            .expect("Failed to execute table node");
         assert!(result.is_empty()); // Table viewer is a sink
 
         // Should now have a cache ID
         assert!(table_node.get_cache_id().is_some());
-        let cache_id = table_node.get_cache_id().unwrap();
+        let cache_id = table_node
+            .get_cache_id()
+            .expect("Failed to get cache ID from table node");
 
         // Verify cache file was created
-        let cache_path = cache_dir.join(format!("table_{}", cache_id));
+        let cache_path = cache_dir.join(format!("table_{cache_id}"));
         assert!(cache_path.exists());
 
         // Create a new table node with same cache ID and verify it loads from cache
@@ -912,12 +926,16 @@ mod tests {
         table_node2.cache_id = Some(cache_id);
 
         // Execute - should load from cache
-        let result2 = table_node2.execute(&inputs).unwrap();
+        let result2 = table_node2
+            .execute(&inputs)
+            .expect("Failed to execute second table node");
         assert!(result2.is_empty());
 
         // Should have loaded the cached data
         assert!(table_node2.get_table_data_or_copy().is_some());
-        let cached_table = table_node2.get_table_data_or_copy().unwrap();
+        let cached_table = table_node2
+            .get_table_data_or_copy()
+            .expect("Failed to get cached table data from second node");
         assert_eq!(cached_table.metadata.row_count, 2);
         assert_eq!(cached_table.metadata.column_count, 3);
 
@@ -930,7 +948,7 @@ mod tests {
         use tempfile::TempDir;
 
         // Create a temporary directory for cache
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for table test");
         let cache_dir = temp_dir.path().to_path_buf();
 
         // Create test data representing CSV-like input
@@ -966,18 +984,24 @@ mod tests {
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), input_data.clone());
 
-        let result1 = table_viewer.execute(&inputs).unwrap();
+        let result1 = table_viewer
+            .execute(&inputs)
+            .expect("Failed to execute table viewer");
         assert!(result1.is_empty()); // Sink node
 
         // Verify cache was created
         assert!(table_viewer.get_cache_id().is_some());
-        let cache_id = table_viewer.get_cache_id().unwrap();
+        let cache_id = table_viewer
+            .get_cache_id()
+            .expect("Failed to get cache ID from table viewer");
 
-        let cache_file = cache_dir.join(format!("table_{}", cache_id));
+        let cache_file = cache_dir.join(format!("table_{cache_id}"));
         assert!(cache_file.exists());
 
         // Verify data structure is optimized
-        let table_data = table_viewer.get_table_data().unwrap();
+        let table_data = table_viewer
+            .get_table_data()
+            .expect("Failed to get table data from table viewer");
         assert_eq!(table_data.metadata.row_count, 2);
         assert_eq!(table_data.metadata.column_count, 3);
         assert_eq!(table_data.columns.len(), 3);
@@ -1008,11 +1032,15 @@ mod tests {
         );
         table_viewer2.cache_id = Some(cache_id); // Simulate same cache ID
 
-        let result2 = table_viewer2.execute(&inputs).unwrap();
+        let result2 = table_viewer2
+            .execute(&inputs)
+            .expect("Failed to execute second table viewer");
         assert!(result2.is_empty());
 
         // Should have same data as first execution
-        let cached_data = table_viewer2.get_table_data_or_copy().unwrap();
+        let cached_data = table_viewer2
+            .get_table_data_or_copy()
+            .expect("Failed to get cached data from second table viewer");
         assert_eq!(cached_data.metadata.row_count, 2);
         assert_eq!(cached_data.metadata.column_count, 3);
     }
@@ -1022,7 +1050,7 @@ mod tests {
         use tempfile::TempDir;
 
         // Create a temporary directory for cache
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory for table test");
         let cache_dir = temp_dir.path().to_path_buf();
 
         let mut table_node = TableViewerNode::new_with_cache_dir(
@@ -1034,7 +1062,9 @@ mod tests {
         // Execute with test data
         let mut inputs = HashMap::new();
         inputs.insert("data".to_string(), create_test_table_data());
-        let _ = table_node.execute(&inputs).unwrap();
+        let _ = table_node
+            .execute(&inputs)
+            .expect("Failed to execute table node for flush test");
 
         // Initially should not be dirty
         assert!(!table_node.is_dirty());
@@ -1044,7 +1074,9 @@ mod tests {
         assert!(table_node.is_dirty());
 
         // Flush to disk should clear dirty flag
-        table_node.flush_to_disk().unwrap();
+        table_node
+            .flush_to_disk()
+            .expect("Failed to flush table node to disk");
         assert!(!table_node.is_dirty());
     }
 }

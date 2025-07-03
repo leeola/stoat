@@ -41,7 +41,7 @@ impl JsonSourceNode {
 
         let json_value: serde_json::Value =
             serde_json::from_str(&json_str).map_err(|e| crate::Error::Generic {
-                message: format!("Failed to parse JSON: {}", e),
+                message: format!("Failed to parse JSON: {e}"),
             })?;
 
         // Convert serde_json::Value to our internal Value type
@@ -69,7 +69,12 @@ impl Node for JsonSourceNode {
         }
 
         let mut outputs = HashMap::new();
-        outputs.insert("data".to_string(), self.data.clone().unwrap());
+        outputs.insert(
+            "data".to_string(),
+            self.data
+                .clone()
+                .expect("JSON data should be loaded by now"),
+        );
         Ok(outputs)
     }
 
@@ -138,7 +143,7 @@ fn json_value_to_value(json_value: serde_json::Value) -> Result<Value> {
                 Ok(Value::I64(f as i64))
             } else {
                 Err(crate::Error::Generic {
-                    message: format!("Unsupported number format: {}", n),
+                    message: format!("Unsupported number format: {n}"),
                 })
             }
         },
@@ -282,10 +287,7 @@ mod tests {
             &self.name
         }
 
-        fn execute(
-            &mut self,
-            _inputs: &HashMap<String, Value>,
-        ) -> crate::Result<HashMap<String, Value>> {
+        fn execute(&mut self, _inputs: &HashMap<String, Value>) -> Result<HashMap<String, Value>> {
             let mut outputs = HashMap::new();
             outputs.insert("data".to_string(), self.test_data.clone());
             Ok(outputs)
@@ -317,8 +319,10 @@ mod tests {
     #[test]
     fn json_value_conversion() {
         let json_str = r#"{"name": "Alice", "age": 25, "active": true}"#;
-        let json_value: serde_json::Value = serde_json::from_str(json_str).unwrap();
-        let value = json_value_to_value(json_value).unwrap();
+        let json_value: serde_json::Value =
+            serde_json::from_str(json_str).expect("Failed to parse JSON string in test");
+        let value = json_value_to_value(json_value)
+            .expect("Failed to convert JSON value to internal value");
 
         if let Value::Map(crate::value::Map(map)) = value {
             assert_eq!(map.len(), 3);
@@ -337,9 +341,10 @@ mod tests {
         let mut workspace = Workspace::new();
 
         // Create temporary test file
-        let temp_dir = tempfile::TempDir::new().unwrap();
+        let temp_dir =
+            tempfile::TempDir::new().expect("Failed to create temporary directory for JSON test");
         let test_json_path = temp_dir.path().join("test.json");
-        std::fs::write(&test_json_path, r#"[{"name":"Alice","age":25,"city":"NYC"},{"name":"Bob","age":30,"city":"LA"},{"name":"Charlie","age":35,"city":"Chicago"}]"#).unwrap();
+        std::fs::write(&test_json_path, r#"[{"name":"Alice","age":25,"city":"NYC"},{"name":"Bob","age":30,"city":"LA"},{"name":"Charlie","age":35,"city":"Chicago"}]"#).expect("Failed to write test JSON file");
 
         // Add JSON source node
         let json_id = NodeId(1);
@@ -352,7 +357,7 @@ mod tests {
 
         // Add consumer JSON node
         let consumer_json_path = temp_dir.path().join("consumer.json");
-        std::fs::write(&consumer_json_path, "[]").unwrap(); // Empty array
+        std::fs::write(&consumer_json_path, "[]").expect("Failed to write consumer JSON file"); // Empty array
         let consumer_id = NodeId(2);
         let consumer_node = JsonSourceNode::new(
             consumer_id,
@@ -371,15 +376,19 @@ mod tests {
                 "data".to_string(),
                 Some(filter_transform),
             )
-            .unwrap();
+            .expect("Failed to link JSON nodes with transformation");
 
         // Execute consumer node - should pull filtered data from JSON node
-        let _result = workspace.execute_node(consumer_id).unwrap();
+        let _result = workspace
+            .execute_node(consumer_id)
+            .expect("Failed to execute consumer JSON node");
 
         // Verify the transformation works by testing it directly
         let original_data = create_test_json_data();
         let filter_transform = Transformation::filter("name=Alice");
-        let filtered_result = filter_transform.apply(&original_data).unwrap();
+        let filtered_result = filter_transform
+            .apply(&original_data)
+            .expect("Failed to apply filter transformation to JSON test data");
 
         if let Value::Array(crate::value::Array(rows)) = filtered_result {
             assert_eq!(rows.len(), 1); // Should have 1 Alice row
@@ -396,9 +405,13 @@ mod tests {
     #[test]
     fn json_node_basic_execution() {
         let mut json_node = MockJsonNode::new(NodeId(0), "test_json".to_string());
-        let result = json_node.execute(&HashMap::new()).unwrap();
+        let result = json_node
+            .execute(&HashMap::new())
+            .expect("Failed to execute JSON node");
 
-        let data = result.get("data").unwrap();
+        let data = result
+            .get("data")
+            .expect("Failed to get data output from JSON node result");
         if let Value::Array(crate::value::Array(rows)) = data {
             assert_eq!(rows.len(), 3); // Should have 3 objects
 

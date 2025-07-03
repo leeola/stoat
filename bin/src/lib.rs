@@ -11,30 +11,39 @@ mod tests {
         assert_eq!(stoat.state().active_workspace, "default");
 
         // Verify state was properly initialized
-        stoat.save().unwrap();
+        stoat
+            .save()
+            .expect("Failed to save stoat instance in initialization test");
     }
 
     #[test]
     fn test_stoat_initialization_with_custom_state_dir() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let custom_state_dir = temp_dir.path().join("custom");
         let config = StoatConfig {
             state_dir: Some(custom_state_dir),
             workspace: None,
         };
-        let stoat = Stoat::new_with_config(config).unwrap();
+        let stoat = Stoat::new_with_config(config)
+            .expect("Failed to create Stoat instance with custom state dir");
 
-        stoat.save().unwrap();
+        stoat
+            .save()
+            .expect("Failed to save Stoat instance with custom state dir");
 
         // The workspace file should have been created when we saved
-        let workspace_path = &stoat.state().current_workspace().unwrap().data_path;
+        let workspace_path = &stoat
+            .state()
+            .current_workspace()
+            .expect("Failed to get current workspace")
+            .data_path;
         assert!(workspace_path.exists());
     }
 
     #[test]
     fn test_workspace_switching_error_handling() {
         // This should fail because we're trying to switch to a non-existent workspace
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let config = StoatConfig {
             state_dir: Some(temp_dir.path().to_path_buf()),
             workspace: Some("nonexistent".to_string()),
@@ -60,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_state_persistence_across_instances() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temporary directory");
         let state_dir = temp_dir.path().to_path_buf();
 
         // Create first instance and save some state
@@ -69,13 +78,13 @@ mod tests {
                 state_dir: Some(state_dir.clone()),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config).expect("Failed to create Stoat instance")
         };
         stoat1
             .state_mut()
             .add_workspace("persistent_test".to_string(), None)
-            .unwrap();
-        stoat1.save().unwrap();
+            .expect("Failed to add persistent_test workspace");
+        stoat1.save().expect("Failed to save first Stoat instance");
 
         // Create second instance and verify state was loaded
         let stoat2 = {
@@ -83,7 +92,7 @@ mod tests {
                 state_dir: Some(state_dir),
                 workspace: None,
             };
-            Stoat::new_with_config(config).unwrap()
+            Stoat::new_with_config(config).expect("Failed to create Stoat instance")
         };
         assert!(stoat2.state().workspaces.contains_key("persistent_test"));
         assert_eq!(

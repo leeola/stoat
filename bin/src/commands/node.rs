@@ -35,7 +35,7 @@ fn add_node(
     name: Option<String>,
     config: NodeConfig,
 ) -> Result<NodeId, Box<dyn std::error::Error>> {
-    let node_name = name.unwrap_or_else(|| format!("{}_node", node_type));
+    let node_name = name.unwrap_or_else(|| format!("{node_type}_node"));
 
     // Convert NodeConfig to Value
     let config_value = match config {
@@ -58,10 +58,7 @@ fn add_node(
 
     let id = stoat.create_node(node_type, node_name.clone(), config_value)?;
 
-    println!(
-        "✓ Added {} node '{}' with ID {:?}",
-        node_type, node_name, id
-    );
+    println!("✓ Added {node_type} node '{node_name}' with ID {id:?}");
     Ok(id)
 }
 
@@ -117,10 +114,10 @@ pub fn handle(node_cmd: NodeCommand, stoat: &mut Stoat) -> Result<(), Box<dyn st
                         let node_type = node.node_type();
                         match filter {
                             stoat::cli::node::NodeTypeFilter::Csv => {
-                                format!("{:?}", node_type).contains("Csv")
+                                format!("{node_type:?}").contains("Csv")
                             },
                             stoat::cli::node::NodeTypeFilter::Json => {
-                                format!("{:?}", node_type).contains("Json")
+                                format!("{node_type:?}").contains("Json")
                             },
                             stoat::cli::node::NodeTypeFilter::Table => {
                                 matches!(node_type, stoat_core::node::NodeType::TableViewer)
@@ -138,7 +135,7 @@ pub fn handle(node_cmd: NodeCommand, stoat: &mut Stoat) -> Result<(), Box<dyn st
 
             if filtered_nodes.is_empty() {
                 if let Some(filter) = type_filter {
-                    println!("No nodes found matching filter: {:?}", filter);
+                    println!("No nodes found matching filter: {filter:?}");
                 } else {
                     println!("No nodes found in workspace");
                 }
@@ -148,7 +145,7 @@ pub fn handle(node_cmd: NodeCommand, stoat: &mut Stoat) -> Result<(), Box<dyn st
             // Display nodes
             if detailed {
                 for (id, node) in filtered_nodes {
-                    println!("Node ID: {:?}", id);
+                    println!("Node ID: {id:?}");
                     println!("  Name: {}", node.name());
                     println!("  Type: {:?}", node.node_type());
                     println!(
@@ -181,25 +178,19 @@ pub fn handle(node_cmd: NodeCommand, stoat: &mut Stoat) -> Result<(), Box<dyn st
             }
         },
         NodeCommand::Show { node, outputs } => {
-            println!("Showing node '{}': outputs={}", node, outputs);
+            println!("Showing node '{node}': outputs={outputs}");
             // TODO: Implement node details display
         },
         NodeCommand::Exec { node, format, save } => {
-            println!(
-                "Executing node '{}': format={:?}, save={:?}",
-                node, format, save
-            );
+            println!("Executing node '{node}': format={format:?}, save={save:?}");
             // TODO: Implement node execution
         },
         NodeCommand::Remove { node, force } => {
-            println!("Removing node '{}': force={}", node, force);
+            println!("Removing node '{node}': force={force}");
             // TODO: Implement node removal
         },
         NodeCommand::Config { node, config, data } => {
-            println!(
-                "Configuring node '{}': config={:?}, data={:?}",
-                node, config, data
-            );
+            println!("Configuring node '{node}': config={config:?}, data={data:?}");
             // TODO: Implement node configuration
         },
     }
@@ -228,22 +219,28 @@ mod tests {
                 "sales_table".to_string(),
                 stoat_core::value::Value::Empty,
             )
-            .unwrap();
+            .expect("Failed to create sales_table node");
         let id2 = stoat
             .create_node(
                 "table",
                 "users_table".to_string(),
                 stoat_core::value::Value::Empty,
             )
-            .unwrap();
+            .expect("Failed to create users_table node");
 
         // Verify nodes were added
         let nodes = stoat.workspace().list_nodes();
         assert_eq!(nodes.len(), 2);
 
         // Test that we can retrieve node details
-        let (found_id1, node1) = nodes.iter().find(|(id, _)| *id == id1).unwrap();
-        let (found_id2, node2) = nodes.iter().find(|(id, _)| *id == id2).unwrap();
+        let (found_id1, node1) = nodes
+            .iter()
+            .find(|(id, _)| *id == id1)
+            .expect("Failed to find sales_table node in workspace");
+        let (found_id2, node2) = nodes
+            .iter()
+            .find(|(id, _)| *id == id2)
+            .expect("Failed to find users_table node in workspace");
 
         assert_eq!(*found_id1, id1);
         assert_eq!(*found_id2, id2);
@@ -416,7 +413,7 @@ mod tests {
         let result = handle(node_cmd, &mut stoat);
         assert!(result.is_err());
         assert!(result
-            .unwrap_err()
+            .expect_err("Expected API node creation to fail")
             .to_string()
             .contains("not yet implemented"));
 
@@ -433,27 +430,39 @@ mod tests {
         let csv_config_value = stoat_core::value::Value::String("test.csv".into());
         let csv_result = stoat.create_node("csv", "test_csv".to_string(), csv_config_value);
         assert!(csv_result.is_ok());
-        let csv_id = csv_result.unwrap();
+        let csv_id = csv_result.expect("Failed to create CSV node in factory test");
         let nodes = stoat.workspace().list_nodes();
-        let csv_node = nodes.iter().find(|(id, _)| *id == csv_id).unwrap().1;
+        let csv_node = nodes
+            .iter()
+            .find(|(id, _)| *id == csv_id)
+            .expect("Failed to find CSV node in workspace")
+            .1;
         assert_eq!(csv_node.name(), "test_csv");
 
         // Test Table node creation
         let table_config_value = stoat_core::value::Value::Empty;
         let table_result = stoat.create_node("table", "table_node".to_string(), table_config_value);
         assert!(table_result.is_ok());
-        let table_id = table_result.unwrap();
+        let table_id = table_result.expect("Failed to create table node in factory test");
         let nodes = stoat.workspace().list_nodes();
-        let table_node = nodes.iter().find(|(id, _)| *id == table_id).unwrap().1;
+        let table_node = nodes
+            .iter()
+            .find(|(id, _)| *id == table_id)
+            .expect("Failed to find table node in workspace")
+            .1;
         assert_eq!(table_node.name(), "table_node");
 
         // Test JSON node creation
         let json_config_value = stoat_core::value::Value::String("data.json".into());
         let json_result = stoat.create_node("json", "my_json".to_string(), json_config_value);
         assert!(json_result.is_ok());
-        let json_id = json_result.unwrap();
+        let json_id = json_result.expect("Failed to create JSON node in factory test");
         let nodes = stoat.workspace().list_nodes();
-        let json_node = nodes.iter().find(|(id, _)| *id == json_id).unwrap().1;
+        let json_node = nodes
+            .iter()
+            .find(|(id, _)| *id == json_id)
+            .expect("Failed to find JSON node in workspace")
+            .1;
         assert_eq!(json_node.name(), "my_json");
 
         // Test unknown node type
@@ -464,7 +473,7 @@ mod tests {
         );
         assert!(unknown_result.is_err());
         assert!(unknown_result
-            .unwrap_err()
+            .expect_err("Expected unknown node type creation to fail")
             .to_string()
             .contains("Unknown node type"));
     }
@@ -477,7 +486,7 @@ mod tests {
         let csv_config_value = stoat_core::value::Value::String("test.csv".into());
         let node_id = stoat
             .create_node("csv", "test_node".to_string(), csv_config_value)
-            .unwrap();
+            .expect("Failed to create test node for persistence test");
 
         // Verify node exists before save
         let nodes_before_save = stoat.workspace().list_nodes();
@@ -485,12 +494,15 @@ mod tests {
         assert_eq!(nodes_before_save[0].0, node_id);
 
         // Save and reload
-        stoat.save().unwrap();
+        stoat
+            .save()
+            .expect("Failed to save stoat instance in persistence test");
         let config = stoat_core::StoatConfig {
             state_dir: Some(temp_dir.path().to_path_buf()),
             workspace: None,
         };
-        let reloaded_stoat = stoat_core::Stoat::new_with_config(config).unwrap();
+        let reloaded_stoat =
+            stoat_core::Stoat::new_with_config(config).expect("Failed to reload stoat instance");
 
         // FIXED: Nodes are now properly serialized AND reconstructed via NodeInit registry
         let nodes_after_reload = reloaded_stoat.workspace().list_nodes();
