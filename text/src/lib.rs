@@ -1,14 +1,31 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! AST-based text editing primitives for Stoat
+//!
+//! This crate provides efficient text editing with a focus on AST-based operations.
+//! Text is stored in a rope data structure for efficiency, while all navigation and
+//! editing operations work through an AST interface.
+//!
+//! # Core Concepts
+//!
+//! - **TextBuffer**: The source of truth containing text and lazily-parsed AST
+//! - **TextView**: A window into a specific part of a buffer (e.g., just one function)
+//! - **SyntaxNode**: AST nodes that reference positions in the underlying rope
+//! - **TextCursor**: Navigation and editing within a view
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod buffer;
+pub mod cursor;
+pub mod cursor_collection;
+pub mod edit;
+pub mod query;
+pub mod range;
+pub mod syntax;
+pub mod view;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+// Re-export core types
+pub use buffer::{BufferId, TextBuffer};
+pub use cursor::TextCursor;
+pub use edit::{Edit, EditError, EditOperation, RopeEdit};
+pub use range::TextRange;
+pub use syntax::{Syntax, SyntaxKind, SyntaxNode};
+// Re-export text-size for convenience
+pub use text_size::{TextLen, TextSize};
+pub use view::TextView;
