@@ -20,7 +20,7 @@ workspace = true
 
 [dependencies]
 stoat = { path = "../stoat", features = ["cli_bin"] }
-stoat_core = { path = "../core", features = ["csv", "json"] }
+stoat_core = { path = "../core" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
 

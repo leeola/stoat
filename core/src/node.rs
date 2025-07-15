@@ -169,25 +169,20 @@ pub struct NodeLoadResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeType {
-    #[cfg(feature = "csv")]
-    CsvSource,
-    #[cfg(feature = "json")]
-    JsonSource,
-    Map,
-    TableViewer,
+    // Placeholder for future node types
+    // This enum will be populated with text editor specific node types
+    #[cfg(test)]
+    MockType, // Used only in tests
 }
 
 impl std::fmt::Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            #[cfg(feature = "csv")]
-            NodeType::CsvSource => "csv",
-            #[cfg(feature = "json")]
-            NodeType::JsonSource => "json",
-            NodeType::Map => "map",
-            NodeType::TableViewer => "table",
-        };
-        write!(f, "{s}")
+        #[allow(unreachable_patterns)]
+        match self {
+            #[cfg(test)]
+            NodeType::MockType => write!(f, "mock"),
+            _ => write!(f, "unknown"),
+        }
     }
 }
 
@@ -332,17 +327,9 @@ impl NodeInitRegistry {
 ///
 /// See also: [`NodeInit`], [`NodeInitRegistry`]
 pub static NODE_INIT_REGISTRY: LazyLock<std::sync::Mutex<NodeInitRegistry>> = LazyLock::new(|| {
-    let mut registry = NodeInitRegistry::new();
+    let registry = NodeInitRegistry::new();
 
-    // Register built-in node types
-    #[cfg(feature = "csv")]
-    registry.register(Box::new(crate::nodes::csv::CsvInit));
-
-    #[cfg(feature = "json")]
-    registry.register(Box::new(crate::nodes::json::JsonInit));
-
-    registry.register(Box::new(crate::nodes::map::MapInit));
-    registry.register(Box::new(crate::nodes::table::TableInit));
+    // No built-in node types registered yet
 
     std::sync::Mutex::new(registry)
 });
@@ -384,7 +371,7 @@ mod tests {
         }
 
         fn node_type(&self) -> NodeType {
-            NodeType::Map
+            NodeType::MockType
         }
 
         fn name(&self) -> &str {
@@ -420,23 +407,9 @@ mod tests {
     fn registry_basic_functionality() {
         // Test that we can create nodes using the global registry
 
-        // Only test CSV if the feature is enabled
-        #[cfg(feature = "csv")]
-        {
-            let csv_config = Value::String(compact_str::CompactString::from("test.csv"));
-            let result =
-                create_node_from_registry("csv", NodeId(1), "test_csv".to_string(), csv_config);
-            assert!(result.is_ok());
-        }
-
-        let table_config = Value::Empty;
+        // No nodes are registered yet, so any creation should fail
         let result =
-            create_node_from_registry("table", NodeId(2), "test_table".to_string(), table_config);
-        assert!(result.is_ok());
-
-        // Test unknown node type
-        let result =
-            create_node_from_registry("unknown", NodeId(3), "test".to_string(), Value::Empty);
+            create_node_from_registry("unknown", NodeId(1), "test".to_string(), Value::Empty);
         assert!(result.is_err());
     }
 
@@ -447,15 +420,8 @@ mod tests {
             .expect("Failed to lock node registry");
         let types = registry.registered_types();
 
-        // Should contain at least the built-in node types
-        assert!(types.contains(&"table"));
-        assert!(types.contains(&"map"));
-
-        #[cfg(feature = "csv")]
-        assert!(types.contains(&"csv"));
-
-        #[cfg(feature = "json")]
-        assert!(types.contains(&"json"));
+        // Should be empty - no built-in node types registered
+        assert!(types.is_empty());
     }
 
     #[test]
@@ -464,15 +430,8 @@ mod tests {
             .lock()
             .expect("Failed to lock node registry");
 
-        assert!(registry.is_registered("table"));
-        assert!(registry.is_registered("map"));
+        // No node types registered yet
         assert!(!registry.is_registered("nonexistent"));
-
-        #[cfg(feature = "csv")]
-        assert!(registry.is_registered("csv"));
-
-        #[cfg(feature = "json")]
-        assert!(registry.is_registered("json"));
     }
 
     #[test]
@@ -508,29 +467,18 @@ mod tests {
     fn node_init_serialization_roundtrip() {
         use crate::workspace::{SerializableWorkspace, Workspace};
 
-        // Create a workspace with a test node
-        let mut workspace = Workspace::new();
+        // Create an empty workspace
+        let workspace = Workspace::new();
 
-        // Add a table node directly
-        let table_node = crate::nodes::table::TableViewerNode::new_with_cache_dir(
-            NodeId(1),
-            "test_table".to_string(),
-            std::path::PathBuf::from("/tmp"),
-        );
-        workspace.add_table_node(NodeId(1), table_node);
-
-        // Serialize the workspace
+        // Serialize the empty workspace
         let serializable = SerializableWorkspace::from(&workspace);
-        assert_eq!(serializable.nodes.len(), 1);
-        assert_eq!(serializable.nodes[0].node_type, "table");
+        assert_eq!(serializable.nodes.len(), 0);
 
-        // Reconstruct workspace from serializable (this tests the registry)
+        // Reconstruct workspace from serializable
         let reconstructed = Workspace::from_serializable(serializable);
 
-        // Verify the node was reconstructed
+        // Verify no nodes exist
         let nodes = reconstructed.list_nodes();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].1.node_type().to_string(), "table");
-        assert_eq!(nodes[0].1.name(), "test_table");
+        assert_eq!(nodes.len(), 0);
     }
 }

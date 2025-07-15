@@ -1,6 +1,5 @@
 use clap::Parser;
-use stoat::cli::config::{Cli, Command};
-use stoat_bin::commands;
+use stoat::cli::config::Cli;
 use stoat_core::{Stoat, StoatConfig};
 
 #[tokio::main]
@@ -13,21 +12,13 @@ async fn main() {
         workspace: cli.workspace,
     };
 
-    let mut stoat = Stoat::new_with_config(config).unwrap_or_else(|e| {
+    let stoat = Stoat::new_with_config(config).unwrap_or_else(|e| {
         eprintln!("Error: Failed to initialize Stoat: {e}");
         std::process::exit(1);
     });
 
-    // Execute command
-    let result: Result<(), Box<dyn std::error::Error>> = match cli.command {
-        Command::Node(node_cmd) => commands::node::handle(node_cmd, &mut stoat),
-    };
-
-    // Handle command result and save state
-    if let Err(e) = result {
-        eprintln!("Command failed: {e}");
-        std::process::exit(1);
-    }
+    // No commands implemented yet - just print a message
+    eprintln!("Stoat editor initialized. No commands available yet.");
 
     // Save state and workspace
     if let Err(e) = stoat.save() {
