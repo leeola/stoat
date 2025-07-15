@@ -1,0 +1,12 @@
+[package]
+name = "stoat_text"
+version = "0.1.0"
+edition = "2024"
+readme = "../README.md"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[dependencies]
+
+[lints]
+workspace = true

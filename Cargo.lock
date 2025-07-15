@@ -3301,6 +3301,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_text"
+version = "0.1.0"
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
