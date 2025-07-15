@@ -2,11 +2,13 @@
 
 use crate::{
     TextSize,
+    action::{ActionError, ActionResult, ExecutionResult, TextAction},
     buffer::{ChangeEvent, TextBuffer},
     cursor::TextCursor,
     cursor_collection::CursorCollection,
+    edit::{Edit, EditOperation},
     range::TextRange,
-    syntax::{Syntax, SyntaxNode},
+    syntax::{Syntax, SyntaxNode, simple::SimpleText},
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -113,6 +115,1004 @@ impl<S: Syntax> TextView<S> {
     pub fn contains_offset(&self, offset: usize) -> bool {
         let range = self.text_range();
         range.contains((offset as u32).into())
+    }
+
+    /// Execute a action on this view
+    pub fn execute_action(&self, action: &TextAction) -> ActionResult<ExecutionResult> {
+        match action {
+            // Movement actions
+            TextAction::MoveLeft { count } => self.execute_move_left(*count),
+            TextAction::MoveRight { count } => self.execute_move_right(*count),
+            TextAction::MoveUp { count } => self.execute_move_up(*count),
+            TextAction::MoveDown { count } => self.execute_move_down(*count),
+            TextAction::MoveWordForward => self.execute_move_word_forward(),
+            TextAction::MoveWordBackward => self.execute_move_word_backward(),
+            TextAction::MoveToLineStart => self.execute_move_to_line_start(),
+            TextAction::MoveToLineEnd => self.execute_move_to_line_end(),
+            TextAction::MoveToDocumentStart => self.execute_move_to_document_start(),
+            TextAction::MoveToDocumentEnd => self.execute_move_to_document_end(),
+            TextAction::MoveToLine { line } => self.execute_move_to_line(*line),
+            TextAction::MoveToOffset { offset } => self.execute_move_to_offset(*offset),
+
+            // Selection actions
+            TextAction::ExtendSelectionLeft { count } => self.execute_extend_selection_left(*count),
+            TextAction::ExtendSelectionRight { count } => {
+                self.execute_extend_selection_right(*count)
+            },
+            TextAction::ExtendSelectionToWordEnd => self.execute_extend_selection_to_word_end(),
+            TextAction::ExtendSelectionToWordStart => self.execute_extend_selection_to_word_start(),
+            TextAction::SelectLine => self.execute_select_line(),
+            TextAction::SelectWord => self.execute_select_word(),
+            TextAction::SelectAll => self.execute_select_all(),
+            TextAction::ClearSelection => self.execute_clear_selection(),
+
+            // Edit actions
+            TextAction::InsertText { text } => self.execute_insert_text(text),
+            TextAction::DeleteForward => self.execute_delete_forward(),
+            TextAction::DeleteBackward => self.execute_delete_backward(),
+            TextAction::DeleteWordForward => self.execute_delete_word_forward(),
+            TextAction::DeleteWordBackward => self.execute_delete_word_backward(),
+            TextAction::DeleteLine => self.execute_delete_line(),
+            TextAction::ReplaceSelection { text } => self.execute_replace_selection(text),
+
+            // Multi-cursor actions
+            TextAction::AddCursorAbove => self.execute_add_cursor_above(),
+            TextAction::AddCursorBelow => self.execute_add_cursor_below(),
+            TextAction::AddCursorAtOffset { offset } => self.execute_add_cursor_at_offset(*offset),
+            TextAction::RemoveSecondaryCursors => self.execute_remove_secondary_cursors(),
+        }
+    }
+
+    // Movement implementations
+    fn execute_move_left(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = TextSize::from(u32::from(old_pos).saturating_sub(count as u32));
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(new_pos, old_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_right(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let buffer_len = self.inner.buffer.len() as u32;
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = TextSize::from(
+                u32::from(old_pos)
+                    .saturating_add(count as u32)
+                    .min(buffer_len),
+            );
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos, new_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_word_forward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = self.inner.buffer.next_word_boundary(old_pos);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos, new_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_word_backward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = self.inner.buffer.prev_word_boundary(old_pos);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(new_pos, old_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_line_start(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = self.inner.buffer.line_start_offset(old_pos);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(new_pos, old_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_line_end(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = self.inner.buffer.line_end_offset(old_pos);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos, new_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_document_start(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = TextSize::from(0);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(new_pos, old_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_document_end(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let buffer_len = self.inner.buffer.len() as u32;
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            let new_pos = TextSize::from(buffer_len);
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos, new_pos));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_line(&self, line: usize) -> ActionResult<ExecutionResult> {
+        if line == 0 {
+            return Err(ActionError::InvalidLine { line });
+        }
+
+        let line_idx = line - 1; // Convert to 0-indexed
+        let line_count = self.inner.buffer.line_count();
+
+        if line_idx >= line_count {
+            return Err(ActionError::InvalidLine { line });
+        }
+
+        let mut cursors = self.inner.cursors.write();
+        let new_pos = self.inner.buffer.line_to_offset(line_idx);
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            cursor.set_position(new_pos);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos.min(new_pos), old_pos.max(new_pos)));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_to_offset(&self, offset: TextSize) -> ActionResult<ExecutionResult> {
+        let buffer_len = self.inner.buffer.len() as u32;
+        if u32::from(offset) > buffer_len {
+            return Err(ActionError::InvalidPosition { position: offset });
+        }
+
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let old_pos = cursor.position();
+            cursor.set_position(offset);
+            cursor.clear_selection();
+            affected_ranges.push(TextRange::new(old_pos.min(offset), old_pos.max(offset)));
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    // Stub implementations for other actions - these will be implemented next
+    fn execute_move_up(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+            let current_line_idx = self.inner.buffer.offset_to_line(current_pos);
+            
+            // Calculate target line index
+            let target_line_idx = current_line_idx.saturating_sub(count);
+            
+            if target_line_idx != current_line_idx {
+                // Get current column position
+                let current_line_start = self.inner.buffer.line_to_offset(current_line_idx);
+                let current_col = current_pos - current_line_start;
+                
+                // Calculate new position on target line
+                let target_line_start = self.inner.buffer.line_to_offset(target_line_idx);
+                let target_line_end = self.inner.buffer.line_end_offset(target_line_start);
+                let target_line_len = target_line_end - target_line_start;
+                
+                let new_pos = if current_col <= target_line_len {
+                    target_line_start + current_col
+                } else {
+                    target_line_end
+                };
+                
+                cursor.set_position(new_pos);
+                cursor.clear_selection();
+                affected_ranges.push(TextRange::new(
+                    current_pos.min(new_pos),
+                    current_pos.max(new_pos),
+                ));
+            }
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Find current line
+            if let Some(current_line) = root.find_line_at_offset(current_pos) {
+                let current_line_range = current_line.text_range();
+
+                // Find the line index
+                if let Some(current_line_idx) = lines
+                    .iter()
+                    .position(|line| line.text_range() == current_line_range)
+                {
+                    // Calculate target line index
+                    let target_line_idx = current_line_idx.saturating_sub(count);
+
+                    if target_line_idx < lines.len() {
+                        let target_line = &lines[target_line_idx];
+
+                        // Try to maintain column position
+                        let current_col = current_pos - current_line_range.start();
+                        let target_line_range = target_line.text_range();
+                        let target_line_len = target_line_range.len();
+
+                        let new_pos = if current_col <= target_line_len {
+                            target_line_range.start() + current_col
+                        } else {
+                            target_line_range.end()
+                        };
+
+                        cursor.set_position(new_pos);
+                        cursor.clear_selection();
+                        affected_ranges.push(TextRange::new(
+                            current_pos.min(new_pos),
+                            current_pos.max(new_pos),
+                        ));
+                    }
+                    // If can't move up, cursor stays in place
+                }
+            }
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_move_down(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        // TODO: Use buffer methods instead of AST methods for generic compatibility
+        return Err(ActionError::AstNotAvailable);
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Find current line
+            if let Some(current_line) = root.find_line_at_offset(current_pos) {
+                let current_line_range = current_line.text_range();
+
+                // Find the line index
+                if let Some(current_line_idx) = lines
+                    .iter()
+                    .position(|line| line.text_range() == current_line_range)
+                {
+                    // Calculate target line index
+                    let target_line_idx =
+                        (current_line_idx + count).min(lines.len().saturating_sub(1));
+
+                    if target_line_idx < lines.len() && target_line_idx != current_line_idx {
+                        let target_line = &lines[target_line_idx];
+
+                        // Try to maintain column position
+                        let current_col = current_pos - current_line_range.start();
+                        let target_line_range = target_line.text_range();
+                        let target_line_len = target_line_range.len();
+
+                        let new_pos = if current_col <= target_line_len {
+                            target_line_range.start() + current_col
+                        } else {
+                            target_line_range.end()
+                        };
+
+                        cursor.set_position(new_pos);
+                        cursor.clear_selection();
+                        affected_ranges.push(TextRange::new(
+                            current_pos.min(new_pos),
+                            current_pos.max(new_pos),
+                        ));
+                    }
+                    // If can't move down, cursor stays in place
+                }
+            }
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_extend_selection_left(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+            let new_pos = TextSize::from(u32::from(current_pos).saturating_sub(count as u32));
+
+            // Extend or create selection
+            let selection = if let Some(existing) = cursor.selection() {
+                // Extend existing selection
+                TextRange::new(existing.start(), new_pos)
+            } else {
+                // Create new selection from current position
+                TextRange::new(current_pos, new_pos)
+            };
+
+            cursor.set_selection(Some(selection));
+            cursor.set_position(new_pos);
+            affected_ranges.push(selection);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_extend_selection_right(&self, count: usize) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let buffer_len = self.inner.buffer.len() as u32;
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+            let new_pos = TextSize::from(
+                u32::from(current_pos)
+                    .saturating_add(count as u32)
+                    .min(buffer_len),
+            );
+
+            // Extend or create selection
+            let selection = if let Some(existing) = cursor.selection() {
+                // Extend existing selection
+                TextRange::new(existing.start(), new_pos)
+            } else {
+                // Create new selection from current position
+                TextRange::new(current_pos, new_pos)
+            };
+
+            cursor.set_selection(Some(selection));
+            cursor.set_position(new_pos);
+            affected_ranges.push(selection);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_extend_selection_to_word_end(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Find next word boundary
+            let new_pos = self.inner.buffer.next_word_boundary(current_pos);
+
+            // Extend or create selection
+            let selection = if let Some(existing) = cursor.selection() {
+                // Extend existing selection
+                TextRange::new(existing.start(), new_pos)
+            } else {
+                // Create new selection from current position
+                TextRange::new(current_pos, new_pos)
+            };
+
+            cursor.set_selection(Some(selection));
+            cursor.set_position(new_pos);
+            affected_ranges.push(selection);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_extend_selection_to_word_start(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Find previous word boundary
+            let new_pos = self.inner.buffer.prev_word_boundary(current_pos);
+
+            // Extend or create selection
+            let selection = if let Some(existing) = cursor.selection() {
+                // Extend existing selection
+                TextRange::new(existing.start(), new_pos)
+            } else {
+                // Create new selection from current position
+                TextRange::new(current_pos, new_pos)
+            };
+
+            cursor.set_selection(Some(selection));
+            cursor.set_position(new_pos);
+            affected_ranges.push(selection);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: None,
+        })
+    }
+
+    fn execute_select_line(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Get line boundaries using buffer methods
+            let line_start = self.inner.buffer.line_start_offset(current_pos);
+            let line_end = self.inner.buffer.line_end_offset(current_pos);
+            let line_range = TextRange::new(line_start, line_end);
+
+            cursor.set_selection(Some(line_range));
+            cursor.set_position(line_start);
+            affected_ranges.push(line_range);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: Some("Line selected".to_string()),
+        })
+    }
+
+    fn execute_select_word(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Find word boundaries using buffer methods
+            let word_start = self.inner.buffer.prev_word_boundary(current_pos);
+            let word_end = self.inner.buffer.next_word_boundary(current_pos);
+
+            // Only select if we're actually on a word
+            if word_start != word_end {
+                let word_range = TextRange::new(word_start, word_end);
+                cursor.set_selection(Some(word_range));
+                cursor.set_position(word_start);
+                affected_ranges.push(word_range);
+            }
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges,
+            message: Some("Word selected".to_string()),
+        })
+    }
+
+    fn execute_select_all(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        let document_range = root.text_range();
+
+        for cursor in cursors.iter_mut() {
+            cursor.set_selection(Some(document_range));
+            cursor.set_position(document_range.start());
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![document_range],
+            message: Some("All text selected".to_string()),
+        })
+    }
+
+    fn execute_clear_selection(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        for cursor in cursors.iter_mut() {
+            cursor.clear_selection();
+        }
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: Vec::new(),
+            message: Some("Selection cleared".to_string()),
+        })
+    }
+
+    fn execute_insert_text(&self, text: &str) -> ActionResult<ExecutionResult> {
+        // For now, only handle primary cursor to avoid complexity
+        // Multi-cursor editing would need more sophisticated handling
+        let mut cursors = self.inner.cursors.write();
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+        let root = self.inner.buffer.syntax();
+
+        primary_cursor.set_current_node(root.clone());
+
+        // Create an edit
+        let edit = Edit {
+            target: root.clone(),
+            operation: EditOperation::InsertAt {
+                offset: u32::from(pos) as usize,
+                text: text.to_string(),
+            },
+        };
+
+        // Drop the cursor lock before applying edit to avoid deadlock
+        drop(cursors);
+
+        // Apply edit
+        self.inner
+            .buffer
+            .apply_edit(&edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![TextRange::new(pos, pos + TextSize::from(text.len() as u32))],
+            message: None,
+        })
+    }
+
+    fn execute_delete_forward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        let buffer_len = self.inner.buffer.len();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        if u32::from(pos) >= buffer_len as u32 {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Already at end of document".to_string()),
+            });
+        }
+
+        // Delete one character forward
+        let delete_range = TextRange::new(pos, pos + TextSize::from(1));
+        let edit = Edit {
+            target: root.clone(),
+            operation: EditOperation::Delete,
+        };
+
+        // We need to create a more specific edit for the range
+        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_rope_edit(&rope_edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![delete_range],
+            message: None,
+        })
+    }
+
+    fn execute_delete_backward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        if pos == TextSize::from(0) {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Already at start of document".to_string()),
+            });
+        }
+
+        // Delete one character backward
+        let delete_range = TextRange::new(pos - TextSize::from(1), pos);
+        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_rope_edit(&rope_edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![delete_range],
+            message: None,
+        })
+    }
+
+    fn execute_delete_word_forward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        // Find next word boundary
+        let end_pos = self.inner.buffer.next_word_boundary(pos);
+
+        if pos == end_pos {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("No word to delete forward".to_string()),
+            });
+        }
+
+        let delete_range = TextRange::new(pos, end_pos);
+        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_rope_edit(&rope_edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![delete_range],
+            message: None,
+        })
+    }
+
+    fn execute_delete_word_backward(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        // Find previous word boundary
+        let start_pos = self.inner.buffer.prev_word_boundary(pos);
+
+        if pos == start_pos {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("No word to delete backward".to_string()),
+            });
+        }
+
+        let delete_range = TextRange::new(start_pos, pos);
+        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_rope_edit(&rope_edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![delete_range],
+            message: None,
+        })
+    }
+
+    fn execute_delete_line(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        // Get line boundaries using buffer methods
+        let line_start = self.inner.buffer.line_start_offset(pos);
+        let line_end = self.inner.buffer.line_end_offset(pos);
+        let line_range = TextRange::new(line_start, line_end);
+
+        let rope_edit = crate::edit::RopeEdit::delete(line_range);
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_rope_edit(&rope_edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![line_range],
+            message: None,
+        })
+    }
+
+    fn execute_replace_selection(&self, text: &str) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+
+        if let Some(selection) = primary_cursor.selection() {
+            let rope_edit = crate::edit::RopeEdit::replace(selection, text.to_string());
+
+            drop(cursors);
+            self.inner
+                .buffer
+                .apply_rope_edit(&rope_edit)
+                .map_err(|e| ActionError::EditFailed { source: e })?;
+
+            let new_range = TextRange::new(
+                selection.start(),
+                selection.start() + TextSize::from(text.len() as u32),
+            );
+            affected_ranges.push(new_range);
+
+            Ok(ExecutionResult {
+                success: true,
+                affected_ranges,
+                message: None,
+            })
+        } else {
+            // No selection, insert at cursor position
+            self.execute_insert_text(text)
+        }
+    }
+
+    fn execute_add_cursor_above(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        // TODO: Use buffer methods instead of AST methods for generic compatibility
+        return Err(ActionError::AstNotAvailable);
+
+        // Get the primary cursor position
+        let primary_pos = cursors.primary().position();
+
+        // Find current line
+        if let Some(current_line) = root.find_line_at_offset(primary_pos) {
+            let current_line_range = current_line.text_range();
+
+            // Find the line index
+            if let Some(current_line_idx) = lines
+                .iter()
+                .position(|line| line.text_range() == current_line_range)
+            {
+                if current_line_idx > 0 {
+                    let target_line = &lines[current_line_idx - 1];
+
+                    // Try to maintain column position
+                    let current_col = primary_pos - current_line_range.start();
+                    let target_line_range = target_line.text_range();
+                    let target_line_len = target_line_range.len();
+
+                    let new_pos = if current_col <= target_line_len {
+                        target_line_range.start() + current_col
+                    } else {
+                        target_line_range.end()
+                    };
+
+                    cursors.add_cursor(new_pos, root);
+
+                    Ok(ExecutionResult {
+                        success: true,
+                        affected_ranges: vec![TextRange::new(new_pos, new_pos)],
+                        message: Some("Cursor added above".to_string()),
+                    })
+                } else {
+                    Ok(ExecutionResult {
+                        success: false,
+                        affected_ranges: Vec::new(),
+                        message: Some("Already at first line".to_string()),
+                    })
+                }
+            } else {
+                Err(ActionError::AstNotAvailable)
+            }
+        } else {
+            Err(ActionError::AstNotAvailable)
+        }
+    }
+
+    fn execute_add_cursor_below(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        // TODO: Use buffer methods instead of AST methods for generic compatibility
+        return Err(ActionError::AstNotAvailable);
+
+        // Get the primary cursor position
+        let primary_pos = cursors.primary().position();
+
+        // Find current line
+        if let Some(current_line) = root.find_line_at_offset(primary_pos) {
+            let current_line_range = current_line.text_range();
+
+            // Find the line index
+            if let Some(current_line_idx) = lines
+                .iter()
+                .position(|line| line.text_range() == current_line_range)
+            {
+                if current_line_idx + 1 < lines.len() {
+                    let target_line = &lines[current_line_idx + 1];
+
+                    // Try to maintain column position
+                    let current_col = primary_pos - current_line_range.start();
+                    let target_line_range = target_line.text_range();
+                    let target_line_len = target_line_range.len();
+
+                    let new_pos = if current_col <= target_line_len {
+                        target_line_range.start() + current_col
+                    } else {
+                        target_line_range.end()
+                    };
+
+                    cursors.add_cursor(new_pos, root);
+
+                    Ok(ExecutionResult {
+                        success: true,
+                        affected_ranges: vec![TextRange::new(new_pos, new_pos)],
+                        message: Some("Cursor added below".to_string()),
+                    })
+                } else {
+                    Ok(ExecutionResult {
+                        success: false,
+                        affected_ranges: Vec::new(),
+                        message: Some("Already at last line".to_string()),
+                    })
+                }
+            } else {
+                Err(ActionError::AstNotAvailable)
+            }
+        } else {
+            Err(ActionError::AstNotAvailable)
+        }
+    }
+
+    fn execute_add_cursor_at_offset(&self, offset: TextSize) -> ActionResult<ExecutionResult> {
+        let buffer_len = self.inner.buffer.len() as u32;
+        if u32::from(offset) > buffer_len {
+            return Err(ActionError::InvalidPosition { position: offset });
+        }
+
+        let mut cursors = self.inner.cursors.write();
+        let root = self.inner.buffer.syntax();
+        cursors.add_cursor(offset, root);
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: vec![TextRange::new(offset, offset)],
+            message: Some("Cursor added".to_string()),
+        })
+    }
+
+    fn execute_remove_secondary_cursors(&self) -> ActionResult<ExecutionResult> {
+        let mut cursors = self.inner.cursors.write();
+
+        // Get all non-primary cursor IDs
+        let to_remove: Vec<_> = cursors
+            .iter()
+            .map(|c| c.id())
+            .filter(|&id| id != cursors.primary().id())
+            .collect();
+
+        for id in to_remove {
+            cursors.remove_cursor(id);
+        }
+
+        Ok(ExecutionResult {
+            success: true,
+            affected_ranges: Vec::new(),
+            message: Some("Secondary cursors removed".to_string()),
+        })
     }
 }
 

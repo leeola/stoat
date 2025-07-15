@@ -288,6 +288,165 @@ impl<S: Syntax> TextBuffer<S> {
             }
         }
     }
+
+    /// Get the number of lines in the buffer
+    pub fn line_count(&self) -> usize {
+        self.inner.rope.read().len_lines()
+    }
+
+    /// Get line at index (0-indexed)
+    pub fn line(&self, line_idx: usize) -> Option<String> {
+        let rope = self.inner.rope.read();
+        if line_idx < rope.len_lines() {
+            Some(rope.line(line_idx).to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Convert byte offset to line number (0-indexed)
+    pub fn offset_to_line(&self, offset: TextSize) -> usize {
+        let rope = self.inner.rope.read();
+        let byte_idx = u32::from(offset) as usize;
+        if byte_idx > rope.len_bytes() {
+            rope.len_lines().saturating_sub(1)
+        } else {
+            let char_idx = rope.byte_to_char(byte_idx);
+            rope.char_to_line(char_idx)
+        }
+    }
+
+    /// Get byte offset of line start
+    pub fn line_to_offset(&self, line_idx: usize) -> TextSize {
+        let rope = self.inner.rope.read();
+        if line_idx >= rope.len_lines() {
+            TextSize::from(rope.len_bytes() as u32)
+        } else {
+            let char_idx = rope.line_to_char(line_idx);
+            let byte_idx = rope.char_to_byte(char_idx);
+            TextSize::from(byte_idx as u32)
+        }
+    }
+
+    /// Get the start of the line containing the given offset
+    pub fn line_start_offset(&self, offset: TextSize) -> TextSize {
+        let line_idx = self.offset_to_line(offset);
+        self.line_to_offset(line_idx)
+    }
+
+    /// Get the end of the line containing the given offset (including newline if present)
+    pub fn line_end_offset(&self, offset: TextSize) -> TextSize {
+        let rope = self.inner.rope.read();
+        let line_idx = self.offset_to_line(offset);
+
+        if line_idx >= rope.len_lines() {
+            return TextSize::from(rope.len_bytes() as u32);
+        }
+
+        // Get the start of the next line
+        if line_idx + 1 < rope.len_lines() {
+            let next_line_char = rope.line_to_char(line_idx + 1);
+            let next_line_byte = rope.char_to_byte(next_line_char);
+            TextSize::from(next_line_byte as u32)
+        } else {
+            // Last line, return end of buffer
+            TextSize::from(rope.len_bytes() as u32)
+        }
+    }
+
+    /// Check if offset is at a word boundary
+    pub fn is_word_boundary(&self, offset: TextSize) -> bool {
+        let rope = self.inner.rope.read();
+        let byte_idx = u32::from(offset) as usize;
+
+        if byte_idx == 0 || byte_idx >= rope.len_bytes() {
+            return true;
+        }
+
+        let char_idx = rope.byte_to_char(byte_idx);
+        if char_idx == 0 || char_idx >= rope.len_chars() {
+            return true;
+        }
+
+        // Get the character at this position and the previous one
+        let curr_char = rope.char(char_idx);
+        let prev_char = rope.char(char_idx - 1);
+
+        // Word boundary if transitioning between word and non-word chars
+        curr_char.is_whitespace() != prev_char.is_whitespace()
+            || (curr_char.is_alphanumeric() != prev_char.is_alphanumeric()
+                && !curr_char.is_whitespace()
+                && !prev_char.is_whitespace())
+    }
+
+    /// Find the next word boundary after the given offset
+    pub fn next_word_boundary(&self, offset: TextSize) -> TextSize {
+        let rope = self.inner.rope.read();
+        let mut byte_idx = u32::from(offset) as usize;
+        let len = rope.len_bytes();
+
+        if byte_idx >= len {
+            return TextSize::from(len as u32);
+        }
+
+        // Skip current word
+        let mut char_idx = rope.byte_to_char(byte_idx);
+        while char_idx < rope.len_chars() {
+            let ch = rope.char(char_idx);
+            if ch.is_whitespace() {
+                break;
+            }
+            char_idx += 1;
+        }
+
+        // Skip whitespace
+        while char_idx < rope.len_chars() {
+            let ch = rope.char(char_idx);
+            if !ch.is_whitespace() {
+                break;
+            }
+            char_idx += 1;
+        }
+
+        byte_idx = rope.char_to_byte(char_idx);
+        TextSize::from(byte_idx as u32)
+    }
+
+    /// Find the previous word boundary before the given offset
+    pub fn prev_word_boundary(&self, offset: TextSize) -> TextSize {
+        let rope = self.inner.rope.read();
+        let byte_idx = u32::from(offset) as usize;
+
+        if byte_idx == 0 {
+            return TextSize::from(0);
+        }
+
+        let mut char_idx = rope.byte_to_char(byte_idx);
+        if char_idx > 0 {
+            char_idx -= 1;
+
+            // Skip whitespace backwards
+            while char_idx > 0 {
+                let ch = rope.char(char_idx);
+                if !ch.is_whitespace() {
+                    break;
+                }
+                char_idx = char_idx.saturating_sub(1);
+            }
+
+            // Skip word backwards
+            while char_idx > 0 {
+                let ch = rope.char(char_idx - 1);
+                if ch.is_whitespace() {
+                    break;
+                }
+                char_idx -= 1;
+            }
+        }
+
+        let byte_idx = rope.char_to_byte(char_idx);
+        TextSize::from(byte_idx as u32)
+    }
 }
 
 impl<S: Syntax> Clone for TextBuffer<S> {

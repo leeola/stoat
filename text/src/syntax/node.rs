@@ -1,6 +1,6 @@
 //! Syntax nodes with rope offsets
 
-use crate::{range::TextRange, syntax::kind::Syntax};
+use crate::{TextSize, range::TextRange, syntax::kind::Syntax};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
@@ -57,6 +57,26 @@ impl<S: Syntax> SyntaxNode<S> {
         node
     }
 
+    /// Create a new syntax node with children
+    pub(crate) fn new_with_children(
+        kind: S::Kind,
+        range: TextRange,
+        children: Vec<SyntaxElement<S>>,
+    ) -> Self {
+        let node = Self::new(kind, range);
+
+        // Set parent pointers for child nodes
+        let weak_parent = Arc::downgrade(&node.data);
+        for child in &children {
+            if let SyntaxElement::Node(child_node) = child {
+                *child_node.data.parent.write() = Some(weak_parent.clone());
+            }
+        }
+
+        let _ = node.data.children.set(children);
+        node
+    }
+
     /// Get the kind of this node
     pub fn kind(&self) -> S::Kind {
         self.data.kind
@@ -70,8 +90,15 @@ impl<S: Syntax> SyntaxNode<S> {
     /// Get the text content of this node
     pub fn text(&self) -> &str {
         self.data.text.get_or_init(|| {
-            // TODO: Extract text from rope via buffer
-            String::new()
+            // Build text from children
+            let mut text = String::new();
+            for child in self.children() {
+                match child {
+                    SyntaxElement::Token(token) => text.push_str(token.text()),
+                    SyntaxElement::Node(node) => text.push_str(node.text()),
+                }
+            }
+            text
         })
     }
 
@@ -87,10 +114,7 @@ impl<S: Syntax> SyntaxNode<S> {
 
     /// Get child nodes (triggers lazy parsing if needed)
     pub fn children(&self) -> &[SyntaxElement<S>] {
-        self.data.children.get_or_init(|| {
-            // TODO: Lazy parse children
-            Vec::new()
-        })
+        self.data.children.get_or_init(|| Vec::new())
     }
 
     /// Get the first child
@@ -146,6 +170,98 @@ impl<S: Syntax> SyntaxNode<S> {
                 SyntaxElement::Node(node) => node.collect_tokens(tokens),
             }
         }
+    }
+
+    /// Find the token at the given offset
+    pub fn find_token_at_offset(&self, offset: TextSize) -> Option<SyntaxToken<S>> {
+        // First check if offset is within our range
+        if !self.text_range().contains(offset) {
+            return None;
+        }
+
+        // Search through children
+        for child in self.children() {
+            match child {
+                SyntaxElement::Token(token) => {
+                    if token.text_range().contains(offset) {
+                        return Some(token.clone());
+                    }
+                },
+                SyntaxElement::Node(node) => {
+                    if let Some(token) = node.find_token_at_offset(offset) {
+                        return Some(token);
+                    }
+                },
+            }
+        }
+
+        None
+    }
+
+    /// Find the deepest node containing the given offset
+    pub fn find_node_at_offset(&self, offset: TextSize) -> Option<SyntaxNode<S>> {
+        // First check if offset is within our range
+        if !self.text_range().contains(offset) {
+            return None;
+        }
+
+        // Try to find a child node containing the offset
+        for child in self.children() {
+            if let SyntaxElement::Node(node) = child {
+                if node.text_range().contains(offset) {
+                    // Recursively find the deepest node
+                    if let Some(deeper) = node.find_node_at_offset(offset) {
+                        return Some(deeper);
+                    }
+                    return Some(node.clone());
+                }
+            }
+        }
+
+        // No child contains it, so we're the deepest
+        Some(self.clone())
+    }
+
+    /// Get the next sibling of this node
+    pub fn next_sibling(&self) -> Option<SyntaxNode<S>> {
+        let parent = self.parent()?;
+        let siblings = parent.children();
+
+        // Find our position among siblings
+        let mut found_self = false;
+        for child in siblings {
+            if found_self {
+                if let SyntaxElement::Node(sibling) = child {
+                    return Some(sibling.clone());
+                }
+            } else if let SyntaxElement::Node(node) = child {
+                // Check if this is us by comparing ranges (since we don't have direct equality)
+                if node.text_range() == self.text_range() && node.kind() == self.kind() {
+                    found_self = true;
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get the previous sibling of this node
+    pub fn prev_sibling(&self) -> Option<SyntaxNode<S>> {
+        let parent = self.parent()?;
+        let siblings = parent.children();
+
+        let mut prev_node = None;
+        for child in siblings {
+            if let SyntaxElement::Node(node) = child {
+                // Check if this is us
+                if node.text_range() == self.text_range() && node.kind() == self.kind() {
+                    return prev_node;
+                }
+                prev_node = Some(node.clone());
+            }
+        }
+
+        None
     }
 }
 

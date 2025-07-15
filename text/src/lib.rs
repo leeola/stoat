@@ -11,6 +11,7 @@
 //! - **SyntaxNode**: AST nodes that reference positions in the underlying rope
 //! - **TextCursor**: Navigation and editing within a view
 
+pub mod action;
 pub mod buffer;
 pub mod cursor;
 pub mod cursor_collection;
@@ -21,6 +22,7 @@ pub mod syntax;
 pub mod view;
 
 // Re-export core types
+pub use action::{ActionError, ActionResult, ExecutionResult, TextAction};
 pub use buffer::{BufferId, TextBuffer};
 pub use cursor::TextCursor;
 pub use edit::{Edit, EditError, EditOperation, RopeEdit};
