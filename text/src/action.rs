@@ -370,6 +370,34 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_word_backward() {
+        let view = simple_view("hello world test");
+
+        // Move to end and delete "test" backward
+        exec(&view, &ActionBuilder::move_to_offset(16)); // At end
+        exec(&view, &TextAction::DeleteWordBackward);
+        assert_buffer_text(view.buffer(), "hello world ");
+        assert_cursor_at(&view, 12);
+
+        // Delete "world" backward from position 12 (after "world ")
+        exec(&view, &TextAction::DeleteWordBackward);
+        assert_buffer_text(view.buffer(), "hello  ");
+        assert_cursor_at(&view, 6);
+
+        // Move to middle of "hello" and delete backward
+        exec(&view, &ActionBuilder::move_to_offset(3)); // In "hello" (on 'l')
+        exec(&view, &TextAction::DeleteWordBackward);
+        assert_buffer_text(view.buffer(), "lo  "); // Deletes "hel"
+        assert_cursor_at(&view, 0);
+
+        // Try to delete at start - should do nothing
+        exec(&view, &ActionBuilder::move_to_offset(0)); // At start
+        exec(&view, &TextAction::DeleteWordBackward);
+        assert_buffer_text(view.buffer(), "lo  "); // No change
+        assert_cursor_at(&view, 0);
+    }
+
+    #[test]
     fn test_ast_based_navigation() {
         let buffer = simple_buffer("hello world\ntest line");
         let root = buffer.syntax();

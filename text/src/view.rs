@@ -883,17 +883,15 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_delete_word_backward(&self) -> ActionResult<ExecutionResult> {
+        // FIXME: multi-cursor support - currently only handles primary cursor
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
+        let current_pos = cursors.primary().position();
 
-        // FIXME: Handle all cursors for multi-cursor delete word backward
-        let primary_cursor = cursors.primary_mut();
-        let pos = primary_cursor.position();
+        // Find the start and end positions for delete word backward operation
+        let (start_pos, end_pos) = self.find_delete_word_backward_range(current_pos);
 
-        // Find previous word boundary
-        let start_pos = self.inner.buffer.prev_word_boundary(pos);
-
-        if pos == start_pos {
+        // Check if there's anything to delete
+        if end_pos == start_pos {
             return Ok(ExecutionResult {
                 success: false,
                 affected_ranges: Vec::new(),
@@ -901,43 +899,47 @@ impl<S: Syntax> TextView<S> {
             });
         }
 
-        let delete_range = TextRange::new(start_pos, pos);
-
-        // FIXME: Convert to AST-based precise edits (like DeleteWordForward)
-        // Current approach is inefficient and wrong:
-        // 1. buffer.text() converts entire rope to string (O(n) + memory allocation)
-        // 2. String slicing and concatenation (more allocations)
-        // 3. Edit::replace(root, new_text) replaces ENTIRE document instead of precise range
-        // Should use: find_node_at_offset() + Edit::delete_range() for precise edits
-        let buffer_text = self.inner.buffer.text();
-        let delete_start = u32::from(start_pos) as usize;
-        let delete_end = u32::from(pos) as usize;
-
-        let mut new_text = String::with_capacity(buffer_text.len() - (delete_end - delete_start));
-        new_text.push_str(&buffer_text[..delete_start]);
-        new_text.push_str(&buffer_text[delete_end..]);
-
-        let edit = Edit::replace(root.clone(), new_text);
-
-        // Update cursor position
-        primary_cursor.set_position(start_pos);
-
+        // Update cursor position to where deletion starts
+        cursors.primary_mut().set_position(start_pos);
         drop(cursors);
-        self.inner
-            .buffer
-            .apply_edit(&edit)
-            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        // Find the node containing the deletion range
+        let root = self.inner.buffer.syntax();
+        if let Some(node) = root.find_node_at_offset(start_pos) {
+            let node_range = node.text_range();
+            let delete_start = u32::from(start_pos - node_range.start()) as usize;
+            let delete_end = u32::from(end_pos - node_range.start()) as usize;
+
+            // Ensure deletion doesn't exceed node bounds
+            let node_len = u32::from(node_range.len()) as usize;
+            if delete_end <= node_len {
+                // Create precise delete edit within the node
+                let edit = Edit::delete_range(node, delete_start, delete_end);
+
+                // Apply the edit
+                self.inner
+                    .buffer
+                    .apply_edit(&edit)
+                    .map_err(|e| ActionError::EditFailed { source: e })?;
+
+                let delete_range = TextRange::new(start_pos, end_pos);
+                return Ok(ExecutionResult {
+                    success: true,
+                    affected_ranges: vec![delete_range],
+                    message: None,
+                });
+            }
+        }
 
         Ok(ExecutionResult {
-            success: true,
-            affected_ranges: vec![delete_range],
-            message: None,
+            success: false,
+            affected_ranges: Vec::new(),
+            message: Some("Could not delete word backward".to_string()),
         })
     }
 
     fn execute_delete_line(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
 
         // FIXME: Handle all cursors for multi-cursor delete line
         let primary_cursor = cursors.primary_mut();
@@ -946,47 +948,54 @@ impl<S: Syntax> TextView<S> {
         // Get line boundaries using buffer methods
         let line_start = self.inner.buffer.line_start_offset(pos);
         let line_end = self.inner.buffer.line_end_offset(pos);
-        let line_range = TextRange::new(line_start, line_end);
 
-        // FIXME: Convert to AST-based precise edits (like DeleteWordForward)
-        // Current approach has same problems as DeleteWordBackward:
-        // 1. buffer.text() converts entire rope to string (expensive)
-        // 2. String manipulation with slicing and concatenation
-        // 3. Edit::replace(root, new_text) replaces entire document (wrong!)
-        // 4. Manual newline handling could be error-prone
-        // Should use: find_node_at_offset() + Edit::delete_range() for line boundaries
-        let buffer_text = self.inner.buffer.text();
-        let delete_start = u32::from(line_start) as usize;
-        let delete_end = u32::from(line_end) as usize;
+        // Determine actual deletion range (include newline if not at end of buffer)
+        let buffer_len = TextSize::from(self.inner.buffer.len() as u32);
+        let delete_end = if line_end < buffer_len {
+            // Include the newline character
+            line_end + TextSize::from(1)
+        } else {
+            // Last line, no newline to include
+            line_end
+        };
 
-        // Also remove the newline if not at the end
-        let actual_delete_end =
-            if delete_end < buffer_text.len() && buffer_text.as_bytes()[delete_end] == b'\n' {
-                delete_end + 1
-            } else {
-                delete_end
-            };
-
-        let mut new_text =
-            String::with_capacity(buffer_text.len() - (actual_delete_end - delete_start));
-        new_text.push_str(&buffer_text[..delete_start]);
-        new_text.push_str(&buffer_text[actual_delete_end..]);
-
-        let edit = Edit::replace(root.clone(), new_text);
+        let delete_range = TextRange::new(line_start, delete_end);
 
         // Update cursor to start of deleted line
         primary_cursor.set_position(line_start);
-
         drop(cursors);
-        self.inner
-            .buffer
-            .apply_edit(&edit)
-            .map_err(|e| ActionError::EditFailed { source: e })?;
+
+        // Find the node containing the deletion range and apply precise edit
+        let root = self.inner.buffer.syntax();
+        if let Some(node) = root.find_node_at_offset(line_start) {
+            let node_range = node.text_range();
+            let delete_start_in_node = u32::from(line_start - node_range.start()) as usize;
+            let delete_end_in_node = u32::from(delete_end - node_range.start()) as usize;
+
+            // Ensure deletion doesn't exceed node bounds
+            let node_len = u32::from(node_range.len()) as usize;
+            if delete_end_in_node <= node_len {
+                // Create precise delete edit within the node
+                let edit = Edit::delete_range(node, delete_start_in_node, delete_end_in_node);
+
+                // Apply the edit
+                self.inner
+                    .buffer
+                    .apply_edit(&edit)
+                    .map_err(|e| ActionError::EditFailed { source: e })?;
+
+                return Ok(ExecutionResult {
+                    success: true,
+                    affected_ranges: vec![delete_range],
+                    message: None,
+                });
+            }
+        }
 
         Ok(ExecutionResult {
-            success: true,
-            affected_ranges: vec![line_range],
-            message: None,
+            success: false,
+            affected_ranges: Vec::new(),
+            message: Some("Could not delete line".to_string()),
         })
     }
 
@@ -998,49 +1007,63 @@ impl<S: Syntax> TextView<S> {
         let primary_cursor = cursors.primary_mut();
 
         if let Some(selection) = primary_cursor.selection() {
-            // FIXME: Convert to AST-based precise edits for better performance
-            // Current approach uses full document string replacement:
-            // 1. buffer.text() converts entire rope to string
-            // 2. String slicing and concatenation
-            // 3. Edit::replace(root, new_text) replaces entire document
-            // Should use: find_node_at_offset() + Edit::replace_range() for targeted edits
-            let buffer_text = self.inner.buffer.text();
-            let replace_start = u32::from(selection.start()) as usize;
-            let replace_end = u32::from(selection.end()) as usize;
-
-            let mut new_text = String::with_capacity(
-                buffer_text.len() - (replace_end - replace_start) + text.len(),
-            );
-            new_text.push_str(&buffer_text[..replace_start]);
-            new_text.push_str(text);
-            new_text.push_str(&buffer_text[replace_end..]);
-
-            let edit = Edit::replace(self.inner.buffer.syntax(), new_text);
+            let selection_start = selection.start();
+            let selection_end = selection.end();
 
             // Update cursor position to end of inserted text
-            let new_pos = selection.start() + TextSize::from(text.len() as u32);
+            let new_pos = selection_start + TextSize::from(text.len() as u32);
             primary_cursor.set_position(new_pos);
             primary_cursor.clear_selection();
 
             drop(cursors);
-            self.inner
-                .buffer
-                .apply_edit(&edit)
-                .map_err(|e| ActionError::EditFailed { source: e })?;
 
-            let new_range = TextRange::new(
-                selection.start(),
-                selection.start() + TextSize::from(text.len() as u32),
-            );
-            affected_ranges.push(new_range);
+            // Find the node containing the selection and apply precise edit
+            let root = self.inner.buffer.syntax();
+            if let Some(node) = root.find_node_at_offset(selection_start) {
+                let node_range = node.text_range();
+                let replace_start_in_node =
+                    u32::from(selection_start - node_range.start()) as usize;
+                let replace_end_in_node = u32::from(selection_end - node_range.start()) as usize;
+
+                // Ensure replacement doesn't exceed node bounds
+                let node_len = u32::from(node_range.len()) as usize;
+                if replace_end_in_node <= node_len {
+                    // Create precise replace edit within the node
+                    let edit = Edit::replace_range(
+                        node,
+                        replace_start_in_node,
+                        replace_end_in_node,
+                        text.to_string(),
+                    );
+
+                    // Apply the edit
+                    self.inner
+                        .buffer
+                        .apply_edit(&edit)
+                        .map_err(|e| ActionError::EditFailed { source: e })?;
+
+                    let new_range = TextRange::new(
+                        selection_start,
+                        selection_start + TextSize::from(text.len() as u32),
+                    );
+                    affected_ranges.push(new_range);
+
+                    return Ok(ExecutionResult {
+                        success: true,
+                        affected_ranges,
+                        message: None,
+                    });
+                }
+            }
 
             Ok(ExecutionResult {
-                success: true,
-                affected_ranges,
-                message: None,
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Could not replace selection".to_string()),
             })
         } else {
             // No selection, insert at cursor position
+            drop(cursors);
             self.execute_insert_text(text)
         }
     }
@@ -1213,6 +1236,61 @@ impl<S: Syntax> TextView<S> {
         }
 
         TextSize::from(pos as u32)
+    }
+
+    /// Find the range to delete for delete word backward operation
+    fn find_delete_word_backward_range(&self, position: TextSize) -> (TextSize, TextSize) {
+        let buffer = &self.inner.buffer;
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        let byte_idx = u32::from(position) as usize;
+
+        if byte_idx == 0 {
+            return (TextSize::from(0), TextSize::from(0));
+        }
+
+        let current_char_pos = byte_idx.saturating_sub(1);
+
+        // Check if we're currently in a word or in whitespace
+        let in_word =
+            current_char_pos < bytes.len() && !bytes[current_char_pos].is_ascii_whitespace();
+
+        if in_word {
+            // Case 1: Cursor is inside a word - delete from word start to cursor position
+            let mut word_start = current_char_pos;
+            while word_start > 0 && !bytes[word_start - 1].is_ascii_whitespace() {
+                word_start -= 1;
+            }
+
+            (TextSize::from(word_start as u32), position)
+        } else {
+            // Case 2: Cursor is in whitespace - find and delete the previous word
+            let mut pos = current_char_pos;
+
+            // Skip whitespace backward to find the end of previous word
+            while pos > 0 && bytes[pos].is_ascii_whitespace() {
+                pos = pos.saturating_sub(1);
+            }
+
+            if pos == 0 && bytes[0].is_ascii_whitespace() {
+                return (TextSize::from(0), TextSize::from(0)); // No word to delete
+            }
+
+            // Find the end of the word (where we are now)
+            let word_end = pos + 1;
+
+            // Find the start of the word
+            while pos > 0 && !bytes[pos - 1].is_ascii_whitespace() {
+                pos -= 1;
+            }
+
+            let word_start = pos;
+
+            (
+                TextSize::from(word_start as u32),
+                TextSize::from(word_end as u32),
+            )
+        }
     }
 }
 
