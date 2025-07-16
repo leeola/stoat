@@ -704,7 +704,9 @@ impl<S: Syntax> TextView<S> {
 
         primary_cursor.set_current_node(root.clone());
 
-        // Create an edit
+        // NOTE: Uses document-level InsertAt which is acceptable for insertion
+        // Unlike delete operations, insertions don't need precise node targeting
+        // since buffer.convert_to_rope_edit() handles offset conversion correctly
         let edit = Edit {
             target: root.clone(),
             operation: EditOperation::InsertAt {
@@ -901,7 +903,12 @@ impl<S: Syntax> TextView<S> {
 
         let delete_range = TextRange::new(start_pos, pos);
 
-        // Get buffer text and create new text with word removed
+        // FIXME: Convert to AST-based precise edits (like DeleteWordForward)
+        // Current approach is inefficient and wrong:
+        // 1. buffer.text() converts entire rope to string (O(n) + memory allocation)
+        // 2. String slicing and concatenation (more allocations)
+        // 3. Edit::replace(root, new_text) replaces ENTIRE document instead of precise range
+        // Should use: find_node_at_offset() + Edit::delete_range() for precise edits
         let buffer_text = self.inner.buffer.text();
         let delete_start = u32::from(start_pos) as usize;
         let delete_end = u32::from(pos) as usize;
@@ -941,7 +948,13 @@ impl<S: Syntax> TextView<S> {
         let line_end = self.inner.buffer.line_end_offset(pos);
         let line_range = TextRange::new(line_start, line_end);
 
-        // Get buffer text and create new text with line removed
+        // FIXME: Convert to AST-based precise edits (like DeleteWordForward)
+        // Current approach has same problems as DeleteWordBackward:
+        // 1. buffer.text() converts entire rope to string (expensive)
+        // 2. String manipulation with slicing and concatenation
+        // 3. Edit::replace(root, new_text) replaces entire document (wrong!)
+        // 4. Manual newline handling could be error-prone
+        // Should use: find_node_at_offset() + Edit::delete_range() for line boundaries
         let buffer_text = self.inner.buffer.text();
         let delete_start = u32::from(line_start) as usize;
         let delete_end = u32::from(line_end) as usize;
@@ -985,7 +998,12 @@ impl<S: Syntax> TextView<S> {
         let primary_cursor = cursors.primary_mut();
 
         if let Some(selection) = primary_cursor.selection() {
-            // Get buffer text and replace selection
+            // FIXME: Convert to AST-based precise edits for better performance
+            // Current approach uses full document string replacement:
+            // 1. buffer.text() converts entire rope to string
+            // 2. String slicing and concatenation
+            // 3. Edit::replace(root, new_text) replaces entire document
+            // Should use: find_node_at_offset() + Edit::replace_range() for targeted edits
             let buffer_text = self.inner.buffer.text();
             let replace_start = u32::from(selection.start()) as usize;
             let replace_end = u32::from(selection.end()) as usize;
