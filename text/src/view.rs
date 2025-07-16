@@ -613,11 +613,53 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_select_word(&self) -> ActionResult<ExecutionResult> {
-        // TODO: Implement AST-aware select word
+        // FIXME: multi-cursor support - currently only handles primary cursor
+        let mut cursors = self.inner.cursors.write();
+        let mut affected_ranges = Vec::new();
+        let buffer = &self.inner.buffer;
+
+        for cursor in cursors.iter_mut() {
+            let current_pos = cursor.position();
+
+            // Check if we're at a word boundary
+            if buffer.is_word_boundary(current_pos) {
+                // If at boundary, we might be at start or end of a word
+                // Try moving one character forward to see if we're at start of word
+                let next_pos = TextSize::from(u32::from(current_pos) + 1);
+                if !buffer.is_word_boundary(next_pos) {
+                    // We're at the start of a word, select it
+                    let word_end = buffer.next_word_boundary(current_pos);
+                    if word_end > current_pos {
+                        let word_range = TextRange::new(current_pos, word_end);
+                        cursor.set_selection(Some(word_range));
+                        cursor.set_position(current_pos);
+                        affected_ranges.push(word_range);
+                    }
+                }
+                // If not at start of word, we're in whitespace - don't select
+            } else {
+                // We're inside a word, find its boundaries
+                let word_start = buffer.prev_word_boundary(current_pos);
+                // Find end of current word (not start of next word)
+                let word_end = self.find_word_end(current_pos);
+
+                if word_end > word_start {
+                    let word_range = TextRange::new(word_start, word_end);
+                    cursor.set_selection(Some(word_range));
+                    cursor.set_position(word_start);
+                    affected_ranges.push(word_range);
+                }
+            }
+        }
+
         Ok(ExecutionResult {
-            success: false,
-            affected_ranges: Vec::new(),
-            message: Some("Select word not yet implemented".to_string()),
+            success: true,
+            affected_ranges: affected_ranges.clone(),
+            message: if affected_ranges.is_empty() {
+                Some("No word to select".to_string())
+            } else {
+                Some("Word selected".to_string())
+            },
         })
     }
 
@@ -1060,6 +1102,27 @@ impl<S: Syntax> TextView<S> {
             affected_ranges: Vec::new(),
             message: Some("Secondary cursors removed".to_string()),
         })
+    }
+
+    /// Find the end of the word containing the given position
+    fn find_word_end(&self, position: TextSize) -> TextSize {
+        let buffer = &self.inner.buffer;
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        let byte_idx = u32::from(position) as usize;
+
+        if byte_idx >= bytes.len() {
+            return TextSize::from(bytes.len() as u32);
+        }
+
+        let mut pos = byte_idx;
+
+        // Scan forward while we're in a word (non-whitespace)
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+
+        TextSize::from(pos as u32)
     }
 }
 

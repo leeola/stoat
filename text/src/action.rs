@@ -316,6 +316,33 @@ mod tests {
     }
 
     #[test]
+    fn test_select_word() {
+        let view = simple_view("hello world test");
+
+        // Test selecting "hello" from middle of word
+        exec(&view, &ActionBuilder::move_to_offset(2)); // In "hello"
+        exec(&view, &TextAction::SelectWord);
+        let cursor = view.primary_cursor();
+        assert_selection(&cursor, 0, 5); // "hello" selected
+        drop(cursor); // Explicitly drop the cursor to release the read lock
+
+        // Clear selection and test selecting "world"
+        exec(&view, &TextAction::ClearSelection);
+        exec(&view, &ActionBuilder::move_to_offset(7)); // In "world"
+        exec(&view, &TextAction::SelectWord);
+        let cursor = view.primary_cursor();
+        assert_selection(&cursor, 6, 11); // "world" selected
+        drop(cursor); // Drop cursor before next action
+
+        // Test when cursor is in whitespace - should not select
+        exec(&view, &TextAction::ClearSelection);
+        exec(&view, &ActionBuilder::move_to_offset(5)); // On space
+        exec(&view, &TextAction::SelectWord);
+        let cursor = view.primary_cursor();
+        assert!(cursor.selection().is_none()); // Nothing selected
+    }
+
+    #[test]
     fn test_ast_based_navigation() {
         let buffer = simple_buffer("hello world\ntest line");
         let root = buffer.syntax();
