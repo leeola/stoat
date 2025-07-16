@@ -89,6 +89,30 @@ impl<S: Syntax> Edit<S> {
             operation: EditOperation::Delete,
         }
     }
+
+    /// Delete a specific node from the AST
+    pub fn delete_node(node: SyntaxNode<S>) -> Self {
+        Self {
+            target: node,
+            operation: EditOperation::Delete,
+        }
+    }
+
+    /// Replace a specific node's text
+    pub fn replace_node(node: SyntaxNode<S>, text: String) -> Self {
+        Self {
+            target: node,
+            operation: EditOperation::Replace(text),
+        }
+    }
+
+    /// Insert text at a specific offset within a node
+    pub fn insert_at_node(node: SyntaxNode<S>, offset: usize, text: String) -> Self {
+        Self {
+            target: node,
+            operation: EditOperation::InsertAt { offset, text },
+        }
+    }
 }
 
 /// A low-level edit operation on the rope

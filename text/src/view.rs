@@ -595,11 +595,11 @@ impl<S: Syntax> TextView<S> {
         for cursor in cursors.iter_mut() {
             let current_pos = cursor.position();
 
-            // Get line boundaries using buffer methods
+            // Use buffer methods to find line boundaries
+            // TODO: Use AST when we have proper generic trait methods
             let line_start = self.inner.buffer.line_start_offset(current_pos);
             let line_end = self.inner.buffer.line_end_offset(current_pos);
             let line_range = TextRange::new(line_start, line_end);
-
             cursor.set_selection(Some(line_range));
             cursor.set_position(line_start);
             affected_ranges.push(line_range);
@@ -613,29 +613,11 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_select_word(&self) -> ActionResult<ExecutionResult> {
-        let mut cursors = self.inner.cursors.write();
-        let mut affected_ranges = Vec::new();
-
-        for cursor in cursors.iter_mut() {
-            let current_pos = cursor.position();
-
-            // Find word boundaries using buffer methods
-            let word_start = self.inner.buffer.prev_word_boundary(current_pos);
-            let word_end = self.inner.buffer.next_word_boundary(current_pos);
-
-            // Only select if we're actually on a word
-            if word_start != word_end {
-                let word_range = TextRange::new(word_start, word_end);
-                cursor.set_selection(Some(word_range));
-                cursor.set_position(word_start);
-                affected_ranges.push(word_range);
-            }
-        }
-
+        // TODO: Implement AST-aware select word
         Ok(ExecutionResult {
-            success: true,
-            affected_ranges,
-            message: Some("Word selected".to_string()),
+            success: false,
+            affected_ranges: Vec::new(),
+            message: Some("Select word not yet implemented".to_string()),
         })
     }
 
@@ -705,7 +687,6 @@ impl<S: Syntax> TextView<S> {
 
     fn execute_delete_forward(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
         let buffer_len = self.inner.buffer.len();
 
         // Only handle primary cursor for now
@@ -720,118 +701,40 @@ impl<S: Syntax> TextView<S> {
             });
         }
 
-        // We need to find the node at the cursor position to delete it
-        // For single character delete, we'll use a workaround by getting the text
-        // and replacing it with the text minus one character
-        let buffer_text = self.inner.buffer.text();
-        let delete_start = u32::from(pos) as usize;
-        let delete_end = (delete_start + 1).min(buffer_text.len());
+        // Delete a single character
+        let delete_end = pos + TextSize::from(1);
+        let delete_range = TextRange::new(pos, delete_end);
 
-        if delete_start >= buffer_text.len() {
-            return Ok(ExecutionResult {
-                success: false,
-                affected_ranges: Vec::new(),
-                message: Some("Nothing to delete".to_string()),
-            });
-        }
-
-        // Create new text with character removed
-        let mut new_text = String::with_capacity(buffer_text.len() - 1);
-        new_text.push_str(&buffer_text[..delete_start]);
-        new_text.push_str(&buffer_text[delete_end..]);
-
-        // Replace entire root with new text
-        let edit = Edit::replace(root.clone(), new_text);
-
-        drop(cursors);
-        self.inner
-            .buffer
-            .apply_edit(&edit)
-            .map_err(|e| ActionError::EditFailed { source: e })?;
-
-        Ok(ExecutionResult {
-            success: true,
-            affected_ranges: vec![TextRange::new(pos, pos + TextSize::from(1))],
-            message: None,
-        })
-    }
-
-    fn execute_delete_backward(&self) -> ActionResult<ExecutionResult> {
-        let mut cursors = self.inner.cursors.write();
+        // Find the node containing this range
         let root = self.inner.buffer.syntax();
+        let node = root
+            .find_node_at_offset(pos)
+            .ok_or(ActionError::AstNotAvailable)?;
 
-        // Only handle primary cursor for now
-        let primary_cursor = cursors.primary_mut();
-        let pos = primary_cursor.position();
+        // Get the node's text and range
+        let node_text = node.text();
+        let node_range = node.text_range();
 
-        if pos == TextSize::from(0) {
-            return Ok(ExecutionResult {
-                success: false,
-                affected_ranges: Vec::new(),
-                message: Some("Already at start of document".to_string()),
-            });
+        // Calculate positions within the node
+        let start_in_node = (u32::from(pos) - u32::from(node_range.start())) as usize;
+        let end_in_node =
+            (u32::from(delete_end.min(node_range.end())) - u32::from(node_range.start())) as usize;
+
+        // Create new text with the character removed
+        let mut new_text = String::new();
+        if start_in_node > 0 {
+            new_text.push_str(&node_text[..start_in_node]);
+        }
+        if end_in_node < node_text.len() {
+            new_text.push_str(&node_text[end_in_node..]);
         }
 
-        // Similar to delete forward, we'll use text replacement
-        let buffer_text = self.inner.buffer.text();
-        let delete_end = u32::from(pos) as usize;
-        let delete_start = delete_end.saturating_sub(1);
-
-        // Create new text with character removed
-        let mut new_text = String::with_capacity(buffer_text.len() - 1);
-        new_text.push_str(&buffer_text[..delete_start]);
-        new_text.push_str(&buffer_text[delete_end..]);
-
-        // Replace entire root with new text
-        let edit = Edit::replace(root.clone(), new_text);
-
-        // Update cursor position
-        primary_cursor.set_position(pos - TextSize::from(1));
-
-        drop(cursors);
-        self.inner
-            .buffer
-            .apply_edit(&edit)
-            .map_err(|e| ActionError::EditFailed { source: e })?;
-
-        Ok(ExecutionResult {
-            success: true,
-            affected_ranges: vec![TextRange::new(pos - TextSize::from(1), pos)],
-            message: None,
-        })
-    }
-
-    fn execute_delete_word_forward(&self) -> ActionResult<ExecutionResult> {
-        let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
-
-        // Only handle primary cursor for now
-        let primary_cursor = cursors.primary_mut();
-        let pos = primary_cursor.position();
-
-        // Find next word boundary
-        let end_pos = self.inner.buffer.next_word_boundary(pos);
-
-        if pos == end_pos {
-            return Ok(ExecutionResult {
-                success: false,
-                affected_ranges: Vec::new(),
-                message: Some("No word to delete forward".to_string()),
-            });
-        }
-
-        let delete_range = TextRange::new(pos, end_pos);
-
-        // Get buffer text and create new text with word removed
-        let buffer_text = self.inner.buffer.text();
-        let delete_start = u32::from(pos) as usize;
-        let delete_end = u32::from(end_pos) as usize;
-
-        let mut new_text = String::with_capacity(buffer_text.len() - (delete_end - delete_start));
-        new_text.push_str(&buffer_text[..delete_start]);
-        new_text.push_str(&buffer_text[delete_end..]);
-
-        let edit = Edit::replace(root.clone(), new_text);
+        // Create the edit
+        let edit = if new_text.is_empty() {
+            Edit::delete_node(node)
+        } else {
+            Edit::replace_node(node, new_text)
+        };
 
         drop(cursors);
         self.inner
@@ -843,6 +746,24 @@ impl<S: Syntax> TextView<S> {
             success: true,
             affected_ranges: vec![delete_range],
             message: None,
+        })
+    }
+
+    fn execute_delete_backward(&self) -> ActionResult<ExecutionResult> {
+        // TODO: Implement AST-aware delete backward
+        Ok(ExecutionResult {
+            success: false,
+            affected_ranges: Vec::new(),
+            message: Some("Delete backward not yet implemented".to_string()),
+        })
+    }
+
+    fn execute_delete_word_forward(&self) -> ActionResult<ExecutionResult> {
+        // TODO: Implement AST-aware delete word forward
+        Ok(ExecutionResult {
+            success: false,
+            affected_ranges: Vec::new(),
+            message: Some("Delete word forward not yet implemented".to_string()),
         })
     }
 

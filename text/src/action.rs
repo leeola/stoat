@@ -266,4 +266,54 @@ mod tests {
         assert!(TextAction::ExtendSelectionLeft { count: 1 }.is_selection_action());
         assert!(TextAction::ClearSelection.is_selection_action());
     }
+
+    #[test]
+    fn test_delete_forward() {
+        let view = simple_view("hello world");
+
+        // Delete 'h'
+        exec(&view, &TextAction::DeleteForward);
+        assert_buffer_text(view.buffer(), "ello world");
+        assert_cursor_at(&view, 0);
+
+        // Move to position 4 and delete space
+        exec(&view, &ActionBuilder::move_to_offset(4));
+        exec(&view, &TextAction::DeleteForward);
+        assert_buffer_text(view.buffer(), "elloworld");
+    }
+
+    #[test]
+    fn test_select_line() {
+        let view = simple_view("line one\nline two\nline three");
+        exec(&view, &ActionBuilder::move_to_offset(12)); // Somewhere in "line two"
+
+        exec(&view, &TextAction::SelectLine);
+        let cursor = view.primary_cursor();
+        // Line includes the text and newline
+        assert_selection(&cursor, 9, 18); // "line two\n" selected
+    }
+
+    #[test]
+    fn test_ast_based_navigation() {
+        let buffer = simple_buffer("hello world\ntest line");
+        let root = buffer.syntax();
+
+        // Test finding nodes at offset
+        let node = root
+            .find_node_at_offset(0.into())
+            .expect("Should find node");
+        assert!(node.text_range().contains(0.into()));
+
+        let node = root
+            .find_node_at_offset(6.into())
+            .expect("Should find node");
+        assert!(node.text_range().contains(6.into()));
+
+        // Test buffer methods for word/line boundaries
+        assert_eq!(buffer.prev_word_boundary(5.into()), 0.into()); // Start of "hello"
+        assert_eq!(buffer.next_word_boundary(0.into()), 6.into()); // Start of "world"
+
+        assert_eq!(buffer.line_start_offset(5.into()), 0.into()); // Start of first line
+        assert_eq!(buffer.line_end_offset(5.into()), 12.into()); // End includes newline
+    }
 }
