@@ -237,6 +237,39 @@ impl<S: Syntax> TextBuffer<S> {
                 // For now, return an error
                 Err(EditError::NodeNotFound)
             },
+            EditOperation::DeleteRange { start, end } => {
+                // Convert node-relative offsets to absolute positions
+                let abs_start = node_range.start() + TextSize::from(*start as u32);
+                let abs_end = node_range.start() + TextSize::from(*end as u32);
+
+                // Validate bounds
+                if abs_end > node_range.end() {
+                    return Err(EditError::RangeOutOfBounds {
+                        position: abs_end,
+                        length: node_range.end(),
+                    });
+                }
+
+                Ok(RopeEdit::delete(TextRange::new(abs_start, abs_end)))
+            },
+            EditOperation::ReplaceRange { start, end, text } => {
+                // Convert node-relative offsets to absolute positions
+                let abs_start = node_range.start() + TextSize::from(*start as u32);
+                let abs_end = node_range.start() + TextSize::from(*end as u32);
+
+                // Validate bounds
+                if abs_end > node_range.end() {
+                    return Err(EditError::RangeOutOfBounds {
+                        position: abs_end,
+                        length: node_range.end(),
+                    });
+                }
+
+                Ok(RopeEdit::replace(
+                    TextRange::new(abs_start, abs_end),
+                    text.clone(),
+                ))
+            },
         }
     }
 

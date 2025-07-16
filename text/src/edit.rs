@@ -55,6 +55,14 @@ pub enum EditOperation {
     WrapWith { before: String, after: String },
     /// Unwrap the node (remove surrounding text)
     Unwrap,
+    /// Delete a specific range within the node
+    DeleteRange { start: usize, end: usize },
+    /// Replace a specific range within the node
+    ReplaceRange {
+        start: usize,
+        end: usize,
+        text: String,
+    },
 }
 
 impl<S: Syntax> Edit<S> {
@@ -111,6 +119,22 @@ impl<S: Syntax> Edit<S> {
         Self {
             target: node,
             operation: EditOperation::InsertAt { offset, text },
+        }
+    }
+
+    /// Delete a specific range within a node
+    pub fn delete_range(node: SyntaxNode<S>, start: usize, end: usize) -> Self {
+        Self {
+            target: node,
+            operation: EditOperation::DeleteRange { start, end },
+        }
+    }
+
+    /// Replace a specific range within a node
+    pub fn replace_range(node: SyntaxNode<S>, start: usize, end: usize, text: String) -> Self {
+        Self {
+            target: node,
+            operation: EditOperation::ReplaceRange { start, end, text },
         }
     }
 }

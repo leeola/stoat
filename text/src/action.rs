@@ -283,6 +283,28 @@ mod tests {
     }
 
     #[test]
+    fn test_delete_backward() {
+        let view = simple_view("hello world");
+
+        // Try to delete at position 0 - should fail gracefully
+        exec(&view, &TextAction::DeleteBackward);
+        assert_buffer_text(view.buffer(), "hello world");
+        assert_cursor_at(&view, 0);
+
+        // Move to position 5 (after "hello") and delete backward
+        exec(&view, &ActionBuilder::move_to_offset(5));
+        exec(&view, &TextAction::DeleteBackward);
+        assert_buffer_text(view.buffer(), "hell world");
+        assert_cursor_at(&view, 4);
+
+        // Move to position 5 (after space in "hell world") and delete backward
+        exec(&view, &ActionBuilder::move_to_offset(5));
+        exec(&view, &TextAction::DeleteBackward);
+        assert_buffer_text(view.buffer(), "hellworld");
+        assert_cursor_at(&view, 4);
+    }
+
+    #[test]
     fn test_select_line() {
         let view = simple_view("line one\nline two\nline three");
         exec(&view, &ActionBuilder::move_to_offset(12)); // Somewhere in "line two"

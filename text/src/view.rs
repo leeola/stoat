@@ -750,11 +750,51 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_delete_backward(&self) -> ActionResult<ExecutionResult> {
-        // TODO: Implement AST-aware delete backward
+        let mut cursors = self.inner.cursors.write();
+
+        // Only handle primary cursor for now
+        let primary_cursor = cursors.primary_mut();
+        let pos = primary_cursor.position();
+
+        if pos == TextSize::from(0) {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Already at start of document".to_string()),
+            });
+        }
+
+        // Delete a single character backward
+        let delete_start = pos - TextSize::from(1);
+        let delete_range = TextRange::new(delete_start, pos);
+
+        // Find the node containing the position to delete
+        let root = self.inner.buffer.syntax();
+        let node = root
+            .find_node_at_offset(delete_start)
+            .ok_or(ActionError::AstNotAvailable)?;
+
+        // Calculate the position within the node
+        let node_range = node.text_range();
+        let start_in_node = (u32::from(delete_start) - u32::from(node_range.start())) as usize;
+        let end_in_node = (u32::from(pos) - u32::from(node_range.start())) as usize;
+
+        // Use the precise DeleteRange operation
+        let edit = Edit::delete_range(node, start_in_node, end_in_node);
+
+        // Don't manually set cursor position - let on_buffer_change handle it
+        // The cursor will be automatically moved to delete_start due to the change event
+
+        drop(cursors);
+        self.inner
+            .buffer
+            .apply_edit(&edit)
+            .map_err(|e| ActionError::EditFailed { source: e })?;
+
         Ok(ExecutionResult {
-            success: false,
-            affected_ranges: Vec::new(),
-            message: Some("Delete backward not yet implemented".to_string()),
+            success: true,
+            affected_ranges: vec![delete_range],
+            message: None,
         })
     }
 
@@ -1074,7 +1114,7 @@ impl<S: Syntax> TextViewInner<S> {
                 cursor.set_position(change_start + event.inserted_len);
             }
             // If cursor is within the deleted range, move to the start of the change
-            else if current_pos < change_end {
+            else if current_pos <= change_end {
                 cursor.set_position(change_start);
             }
             // If cursor is after the change, adjust by the size delta
