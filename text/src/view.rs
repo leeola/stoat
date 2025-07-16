@@ -828,11 +828,55 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_delete_word_forward(&self) -> ActionResult<ExecutionResult> {
-        // TODO: Implement AST-aware delete word forward
+        // FIXME: multi-cursor support - currently only handles primary cursor
+        let cursors = self.inner.cursors.read();
+        let current_pos = cursors.primary().position();
+        drop(cursors);
+
+        // Find the end of current word or next word if in whitespace
+        let word_end = self.find_delete_word_forward_end(current_pos);
+
+        // Check if there's anything to delete
+        if word_end <= current_pos {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("No word to delete forward".to_string()),
+            });
+        }
+
+        // Find the node containing the deletion range
+        let root = self.inner.buffer.syntax();
+        if let Some(node) = root.find_node_at_offset(current_pos) {
+            let node_range = node.text_range();
+            let delete_start = u32::from(current_pos - node_range.start()) as usize;
+            let delete_end = u32::from(word_end - node_range.start()) as usize;
+
+            // Ensure deletion doesn't exceed node bounds
+            let node_len = u32::from(node_range.len()) as usize;
+            if delete_end <= node_len {
+                // Create precise delete edit within the node
+                let edit = Edit::delete_range(node, delete_start, delete_end);
+
+                // Apply the edit
+                self.inner
+                    .buffer
+                    .apply_edit(&edit)
+                    .map_err(|e| ActionError::EditFailed { source: e })?;
+
+                let delete_range = TextRange::new(current_pos, word_end);
+                return Ok(ExecutionResult {
+                    success: true,
+                    affected_ranges: vec![delete_range],
+                    message: None,
+                });
+            }
+        }
+
         Ok(ExecutionResult {
             success: false,
             affected_ranges: Vec::new(),
-            message: Some("Delete word forward not yet implemented".to_string()),
+            message: Some("Could not delete word forward".to_string()),
         })
     }
 
@@ -1118,6 +1162,34 @@ impl<S: Syntax> TextView<S> {
         let mut pos = byte_idx;
 
         // Scan forward while we're in a word (non-whitespace)
+        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+
+        TextSize::from(pos as u32)
+    }
+
+    /// Find the end position for delete word forward operation
+    fn find_delete_word_forward_end(&self, position: TextSize) -> TextSize {
+        let buffer = &self.inner.buffer;
+        let text = buffer.text();
+        let bytes = text.as_bytes();
+        let byte_idx = u32::from(position) as usize;
+
+        if byte_idx >= bytes.len() {
+            return TextSize::from(bytes.len() as u32);
+        }
+
+        let mut pos = byte_idx;
+
+        // If we're on whitespace, skip whitespace first
+        if pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+        }
+
+        // Now skip the word (non-whitespace)
         while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
