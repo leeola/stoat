@@ -651,8 +651,10 @@ impl<S: Syntax> TextView<S> {
     }
 
     fn execute_insert_text(&self, text: &str) -> ActionResult<ExecutionResult> {
-        // For now, only handle primary cursor to avoid complexity
-        // Multi-cursor editing would need more sophisticated handling
+        // FIXME: Handle all cursors, not just primary. Multi-cursor editing needs:
+        // - Batch edits for all cursor positions
+        // - Handle overlapping edits
+        // - Maintain cursor ordering
         let mut cursors = self.inner.cursors.write();
         let primary_cursor = cursors.primary_mut();
         let pos = primary_cursor.position();
@@ -689,7 +691,7 @@ impl<S: Syntax> TextView<S> {
         let mut cursors = self.inner.cursors.write();
         let buffer_len = self.inner.buffer.len();
 
-        // Only handle primary cursor for now
+        // FIXME: Handle all cursors for multi-cursor delete forward
         let primary_cursor = cursors.primary_mut();
         let pos = primary_cursor.position();
 
@@ -752,7 +754,7 @@ impl<S: Syntax> TextView<S> {
     fn execute_delete_backward(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
 
-        // Only handle primary cursor for now
+        // FIXME: Handle all cursors for multi-cursor delete backward
         let primary_cursor = cursors.primary_mut();
         let pos = primary_cursor.position();
 
@@ -811,7 +813,7 @@ impl<S: Syntax> TextView<S> {
         let mut cursors = self.inner.cursors.write();
         let root = self.inner.buffer.syntax();
 
-        // Only handle primary cursor for now
+        // FIXME: Handle all cursors for multi-cursor delete word backward
         let primary_cursor = cursors.primary_mut();
         let pos = primary_cursor.position();
 
@@ -859,7 +861,7 @@ impl<S: Syntax> TextView<S> {
         let mut cursors = self.inner.cursors.write();
         let root = self.inner.buffer.syntax();
 
-        // Only handle primary cursor for now
+        // FIXME: Handle all cursors for multi-cursor delete line
         let primary_cursor = cursors.primary_mut();
         let pos = primary_cursor.position();
 
@@ -908,7 +910,7 @@ impl<S: Syntax> TextView<S> {
         let mut cursors = self.inner.cursors.write();
         let mut affected_ranges = Vec::new();
 
-        // Only handle primary cursor for now
+        // FIXME: Handle all cursors for multi-cursor replace selection
         let primary_cursor = cursors.primary_mut();
 
         if let Some(selection) = primary_cursor.selection() {
