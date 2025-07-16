@@ -703,40 +703,25 @@ impl<S: Syntax> TextView<S> {
             });
         }
 
-        // Delete a single character
+        // Delete a single character forward
         let delete_end = pos + TextSize::from(1);
         let delete_range = TextRange::new(pos, delete_end);
 
-        // Find the node containing this range
+        // Find the node containing the position to delete
         let root = self.inner.buffer.syntax();
         let node = root
             .find_node_at_offset(pos)
             .ok_or(ActionError::AstNotAvailable)?;
 
-        // Get the node's text and range
-        let node_text = node.text();
+        // Calculate the position within the node
         let node_range = node.text_range();
-
-        // Calculate positions within the node
         let start_in_node = (u32::from(pos) - u32::from(node_range.start())) as usize;
-        let end_in_node =
-            (u32::from(delete_end.min(node_range.end())) - u32::from(node_range.start())) as usize;
+        let end_in_node = (u32::from(delete_end) - u32::from(node_range.start())) as usize;
 
-        // Create new text with the character removed
-        let mut new_text = String::new();
-        if start_in_node > 0 {
-            new_text.push_str(&node_text[..start_in_node]);
-        }
-        if end_in_node < node_text.len() {
-            new_text.push_str(&node_text[end_in_node..]);
-        }
+        // Use the precise DeleteRange operation
+        let edit = Edit::delete_range(node, start_in_node, end_in_node);
 
-        // Create the edit
-        let edit = if new_text.is_empty() {
-            Edit::delete_node(node)
-        } else {
-            Edit::replace_node(node, new_text)
-        };
+        // Cursor stays at the same position for forward delete
 
         drop(cursors);
         self.inner
