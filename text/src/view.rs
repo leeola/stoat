@@ -8,7 +8,7 @@ use crate::{
     cursor_collection::CursorCollection,
     edit::{Edit, EditOperation},
     range::TextRange,
-    syntax::{Syntax, SyntaxNode, simple::SimpleText},
+    syntax::{Syntax, SyntaxNode},
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -383,26 +383,26 @@ impl<S: Syntax> TextView<S> {
         for cursor in cursors.iter_mut() {
             let current_pos = cursor.position();
             let current_line_idx = self.inner.buffer.offset_to_line(current_pos);
-            
+
             // Calculate target line index
             let target_line_idx = current_line_idx.saturating_sub(count);
-            
+
             if target_line_idx != current_line_idx {
                 // Get current column position
                 let current_line_start = self.inner.buffer.line_to_offset(current_line_idx);
                 let current_col = current_pos - current_line_start;
-                
+
                 // Calculate new position on target line
                 let target_line_start = self.inner.buffer.line_to_offset(target_line_idx);
                 let target_line_end = self.inner.buffer.line_end_offset(target_line_start);
                 let target_line_len = target_line_end - target_line_start;
-                
+
                 let new_pos = if current_col <= target_line_len {
                     target_line_start + current_col
                 } else {
                     target_line_end
                 };
-                
+
                 cursor.set_position(new_pos);
                 cursor.clear_selection();
                 affected_ranges.push(TextRange::new(
@@ -419,100 +419,40 @@ impl<S: Syntax> TextView<S> {
         })
     }
 
-        for cursor in cursors.iter_mut() {
-            let current_pos = cursor.position();
-
-            // Find current line
-            if let Some(current_line) = root.find_line_at_offset(current_pos) {
-                let current_line_range = current_line.text_range();
-
-                // Find the line index
-                if let Some(current_line_idx) = lines
-                    .iter()
-                    .position(|line| line.text_range() == current_line_range)
-                {
-                    // Calculate target line index
-                    let target_line_idx = current_line_idx.saturating_sub(count);
-
-                    if target_line_idx < lines.len() {
-                        let target_line = &lines[target_line_idx];
-
-                        // Try to maintain column position
-                        let current_col = current_pos - current_line_range.start();
-                        let target_line_range = target_line.text_range();
-                        let target_line_len = target_line_range.len();
-
-                        let new_pos = if current_col <= target_line_len {
-                            target_line_range.start() + current_col
-                        } else {
-                            target_line_range.end()
-                        };
-
-                        cursor.set_position(new_pos);
-                        cursor.clear_selection();
-                        affected_ranges.push(TextRange::new(
-                            current_pos.min(new_pos),
-                            current_pos.max(new_pos),
-                        ));
-                    }
-                    // If can't move up, cursor stays in place
-                }
-            }
-        }
-
-        Ok(ExecutionResult {
-            success: true,
-            affected_ranges,
-            message: None,
-        })
-    }
-
     fn execute_move_down(&self, count: usize) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
-        // TODO: Use buffer methods instead of AST methods for generic compatibility
-        return Err(ActionError::AstNotAvailable);
         let mut affected_ranges = Vec::new();
+        let line_count = self.inner.buffer.line_count();
 
         for cursor in cursors.iter_mut() {
             let current_pos = cursor.position();
+            let current_line_idx = self.inner.buffer.offset_to_line(current_pos);
 
-            // Find current line
-            if let Some(current_line) = root.find_line_at_offset(current_pos) {
-                let current_line_range = current_line.text_range();
+            // Calculate target line index
+            let target_line_idx = (current_line_idx + count).min(line_count.saturating_sub(1));
 
-                // Find the line index
-                if let Some(current_line_idx) = lines
-                    .iter()
-                    .position(|line| line.text_range() == current_line_range)
-                {
-                    // Calculate target line index
-                    let target_line_idx =
-                        (current_line_idx + count).min(lines.len().saturating_sub(1));
+            if target_line_idx != current_line_idx {
+                // Get current column position
+                let current_line_start = self.inner.buffer.line_to_offset(current_line_idx);
+                let current_col = current_pos - current_line_start;
 
-                    if target_line_idx < lines.len() && target_line_idx != current_line_idx {
-                        let target_line = &lines[target_line_idx];
+                // Calculate new position on target line
+                let target_line_start = self.inner.buffer.line_to_offset(target_line_idx);
+                let target_line_end = self.inner.buffer.line_end_offset(target_line_start);
+                let target_line_len = target_line_end - target_line_start;
 
-                        // Try to maintain column position
-                        let current_col = current_pos - current_line_range.start();
-                        let target_line_range = target_line.text_range();
-                        let target_line_len = target_line_range.len();
+                let new_pos = if current_col <= target_line_len {
+                    target_line_start + current_col
+                } else {
+                    target_line_end
+                };
 
-                        let new_pos = if current_col <= target_line_len {
-                            target_line_range.start() + current_col
-                        } else {
-                            target_line_range.end()
-                        };
-
-                        cursor.set_position(new_pos);
-                        cursor.clear_selection();
-                        affected_ranges.push(TextRange::new(
-                            current_pos.min(new_pos),
-                            current_pos.max(new_pos),
-                        ));
-                    }
-                    // If can't move down, cursor stays in place
-                }
+                cursor.set_position(new_pos);
+                cursor.clear_selection();
+                affected_ranges.push(TextRange::new(
+                    current_pos.min(new_pos),
+                    current_pos.max(new_pos),
+                ));
             }
         }
 
@@ -588,7 +528,6 @@ impl<S: Syntax> TextView<S> {
 
     fn execute_extend_selection_to_word_end(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
         let mut affected_ranges = Vec::new();
 
         for cursor in cursors.iter_mut() {
@@ -620,7 +559,6 @@ impl<S: Syntax> TextView<S> {
 
     fn execute_extend_selection_to_word_start(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
-        let root = self.inner.buffer.syntax();
         let mut affected_ranges = Vec::new();
 
         for cursor in cursors.iter_mut() {
@@ -782,25 +720,38 @@ impl<S: Syntax> TextView<S> {
             });
         }
 
-        // Delete one character forward
-        let delete_range = TextRange::new(pos, pos + TextSize::from(1));
-        let edit = Edit {
-            target: root.clone(),
-            operation: EditOperation::Delete,
-        };
+        // We need to find the node at the cursor position to delete it
+        // For single character delete, we'll use a workaround by getting the text
+        // and replacing it with the text minus one character
+        let buffer_text = self.inner.buffer.text();
+        let delete_start = u32::from(pos) as usize;
+        let delete_end = (delete_start + 1).min(buffer_text.len());
 
-        // We need to create a more specific edit for the range
-        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+        if delete_start >= buffer_text.len() {
+            return Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Nothing to delete".to_string()),
+            });
+        }
+
+        // Create new text with character removed
+        let mut new_text = String::with_capacity(buffer_text.len() - 1);
+        new_text.push_str(&buffer_text[..delete_start]);
+        new_text.push_str(&buffer_text[delete_end..]);
+
+        // Replace entire root with new text
+        let edit = Edit::replace(root.clone(), new_text);
 
         drop(cursors);
         self.inner
             .buffer
-            .apply_rope_edit(&rope_edit)
+            .apply_edit(&edit)
             .map_err(|e| ActionError::EditFailed { source: e })?;
 
         Ok(ExecutionResult {
             success: true,
-            affected_ranges: vec![delete_range],
+            affected_ranges: vec![TextRange::new(pos, pos + TextSize::from(1))],
             message: None,
         })
     }
@@ -821,19 +772,31 @@ impl<S: Syntax> TextView<S> {
             });
         }
 
-        // Delete one character backward
-        let delete_range = TextRange::new(pos - TextSize::from(1), pos);
-        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+        // Similar to delete forward, we'll use text replacement
+        let buffer_text = self.inner.buffer.text();
+        let delete_end = u32::from(pos) as usize;
+        let delete_start = delete_end.saturating_sub(1);
+
+        // Create new text with character removed
+        let mut new_text = String::with_capacity(buffer_text.len() - 1);
+        new_text.push_str(&buffer_text[..delete_start]);
+        new_text.push_str(&buffer_text[delete_end..]);
+
+        // Replace entire root with new text
+        let edit = Edit::replace(root.clone(), new_text);
+
+        // Update cursor position
+        primary_cursor.set_position(pos - TextSize::from(1));
 
         drop(cursors);
         self.inner
             .buffer
-            .apply_rope_edit(&rope_edit)
+            .apply_edit(&edit)
             .map_err(|e| ActionError::EditFailed { source: e })?;
 
         Ok(ExecutionResult {
             success: true,
-            affected_ranges: vec![delete_range],
+            affected_ranges: vec![TextRange::new(pos - TextSize::from(1), pos)],
             message: None,
         })
     }
@@ -858,12 +821,22 @@ impl<S: Syntax> TextView<S> {
         }
 
         let delete_range = TextRange::new(pos, end_pos);
-        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        // Get buffer text and create new text with word removed
+        let buffer_text = self.inner.buffer.text();
+        let delete_start = u32::from(pos) as usize;
+        let delete_end = u32::from(end_pos) as usize;
+
+        let mut new_text = String::with_capacity(buffer_text.len() - (delete_end - delete_start));
+        new_text.push_str(&buffer_text[..delete_start]);
+        new_text.push_str(&buffer_text[delete_end..]);
+
+        let edit = Edit::replace(root.clone(), new_text);
 
         drop(cursors);
         self.inner
             .buffer
-            .apply_rope_edit(&rope_edit)
+            .apply_edit(&edit)
             .map_err(|e| ActionError::EditFailed { source: e })?;
 
         Ok(ExecutionResult {
@@ -893,12 +866,25 @@ impl<S: Syntax> TextView<S> {
         }
 
         let delete_range = TextRange::new(start_pos, pos);
-        let rope_edit = crate::edit::RopeEdit::delete(delete_range);
+
+        // Get buffer text and create new text with word removed
+        let buffer_text = self.inner.buffer.text();
+        let delete_start = u32::from(start_pos) as usize;
+        let delete_end = u32::from(pos) as usize;
+
+        let mut new_text = String::with_capacity(buffer_text.len() - (delete_end - delete_start));
+        new_text.push_str(&buffer_text[..delete_start]);
+        new_text.push_str(&buffer_text[delete_end..]);
+
+        let edit = Edit::replace(root.clone(), new_text);
+
+        // Update cursor position
+        primary_cursor.set_position(start_pos);
 
         drop(cursors);
         self.inner
             .buffer
-            .apply_rope_edit(&rope_edit)
+            .apply_edit(&edit)
             .map_err(|e| ActionError::EditFailed { source: e })?;
 
         Ok(ExecutionResult {
@@ -921,12 +907,33 @@ impl<S: Syntax> TextView<S> {
         let line_end = self.inner.buffer.line_end_offset(pos);
         let line_range = TextRange::new(line_start, line_end);
 
-        let rope_edit = crate::edit::RopeEdit::delete(line_range);
+        // Get buffer text and create new text with line removed
+        let buffer_text = self.inner.buffer.text();
+        let delete_start = u32::from(line_start) as usize;
+        let delete_end = u32::from(line_end) as usize;
+
+        // Also remove the newline if not at the end
+        let actual_delete_end =
+            if delete_end < buffer_text.len() && buffer_text.as_bytes()[delete_end] == b'\n' {
+                delete_end + 1
+            } else {
+                delete_end
+            };
+
+        let mut new_text =
+            String::with_capacity(buffer_text.len() - (actual_delete_end - delete_start));
+        new_text.push_str(&buffer_text[..delete_start]);
+        new_text.push_str(&buffer_text[actual_delete_end..]);
+
+        let edit = Edit::replace(root.clone(), new_text);
+
+        // Update cursor to start of deleted line
+        primary_cursor.set_position(line_start);
 
         drop(cursors);
         self.inner
             .buffer
-            .apply_rope_edit(&rope_edit)
+            .apply_edit(&edit)
             .map_err(|e| ActionError::EditFailed { source: e })?;
 
         Ok(ExecutionResult {
@@ -944,12 +951,29 @@ impl<S: Syntax> TextView<S> {
         let primary_cursor = cursors.primary_mut();
 
         if let Some(selection) = primary_cursor.selection() {
-            let rope_edit = crate::edit::RopeEdit::replace(selection, text.to_string());
+            // Get buffer text and replace selection
+            let buffer_text = self.inner.buffer.text();
+            let replace_start = u32::from(selection.start()) as usize;
+            let replace_end = u32::from(selection.end()) as usize;
+
+            let mut new_text = String::with_capacity(
+                buffer_text.len() - (replace_end - replace_start) + text.len(),
+            );
+            new_text.push_str(&buffer_text[..replace_start]);
+            new_text.push_str(text);
+            new_text.push_str(&buffer_text[replace_end..]);
+
+            let edit = Edit::replace(self.inner.buffer.syntax(), new_text);
+
+            // Update cursor position to end of inserted text
+            let new_pos = selection.start() + TextSize::from(text.len() as u32);
+            primary_cursor.set_position(new_pos);
+            primary_cursor.clear_selection();
 
             drop(cursors);
             self.inner
                 .buffer
-                .apply_rope_edit(&rope_edit)
+                .apply_edit(&edit)
                 .map_err(|e| ActionError::EditFailed { source: e })?;
 
             let new_range = TextRange::new(
@@ -972,108 +996,83 @@ impl<S: Syntax> TextView<S> {
     fn execute_add_cursor_above(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
         let root = self.inner.buffer.syntax();
-        // TODO: Use buffer methods instead of AST methods for generic compatibility
-        return Err(ActionError::AstNotAvailable);
 
         // Get the primary cursor position
         let primary_pos = cursors.primary().position();
+        let current_line_idx = self.inner.buffer.offset_to_line(primary_pos);
 
-        // Find current line
-        if let Some(current_line) = root.find_line_at_offset(primary_pos) {
-            let current_line_range = current_line.text_range();
+        if current_line_idx > 0 {
+            // Get current column position
+            let current_line_start = self.inner.buffer.line_to_offset(current_line_idx);
+            let current_col = primary_pos - current_line_start;
 
-            // Find the line index
-            if let Some(current_line_idx) = lines
-                .iter()
-                .position(|line| line.text_range() == current_line_range)
-            {
-                if current_line_idx > 0 {
-                    let target_line = &lines[current_line_idx - 1];
+            // Calculate new position on line above
+            let target_line_idx = current_line_idx - 1;
+            let target_line_start = self.inner.buffer.line_to_offset(target_line_idx);
+            let target_line_end = self.inner.buffer.line_end_offset(target_line_start);
+            let target_line_len = target_line_end - target_line_start;
 
-                    // Try to maintain column position
-                    let current_col = primary_pos - current_line_range.start();
-                    let target_line_range = target_line.text_range();
-                    let target_line_len = target_line_range.len();
-
-                    let new_pos = if current_col <= target_line_len {
-                        target_line_range.start() + current_col
-                    } else {
-                        target_line_range.end()
-                    };
-
-                    cursors.add_cursor(new_pos, root);
-
-                    Ok(ExecutionResult {
-                        success: true,
-                        affected_ranges: vec![TextRange::new(new_pos, new_pos)],
-                        message: Some("Cursor added above".to_string()),
-                    })
-                } else {
-                    Ok(ExecutionResult {
-                        success: false,
-                        affected_ranges: Vec::new(),
-                        message: Some("Already at first line".to_string()),
-                    })
-                }
+            let new_pos = if current_col <= target_line_len {
+                target_line_start + current_col
             } else {
-                Err(ActionError::AstNotAvailable)
-            }
+                target_line_end
+            };
+
+            cursors.add_cursor(new_pos, root);
+
+            Ok(ExecutionResult {
+                success: true,
+                affected_ranges: vec![TextRange::new(new_pos, new_pos)],
+                message: Some("Cursor added above".to_string()),
+            })
         } else {
-            Err(ActionError::AstNotAvailable)
+            Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Already at first line".to_string()),
+            })
         }
     }
 
     fn execute_add_cursor_below(&self) -> ActionResult<ExecutionResult> {
         let mut cursors = self.inner.cursors.write();
         let root = self.inner.buffer.syntax();
-        // TODO: Use buffer methods instead of AST methods for generic compatibility
-        return Err(ActionError::AstNotAvailable);
+        let line_count = self.inner.buffer.line_count();
 
         // Get the primary cursor position
         let primary_pos = cursors.primary().position();
+        let current_line_idx = self.inner.buffer.offset_to_line(primary_pos);
 
-        // Find current line
-        if let Some(current_line) = root.find_line_at_offset(primary_pos) {
-            let current_line_range = current_line.text_range();
+        if current_line_idx + 1 < line_count {
+            // Get current column position
+            let current_line_start = self.inner.buffer.line_to_offset(current_line_idx);
+            let current_col = primary_pos - current_line_start;
 
-            // Find the line index
-            if let Some(current_line_idx) = lines
-                .iter()
-                .position(|line| line.text_range() == current_line_range)
-            {
-                if current_line_idx + 1 < lines.len() {
-                    let target_line = &lines[current_line_idx + 1];
+            // Calculate new position on line below
+            let target_line_idx = current_line_idx + 1;
+            let target_line_start = self.inner.buffer.line_to_offset(target_line_idx);
+            let target_line_end = self.inner.buffer.line_end_offset(target_line_start);
+            let target_line_len = target_line_end - target_line_start;
 
-                    // Try to maintain column position
-                    let current_col = primary_pos - current_line_range.start();
-                    let target_line_range = target_line.text_range();
-                    let target_line_len = target_line_range.len();
-
-                    let new_pos = if current_col <= target_line_len {
-                        target_line_range.start() + current_col
-                    } else {
-                        target_line_range.end()
-                    };
-
-                    cursors.add_cursor(new_pos, root);
-
-                    Ok(ExecutionResult {
-                        success: true,
-                        affected_ranges: vec![TextRange::new(new_pos, new_pos)],
-                        message: Some("Cursor added below".to_string()),
-                    })
-                } else {
-                    Ok(ExecutionResult {
-                        success: false,
-                        affected_ranges: Vec::new(),
-                        message: Some("Already at last line".to_string()),
-                    })
-                }
+            let new_pos = if current_col <= target_line_len {
+                target_line_start + current_col
             } else {
-                Err(ActionError::AstNotAvailable)
-            }
+                target_line_end
+            };
+
+            cursors.add_cursor(new_pos, root);
+
+            Ok(ExecutionResult {
+                success: true,
+                affected_ranges: vec![TextRange::new(new_pos, new_pos)],
+                message: Some("Cursor added below".to_string()),
+            })
         } else {
-            Err(ActionError::AstNotAvailable)
+            Ok(ExecutionResult {
+                success: false,
+                affected_ranges: Vec::new(),
+                message: Some("Already at last line".to_string()),
+            })
         }
     }
 

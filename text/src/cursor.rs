@@ -215,16 +215,11 @@ impl<S: Syntax> TextCursor<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{SyntaxNode, simple::SimpleText};
+    use crate::test_helpers::*;
 
     #[test]
     fn test_cursor_creation() {
-        let root = SyntaxNode::<SimpleText>::new_with_text(
-            crate::syntax::simple::SimpleKind::Root,
-            TextRange::new(0.into(), 11.into()),
-            "hello world".to_string(),
-        );
-
+        let root = simple_root("hello world");
         let cursor = TextCursor::new(0.into(), root);
         assert!(cursor.current().is_some());
         assert_eq!(cursor.position(), 0.into());
@@ -232,15 +227,9 @@ mod tests {
 
     #[test]
     fn test_cursor_edit_operations() {
-        let root = SyntaxNode::<SimpleText>::new_with_text(
-            crate::syntax::simple::SimpleKind::Root,
-            TextRange::new(0.into(), 11.into()),
-            "hello world".to_string(),
-        );
-
+        let root = simple_root("hello world");
         let mut cursor = TextCursor::new(0.into(), root);
 
-        // Test creating edit operations
         let edit = cursor
             .replace("goodbye")
             .expect("Failed to create replace edit");

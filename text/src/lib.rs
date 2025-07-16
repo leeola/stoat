@@ -21,6 +21,9 @@ pub mod range;
 pub mod syntax;
 pub mod view;
 
+#[cfg(test)]
+pub mod test_helpers;
+
 // Re-export core types
 pub use action::{ActionError, ActionResult, ExecutionResult, TextAction};
 pub use buffer::{BufferId, TextBuffer};

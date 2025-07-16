@@ -165,129 +165,64 @@ impl TextAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::TextBuffer, range::TextRange, syntax::simple::SimpleText};
+    use crate::{range::TextRange, test_helpers::*};
 
     #[test]
     fn test_move_actions() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world\ntest line");
-        let view = buffer.create_view();
-
-        // Test move right
-        let act = TextAction::MoveRight { count: 5 };
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 5.into());
-
-        // Test move left
-        let act = TextAction::MoveLeft { count: 2 };
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 3.into());
-
-        // Test move to line start
-        let act = TextAction::MoveToLineStart;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 0.into());
-
-        // Test move to line end
-        let act = TextAction::MoveToLineEnd;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 12.into()); // After newline
-
-        // Test move to document end
-        let act = TextAction::MoveToDocumentEnd;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 21.into());
+        TestScenario::new("hello world\ntest line")
+            .exec(ActionBuilder::move_right(5))
+            .expect_pos(5)
+            .exec(ActionBuilder::move_left(2))
+            .expect_pos(3)
+            .exec(TextAction::MoveToLineStart)
+            .expect_pos(0)
+            .exec(TextAction::MoveToLineEnd)
+            .expect_pos(12) // After newline
+            .exec(TextAction::MoveToDocumentEnd)
+            .expect_pos(21);
     }
 
     #[test]
     fn test_word_movement() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world test");
-        let view = buffer.create_view();
-
-        // Move forward by word
-        let act = TextAction::MoveWordForward;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 6.into()); // After "hello "
-
-        // Move forward again
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 12.into()); // After "world "
-
-        // Move backward by word
-        let act = TextAction::MoveWordBackward;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 6.into()); // Back to start of "world"
+        TestScenario::new("hello world test")
+            .exec(TextAction::MoveWordForward)
+            .expect_pos(6) // After "hello "
+            .exec(TextAction::MoveWordForward)
+            .expect_pos(12) // After "world "
+            .exec(TextAction::MoveWordBackward)
+            .expect_pos(6); // Back to start of "world"
     }
 
     #[test]
     fn test_move_to_line() {
-        let buffer = TextBuffer::<SimpleText>::new("line 1\nline 2\nline 3");
-        let view = buffer.create_view();
+        let view = simple_view("line 1\nline 2\nline 3");
 
-        // Move to line 2 (1-indexed)
-        let act = TextAction::MoveToLine { line: 2 };
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 7.into()); // Start of "line 2"
+        exec_expect_pos(&view, ActionBuilder::move_to_line(2), 7); // Start of "line 2"
+        exec_expect_pos(&view, ActionBuilder::move_to_line(3), 14); // Start of "line 3"
 
-        // Move to line 3
-        let act = TextAction::MoveToLine { line: 3 };
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert_eq!(view.primary_cursor().position(), 14.into()); // Start of "line 3"
-
-        // Try invalid line
-        let act = TextAction::MoveToLine { line: 0 };
-        let result = view.execute_action(&act);
+        // Try invalid lines
+        let result = view.execute_action(&ActionBuilder::move_to_line(0));
         assert!(matches!(result, Err(ActionError::InvalidLine { .. })));
 
-        // Try line beyond buffer
-        let act = TextAction::MoveToLine { line: 10 };
-        let result = view.execute_action(&act);
+        let result = view.execute_action(&ActionBuilder::move_to_line(10));
         assert!(matches!(result, Err(ActionError::InvalidLine { .. })));
     }
 
     #[test]
     fn test_insert_text() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
-        let view = buffer.create_view();
-
-        // Move cursor to position 5
-        let act = TextAction::MoveToOffset { offset: 5.into() };
-        view.execute_action(&act).expect("Move should succeed");
-
-        // Insert text
-        let act = TextAction::InsertText {
-            text: " beautiful".to_string(),
-        };
-        let result = view.execute_action(&act).expect("Insert should succeed");
-        assert!(result.success);
-        assert_eq!(buffer.text(), "hello beautiful world");
+        TestScenario::at_position("hello world", 5)
+            .exec(ActionBuilder::insert_text(" beautiful"))
+            .expect_text("hello beautiful world");
     }
 
     #[test]
     fn test_multi_cursor_actions() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
-        let view = buffer.create_view();
+        let view = simple_view("hello world");
 
-        // Add cursor at position 6
-        let act = TextAction::AddCursorAtOffset { offset: 6.into() };
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
+        exec(&view, &ActionBuilder::add_cursor_at(6));
         assert_eq!(view.cursors().len(), 2);
 
-        // Move all cursors right
-        let act = TextAction::MoveRight { count: 2 };
-        view.execute_action(&act).expect("Action should succeed");
-
-        // Check cursor positions
+        exec(&view, &ActionBuilder::move_right(2));
         let positions: Vec<u32> = view
             .cursors()
             .iter()
@@ -295,27 +230,18 @@ mod tests {
             .collect();
         assert_eq!(positions, vec![2, 8]);
 
-        // Remove secondary cursors
-        let act = TextAction::RemoveSecondaryCursors;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
+        exec(&view, &TextAction::RemoveSecondaryCursors);
         assert_eq!(view.cursors().len(), 1);
     }
 
     #[test]
     fn test_clear_selection() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
-        let view = buffer.create_view();
-
-        // Set a selection on the primary cursor
+        let view = simple_view("hello world");
         view.primary_cursor_mut()
             .set_selection(Some(TextRange::new(0.into(), 5.into())));
 
-        // Clear selection
-        let act = TextAction::ClearSelection;
-        let result = view.execute_action(&act).expect("Action should succeed");
-        assert!(result.success);
-        assert!(view.primary_cursor().selection().is_none());
+        exec(&view, &TextAction::ClearSelection);
+        assert_no_selection(&view.primary_cursor());
     }
 
     #[test]

@@ -82,13 +82,11 @@ impl<'a> SimpleAstBuilder<'a> {
         }
 
         let root_end = self.pos;
-        let root = SyntaxNode::new_with_children(
+        SyntaxNode::new_with_children(
             SimpleKind::Root,
             TextRange::new(root_start, root_end),
             children,
-        );
-
-        root
+        )
     }
 
     fn parse_line(&mut self, line_text: &str) -> SyntaxNode<SimpleText> {
@@ -381,7 +379,7 @@ mod tests {
 
         // Test parent navigation
         assert!(first_line.parent().is_some());
-        let parent = first_line.parent().unwrap();
+        let parent = first_line.parent().expect("Line should have parent");
         assert_eq!(parent.kind(), SimpleKind::Root);
 
         // Test finding words
@@ -410,7 +408,7 @@ mod tests {
             .collect();
 
         // Check we can navigate through the words
-        assert!(words.len() > 0);
+        assert!(!words.is_empty());
         assert_eq!(words[0].text(), "fn");
         assert_eq!(words[1].text(), "hello_world()");
         assert_eq!(words[2].text(), "{");

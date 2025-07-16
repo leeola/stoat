@@ -460,11 +460,11 @@ impl<S: Syntax> Clone for TextBuffer<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{edit::EditOperation, syntax::simple::SimpleText};
+    use crate::{edit::EditOperation, test_helpers::*};
 
     #[test]
     fn test_buffer_creation() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = simple_buffer("hello world");
         assert_eq!(buffer.text(), "hello world");
         assert_eq!(buffer.len(), 11);
         assert!(!buffer.is_empty());
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_empty_buffer() {
-        let buffer = TextBuffer::<SimpleText>::new("");
+        let buffer = simple_buffer("");
         assert_eq!(buffer.text(), "");
         assert_eq!(buffer.len(), 0);
         assert!(buffer.is_empty());
@@ -480,53 +480,32 @@ mod tests {
 
     #[test]
     fn test_apply_replace_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
-        let root = buffer.syntax();
-
-        let edit = Edit::replace(root, "goodbye world".to_string());
-        buffer.apply_edit(&edit).expect("Edit should succeed");
-
-        assert_eq!(buffer.text(), "goodbye world");
+        let buffer = simple_buffer("hello world");
+        assert_buffer_text(&buffer, &apply_replace(&buffer, "goodbye world"));
     }
 
     #[test]
     fn test_apply_insert_before_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("world");
-        let root = buffer.syntax();
-
-        let edit = Edit::insert_before(root, "hello ".to_string());
-        buffer.apply_edit(&edit).expect("Edit should succeed");
-
-        assert_eq!(buffer.text(), "hello world");
+        let buffer = simple_buffer("world");
+        assert_eq!(apply_insert_before(&buffer, "hello "), "hello world");
     }
 
     #[test]
     fn test_apply_insert_after_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("hello");
-        let root = buffer.syntax();
-
-        let edit = Edit::insert_after(root, " world".to_string());
-        buffer.apply_edit(&edit).expect("Edit should succeed");
-
-        assert_eq!(buffer.text(), "hello world");
+        let buffer = simple_buffer("hello");
+        assert_eq!(apply_insert_after(&buffer, " world"), "hello world");
     }
 
     #[test]
     fn test_apply_delete_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
-        let root = buffer.syntax();
-
-        let edit = Edit::delete(root);
-        buffer.apply_edit(&edit).expect("Edit should succeed");
-
-        assert_eq!(buffer.text(), "");
+        let buffer = simple_buffer("hello world");
+        assert_eq!(apply_delete(&buffer), "");
     }
 
     #[test]
     fn test_apply_wrap_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("content");
+        let buffer = simple_buffer("content");
         let root = buffer.syntax();
-
         let edit = Edit {
             target: root,
             operation: EditOperation::WrapWith {
@@ -535,19 +514,14 @@ mod tests {
             },
         };
         buffer.apply_edit(&edit).expect("Edit should succeed");
-
-        assert_eq!(buffer.text(), "(content)");
+        assert_buffer_text(&buffer, "(content)");
     }
 
     #[test]
     fn test_version_increments_on_edit() {
-        let buffer = TextBuffer::<SimpleText>::new("hello");
+        let buffer = simple_buffer("hello");
         let initial_version = *buffer.inner.version.read();
-
-        let root = buffer.syntax();
-        let edit = Edit::replace(root, "world".to_string());
-        buffer.apply_edit(&edit).expect("Edit should succeed");
-
+        apply_replace(&buffer, "world");
         let new_version = *buffer.inner.version.read();
         assert_eq!(new_version, initial_version + 1);
     }

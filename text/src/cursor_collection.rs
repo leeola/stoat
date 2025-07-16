@@ -118,16 +118,11 @@ impl<S: Syntax> CursorCollection<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{range::TextRange, syntax::simple::SimpleText};
+    use crate::test_helpers::*;
 
     #[test]
     fn test_cursor_collection_creation() {
-        let root = SyntaxNode::<SimpleText>::new_with_text(
-            crate::syntax::simple::SimpleKind::Root,
-            TextRange::new(0.into(), 10.into()),
-            "test".to_string(),
-        );
-
+        let root = simple_root("test");
         let collection = CursorCollection::new(0.into(), root);
         assert_eq!(collection.len(), 1);
         assert!(!collection.is_empty());
@@ -135,12 +130,7 @@ mod tests {
 
     #[test]
     fn test_add_remove_cursors() {
-        let root = SyntaxNode::<SimpleText>::new_with_text(
-            crate::syntax::simple::SimpleKind::Root,
-            TextRange::new(0.into(), 10.into()),
-            "test".to_string(),
-        );
-
+        let root = simple_root("test");
         let mut collection = CursorCollection::new(0.into(), root.clone());
         let id = collection.add_cursor(5.into(), root.clone());
         assert_eq!(collection.len(), 2);
@@ -155,12 +145,7 @@ mod tests {
 
     #[test]
     fn test_merge_overlapping() {
-        let root = SyntaxNode::<SimpleText>::new_with_text(
-            crate::syntax::simple::SimpleKind::Root,
-            TextRange::new(0.into(), 10.into()),
-            "test".to_string(),
-        );
-
+        let root = simple_root("test");
         let mut collection = CursorCollection::new(0.into(), root.clone());
         collection.add_cursor(5.into(), root.clone());
         collection.add_cursor(5.into(), root.clone()); // Same position

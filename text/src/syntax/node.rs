@@ -51,6 +51,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Create a new syntax node with text (for testing)
+    #[cfg(test)]
     pub(crate) fn new_with_text(kind: S::Kind, range: TextRange, text: String) -> Self {
         let node = Self::new(kind, range);
         let _ = node.data.text.set(text);
@@ -114,7 +115,7 @@ impl<S: Syntax> SyntaxNode<S> {
 
     /// Get child nodes (triggers lazy parsing if needed)
     pub fn children(&self) -> &[SyntaxElement<S>] {
-        self.data.children.get_or_init(|| Vec::new())
+        self.data.children.get_or_init(Vec::new)
     }
 
     /// Get the first child
