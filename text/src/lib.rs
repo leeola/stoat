@@ -33,7 +33,8 @@ pub use edit::{Edit, EditError, EditOperation, FlatEdit, RopeEdit};
 pub use flat_buffer::FlatTextBuffer;
 pub use range::TextRange;
 pub use syntax::{
-    FlatAst, FlatSyntaxNode, IncrementalParser, Syntax, SyntaxKind, SyntaxNode, TextChange,
+    FlatAst, FlatSyntaxNode, IncrementalParser, MarkdownKind, MarkdownSyntax, Syntax, SyntaxKind,
+    SyntaxNode, TextChange,
 };
 // Re-export text-size for convenience
 pub use text_size::{TextLen, TextSize};
