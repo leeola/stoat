@@ -1,13 +1,17 @@
 [package]
 name = "stoat_gui"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
+[[bin]]
+name = "stoat-gui-prototype"
+path = "src/main.rs"
+
 [dependencies]
-iced = "0.13.1"
+iced = { version = "0.13.1", features = ["canvas", "advanced"] }
 
 [lints]
 workspace = true
