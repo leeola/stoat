@@ -11,6 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 /// Simple text syntax
+#[derive(Clone)]
 pub struct SimpleText;
 
 /// Kinds of nodes in simple text

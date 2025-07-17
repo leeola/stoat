@@ -3,7 +3,7 @@
 use std::fmt::Debug;
 
 /// Trait for syntax types (e.g., different languages)
-pub trait Syntax: 'static + Sized {
+pub trait Syntax: 'static + Sized + Clone {
     /// The kind of syntax nodes
     type Kind: SyntaxKind;
 

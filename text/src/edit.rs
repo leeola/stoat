@@ -3,9 +3,13 @@
 use crate::{
     TextSize,
     range::TextRange,
-    syntax::{Syntax, SyntaxNode},
+    syntax::{
+        Syntax, SyntaxNode,
+        flat_ast::{FlatAst, NodeId},
+    },
 };
 use snafu::Snafu;
+use std::sync::Arc;
 
 /// Errors that can occur during edit operations
 #[derive(Debug, Snafu)]
@@ -136,6 +140,116 @@ impl<S: Syntax> Edit<S> {
             target: node,
             operation: EditOperation::ReplaceRange { start, end, text },
         }
+    }
+}
+
+/// An edit operation on the flat AST using NodeId references
+#[derive(Debug, Clone)]
+pub struct FlatEdit {
+    /// The target node ID to edit
+    pub target: NodeId,
+    /// The operation to perform
+    pub operation: EditOperation,
+}
+
+impl FlatEdit {
+    /// Create a replace edit
+    pub fn replace(target: NodeId, text: String) -> Self {
+        Self {
+            target,
+            operation: EditOperation::Replace(text),
+        }
+    }
+
+    /// Create an insert before edit
+    pub fn insert_before(target: NodeId, text: String) -> Self {
+        Self {
+            target,
+            operation: EditOperation::InsertBefore(text),
+        }
+    }
+
+    /// Create an insert after edit
+    pub fn insert_after(target: NodeId, text: String) -> Self {
+        Self {
+            target,
+            operation: EditOperation::InsertAfter(text),
+        }
+    }
+
+    /// Create a delete edit
+    pub fn delete(target: NodeId) -> Self {
+        Self {
+            target,
+            operation: EditOperation::Delete,
+        }
+    }
+
+    /// Delete a specific node from the AST
+    pub fn delete_node(node_id: NodeId) -> Self {
+        Self {
+            target: node_id,
+            operation: EditOperation::Delete,
+        }
+    }
+
+    /// Replace a specific node's text
+    pub fn replace_node(node_id: NodeId, text: String) -> Self {
+        Self {
+            target: node_id,
+            operation: EditOperation::Replace(text),
+        }
+    }
+
+    /// Insert text at a specific offset within a node
+    pub fn insert_at_node(node_id: NodeId, offset: usize, text: String) -> Self {
+        Self {
+            target: node_id,
+            operation: EditOperation::InsertAt { offset, text },
+        }
+    }
+
+    /// Delete a specific range within a node
+    pub fn delete_range(node_id: NodeId, start: usize, end: usize) -> Self {
+        Self {
+            target: node_id,
+            operation: EditOperation::DeleteRange { start, end },
+        }
+    }
+
+    /// Replace a specific range within a node
+    pub fn replace_range(node_id: NodeId, start: usize, end: usize, text: String) -> Self {
+        Self {
+            target: node_id,
+            operation: EditOperation::ReplaceRange { start, end, text },
+        }
+    }
+
+    /// Wrap the node with text before and after
+    pub fn wrap_with(target: NodeId, before: String, after: String) -> Self {
+        Self {
+            target,
+            operation: EditOperation::WrapWith { before, after },
+        }
+    }
+
+    /// Unwrap the node (remove surrounding text)
+    pub fn unwrap(target: NodeId) -> Self {
+        Self {
+            target,
+            operation: EditOperation::Unwrap,
+        }
+    }
+
+    /// Convert to legacy Edit for backward compatibility
+    pub fn to_legacy<S: Syntax>(&self, ast: &Arc<FlatAst<S>>) -> Option<Edit<S>> {
+        use crate::syntax::compat::FlatSyntaxNode;
+
+        let flat_node = FlatSyntaxNode::new(ast.clone(), self.target);
+        flat_node.to_legacy().map(|node| Edit {
+            target: node,
+            operation: self.operation.clone(),
+        })
     }
 }
 

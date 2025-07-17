@@ -71,6 +71,16 @@ impl TextRange {
         TextRange::new(self.start.min(other.start), self.end.max(other.end))
     }
 
+    /// Check if this range intersects with another range
+    pub fn intersects(&self, other: TextRange) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+
+    /// Get the union of two ranges
+    pub fn union(&self, other: TextRange) -> TextRange {
+        TextRange::new(self.start.min(other.start), self.end.max(other.end))
+    }
+
     /// Shift this range by the given offset
     pub fn shift(&self, offset: TextSize) -> TextRange {
         TextRange::new(self.start + offset, self.end + offset)
