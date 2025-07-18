@@ -3,14 +3,28 @@
 
 // TODO: Rename to be more Key/User oriented. This app has lots of inputs, so this is conflated.
 //
+use super::Key;
+
 /// Raw input from some Stoat UI, to be later mapped to underlying commands/modes/nodes/etc.
 ///
 /// The resulting output from [`Output`](crate::output::Output).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserInput {
-    // NIT: multiple chars?
-    Keyboard(char),
+    /// Direct key input
+    Key(Key),
     // Mouse(Mouse),
+}
+
+impl From<Key> for UserInput {
+    fn from(key: Key) -> Self {
+        UserInput::Key(key)
+    }
+}
+
+impl From<char> for UserInput {
+    fn from(ch: char) -> Self {
+        UserInput::Key(Key::Char(ch))
+    }
 }
 
 // NIT: Not sure what i want to do about mouse. Mouse input is useful but it has some association to

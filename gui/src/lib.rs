@@ -1,5 +1,6 @@
 pub mod app;
 pub mod canvas;
+pub mod input;
 pub mod state;
 pub mod widget;
 

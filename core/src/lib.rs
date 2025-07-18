@@ -1,6 +1,6 @@
 /// The core implementation the [`Stoat`] editor runtime. Ie the editor minus the GUI/TUI/CLI
 /// interfaces.
-use input::UserInput;
+use input::{Action, Key, ModalConfig, ModalSystem, Mode, UserInput};
 use std::path::{Path, PathBuf};
 use view::View;
 use workspace::Workspace;
@@ -299,6 +299,8 @@ pub struct Stoat {
     state: state::State,
     /// State file path for persistence
     state_path: PathBuf,
+    /// Modal input system
+    modal_system: ModalSystem,
 }
 
 impl Default for Stoat {
@@ -423,6 +425,7 @@ impl Stoat {
             active,
             state,
             state_path,
+            modal_system: ModalSystem::new(),
         })
     }
 
@@ -433,6 +436,7 @@ impl Stoat {
             active: workspace,
             state,
             state_path,
+            modal_system: ModalSystem::new(),
         }
     }
 
@@ -533,22 +537,110 @@ impl Stoat {
     /// Push a user input into Stoat.
     //
     // TODO: UserInput needs to return available actions? For automatic ? and client validation?
-    pub fn user_input(&mut self, _ue: impl Into<UserInput>) {
-        todo!()
+    pub fn user_input(&mut self, ue: impl Into<UserInput>) -> Option<Action> {
+        let user_input = ue.into();
+
+        // Convert UserInput to Key
+        let UserInput::Key(key) = user_input;
+
+        // Process key through modal system
+        let action = self.modal_system.process_key(key);
+
+        // Handle the action
+        if let Some(ref action) = action {
+            match action {
+                Action::ExitApp => {
+                    // Exit app handling would be done by the caller
+                },
+                Action::ChangeMode(_) => {
+                    // Mode change is handled internally by ModalSystem
+                },
+                Action::Move(_direction) => {
+                    // TODO: Implement movement in workspace/view
+                    // self.active.view_mut().move_cursor(direction);
+                },
+                Action::Delete => {
+                    // TODO: Implement delete
+                },
+                Action::DeleteLine => {
+                    // TODO: Implement delete line
+                },
+                Action::Yank => {
+                    // TODO: Implement yank
+                },
+                Action::Paste => {
+                    // TODO: Implement paste
+                },
+                Action::Jump(_target) => {
+                    // TODO: Implement jump navigation
+                },
+                Action::InsertChar => {
+                    // TODO: Implement character insertion
+                    // This action would typically insert the last key pressed
+                },
+                Action::YankLine => {
+                    // TODO: Implement yank line
+                },
+                Action::CommandInput => {
+                    // TODO: Implement command mode input
+                },
+                Action::ExecuteCommand => {
+                    // TODO: Execute the current command
+                },
+                Action::ShowActionList => {
+                    // TODO: Show available actions
+                },
+                Action::ShowCommandPalette => {
+                    // TODO: Show command palette
+                },
+            }
+        }
+
+        action
     }
     /// Push multiple user events into Stoat.
     pub fn user_inputs<T: Into<UserInput>>(&mut self, user_inputs: impl IntoIterator<Item = T>) {
         for ue in user_inputs {
-            self.user_input(ue)
+            self.user_input(ue);
         }
     }
     pub fn view(&self) -> &View {
         self.active.view()
     }
+
+    /// Get the current modal mode
+    pub fn current_mode(&self) -> &Mode {
+        self.modal_system.current_mode()
+    }
+
+    /// Get available actions in the current mode
+    pub fn available_actions(&self) -> Vec<(&Key, &Action)> {
+        self.modal_system.available_actions()
+    }
+
+    /// Update the modal system (call on each frame/tick)
+    pub fn tick(&mut self) {
+        self.modal_system.tick();
+    }
+
+    /// Load a modal configuration from RON
+    pub fn load_modal_config(&mut self, config: ModalConfig) {
+        self.modal_system = ModalSystem::with_config(config);
+    }
+
+    /// Load modal configuration from a file
+    pub fn load_modal_config_from_file(&mut self, path: &Path) -> Result<()> {
+        let config = ModalConfig::from_file(path).map_err(|e| Error::Generic {
+            message: format!("Failed to load modal config: {e}"),
+        })?;
+        self.modal_system = ModalSystem::with_config(config);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 pub struct StoatBuilder(Stoat);
+
 impl StoatBuilder {
     /// Include standard configuration and node types.
     pub fn std(self) -> Self {

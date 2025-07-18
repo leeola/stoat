@@ -3408,6 +3408,7 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "stoat_core",
 ]
 
 [[package]]
