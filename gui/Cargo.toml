@@ -6,9 +6,9 @@ readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[[bin]]
-name = "stoat-gui-prototype"
-path = "src/main.rs"
+[lib]
+name = "stoat_gui"
+path = "src/lib.rs"
 
 [dependencies]
 iced = { version = "0.13.1", features = ["canvas", "advanced"] }

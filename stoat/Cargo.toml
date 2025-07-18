@@ -12,6 +12,8 @@ license-file = "../LICENSE"
 cli_bin = ["cli_config", "tokio/macros", "tokio/rt-multi-thread"]
 # Include CLI configuration.
 cli_config = ["clap"]
+# Enable GUI support
+gui = []
 
 [lints]
 workspace = true

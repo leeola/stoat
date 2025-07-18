@@ -7,3 +7,8 @@ pub mod widget;
 pub use app::{App, Message};
 pub use canvas::NodeCanvas;
 pub use state::{NodeContent, NodeId, NodeRenderData, NodeState, RenderState, Viewport};
+
+/// Run the GUI application
+pub fn run_gui() -> iced::Result {
+    App::run()
+}

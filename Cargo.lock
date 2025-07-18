@@ -3378,6 +3378,7 @@ dependencies = [
  "clap",
  "stoat",
  "stoat_core",
+ "stoat_gui",
  "tempfile",
  "tokio",
 ]
