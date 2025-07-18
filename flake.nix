@@ -38,6 +38,15 @@
 
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # GUI runtime libraries
+              wayland
+              libxkbcommon
+              libGL
+              # X11 fallback libraries
+              xorg.libX11
+              xorg.libXcursor
+              xorg.libXrandr
+              xorg.libXi
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               darwin.apple_sdk.frameworks.Security
@@ -47,9 +56,22 @@
               darwin.apple_sdk.frameworks.WebKit
             ];
 
-          # necessary for some libs. Not even sure which ones,
-          # i just copy and pasted from a Bevy repo of mine, hah.
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+          # Library path for GUI applications (especially Wayland/iced)
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+            buildInputs
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              # Wayland runtime libraries
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.libGL
+              pkgs.vulkan-loader
+              # X11 fallback libraries
+              pkgs.xorg.libX11
+              pkgs.xorg.libXcursor
+              pkgs.xorg.libXrandr
+              pkgs.xorg.libXi
+            ]
+          );
         };
       }
     );
