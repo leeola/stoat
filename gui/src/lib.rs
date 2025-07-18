@@ -1,7 +1,7 @@
 pub mod app;
 pub mod canvas;
 pub mod state;
-pub mod theme;
+pub mod widget;
 
 // Re-export key types
 pub use app::{App, Message};
