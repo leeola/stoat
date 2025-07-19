@@ -38,6 +38,29 @@ struct IncrementalParserCache {
     version: u64,
 }
 
+/// A reference to an incremental parser that avoids cloning the AST
+pub struct IncrementalParserRef {
+    /// Reference to the flat AST
+    ast: Arc<FlatAst>,
+}
+
+impl IncrementalParserRef {
+    /// Create a new parser reference
+    fn new(ast: Arc<FlatAst>) -> Self {
+        Self { ast }
+    }
+
+    /// Get the AST reference
+    pub fn ast(&self) -> &FlatAst {
+        &self.ast
+    }
+
+    /// Get the root node ID
+    pub fn root(&self) -> crate::syntax::flat_ast::NodeId {
+        self.ast.root()
+    }
+}
+
 impl FlatTextBuffer {
     /// Create a new buffer with the given text
     pub fn new(text: &str) -> Self {
@@ -237,22 +260,128 @@ impl FlatTextBuffer {
 
     /// Apply a flat edit to the buffer (native flat edit support)
     pub fn apply_flat_edit(&self, edit: &FlatEdit) -> Result<(), EditError> {
-        // For now, convert to legacy edit and apply
-        // FIXME: This should be implemented more efficiently
-        let ast = self.flat_ast();
-        let legacy_edit = edit.to_legacy(&ast).ok_or(EditError::NodeNotFound)?;
-        self.apply_edit(&legacy_edit)
+        // Convert directly to rope edit
+        let rope_edit = self.convert_flat_to_rope_edit(edit)?;
+
+        // Calculate change metrics before applying
+        let deleted_len = rope_edit.range.len();
+        let inserted_len = TextSize::from(rope_edit.text.len() as u32);
+        let change_range = rope_edit.range;
+
+        // Apply to rope
+        self.apply_rope_edit(&rope_edit)?;
+
+        // Create text change for incremental parsing
+        let text_change = TextChange::new(change_range, deleted_len, inserted_len);
+
+        // Add to pending changes
+        self.inner.pending_changes.write().push(text_change);
+
+        // Increment version
+        let new_version = {
+            let mut version = self.inner.version.write();
+            *version += 1;
+            *version
+        };
+
+        // Create change event
+        let event = crate::buffer::ChangeEvent {
+            range: change_range,
+            deleted_len,
+            inserted_len,
+            new_version,
+        };
+
+        // Notify views of the change
+        self.notify_views(&event);
+
+        Ok(())
     }
 
     /// Get access to the incremental parser for advanced operations
-    pub fn get_incremental_parser(&self) -> Option<IncrementalParser> {
+    pub fn get_incremental_parser_ref(&self) -> Option<IncrementalParserRef> {
         self.ensure_parsed();
-        let parser_cache = self.inner.parser.read();
-        parser_cache.parser.as_ref().map(|p| {
-            // FIXME: This clones the entire parser, which is not ideal
-            // In practice, we'd want to provide a different API
-            IncrementalParser::new(p.ast().clone())
-        })
+        // Return a reference to the AST without cloning
+        Some(IncrementalParserRef::new(self.flat_ast()))
+    }
+
+    /// Convert a flat edit directly to a rope edit
+    fn convert_flat_to_rope_edit(&self, edit: &FlatEdit) -> Result<RopeEdit, EditError> {
+        let ast = self.flat_ast();
+
+        // Look up the node in the flat AST
+        let node = ast.get_node(edit.target).ok_or(EditError::NodeNotFound)?;
+
+        let node_range = node.range;
+
+        match &edit.operation {
+            EditOperation::Replace(text) => Ok(RopeEdit::replace(node_range, text.clone())),
+            EditOperation::InsertBefore(text) => {
+                Ok(RopeEdit::insert(node_range.start(), text.clone()))
+            },
+            EditOperation::InsertAfter(text) => {
+                Ok(RopeEdit::insert(node_range.end(), text.clone()))
+            },
+            EditOperation::InsertAt { offset, text } => {
+                // Convert offset relative to node to absolute position
+                let position = node_range.start() + TextSize::from(*offset as u32);
+                if position > node_range.end() {
+                    return Err(EditError::RangeOutOfBounds {
+                        position,
+                        length: node_range.end(),
+                    });
+                }
+                Ok(RopeEdit::insert(position, text.clone()))
+            },
+            EditOperation::Delete => Ok(RopeEdit::delete(node_range)),
+            EditOperation::WrapWith { before, after } => {
+                // For wrap operations, we need to get the current text
+                // Extract text from rope for this range
+                let rope = self.inner.rope.read();
+                let start_char = rope.byte_to_char(node_range.start().into());
+                let end_char = rope.byte_to_char(node_range.end().into());
+                let current_text = rope.slice(start_char..end_char).to_string();
+                let wrapped = format!("{before}{current_text}{after}");
+                Ok(RopeEdit::replace(node_range, wrapped))
+            },
+            EditOperation::Unwrap => {
+                // This is complex and requires understanding node structure
+                // For now, return an error
+                Err(EditError::NodeNotFound)
+            },
+            EditOperation::DeleteRange { start, end } => {
+                // Convert node-relative offsets to absolute positions
+                let abs_start = node_range.start() + TextSize::from(*start as u32);
+                let abs_end = node_range.start() + TextSize::from(*end as u32);
+
+                // Validate bounds
+                if abs_end > node_range.end() {
+                    return Err(EditError::RangeOutOfBounds {
+                        position: abs_end,
+                        length: node_range.end(),
+                    });
+                }
+
+                let range = TextRange::new(abs_start, abs_end);
+                Ok(RopeEdit::delete(range))
+            },
+            EditOperation::ReplaceRange { start, end, text } => {
+                // Convert node-relative offsets to absolute positions
+                let abs_start = node_range.start() + TextSize::from(*start as u32);
+                let abs_end = node_range.start() + TextSize::from(*end as u32);
+
+                // Validate bounds
+                if abs_end > node_range.end() {
+                    return Err(EditError::RangeOutOfBounds {
+                        position: abs_end,
+                        length: node_range.end(),
+                    });
+                }
+
+                let range = TextRange::new(abs_start, abs_end);
+                Ok(RopeEdit::replace(range, text.clone()))
+            },
+        }
     }
 
     /// Convert an AST-based edit to a rope edit
