@@ -4,8 +4,9 @@ use crate::{
     TextSize,
     range::TextRange,
     syntax::{
-        kind::{ParseResult, Syntax, SyntaxKind},
+        kind::ParseResult,
         node::{SyntaxElement, SyntaxNode, SyntaxToken},
+        unified_kind::SyntaxKind,
     },
 };
 use std::sync::Arc;
@@ -27,10 +28,11 @@ pub enum SimpleKind {
     Line,
 }
 
-impl Syntax for SimpleText {
+#[allow(deprecated)]
+impl crate::syntax::kind::Syntax for SimpleText {
     type Kind = SimpleKind;
 
-    fn parse(text: &str) -> ParseResult<Self> {
+    fn parse(text: &str) -> ParseResult {
         let mut builder = SimpleAstBuilder::new(text);
         let root = builder.build();
 
@@ -55,7 +57,7 @@ impl<'a> SimpleAstBuilder<'a> {
         }
     }
 
-    fn build(&mut self) -> SyntaxNode<SimpleText> {
+    fn build(&mut self) -> SyntaxNode {
         let root_start = self.pos;
         let mut children = Vec::new();
 
@@ -74,7 +76,7 @@ impl<'a> SimpleAstBuilder<'a> {
                 self.pos += TextSize::from(1); // '\n' is 1 byte
 
                 let newline_token = SyntaxToken::new(
-                    SimpleKind::Whitespace,
+                    SyntaxKind::Whitespace,
                     TextRange::new(newline_start, self.pos),
                     Arc::from("\n"),
                 );
@@ -84,13 +86,13 @@ impl<'a> SimpleAstBuilder<'a> {
 
         let root_end = self.pos;
         SyntaxNode::new_with_children(
-            SimpleKind::Root,
+            SyntaxKind::Root,
             TextRange::new(root_start, root_end),
             children,
         )
     }
 
-    fn parse_line(&mut self, line_text: &str) -> SyntaxNode<SimpleText> {
+    fn parse_line(&mut self, line_text: &str) -> SyntaxNode {
         let line_start = self.pos;
         let mut children = Vec::new();
         let mut chars = line_text.char_indices().peekable();
@@ -113,7 +115,7 @@ impl<'a> SimpleAstBuilder<'a> {
                 let ws_end = ws_start + TextSize::from(ws_text.len() as u32);
 
                 let ws_token = SyntaxToken::new(
-                    SimpleKind::Whitespace,
+                    SyntaxKind::Whitespace,
                     TextRange::new(ws_start, ws_end),
                     Arc::from(ws_text),
                 );
@@ -135,7 +137,7 @@ impl<'a> SimpleAstBuilder<'a> {
                 let word_end = word_start + TextSize::from(word_text.len() as u32);
 
                 let word_token = SyntaxToken::new(
-                    SimpleKind::Word,
+                    SyntaxKind::Word,
                     TextRange::new(word_start, word_end),
                     Arc::from(word_text),
                 );
@@ -147,14 +149,15 @@ impl<'a> SimpleAstBuilder<'a> {
         let line_end = self.pos;
 
         SyntaxNode::new_with_children(
-            SimpleKind::Line,
+            SyntaxKind::Line,
             TextRange::new(line_start, line_end),
             children,
         )
     }
 }
 
-impl SyntaxKind for SimpleKind {
+#[allow(deprecated)]
+impl crate::syntax::kind::SyntaxKind for SimpleKind {
     fn is_token(&self) -> bool {
         matches!(self, SimpleKind::Word | SimpleKind::Whitespace)
     }
@@ -183,7 +186,7 @@ mod tests {
         let result = SimpleText::parse(text);
         let root = result.root;
 
-        assert_eq!(root.kind(), SimpleKind::Root);
+        assert_eq!(root.kind(), SyntaxKind::Root);
         assert_eq!(root.text_range(), TextRange::new(0.into(), 11.into()));
 
         // Check children: should have one Line node
@@ -195,7 +198,7 @@ mod tests {
             SyntaxElement::Node(n) => n,
             _ => panic!("Expected line node"),
         };
-        assert_eq!(line.kind(), SimpleKind::Line);
+        assert_eq!(line.kind(), SyntaxKind::Line);
         assert_eq!(line.text_range(), TextRange::new(0.into(), 11.into()));
 
         // Check line's children: Word "hello", Whitespace " ", Word "world"
@@ -205,7 +208,7 @@ mod tests {
         // First word "hello"
         match &line_children[0] {
             SyntaxElement::Token(t) => {
-                assert_eq!(t.kind(), SimpleKind::Word);
+                assert_eq!(t.kind(), SyntaxKind::Word);
                 assert_eq!(t.text(), "hello");
                 assert_eq!(t.text_range(), TextRange::new(0.into(), 5.into()));
             },
@@ -215,7 +218,7 @@ mod tests {
         // Whitespace
         match &line_children[1] {
             SyntaxElement::Token(t) => {
-                assert_eq!(t.kind(), SimpleKind::Whitespace);
+                assert_eq!(t.kind(), SyntaxKind::Whitespace);
                 assert_eq!(t.text(), " ");
                 assert_eq!(t.text_range(), TextRange::new(5.into(), 6.into()));
             },
@@ -225,7 +228,7 @@ mod tests {
         // Second word "world"
         match &line_children[2] {
             SyntaxElement::Token(t) => {
-                assert_eq!(t.kind(), SimpleKind::Word);
+                assert_eq!(t.kind(), SyntaxKind::Word);
                 assert_eq!(t.text(), "world");
                 assert_eq!(t.text_range(), TextRange::new(6.into(), 11.into()));
             },
@@ -239,7 +242,7 @@ mod tests {
         let result = SimpleText::parse(text);
         let root = result.root;
 
-        assert_eq!(root.kind(), SimpleKind::Root);
+        assert_eq!(root.kind(), SyntaxKind::Root);
         assert_eq!(root.text_range(), TextRange::new(0.into(), 23.into()));
 
         // Check children: Line, Whitespace (newline), Line
@@ -249,7 +252,7 @@ mod tests {
         // First line
         match &children[0] {
             SyntaxElement::Node(n) => {
-                assert_eq!(n.kind(), SimpleKind::Line);
+                assert_eq!(n.kind(), SyntaxKind::Line);
                 assert_eq!(n.text_range(), TextRange::new(0.into(), 11.into()));
             },
             _ => panic!("Expected line node"),
@@ -258,7 +261,7 @@ mod tests {
         // Newline
         match &children[1] {
             SyntaxElement::Token(t) => {
-                assert_eq!(t.kind(), SimpleKind::Whitespace);
+                assert_eq!(t.kind(), SyntaxKind::Whitespace);
                 assert_eq!(t.text(), "\n");
                 assert_eq!(t.text_range(), TextRange::new(11.into(), 12.into()));
             },
@@ -268,7 +271,7 @@ mod tests {
         // Second line
         match &children[2] {
             SyntaxElement::Node(n) => {
-                assert_eq!(n.kind(), SimpleKind::Line);
+                assert_eq!(n.kind(), SyntaxKind::Line);
                 assert_eq!(n.text_range(), TextRange::new(12.into(), 23.into()));
 
                 // Check it has the right content
@@ -292,7 +295,7 @@ mod tests {
         // Check empty line
         match &children[2] {
             SyntaxElement::Node(n) => {
-                assert_eq!(n.kind(), SimpleKind::Line);
+                assert_eq!(n.kind(), SyntaxKind::Line);
                 assert_eq!(n.children().len(), 0); // Empty line has no children
             },
             _ => panic!("Expected empty line node"),
@@ -307,18 +310,18 @@ mod tests {
 
         // Test first_child
         let first_line = root.first_child().expect("Should have first child");
-        assert_eq!(first_line.kind(), SimpleKind::Line);
+        assert_eq!(first_line.kind(), SyntaxKind::Line);
 
         // Test parent navigation
         assert!(first_line.parent().is_some());
         let parent = first_line.parent().expect("Line should have parent");
-        assert_eq!(parent.kind(), SimpleKind::Root);
+        assert_eq!(parent.kind(), SyntaxKind::Root);
 
         // Test finding words
         let words: Vec<_> = root
             .tokens()
             .into_iter()
-            .filter(|t| t.kind() == SimpleKind::Word)
+            .filter(|t| t.kind() == SyntaxKind::Word)
             .collect();
         assert_eq!(words.len(), 3); // "hello", "world", "test"
         assert_eq!(words[0].text(), "hello");
@@ -336,7 +339,7 @@ mod tests {
         let words: Vec<_> = root
             .tokens()
             .into_iter()
-            .filter(|t| t.kind() == SimpleKind::Word)
+            .filter(|t| t.kind() == SyntaxKind::Word)
             .collect();
 
         // Check we can navigate through the words

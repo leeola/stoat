@@ -8,28 +8,28 @@ use crate::{
     cursor_collection::CursorCollection,
     edit::{Edit, EditOperation},
     range::TextRange,
-    syntax::{Syntax, SyntaxNode},
+    syntax::{SyntaxNode, unified_kind::SyntaxKind},
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 /// A view into a text buffer, showing a specific portion
-pub struct TextView<S: Syntax> {
-    inner: Arc<TextViewInner<S>>,
+pub struct TextView {
+    inner: Arc<TextViewInner>,
 }
 
-pub(crate) struct TextViewInner<S: Syntax> {
+pub(crate) struct TextViewInner {
     /// Reference to the buffer
-    buffer: TextBuffer<S>,
+    buffer: TextBuffer,
     /// Root node of this view
-    view_root: RwLock<SyntaxNode<S>>,
+    view_root: RwLock<SyntaxNode>,
     /// Collection of cursors for this view
-    cursors: RwLock<CursorCollection<S>>,
+    cursors: RwLock<CursorCollection>,
 }
 
-impl<S: Syntax> TextView<S> {
+impl TextView {
     /// Create a new view
-    pub(crate) fn new(buffer: TextBuffer<S>, root: SyntaxNode<S>) -> Self {
+    pub(crate) fn new(buffer: TextBuffer, root: SyntaxNode) -> Self {
         let cursors = CursorCollection::new(0.into(), root.clone());
         let inner = Arc::new(TextViewInner {
             buffer: buffer.clone(),
@@ -44,37 +44,37 @@ impl<S: Syntax> TextView<S> {
     }
 
     /// Get the buffer this view is attached to
-    pub fn buffer(&self) -> &TextBuffer<S> {
+    pub fn buffer(&self) -> &TextBuffer {
         &self.inner.buffer
     }
 
     /// Get a reference to the primary cursor
-    pub fn primary_cursor(&self) -> impl std::ops::Deref<Target = TextCursor<S>> + '_ {
+    pub fn primary_cursor(&self) -> impl std::ops::Deref<Target = TextCursor> + '_ {
         parking_lot::RwLockReadGuard::map(self.inner.cursors.read(), |c| c.primary())
     }
 
     /// Get a mutable reference to the primary cursor
-    pub fn primary_cursor_mut(&self) -> impl std::ops::DerefMut<Target = TextCursor<S>> + '_ {
+    pub fn primary_cursor_mut(&self) -> impl std::ops::DerefMut<Target = TextCursor> + '_ {
         parking_lot::RwLockWriteGuard::map(self.inner.cursors.write(), |c| c.primary_mut())
     }
 
     /// Access the cursor collection
-    pub fn cursors(&self) -> parking_lot::RwLockReadGuard<'_, CursorCollection<S>> {
+    pub fn cursors(&self) -> parking_lot::RwLockReadGuard<'_, CursorCollection> {
         self.inner.cursors.read()
     }
 
     /// Access the cursor collection mutably
-    pub fn cursors_mut(&self) -> parking_lot::RwLockWriteGuard<'_, CursorCollection<S>> {
+    pub fn cursors_mut(&self) -> parking_lot::RwLockWriteGuard<'_, CursorCollection> {
         self.inner.cursors.write()
     }
 
     /// Get the root node of this view
-    pub fn root(&self) -> SyntaxNode<S> {
+    pub fn root(&self) -> SyntaxNode {
         self.inner.view_root.read().clone()
     }
 
     /// Set the root node of this view
-    pub fn set_root(&mut self, node: SyntaxNode<S>) {
+    pub fn set_root(&mut self, node: SyntaxNode) {
         *self.inner.view_root.write() = node;
     }
 
@@ -1294,7 +1294,7 @@ impl<S: Syntax> TextView<S> {
     }
 }
 
-impl<S: Syntax> Clone for TextView<S> {
+impl Clone for TextView {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -1302,7 +1302,7 @@ impl<S: Syntax> Clone for TextView<S> {
     }
 }
 
-impl<S: Syntax> TextViewInner<S> {
+impl TextViewInner {
     /// Handle a change event from the buffer
     pub(crate) fn on_buffer_change(&self, event: &ChangeEvent) {
         // Update the view root to point to the new AST
@@ -1366,18 +1366,18 @@ impl<S: Syntax> TextViewInner<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::simple::SimpleText;
+    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_view_creation() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = TextBuffer::new("hello world");
         let view = buffer.create_view();
         assert_eq!(view.text(), "hello world");
     }
 
     #[test]
     fn test_view_cursor_position() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = TextBuffer::new("hello world");
         let view = buffer.create_view();
         assert_eq!(view.primary_cursor().position(), 0.into());
 
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn test_view_multiple_cursors() {
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = TextBuffer::new("hello world");
         let view = buffer.create_view();
         let root = view.root();
 
@@ -1402,7 +1402,7 @@ mod tests {
     fn test_view_cursor_adjustment_on_edit() {
         use crate::edit::Edit;
 
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = TextBuffer::new("hello world");
         let view = buffer.create_view();
         let root = view.root();
 
@@ -1429,7 +1429,7 @@ mod tests {
     fn test_view_cursor_in_deleted_range() {
         use crate::edit::Edit;
 
-        let buffer = TextBuffer::<SimpleText>::new("hello world");
+        let buffer = TextBuffer::new("hello world");
         let view = buffer.create_view();
         let root = view.root();
 

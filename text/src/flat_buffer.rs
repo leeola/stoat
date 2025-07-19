@@ -5,7 +5,8 @@ use crate::{
     edit::{Edit, EditError, EditOperation, FlatEdit, RopeEdit},
     range::TextRange,
     syntax::{
-        FlatAst, FlatSyntaxNode, FlatTreeBuilder, IncrementalParser, Syntax, SyntaxNode, TextChange,
+        FlatAst, FlatSyntaxNode, FlatTreeBuilder, IncrementalParser, SyntaxNode, TextChange,
+        unified_kind::SyntaxKind,
     },
     view::TextView,
 };
@@ -14,33 +15,33 @@ use ropey::Rope;
 use std::sync::{Arc, Weak};
 
 /// A text buffer with efficient rope storage and flat AST
-pub struct FlatTextBuffer<S: Syntax> {
-    inner: Arc<FlatBufferInner<S>>,
+pub struct FlatTextBuffer {
+    inner: Arc<FlatBufferInner>,
 }
 
-pub(crate) struct FlatBufferInner<S: Syntax> {
+pub(crate) struct FlatBufferInner {
     /// Unique ID for this buffer
     id: crate::buffer::BufferId,
     /// The rope storing the actual text
     rope: RwLock<Rope>,
     /// Incremental parser with cached AST
-    parser: RwLock<IncrementalParserCache<S>>,
+    parser: RwLock<IncrementalParserCache>,
     /// Pending changes since last parse
     pending_changes: RwLock<Vec<TextChange>>,
     /// Version number for invalidation
     version: RwLock<u64>,
     /// All views of this buffer
-    views: RwLock<Vec<Weak<crate::view::TextViewInner<S>>>>,
+    views: RwLock<Vec<Weak<crate::view::TextViewInner>>>,
 }
 
-struct IncrementalParserCache<S: Syntax> {
+struct IncrementalParserCache {
     /// The incremental parser
-    parser: Option<IncrementalParser<S>>,
+    parser: Option<IncrementalParser>,
     /// Version when this was last parsed
     version: u64,
 }
 
-impl<S: Syntax> FlatTextBuffer<S> {
+impl FlatTextBuffer {
     /// Create a new buffer with the given text
     pub fn new(text: &str) -> Self {
         let rope = Rope::from_str(text);
@@ -83,7 +84,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Get the root syntax node (returns flat node)
-    pub fn flat_syntax(&self) -> FlatSyntaxNode<S> {
+    pub fn flat_syntax(&self) -> FlatSyntaxNode {
         self.ensure_parsed();
         let parser_cache = self.inner.parser.read();
         let parser = parser_cache
@@ -96,14 +97,14 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Get the root syntax node (legacy compatibility)
-    pub fn syntax(&self) -> SyntaxNode<S> {
+    pub fn syntax(&self) -> SyntaxNode {
         self.flat_syntax()
             .to_legacy()
             .expect("Root node should exist")
     }
 
     /// Get the flat AST directly
-    pub fn flat_ast(&self) -> Arc<FlatAst<S>> {
+    pub fn flat_ast(&self) -> Arc<FlatAst> {
         self.ensure_parsed();
         let parser_cache = self.inner.parser.read();
         let parser = parser_cache
@@ -114,27 +115,24 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Create a view of the entire buffer
-    pub fn create_view(&self) -> TextView<S> {
+    pub fn create_view(&self) -> TextView {
         TextView::new(self.to_legacy_buffer(), self.syntax())
     }
 
     /// Create a view of a specific node
-    pub fn create_view_of(&self, node: SyntaxNode<S>) -> TextView<S> {
+    pub fn create_view_of(&self, node: SyntaxNode) -> TextView {
         TextView::new(self.to_legacy_buffer(), node)
     }
 
     /// Convert to legacy buffer type for compatibility
-    fn to_legacy_buffer(&self) -> crate::buffer::TextBuffer<S> {
+    fn to_legacy_buffer(&self) -> crate::buffer::TextBuffer {
         // This is a temporary method for compatibility
         // In a real implementation, we'd update TextView to work with FlatTextBuffer
         crate::buffer::TextBuffer::new(&self.text())
     }
 
     /// Find nodes matching a predicate using flat traversal
-    pub fn find_nodes(
-        &self,
-        predicate: impl Fn(&FlatSyntaxNode<S>) -> bool,
-    ) -> Vec<FlatSyntaxNode<S>> {
+    pub fn find_nodes(&self, predicate: impl Fn(&FlatSyntaxNode) -> bool) -> Vec<FlatSyntaxNode> {
         let mut results = Vec::new();
         let root = self.flat_syntax();
         Self::find_nodes_recursive(&root, &predicate, &mut results);
@@ -142,9 +140,9 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     fn find_nodes_recursive(
-        node: &FlatSyntaxNode<S>,
-        predicate: &impl Fn(&FlatSyntaxNode<S>) -> bool,
-        results: &mut Vec<FlatSyntaxNode<S>>,
+        node: &FlatSyntaxNode,
+        predicate: &impl Fn(&FlatSyntaxNode) -> bool,
+        results: &mut Vec<FlatSyntaxNode>,
     ) {
         if predicate(node) {
             results.push(node.clone());
@@ -167,8 +165,13 @@ impl<S: Syntax> FlatTextBuffer<S> {
 
             if parser_cache.parser.is_none() {
                 // First parse - create parser with full AST
-                let parse_result = S::parse(&text);
-                let flat_ast = self.convert_to_flat_ast(parse_result.root);
+                // FIXME: Implement parsing with unified syntax
+                // For now, create a dummy AST
+                let dummy_root = SyntaxNode::new(
+                    SyntaxKind::Root,
+                    TextRange::new(0.into(), (text.len() as u32).into()),
+                );
+                let flat_ast = self.convert_to_flat_ast(dummy_root);
                 parser_cache.parser = Some(IncrementalParser::new(flat_ast));
             } else {
                 // Incremental parse - apply pending changes
@@ -181,8 +184,13 @@ impl<S: Syntax> FlatTextBuffer<S> {
                             eprintln!(
                                 "Incremental parsing failed: {e}, falling back to full reparse"
                             );
-                            let parse_result = S::parse(&text);
-                            let flat_ast = self.convert_to_flat_ast(parse_result.root);
+                            // FIXME: Implement parsing with unified syntax
+                            // For now, create a dummy AST
+                            let dummy_root = SyntaxNode::new(
+                                SyntaxKind::Root,
+                                TextRange::new(0.into(), (text.len() as u32).into()),
+                            );
+                            let flat_ast = self.convert_to_flat_ast(dummy_root);
                             *parser = IncrementalParser::new(flat_ast);
                             break;
                         }
@@ -192,8 +200,13 @@ impl<S: Syntax> FlatTextBuffer<S> {
                     if let Err(e) = parser.reparse(&text) {
                         // If incremental reparse fails, fall back to full reparse
                         eprintln!("Incremental reparse failed: {e}, falling back to full reparse");
-                        let parse_result = S::parse(&text);
-                        let flat_ast = self.convert_to_flat_ast(parse_result.root);
+                        // FIXME: Implement parsing with unified syntax
+                        // For now, create a dummy AST
+                        let dummy_root = SyntaxNode::new(
+                            SyntaxKind::Root,
+                            TextRange::new(0.into(), (text.len() as u32).into()),
+                        );
+                        let flat_ast = self.convert_to_flat_ast(dummy_root);
                         *parser = IncrementalParser::new(flat_ast);
                     }
                 }
@@ -204,7 +217,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Convert legacy AST to flat AST (temporary method)
-    fn convert_to_flat_ast(&self, root: SyntaxNode<S>) -> FlatAst<S> {
+    fn convert_to_flat_ast(&self, root: SyntaxNode) -> FlatAst {
         // This is a simplified conversion - in practice we'd want to
         // update the parser to build flat AST directly
         let mut builder = FlatTreeBuilder::new();
@@ -222,7 +235,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Apply an edit to the buffer
-    pub fn apply_edit(&self, edit: &Edit<S>) -> Result<(), EditError> {
+    pub fn apply_edit(&self, edit: &Edit) -> Result<(), EditError> {
         // Convert AST edit to rope edit
         let rope_edit = self.convert_to_rope_edit(edit)?;
 
@@ -271,7 +284,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Get access to the incremental parser for advanced operations
-    pub fn get_incremental_parser(&self) -> Option<IncrementalParser<S>> {
+    pub fn get_incremental_parser(&self) -> Option<IncrementalParser> {
         self.ensure_parsed();
         let parser_cache = self.inner.parser.read();
         parser_cache.parser.as_ref().map(|p| {
@@ -282,7 +295,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 
     /// Convert an AST-based edit to a rope edit
-    fn convert_to_rope_edit(&self, edit: &Edit<S>) -> Result<RopeEdit, EditError> {
+    fn convert_to_rope_edit(&self, edit: &Edit) -> Result<RopeEdit, EditError> {
         let node_range = edit.target.text_range();
 
         match &edit.operation {
@@ -386,7 +399,7 @@ impl<S: Syntax> FlatTextBuffer<S> {
     }
 }
 
-impl<S: Syntax> Clone for FlatTextBuffer<S> {
+impl Clone for FlatTextBuffer {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -397,11 +410,11 @@ impl<S: Syntax> Clone for FlatTextBuffer<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::simple::SimpleText;
+    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_flat_buffer_creation() {
-        let buffer = FlatTextBuffer::<SimpleText>::new("hello world");
+        let buffer = FlatTextBuffer::new("hello world");
         assert_eq!(buffer.text(), "hello world");
         assert_eq!(buffer.len(), 11);
         assert!(!buffer.is_empty());
@@ -409,11 +422,11 @@ mod tests {
 
     #[test]
     fn test_flat_ast_access() {
-        let buffer = FlatTextBuffer::<SimpleText>::new("hello world");
+        let buffer = FlatTextBuffer::new("hello world");
 
         // Get flat syntax node
         let root = buffer.flat_syntax();
-        assert_eq!(root.kind(), Some(crate::syntax::simple::SimpleKind::Root));
+        assert_eq!(root.kind(), Some(SyntaxKind::Root));
 
         // Get flat AST
         let ast = buffer.flat_ast();
@@ -422,11 +435,11 @@ mod tests {
 
     #[test]
     fn test_legacy_compatibility() {
-        let buffer = FlatTextBuffer::<SimpleText>::new("hello world");
+        let buffer = FlatTextBuffer::new("hello world");
 
         // Get legacy syntax node
         let root = buffer.syntax();
-        assert_eq!(root.kind(), crate::syntax::simple::SimpleKind::Root);
+        assert_eq!(root.kind(), SyntaxKind::Root);
         assert_eq!(root.text_range(), TextRange::new(0.into(), 11.into()));
     }
 }

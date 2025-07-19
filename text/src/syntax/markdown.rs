@@ -4,9 +4,8 @@ use crate::{
     TextSize,
     range::TextRange,
     syntax::{
-        flat_ast::FlatAst,
-        flat_builder::FlatTreeBuilder,
-        kind::{ParseResult, Syntax, SyntaxKind},
+        flat_ast::FlatAst, flat_builder::FlatTreeBuilder, kind::ParseResult,
+        unified_kind::SyntaxKind,
     },
 };
 use tree_sitter::{Parser, Tree};
@@ -53,10 +52,11 @@ pub enum MarkdownKind {
     Error,
 }
 
-impl Syntax for MarkdownSyntax {
+#[allow(deprecated)]
+impl crate::syntax::kind::Syntax for MarkdownSyntax {
     type Kind = MarkdownKind;
 
-    fn parse(text: &str) -> ParseResult<Self> {
+    fn parse(text: &str) -> ParseResult {
         let mut parser = Parser::new();
         let language = tree_sitter_markdown::language();
         parser
@@ -76,7 +76,8 @@ impl Syntax for MarkdownSyntax {
     }
 }
 
-impl SyntaxKind for MarkdownKind {
+#[allow(deprecated)]
+impl crate::syntax::kind::SyntaxKind for MarkdownKind {
     fn is_token(&self) -> bool {
         matches!(
             self,
@@ -123,12 +124,12 @@ impl SyntaxKind for MarkdownKind {
 }
 
 /// Convert tree-sitter tree to flat AST
-fn convert_tree_to_flat_ast(tree: &Tree, text: &str) -> FlatAst<MarkdownSyntax> {
+fn convert_tree_to_flat_ast(tree: &Tree, text: &str) -> FlatAst {
     let mut builder = FlatTreeBuilder::new();
     let root_node = tree.root_node();
 
     // Start with document root
-    builder.start_node(MarkdownKind::Document);
+    builder.start_node(SyntaxKind::Document);
 
     // Convert tree-sitter nodes recursively
     convert_node_recursive(&mut builder, root_node, text.as_bytes());
@@ -139,7 +140,7 @@ fn convert_tree_to_flat_ast(tree: &Tree, text: &str) -> FlatAst<MarkdownSyntax> 
 
 /// Recursively convert tree-sitter nodes to flat AST
 fn convert_node_recursive(
-    builder: &mut FlatTreeBuilder<MarkdownSyntax>,
+    builder: &mut FlatTreeBuilder,
     node: tree_sitter::Node<'_>,
     source: &[u8],
 ) {
@@ -162,48 +163,48 @@ fn convert_node_recursive(
     }
 }
 
-/// Map tree-sitter node kinds to our MarkdownKind enum
-fn map_tree_sitter_kind(ts_kind: &str) -> MarkdownKind {
+/// Map tree-sitter node kinds to our SyntaxKind enum
+fn map_tree_sitter_kind(ts_kind: &str) -> SyntaxKind {
     match ts_kind {
-        "document" => MarkdownKind::Document,
-        "section" => MarkdownKind::Section,
-        "paragraph" => MarkdownKind::Paragraph,
-        "atx_heading" => MarkdownKind::Heading,
-        "setext_heading" => MarkdownKind::Heading,
-        "code_block" => MarkdownKind::CodeBlock,
-        "fenced_code_block" => MarkdownKind::FencedCodeBlock,
-        "block_quote" => MarkdownKind::BlockQuote,
-        "list" => MarkdownKind::List,
-        "list_item" => MarkdownKind::ListItem,
-        "strong_emphasis" => MarkdownKind::Strong,
-        "emphasis" => MarkdownKind::Emphasis,
-        "code_span" => MarkdownKind::Code,
-        "link" => MarkdownKind::Link,
-        "image" => MarkdownKind::Image,
+        "document" => SyntaxKind::Document,
+        "section" => SyntaxKind::Section,
+        "paragraph" => SyntaxKind::Paragraph,
+        "atx_heading" => SyntaxKind::Heading,
+        "setext_heading" => SyntaxKind::Heading,
+        "code_block" => SyntaxKind::CodeBlock,
+        "fenced_code_block" => SyntaxKind::FencedCodeBlock,
+        "block_quote" => SyntaxKind::BlockQuote,
+        "list" => SyntaxKind::List,
+        "list_item" => SyntaxKind::ListItem,
+        "strong_emphasis" => SyntaxKind::Strong,
+        "emphasis" => SyntaxKind::Emphasis,
+        "code_span" => SyntaxKind::Code,
+        "link" => SyntaxKind::Link,
+        "image" => SyntaxKind::Image,
         "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker" | "atx_h5_marker"
-        | "atx_h6_marker" => MarkdownKind::HeadingMarker,
-        "code_fence_start" | "code_fence_end" => MarkdownKind::CodeFence,
-        "link_text" => MarkdownKind::LinkText,
-        "link_destination" => MarkdownKind::LinkDestination,
-        "\n" => MarkdownKind::Newline,
-        " " | "\t" => MarkdownKind::Whitespace,
-        "ERROR" => MarkdownKind::Error,
-        _ => MarkdownKind::Text, // Default to text for unknown kinds
+        | "atx_h6_marker" => SyntaxKind::HeadingMarker,
+        "code_fence_start" | "code_fence_end" => SyntaxKind::CodeFence,
+        "link_text" => SyntaxKind::LinkText,
+        "link_destination" => SyntaxKind::LinkDestination,
+        "\n" => SyntaxKind::Newline,
+        " " | "\t" => SyntaxKind::Whitespace,
+        "ERROR" => SyntaxKind::Error,
+        _ => SyntaxKind::Text, // Default to text for unknown kinds
     }
 }
 
 /// Create a legacy root node for backward compatibility
 /// FIXME: Remove this when legacy support is removed
-fn create_legacy_root(text: &str) -> crate::syntax::SyntaxNode<MarkdownSyntax> {
+fn create_legacy_root(text: &str) -> crate::syntax::SyntaxNode {
     use crate::syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
     use std::sync::Arc;
 
     // Create a simple root with the entire text as a single token
     let range = TextRange::new(TextSize::from(0), TextSize::from(text.len() as u32));
-    let token = SyntaxToken::new(MarkdownKind::Text, range, Arc::from(text));
+    let token = SyntaxToken::new(SyntaxKind::Text, range, Arc::from(text));
     let children = vec![SyntaxElement::Token(token)];
 
-    SyntaxNode::new_with_children(MarkdownKind::Document, range, children)
+    SyntaxNode::new_with_children(SyntaxKind::Document, range, children)
 }
 
 #[cfg(test)]
@@ -229,10 +230,10 @@ mod tests {
 
     #[test]
     fn test_tree_sitter_kind_mapping() {
-        assert_eq!(map_tree_sitter_kind("document"), MarkdownKind::Document);
-        assert_eq!(map_tree_sitter_kind("paragraph"), MarkdownKind::Paragraph);
-        assert_eq!(map_tree_sitter_kind("atx_heading"), MarkdownKind::Heading);
-        assert_eq!(map_tree_sitter_kind("unknown"), MarkdownKind::Text);
+        assert_eq!(map_tree_sitter_kind("document"), SyntaxKind::Document);
+        assert_eq!(map_tree_sitter_kind("paragraph"), SyntaxKind::Paragraph);
+        assert_eq!(map_tree_sitter_kind("atx_heading"), SyntaxKind::Heading);
+        assert_eq!(map_tree_sitter_kind("unknown"), SyntaxKind::Text);
     }
 
     #[test]
@@ -240,13 +241,13 @@ mod tests {
         use crate::FlatTextBuffer;
 
         let markdown_text = "# Hello World\n\nThis is a **bold** paragraph with `code`.";
-        let buffer = FlatTextBuffer::<MarkdownSyntax>::new(markdown_text);
+        let buffer = FlatTextBuffer::new(markdown_text);
 
         assert_eq!(buffer.text(), markdown_text);
         assert!(!buffer.is_empty());
 
         // Get the flat syntax node
         let root = buffer.flat_syntax();
-        assert_eq!(root.kind(), Some(MarkdownKind::Document));
+        assert_eq!(root.kind(), Some(SyntaxKind::Document));
     }
 }

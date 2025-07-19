@@ -5,28 +5,28 @@ use crate::{
     range::TextRange,
     syntax::{
         flat_ast::{ElementId, FlatAst, NodeId, SyntaxNodeRef},
-        kind::Syntax,
         node::{SyntaxElement, SyntaxNode, SyntaxToken},
+        unified_kind::SyntaxKind,
     },
 };
 use std::sync::Arc;
 
 /// Wrapper that provides SyntaxNode interface backed by flat AST
-pub struct FlatSyntaxNode<S: Syntax> {
+pub struct FlatSyntaxNode {
     /// Reference to the flat AST
-    ast: Arc<FlatAst<S>>,
+    ast: Arc<FlatAst>,
     /// ID of this node in the AST
     id: NodeId,
 }
 
-impl<S: Syntax> FlatSyntaxNode<S> {
+impl FlatSyntaxNode {
     /// Create a new flat syntax node
-    pub fn new(ast: Arc<FlatAst<S>>, id: NodeId) -> Self {
+    pub fn new(ast: Arc<FlatAst>, id: NodeId) -> Self {
         Self { ast, id }
     }
 
     /// Convert to the old SyntaxNode type (for gradual migration)
-    pub fn to_legacy(&self) -> Option<SyntaxNode<S>> {
+    pub fn to_legacy(&self) -> Option<SyntaxNode> {
         self.ast.get_node(self.id).map(|node_data| {
             let children = self.children_as_elements();
             SyntaxNode::new_with_children(node_data.kind, node_data.range, children)
@@ -34,7 +34,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Get children as SyntaxElement vector (for legacy compatibility)
-    fn children_as_elements(&self) -> Vec<SyntaxElement<S>> {
+    fn children_as_elements(&self) -> Vec<SyntaxElement> {
         let mut elements = Vec::new();
 
         if let Some(node_data) = self.ast.get_node(self.id) {
@@ -64,7 +64,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Get the kind of this node
-    pub fn kind(&self) -> Option<S::Kind> {
+    pub fn kind(&self) -> Option<SyntaxKind> {
         self.ast.get_node(self.id).map(|n| n.kind)
     }
 
@@ -77,7 +77,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Get the parent node
-    pub fn parent(&self) -> Option<FlatSyntaxNode<S>> {
+    pub fn parent(&self) -> Option<FlatSyntaxNode> {
         self.ast
             .get_node(self.id)
             .and_then(|n| n.parent)
@@ -85,7 +85,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Get child nodes
-    pub fn children(&self) -> Vec<FlatSyntaxNode<S>> {
+    pub fn children(&self) -> Vec<FlatSyntaxNode> {
         let mut children = Vec::new();
 
         if let Some(node_data) = self.ast.get_node(self.id) {
@@ -100,13 +100,13 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Get tokens in this subtree
-    pub fn tokens(&self) -> Vec<SyntaxToken<S>> {
+    pub fn tokens(&self) -> Vec<SyntaxToken> {
         let mut tokens = Vec::new();
         self.collect_tokens(&mut tokens);
         tokens
     }
 
-    fn collect_tokens(&self, tokens: &mut Vec<SyntaxToken<S>>) {
+    fn collect_tokens(&self, tokens: &mut Vec<SyntaxToken>) {
         if let Some(node_data) = self.ast.get_node(self.id) {
             for &child_id in &node_data.children {
                 match child_id {
@@ -130,7 +130,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 
     /// Find the token at the given offset
-    pub fn find_token_at_offset(&self, offset: TextSize) -> Option<SyntaxToken<S>> {
+    pub fn find_token_at_offset(&self, offset: TextSize) -> Option<SyntaxToken> {
         // Use the flat AST's efficient lookup
         if let Some(containing_node_id) = self.ast.find_node_at_offset(offset) {
             // Get a reference to traverse from the found node
@@ -154,7 +154,7 @@ impl<S: Syntax> FlatSyntaxNode<S> {
     }
 }
 
-impl<S: Syntax> Clone for FlatSyntaxNode<S> {
+impl Clone for FlatSyntaxNode {
     fn clone(&self) -> Self {
         Self {
             ast: self.ast.clone(),
@@ -164,38 +164,35 @@ impl<S: Syntax> Clone for FlatSyntaxNode<S> {
 }
 
 /// Bridge trait for converting between representations
-pub trait AstBridge<S: Syntax> {
+pub trait AstBridge {
     /// Convert a legacy SyntaxNode to use flat AST
-    fn from_legacy(node: &SyntaxNode<S>) -> Arc<FlatAst<S>>;
+    fn from_legacy(node: &SyntaxNode) -> Arc<FlatAst>;
 
     /// Convert a flat AST to legacy format
-    fn to_legacy(ast: &FlatAst<S>) -> SyntaxNode<S>;
+    fn to_legacy(ast: &FlatAst) -> SyntaxNode;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{
-        flat_builder::FlatTreeBuilder,
-        simple::{SimpleKind, SimpleText},
-    };
+    use crate::syntax::{flat_builder::FlatTreeBuilder, unified_kind::SyntaxKind};
 
     #[test]
     fn test_compat_basic() {
-        let mut builder = FlatTreeBuilder::<SimpleText>::new();
+        let mut builder = FlatTreeBuilder::new();
 
         // Build a simple AST
-        builder.start_node(SimpleKind::Root);
-        builder.add_token(SimpleKind::Word, "hello".to_string());
-        builder.add_token(SimpleKind::Whitespace, " ".to_string());
-        builder.add_token(SimpleKind::Word, "world".to_string());
+        builder.start_node(SyntaxKind::Root);
+        builder.add_token(SyntaxKind::Word, "hello".to_string());
+        builder.add_token(SyntaxKind::Whitespace, " ".to_string());
+        builder.add_token(SyntaxKind::Word, "world".to_string());
         builder.finish_node();
 
         let ast = Arc::new(builder.finish());
         let root = FlatSyntaxNode::new(ast.clone(), ast.root());
 
         // Test basic operations
-        assert_eq!(root.kind(), Some(SimpleKind::Root));
+        assert_eq!(root.kind(), Some(SyntaxKind::Root));
         assert_eq!(root.text_range(), TextRange::new(0.into(), 11.into()));
 
         // Test token collection
@@ -208,10 +205,10 @@ mod tests {
 
     #[test]
     fn test_compat_to_legacy() {
-        let mut builder = FlatTreeBuilder::<SimpleText>::new();
+        let mut builder = FlatTreeBuilder::new();
 
-        builder.start_node(SimpleKind::Root);
-        builder.add_token(SimpleKind::Word, "test".to_string());
+        builder.start_node(SyntaxKind::Root);
+        builder.add_token(SyntaxKind::Word, "test".to_string());
         builder.finish_node();
 
         let ast = Arc::new(builder.finish());
@@ -219,7 +216,7 @@ mod tests {
 
         // Convert to legacy format
         let legacy = root.to_legacy().expect("Should convert to legacy");
-        assert_eq!(legacy.kind(), SimpleKind::Root);
+        assert_eq!(legacy.kind(), SyntaxKind::Root);
         assert_eq!(legacy.text_range(), TextRange::new(0.into(), 4.into()));
 
         // Check children were converted
@@ -227,7 +224,7 @@ mod tests {
         assert_eq!(children.len(), 1);
         match &children[0] {
             SyntaxElement::Token(t) => {
-                assert_eq!(t.kind(), SimpleKind::Word);
+                assert_eq!(t.kind(), SyntaxKind::Word);
                 assert_eq!(t.text(), "test");
             },
             _ => panic!("Expected token"),

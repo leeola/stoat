@@ -6,7 +6,7 @@ use crate::{
     range::TextRange,
     syntax::{
         flat_ast::{FlatAst, NodeId},
-        kind::Syntax,
+        unified_kind::SyntaxKind,
     },
 };
 use std::collections::HashSet;
@@ -102,16 +102,16 @@ impl InvalidationSet {
 }
 
 /// Incremental parser that efficiently updates flat ASTs
-pub struct IncrementalParser<S: Syntax> {
+pub struct IncrementalParser {
     /// Current AST being maintained
-    ast: FlatAst<S>,
+    ast: FlatAst,
     /// Set of invalidated nodes
     invalidation: InvalidationSet,
 }
 
-impl<S: Syntax> IncrementalParser<S> {
+impl IncrementalParser {
     /// Create a new incremental parser
-    pub fn new(ast: FlatAst<S>) -> Self {
+    pub fn new(ast: FlatAst) -> Self {
         Self {
             ast,
             invalidation: InvalidationSet::new(),
@@ -136,7 +136,7 @@ impl<S: Syntax> IncrementalParser<S> {
     }
 
     /// Get the current AST
-    pub fn ast(&self) -> &FlatAst<S> {
+    pub fn ast(&self) -> &FlatAst {
         &self.ast
     }
 
@@ -253,8 +253,8 @@ impl<S: Syntax> IncrementalParser<S> {
         // 4. Update node IDs and references
 
         // For now, fall back to full reparse
-        let _parse_result = S::parse(text);
-        // FIXME: Convert parse_result to FlatAst and replace self.ast
+        // FIXME: Implement proper incremental parsing
+        // This would parse the text and update the AST incrementally
 
         Ok(())
     }
@@ -282,7 +282,7 @@ pub enum IncrementalParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::simple::SimpleText;
+    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_text_change_net_change() {
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_incremental_parser_creation() {
-        let ast = FlatAst::<SimpleText>::new();
+        let ast = FlatAst::new();
         let parser = IncrementalParser::new(ast);
         assert!(parser.invalidation().is_empty());
     }

@@ -1,44 +1,44 @@
 //! Syntax nodes with rope offsets
 
-use crate::{TextSize, range::TextRange, syntax::kind::Syntax};
+use crate::{TextSize, range::TextRange, syntax::unified_kind::SyntaxKind};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 
 /// A syntax node in the AST
-pub struct SyntaxNode<S: Syntax> {
-    data: Arc<SyntaxNodeData<S>>,
+pub struct SyntaxNode {
+    data: Arc<SyntaxNodeData>,
 }
 
-struct SyntaxNodeData<S: Syntax> {
+struct SyntaxNodeData {
     /// The kind of this node
-    kind: S::Kind,
+    kind: SyntaxKind,
     /// Byte range in the rope
     range: TextRange,
     /// Cached text content
     text: OnceCell<String>,
     /// Parent node (if any)
-    parent: RwLock<Option<Weak<SyntaxNodeData<S>>>>,
+    parent: RwLock<Option<Weak<SyntaxNodeData>>>,
     /// Children (lazily parsed)
-    children: OnceCell<Vec<SyntaxElement<S>>>,
+    children: OnceCell<Vec<SyntaxElement>>,
 }
 
 /// Either a node or a token
-pub enum SyntaxElement<S: Syntax> {
-    Node(SyntaxNode<S>),
-    Token(SyntaxToken<S>),
+pub enum SyntaxElement {
+    Node(SyntaxNode),
+    Token(SyntaxToken),
 }
 
 /// A syntax token (leaf node)
-pub struct SyntaxToken<S: Syntax> {
-    kind: S::Kind,
+pub struct SyntaxToken {
+    kind: SyntaxKind,
     range: TextRange,
     text: Arc<str>,
 }
 
-impl<S: Syntax> SyntaxNode<S> {
+impl SyntaxNode {
     /// Create a new syntax node (internal use)
-    pub(crate) fn new(kind: S::Kind, range: TextRange) -> Self {
+    pub(crate) fn new(kind: SyntaxKind, range: TextRange) -> Self {
         Self {
             data: Arc::new(SyntaxNodeData {
                 kind,
@@ -52,7 +52,7 @@ impl<S: Syntax> SyntaxNode<S> {
 
     /// Create a new syntax node with text (for testing)
     #[cfg(test)]
-    pub(crate) fn new_with_text(kind: S::Kind, range: TextRange, text: String) -> Self {
+    pub(crate) fn new_with_text(kind: SyntaxKind, range: TextRange, text: String) -> Self {
         let node = Self::new(kind, range);
         let _ = node.data.text.set(text);
         node
@@ -60,9 +60,9 @@ impl<S: Syntax> SyntaxNode<S> {
 
     /// Create a new syntax node with children
     pub(crate) fn new_with_children(
-        kind: S::Kind,
+        kind: SyntaxKind,
         range: TextRange,
-        children: Vec<SyntaxElement<S>>,
+        children: Vec<SyntaxElement>,
     ) -> Self {
         let node = Self::new(kind, range);
 
@@ -79,7 +79,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get the kind of this node
-    pub fn kind(&self) -> S::Kind {
+    pub fn kind(&self) -> SyntaxKind {
         self.data.kind
     }
 
@@ -104,7 +104,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get the parent node
-    pub fn parent(&self) -> Option<SyntaxNode<S>> {
+    pub fn parent(&self) -> Option<SyntaxNode> {
         self.data
             .parent
             .read()
@@ -114,12 +114,12 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get child nodes (triggers lazy parsing if needed)
-    pub fn children(&self) -> &[SyntaxElement<S>] {
+    pub fn children(&self) -> &[SyntaxElement] {
         self.data.children.get_or_init(Vec::new)
     }
 
     /// Get the first child
-    pub fn first_child(&self) -> Option<SyntaxNode<S>> {
+    pub fn first_child(&self) -> Option<SyntaxNode> {
         self.children().iter().find_map(|child| match child {
             SyntaxElement::Node(node) => Some(node.clone()),
             SyntaxElement::Token(_) => None,
@@ -127,7 +127,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get child at index
-    pub fn child(&self, index: usize) -> Option<SyntaxNode<S>> {
+    pub fn child(&self, index: usize) -> Option<SyntaxNode> {
         self.children()
             .iter()
             .filter_map(|child| match child {
@@ -138,10 +138,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Find a descendant matching the predicate
-    pub fn find_descendant(
-        &self,
-        predicate: impl Fn(&SyntaxNode<S>) -> bool,
-    ) -> Option<SyntaxNode<S>> {
+    pub fn find_descendant(&self, predicate: impl Fn(&SyntaxNode) -> bool) -> Option<SyntaxNode> {
         if predicate(self) {
             return Some(self.clone());
         }
@@ -158,13 +155,13 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get all tokens in this subtree
-    pub fn tokens(&self) -> Vec<SyntaxToken<S>> {
+    pub fn tokens(&self) -> Vec<SyntaxToken> {
         let mut tokens = Vec::new();
         self.collect_tokens(&mut tokens);
         tokens
     }
 
-    fn collect_tokens(&self, tokens: &mut Vec<SyntaxToken<S>>) {
+    fn collect_tokens(&self, tokens: &mut Vec<SyntaxToken>) {
         for child in self.children() {
             match child {
                 SyntaxElement::Token(token) => tokens.push(token.clone()),
@@ -174,7 +171,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Find the token at the given offset
-    pub fn find_token_at_offset(&self, offset: TextSize) -> Option<SyntaxToken<S>> {
+    pub fn find_token_at_offset(&self, offset: TextSize) -> Option<SyntaxToken> {
         // First check if offset is within our range
         if !self.text_range().contains(offset) {
             return None;
@@ -200,7 +197,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Find the deepest node containing the given offset
-    pub fn find_node_at_offset(&self, offset: TextSize) -> Option<SyntaxNode<S>> {
+    pub fn find_node_at_offset(&self, offset: TextSize) -> Option<SyntaxNode> {
         // First check if offset is within our range
         if !self.text_range().contains(offset) {
             return None;
@@ -224,7 +221,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get the next sibling of this node
-    pub fn next_sibling(&self) -> Option<SyntaxNode<S>> {
+    pub fn next_sibling(&self) -> Option<SyntaxNode> {
         let parent = self.parent()?;
         let siblings = parent.children();
 
@@ -247,7 +244,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 
     /// Get the previous sibling of this node
-    pub fn prev_sibling(&self) -> Option<SyntaxNode<S>> {
+    pub fn prev_sibling(&self) -> Option<SyntaxNode> {
         let parent = self.parent()?;
         let siblings = parent.children();
 
@@ -266,7 +263,7 @@ impl<S: Syntax> SyntaxNode<S> {
     }
 }
 
-impl<S: Syntax> Clone for SyntaxNode<S> {
+impl Clone for SyntaxNode {
     fn clone(&self) -> Self {
         Self {
             data: self.data.clone(),
@@ -274,14 +271,14 @@ impl<S: Syntax> Clone for SyntaxNode<S> {
     }
 }
 
-impl<S: Syntax> SyntaxToken<S> {
+impl SyntaxToken {
     /// Create a new syntax token
-    pub fn new(kind: S::Kind, range: TextRange, text: Arc<str>) -> Self {
+    pub fn new(kind: SyntaxKind, range: TextRange, text: Arc<str>) -> Self {
         Self { kind, range, text }
     }
 
     /// Get the kind of this token
-    pub fn kind(&self) -> S::Kind {
+    pub fn kind(&self) -> SyntaxKind {
         self.kind
     }
 
@@ -296,7 +293,7 @@ impl<S: Syntax> SyntaxToken<S> {
     }
 }
 
-impl<S: Syntax> Clone for SyntaxToken<S> {
+impl Clone for SyntaxToken {
     fn clone(&self) -> Self {
         Self {
             kind: self.kind,
@@ -306,9 +303,9 @@ impl<S: Syntax> Clone for SyntaxToken<S> {
     }
 }
 
-impl<S: Syntax> SyntaxElement<S> {
+impl SyntaxElement {
     /// Get the kind of this element
-    pub fn kind(&self) -> S::Kind {
+    pub fn kind(&self) -> SyntaxKind {
         match self {
             SyntaxElement::Node(node) => node.kind(),
             SyntaxElement::Token(token) => token.kind(),
@@ -332,7 +329,7 @@ impl<S: Syntax> SyntaxElement<S> {
     }
 }
 
-impl<S: Syntax> Clone for SyntaxElement<S> {
+impl Clone for SyntaxElement {
     fn clone(&self) -> Self {
         match self {
             SyntaxElement::Node(node) => SyntaxElement::Node(node.clone()),

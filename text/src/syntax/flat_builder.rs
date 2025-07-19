@@ -5,22 +5,22 @@ use crate::{
     range::TextRange,
     syntax::{
         flat_ast::{ElementId, FlatAst, NodeData, NodeId, TokenData},
-        kind::Syntax,
+        unified_kind::SyntaxKind,
     },
 };
 use smallvec::SmallVec;
 
 /// Builder for constructing flat ASTs with a stack-based approach
-pub struct FlatTreeBuilder<S: Syntax> {
+pub struct FlatTreeBuilder {
     /// The AST being built
-    ast: FlatAst<S>,
+    ast: FlatAst,
     /// Stack of open nodes (node ID, start position)
     node_stack: Vec<(NodeId, TextSize)>,
     /// Current position in the text
     current_pos: TextSize,
 }
 
-impl<S: Syntax> Default for FlatTreeBuilder<S> {
+impl Default for FlatTreeBuilder {
     fn default() -> Self {
         Self {
             ast: FlatAst::new(),
@@ -30,7 +30,7 @@ impl<S: Syntax> Default for FlatTreeBuilder<S> {
     }
 }
 
-impl<S: Syntax> FlatTreeBuilder<S> {
+impl FlatTreeBuilder {
     /// Create a new tree builder
     pub fn new() -> Self {
         Self::default()
@@ -46,7 +46,7 @@ impl<S: Syntax> FlatTreeBuilder<S> {
     }
 
     /// Start a new node
-    pub fn start_node(&mut self, kind: S::Kind) {
+    pub fn start_node(&mut self, kind: SyntaxKind) {
         let parent = self.node_stack.last().map(|(id, _)| *id);
 
         let node_data = NodeData {
@@ -82,7 +82,7 @@ impl<S: Syntax> FlatTreeBuilder<S> {
     }
 
     /// Add a token
-    pub fn add_token(&mut self, kind: S::Kind, text: String) {
+    pub fn add_token(&mut self, kind: SyntaxKind, text: String) {
         let start = self.current_pos;
         let len = TextSize::from(text.len() as u32);
         let end = start + len;
@@ -115,7 +115,7 @@ impl<S: Syntax> FlatTreeBuilder<S> {
     }
 
     /// Finish building and return the AST
-    pub fn finish(mut self) -> FlatAst<S> {
+    pub fn finish(mut self) -> FlatAst {
         // Finish any remaining open nodes
         while !self.node_stack.is_empty() {
             self.finish_node();
@@ -130,7 +130,7 @@ impl<S: Syntax> FlatTreeBuilder<S> {
     }
 
     /// Get the kind of the current node (if any)
-    pub fn current_node_kind(&self) -> Option<S::Kind> {
+    pub fn current_node_kind(&self) -> Option<SyntaxKind> {
         self.node_stack
             .last()
             .and_then(|(id, _)| self.ast.get_node(*id).map(|node| node.kind))
@@ -140,27 +140,24 @@ impl<S: Syntax> FlatTreeBuilder<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{
-        SyntaxNodeRef,
-        simple::{SimpleKind, SimpleText},
-    };
+    use crate::syntax::{SyntaxNodeRef, unified_kind::SyntaxKind};
 
     #[test]
     fn test_builder_basic() {
-        let mut builder = FlatTreeBuilder::<SimpleText>::new();
+        let mut builder = FlatTreeBuilder::new();
 
         // Build: Root { Word("hello"), Whitespace(" "), Word("world") }
-        builder.start_node(SimpleKind::Root);
-        builder.add_token(SimpleKind::Word, "hello".to_string());
-        builder.add_token(SimpleKind::Whitespace, " ".to_string());
-        builder.add_token(SimpleKind::Word, "world".to_string());
+        builder.start_node(SyntaxKind::Root);
+        builder.add_token(SyntaxKind::Word, "hello".to_string());
+        builder.add_token(SyntaxKind::Whitespace, " ".to_string());
+        builder.add_token(SyntaxKind::Word, "world".to_string());
         builder.finish_node();
 
         let ast = builder.finish();
 
         // Verify structure
         let root = ast.get_node(ast.root()).expect("Root node should exist");
-        assert_eq!(root.kind, SimpleKind::Root);
+        assert_eq!(root.kind, SyntaxKind::Root);
         assert_eq!(root.range, TextRange::new(0.into(), 11.into()));
         assert_eq!(root.children.len(), 3);
 
@@ -174,19 +171,19 @@ mod tests {
 
     #[test]
     fn test_builder_nested() {
-        let mut builder = FlatTreeBuilder::<SimpleText>::new();
+        let mut builder = FlatTreeBuilder::new();
 
         // Build: Root { Line { Word("hello") }, Line { Word("world") } }
-        builder.start_node(SimpleKind::Root);
+        builder.start_node(SyntaxKind::Root);
 
-        builder.start_node(SimpleKind::Line);
-        builder.add_token(SimpleKind::Word, "hello".to_string());
+        builder.start_node(SyntaxKind::Line);
+        builder.add_token(SyntaxKind::Word, "hello".to_string());
         builder.finish_node();
 
-        builder.add_token(SimpleKind::Whitespace, "\n".to_string());
+        builder.add_token(SyntaxKind::Whitespace, "\n".to_string());
 
-        builder.start_node(SimpleKind::Line);
-        builder.add_token(SimpleKind::Word, "world".to_string());
+        builder.start_node(SyntaxKind::Line);
+        builder.add_token(SyntaxKind::Word, "world".to_string());
         builder.finish_node();
 
         builder.finish_node();
@@ -201,7 +198,7 @@ mod tests {
         assert_eq!(root_ref.children().count(), 2); // Two line nodes
 
         let first_line = root_ref.children().next().expect("Should have first line");
-        assert_eq!(first_line.kind(), SimpleKind::Line);
+        assert_eq!(first_line.kind(), SyntaxKind::Line);
         assert_eq!(first_line.tokens().count(), 1);
         assert_eq!(
             first_line.tokens().next().expect("Should have token").text,
@@ -211,12 +208,12 @@ mod tests {
 
     #[test]
     fn test_builder_skip() {
-        let mut builder = FlatTreeBuilder::<SimpleText>::new();
+        let mut builder = FlatTreeBuilder::new();
 
-        builder.start_node(SimpleKind::Root);
-        builder.add_token(SimpleKind::Word, "hello".to_string());
+        builder.start_node(SyntaxKind::Root);
+        builder.add_token(SyntaxKind::Word, "hello".to_string());
         builder.skip(10); // Skip some content
-        builder.add_token(SimpleKind::Word, "world".to_string());
+        builder.add_token(SyntaxKind::Word, "world".to_string());
         builder.finish_node();
 
         let ast = builder.finish();

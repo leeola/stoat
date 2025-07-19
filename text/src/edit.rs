@@ -4,7 +4,7 @@ use crate::{
     TextSize,
     range::TextRange,
     syntax::{
-        Syntax, SyntaxNode,
+        SyntaxNode,
         flat_ast::{FlatAst, NodeId},
     },
 };
@@ -35,9 +35,9 @@ pub enum EditError {
 
 /// An edit operation on the AST
 #[derive(Clone)]
-pub struct Edit<S: Syntax> {
+pub struct Edit {
     /// The target node to edit
-    pub target: SyntaxNode<S>,
+    pub target: SyntaxNode,
     /// The operation to perform
     pub operation: EditOperation,
 }
@@ -69,9 +69,9 @@ pub enum EditOperation {
     },
 }
 
-impl<S: Syntax> Edit<S> {
+impl Edit {
     /// Create a replace edit
-    pub fn replace(target: SyntaxNode<S>, text: String) -> Self {
+    pub fn replace(target: SyntaxNode, text: String) -> Self {
         Self {
             target,
             operation: EditOperation::Replace(text),
@@ -79,7 +79,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Create an insert before edit
-    pub fn insert_before(target: SyntaxNode<S>, text: String) -> Self {
+    pub fn insert_before(target: SyntaxNode, text: String) -> Self {
         Self {
             target,
             operation: EditOperation::InsertBefore(text),
@@ -87,7 +87,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Create an insert after edit
-    pub fn insert_after(target: SyntaxNode<S>, text: String) -> Self {
+    pub fn insert_after(target: SyntaxNode, text: String) -> Self {
         Self {
             target,
             operation: EditOperation::InsertAfter(text),
@@ -95,7 +95,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Create a delete edit
-    pub fn delete(target: SyntaxNode<S>) -> Self {
+    pub fn delete(target: SyntaxNode) -> Self {
         Self {
             target,
             operation: EditOperation::Delete,
@@ -103,7 +103,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Delete a specific node from the AST
-    pub fn delete_node(node: SyntaxNode<S>) -> Self {
+    pub fn delete_node(node: SyntaxNode) -> Self {
         Self {
             target: node,
             operation: EditOperation::Delete,
@@ -111,7 +111,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Replace a specific node's text
-    pub fn replace_node(node: SyntaxNode<S>, text: String) -> Self {
+    pub fn replace_node(node: SyntaxNode, text: String) -> Self {
         Self {
             target: node,
             operation: EditOperation::Replace(text),
@@ -119,7 +119,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Insert text at a specific offset within a node
-    pub fn insert_at_node(node: SyntaxNode<S>, offset: usize, text: String) -> Self {
+    pub fn insert_at_node(node: SyntaxNode, offset: usize, text: String) -> Self {
         Self {
             target: node,
             operation: EditOperation::InsertAt { offset, text },
@@ -127,7 +127,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Delete a specific range within a node
-    pub fn delete_range(node: SyntaxNode<S>, start: usize, end: usize) -> Self {
+    pub fn delete_range(node: SyntaxNode, start: usize, end: usize) -> Self {
         Self {
             target: node,
             operation: EditOperation::DeleteRange { start, end },
@@ -135,7 +135,7 @@ impl<S: Syntax> Edit<S> {
     }
 
     /// Replace a specific range within a node
-    pub fn replace_range(node: SyntaxNode<S>, start: usize, end: usize, text: String) -> Self {
+    pub fn replace_range(node: SyntaxNode, start: usize, end: usize, text: String) -> Self {
         Self {
             target: node,
             operation: EditOperation::ReplaceRange { start, end, text },
@@ -242,7 +242,7 @@ impl FlatEdit {
     }
 
     /// Convert to legacy Edit for backward compatibility
-    pub fn to_legacy<S: Syntax>(&self, ast: &Arc<FlatAst<S>>) -> Option<Edit<S>> {
+    pub fn to_legacy(&self, ast: &Arc<FlatAst>) -> Option<Edit> {
         use crate::syntax::compat::FlatSyntaxNode;
 
         let flat_node = FlatSyntaxNode::new(ast.clone(), self.target);

@@ -4,7 +4,7 @@ use crate::{
     TextSize,
     edit::{Edit, EditOperation},
     range::TextRange,
-    syntax::{Syntax, SyntaxNode},
+    syntax::SyntaxNode,
 };
 use snafu::Snafu;
 
@@ -32,20 +32,20 @@ impl CursorId {
 }
 
 /// A cursor for navigating and editing text within a view
-pub struct TextCursor<S: Syntax> {
+pub struct TextCursor {
     /// Unique identifier for this cursor
     id: CursorId,
     /// Position in the buffer (byte offset)
     position: TextSize,
     /// Current node the cursor is at
-    current_node: Option<SyntaxNode<S>>,
+    current_node: Option<SyntaxNode>,
     /// Selection range (if any)
     selection: Option<TextRange>,
 }
 
-impl<S: Syntax> TextCursor<S> {
+impl TextCursor {
     /// Create a new cursor at the given position
-    pub(crate) fn new(position: TextSize, root: SyntaxNode<S>) -> Self {
+    pub(crate) fn new(position: TextSize, root: SyntaxNode) -> Self {
         Self {
             id: CursorId::new(),
             position,
@@ -85,12 +85,12 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Set the current node
-    pub fn set_current_node(&mut self, node: SyntaxNode<S>) {
+    pub fn set_current_node(&mut self, node: SyntaxNode) {
         self.current_node = Some(node);
     }
 
     /// Get the current node
-    pub fn current(&self) -> Option<&SyntaxNode<S>> {
+    pub fn current(&self) -> Option<&SyntaxNode> {
         self.current_node.as_ref()
     }
 
@@ -128,7 +128,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Find and move to the next node matching a predicate
-    pub fn find_next(&mut self, _predicate: impl Fn(&SyntaxNode<S>) -> bool) -> bool {
+    pub fn find_next(&mut self, _predicate: impl Fn(&SyntaxNode) -> bool) -> bool {
         // TODO: Implement proper tree traversal
         false
     }
@@ -144,7 +144,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Insert text at the current position
-    pub fn insert(&mut self, text: &str) -> Result<Edit<S>> {
+    pub fn insert(&mut self, text: &str) -> Result<Edit> {
         let node = self
             .current_node
             .as_ref()
@@ -160,7 +160,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Replace the current node's text
-    pub fn replace(&mut self, text: &str) -> Result<Edit<S>> {
+    pub fn replace(&mut self, text: &str) -> Result<Edit> {
         let node = self
             .current_node
             .as_ref()
@@ -173,7 +173,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Delete the current node
-    pub fn delete(&mut self) -> Result<Edit<S>> {
+    pub fn delete(&mut self) -> Result<Edit> {
         let node = self
             .current_node
             .as_ref()
@@ -186,7 +186,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Insert text before the current node
-    pub fn insert_before(&mut self, text: &str) -> Result<Edit<S>> {
+    pub fn insert_before(&mut self, text: &str) -> Result<Edit> {
         let node = self
             .current_node
             .as_ref()
@@ -199,7 +199,7 @@ impl<S: Syntax> TextCursor<S> {
     }
 
     /// Insert text after the current node
-    pub fn insert_after(&mut self, text: &str) -> Result<Edit<S>> {
+    pub fn insert_after(&mut self, text: &str) -> Result<Edit> {
         let node = self
             .current_node
             .as_ref()

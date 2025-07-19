@@ -1,23 +1,18 @@
 //! Tree structure utilities
 
-use crate::syntax::Syntax;
-
 /// Builder for constructing syntax trees
-pub struct TreeBuilder<S: Syntax> {
+pub struct TreeBuilder {
     // TODO: Implement tree building
-    _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: Syntax> TreeBuilder<S> {
+impl TreeBuilder {
     /// Create a new tree builder
     pub fn new() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
+        Self {}
     }
 }
 
-impl<S: Syntax> Default for TreeBuilder<S> {
+impl Default for TreeBuilder {
     fn default() -> Self {
         Self::new()
     }

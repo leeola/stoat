@@ -4,7 +4,7 @@ use crate::{
     TextSize,
     edit::{Edit, EditError, EditOperation, RopeEdit},
     range::TextRange,
-    syntax::{Syntax, SyntaxNode},
+    syntax::SyntaxNode,
     view::TextView,
 };
 use parking_lot::RwLock;
@@ -37,31 +37,31 @@ pub struct ChangeEvent {
 }
 
 /// A text buffer with efficient rope storage and lazy AST
-pub struct TextBuffer<S: Syntax> {
-    inner: Arc<BufferInner<S>>,
+pub struct TextBuffer {
+    inner: Arc<BufferInner>,
 }
 
-pub(crate) struct BufferInner<S: Syntax> {
+pub(crate) struct BufferInner {
     /// Unique ID for this buffer
     id: BufferId,
     /// The rope storing the actual text
     rope: RwLock<Rope>,
     /// Cached AST with version tracking
-    ast: RwLock<AstCache<S>>,
+    ast: RwLock<AstCache>,
     /// Version number for invalidation
     version: RwLock<u64>,
     /// All views of this buffer
-    views: RwLock<Vec<Weak<crate::view::TextViewInner<S>>>>,
+    views: RwLock<Vec<Weak<crate::view::TextViewInner>>>,
 }
 
-struct AstCache<S: Syntax> {
+struct AstCache {
     /// The cached root node
-    root: Option<SyntaxNode<S>>,
+    root: Option<SyntaxNode>,
     /// Version when this was parsed
     version: u64,
 }
 
-impl<S: Syntax> TextBuffer<S> {
+impl TextBuffer {
     /// Create a new buffer with the given text
     pub fn new(text: &str) -> Self {
         let rope = Rope::from_str(text);
@@ -103,7 +103,7 @@ impl<S: Syntax> TextBuffer<S> {
     }
 
     /// Get the root syntax node
-    pub fn syntax(&self) -> SyntaxNode<S> {
+    pub fn syntax(&self) -> SyntaxNode {
         self.ensure_parsed();
         self.inner
             .ast
@@ -115,17 +115,17 @@ impl<S: Syntax> TextBuffer<S> {
     }
 
     /// Create a view of the entire buffer
-    pub fn create_view(&self) -> TextView<S> {
+    pub fn create_view(&self) -> TextView {
         TextView::new(self.clone(), self.syntax())
     }
 
     /// Create a view of a specific node
-    pub fn create_view_of(&self, node: SyntaxNode<S>) -> TextView<S> {
+    pub fn create_view_of(&self, node: SyntaxNode) -> TextView {
         TextView::new(self.clone(), node)
     }
 
     /// Find nodes matching a predicate
-    pub fn find_nodes(&self, predicate: impl Fn(&SyntaxNode<S>) -> bool) -> Vec<SyntaxNode<S>> {
+    pub fn find_nodes(&self, predicate: impl Fn(&SyntaxNode) -> bool) -> Vec<SyntaxNode> {
         let mut results = Vec::new();
         let root = self.syntax();
         self.find_nodes_recursive(&root, &predicate, &mut results);
@@ -134,9 +134,9 @@ impl<S: Syntax> TextBuffer<S> {
 
     fn find_nodes_recursive(
         &self,
-        node: &SyntaxNode<S>,
-        predicate: &impl Fn(&SyntaxNode<S>) -> bool,
-        results: &mut Vec<SyntaxNode<S>>,
+        node: &SyntaxNode,
+        predicate: &impl Fn(&SyntaxNode) -> bool,
+        results: &mut Vec<SyntaxNode>,
     ) {
         if predicate(node) {
             results.push(node.clone());
@@ -152,19 +152,19 @@ impl<S: Syntax> TextBuffer<S> {
         if ast.version < current_version || ast.root.is_none() {
             // Need to parse
             let text = self.text();
-            let parse_result = S::parse(&text);
+            let parse_result = crate::syntax::parse::parse(&text);
             ast.root = Some(parse_result.root);
             ast.version = current_version;
         }
     }
 
     /// Register a view
-    pub(crate) fn register_view(&self, view: Weak<crate::view::TextViewInner<S>>) {
+    pub(crate) fn register_view(&self, view: Weak<crate::view::TextViewInner>) {
         self.inner.views.write().push(view);
     }
 
     /// Apply an edit to the buffer
-    pub fn apply_edit(&self, edit: &Edit<S>) -> Result<(), EditError> {
+    pub fn apply_edit(&self, edit: &Edit) -> Result<(), EditError> {
         // Convert AST edit to rope edit
         let rope_edit = self.convert_to_rope_edit(edit)?;
 
@@ -203,7 +203,7 @@ impl<S: Syntax> TextBuffer<S> {
     }
 
     /// Convert an AST-based edit to a rope edit
-    fn convert_to_rope_edit(&self, edit: &Edit<S>) -> Result<RopeEdit, EditError> {
+    fn convert_to_rope_edit(&self, edit: &Edit) -> Result<RopeEdit, EditError> {
         let node_range = edit.target.text_range();
 
         match &edit.operation {
@@ -482,7 +482,7 @@ impl<S: Syntax> TextBuffer<S> {
     }
 }
 
-impl<S: Syntax> Clone for TextBuffer<S> {
+impl Clone for TextBuffer {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),

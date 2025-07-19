@@ -3,21 +3,21 @@
 use crate::{
     TextSize,
     cursor::{CursorId, TextCursor},
-    syntax::{Syntax, SyntaxNode},
+    syntax::SyntaxNode,
 };
 use indexmap::IndexMap;
 
 /// A collection of cursors for multi-cursor editing
-pub struct CursorCollection<S: Syntax> {
+pub struct CursorCollection {
     /// The primary cursor ID
     primary: CursorId,
     /// All cursors indexed by ID
-    cursors: IndexMap<CursorId, TextCursor<S>>,
+    cursors: IndexMap<CursorId, TextCursor>,
 }
 
-impl<S: Syntax> CursorCollection<S> {
+impl CursorCollection {
     /// Create a new cursor collection with a single cursor
-    pub fn new(position: TextSize, root: SyntaxNode<S>) -> Self {
+    pub fn new(position: TextSize, root: SyntaxNode) -> Self {
         let cursor = TextCursor::new(position, root);
         let primary = cursor.id();
         let mut cursors = IndexMap::new();
@@ -27,21 +27,21 @@ impl<S: Syntax> CursorCollection<S> {
     }
 
     /// Get the primary cursor
-    pub fn primary(&self) -> &TextCursor<S> {
+    pub fn primary(&self) -> &TextCursor {
         self.cursors
             .get(&self.primary)
             .expect("Primary cursor should always exist")
     }
 
     /// Get the primary cursor mutably
-    pub fn primary_mut(&mut self) -> &mut TextCursor<S> {
+    pub fn primary_mut(&mut self) -> &mut TextCursor {
         self.cursors
             .get_mut(&self.primary)
             .expect("Primary cursor should always exist")
     }
 
     /// Add a new cursor at the given position
-    pub fn add_cursor(&mut self, position: TextSize, root: SyntaxNode<S>) -> CursorId {
+    pub fn add_cursor(&mut self, position: TextSize, root: SyntaxNode) -> CursorId {
         let cursor = TextCursor::new(position, root);
         let id = cursor.id();
         self.cursors.insert(id, cursor);
@@ -58,22 +58,22 @@ impl<S: Syntax> CursorCollection<S> {
     }
 
     /// Get a cursor by ID
-    pub fn get(&self, id: CursorId) -> Option<&TextCursor<S>> {
+    pub fn get(&self, id: CursorId) -> Option<&TextCursor> {
         self.cursors.get(&id)
     }
 
     /// Get a cursor by ID mutably
-    pub fn get_mut(&mut self, id: CursorId) -> Option<&mut TextCursor<S>> {
+    pub fn get_mut(&mut self, id: CursorId) -> Option<&mut TextCursor> {
         self.cursors.get_mut(&id)
     }
 
     /// Iterate over all cursors
-    pub fn iter(&self) -> impl Iterator<Item = &TextCursor<S>> {
+    pub fn iter(&self) -> impl Iterator<Item = &TextCursor> {
         self.cursors.values()
     }
 
     /// Iterate over all cursors mutably
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TextCursor<S>> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TextCursor> {
         self.cursors.values_mut()
     }
 

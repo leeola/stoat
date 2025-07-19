@@ -1,6 +1,6 @@
 //! Flat, ID-based AST implementation for efficient memory usage and traversal
 
-use crate::{TextSize, range::TextRange, syntax::kind::Syntax};
+use crate::{TextSize, range::TextRange, syntax::unified_kind::SyntaxKind};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,11 +29,11 @@ pub enum ElementId {
 
 /// Data for a syntax node stored in flat array
 #[derive(Debug, Clone)]
-pub struct NodeData<S: Syntax> {
+pub struct NodeData {
     /// Unique ID for this node
     pub id: NodeId,
     /// The kind of this node
-    pub kind: S::Kind,
+    pub kind: SyntaxKind,
     /// Byte range in the source text
     pub range: TextRange,
     /// Parent node ID (None for root)
@@ -45,9 +45,9 @@ pub struct NodeData<S: Syntax> {
 
 /// Data for a syntax token (leaf node with text)
 #[derive(Debug, Clone)]
-pub struct TokenData<S: Syntax> {
+pub struct TokenData {
     /// The kind of this token
-    pub kind: S::Kind,
+    pub kind: SyntaxKind,
     /// Byte range in the source text
     pub range: TextRange,
     /// The actual text content
@@ -56,18 +56,18 @@ pub struct TokenData<S: Syntax> {
 
 /// Flat AST structure with all nodes stored in vectors
 #[derive(Clone)]
-pub struct FlatAst<S: Syntax> {
+pub struct FlatAst {
     /// All nodes stored flat
-    nodes: Vec<NodeData<S>>,
+    nodes: Vec<NodeData>,
     /// All tokens stored flat
-    tokens: Vec<TokenData<S>>,
+    tokens: Vec<TokenData>,
     /// Root node ID
     root: NodeId,
     /// Maps NodeId to index in nodes vector for fast lookup
     node_index: rustc_hash::FxHashMap<NodeId, usize>,
 }
 
-impl<S: Syntax> Default for FlatAst<S> {
+impl Default for FlatAst {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
@@ -78,7 +78,7 @@ impl<S: Syntax> Default for FlatAst<S> {
     }
 }
 
-impl<S: Syntax> FlatAst<S> {
+impl FlatAst {
     /// Create a new empty AST
     pub fn new() -> Self {
         Self::default()
@@ -105,7 +105,7 @@ impl<S: Syntax> FlatAst<S> {
     }
 
     /// Add a node to the AST
-    pub(crate) fn add_node(&mut self, mut node: NodeData<S>) -> NodeId {
+    pub(crate) fn add_node(&mut self, mut node: NodeData) -> NodeId {
         let id = NodeId::new();
         node.id = id;
 
@@ -117,33 +117,33 @@ impl<S: Syntax> FlatAst<S> {
     }
 
     /// Add a token to the AST
-    pub(crate) fn add_token(&mut self, token: TokenData<S>) -> TokenId {
+    pub(crate) fn add_token(&mut self, token: TokenData) -> TokenId {
         let id = TokenId(self.tokens.len() as u32);
         self.tokens.push(token);
         id
     }
 
     /// Get a node by ID
-    pub fn get_node(&self, id: NodeId) -> Option<&NodeData<S>> {
+    pub fn get_node(&self, id: NodeId) -> Option<&NodeData> {
         self.node_index
             .get(&id)
             .and_then(|&idx| self.nodes.get(idx))
     }
 
     /// Get a mutable node by ID (for building)
-    pub(crate) fn get_node_mut(&mut self, id: NodeId) -> Option<&mut NodeData<S>> {
+    pub(crate) fn get_node_mut(&mut self, id: NodeId) -> Option<&mut NodeData> {
         self.node_index
             .get(&id)
             .and_then(|&idx| self.nodes.get_mut(idx))
     }
 
     /// Get a token by ID
-    pub fn get_token(&self, id: TokenId) -> Option<&TokenData<S>> {
+    pub fn get_token(&self, id: TokenId) -> Option<&TokenData> {
         self.tokens.get(id.0 as usize)
     }
 
     /// Get node data by element ID
-    pub fn get_element_node(&self, id: ElementId) -> Option<&NodeData<S>> {
+    pub fn get_element_node(&self, id: ElementId) -> Option<&NodeData> {
         match id {
             ElementId::Node(node_id) => self.get_node(node_id),
             ElementId::Token(_) => None,
@@ -151,7 +151,7 @@ impl<S: Syntax> FlatAst<S> {
     }
 
     /// Get token data by element ID
-    pub fn get_element_token(&self, id: ElementId) -> Option<&TokenData<S>> {
+    pub fn get_element_token(&self, id: ElementId) -> Option<&TokenData> {
         match id {
             ElementId::Node(_) => None,
             ElementId::Token(token_id) => self.get_token(token_id),
@@ -192,12 +192,12 @@ impl<S: Syntax> FlatAst<S> {
     }
 
     /// Iterate over all nodes
-    pub fn nodes(&self) -> impl Iterator<Item = &NodeData<S>> {
+    pub fn nodes(&self) -> impl Iterator<Item = &NodeData> {
         self.nodes.iter()
     }
 
     /// Iterate over all tokens
-    pub fn tokens(&self) -> impl Iterator<Item = &TokenData<S>> {
+    pub fn tokens(&self) -> impl Iterator<Item = &TokenData> {
         self.tokens.iter()
     }
 
@@ -205,8 +205,8 @@ impl<S: Syntax> FlatAst<S> {
     pub fn memory_usage(&self) -> usize {
         use std::mem::size_of;
 
-        let node_memory = self.nodes.capacity() * size_of::<NodeData<S>>();
-        let token_memory = self.tokens.capacity() * size_of::<TokenData<S>>();
+        let node_memory = self.nodes.capacity() * size_of::<NodeData>();
+        let token_memory = self.tokens.capacity() * size_of::<TokenData>();
         let index_memory = self.node_index.capacity() * (size_of::<NodeId>() + size_of::<usize>());
 
         node_memory + token_memory + index_memory
@@ -228,14 +228,14 @@ impl<S: Syntax> FlatAst<S> {
 }
 
 /// Lightweight reference to a node in the AST
-pub struct SyntaxNodeRef<'a, S: Syntax> {
-    ast: &'a FlatAst<S>,
-    data: &'a NodeData<S>,
+pub struct SyntaxNodeRef<'a> {
+    ast: &'a FlatAst,
+    data: &'a NodeData,
 }
 
-impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
+impl<'a> SyntaxNodeRef<'a> {
     /// Create a new node reference
-    pub(crate) fn new(ast: &'a FlatAst<S>, data: &'a NodeData<S>) -> Self {
+    pub(crate) fn new(ast: &'a FlatAst, data: &'a NodeData) -> Self {
         Self { ast, data }
     }
 
@@ -245,7 +245,7 @@ impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
     }
 
     /// Get the node kind
-    pub fn kind(&self) -> S::Kind {
+    pub fn kind(&self) -> SyntaxKind {
         self.data.kind
     }
 
@@ -255,7 +255,7 @@ impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
     }
 
     /// Get the parent node
-    pub fn parent(&self) -> Option<SyntaxNodeRef<'a, S>> {
+    pub fn parent(&self) -> Option<SyntaxNodeRef<'a>> {
         self.data.parent.and_then(|id| {
             self.ast
                 .get_node(id)
@@ -264,7 +264,7 @@ impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
     }
 
     /// Iterate over child nodes
-    pub fn children(&'a self) -> impl Iterator<Item = SyntaxNodeRef<'a, S>> + 'a {
+    pub fn children(&'a self) -> impl Iterator<Item = SyntaxNodeRef<'a>> + 'a {
         self.data.children.iter().filter_map(move |&child_id| {
             if let ElementId::Node(node_id) = child_id {
                 self.ast
@@ -277,7 +277,7 @@ impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
     }
 
     /// Iterate over child tokens
-    pub fn tokens(&'a self) -> impl Iterator<Item = &'a TokenData<S>> + 'a {
+    pub fn tokens(&'a self) -> impl Iterator<Item = &'a TokenData> + 'a {
         self.data.children.iter().filter_map(move |&child_id| {
             if let ElementId::Token(token_id) = child_id {
                 self.ast.get_token(token_id)
@@ -316,16 +316,16 @@ impl<'a, S: Syntax> SyntaxNodeRef<'a, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::simple::{SimpleKind, SimpleText};
+    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_flat_ast_creation() {
-        let mut ast = FlatAst::<SimpleText>::new();
+        let mut ast = FlatAst::new();
 
         // Create root node
         let root_data = NodeData {
             id: NodeId(0), // Will be replaced
-            kind: SimpleKind::Root,
+            kind: SyntaxKind::Root,
             range: TextRange::new(0.into(), 10.into()),
             parent: None,
             children: SmallVec::new(),
@@ -341,12 +341,12 @@ mod tests {
 
     #[test]
     fn test_node_traversal() {
-        let mut ast = FlatAst::<SimpleText>::new();
+        let mut ast = FlatAst::new();
 
         // Build a simple tree
         let root_id = ast.add_node(NodeData {
             id: NodeId(0),
-            kind: SimpleKind::Root,
+            kind: SyntaxKind::Root,
             range: TextRange::new(0.into(), 20.into()),
             parent: None,
             children: SmallVec::new(),
@@ -354,7 +354,7 @@ mod tests {
 
         let child_id = ast.add_node(NodeData {
             id: NodeId(0),
-            kind: SimpleKind::Word,
+            kind: SyntaxKind::Word,
             range: TextRange::new(0.into(), 5.into()),
             parent: Some(root_id),
             children: SmallVec::new(),
@@ -373,11 +373,11 @@ mod tests {
 
     #[test]
     fn test_find_node_at_offset() {
-        let mut ast = FlatAst::<SimpleText>::new();
+        let mut ast = FlatAst::new();
 
         let root_id = ast.add_node(NodeData {
             id: NodeId(0),
-            kind: SimpleKind::Root,
+            kind: SyntaxKind::Root,
             range: TextRange::new(0.into(), 20.into()),
             parent: None,
             children: SmallVec::new(),
