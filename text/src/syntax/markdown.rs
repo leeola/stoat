@@ -1,6 +1,6 @@
 //! Markdown syntax implementation using tree-sitter
 
-use crate::syntax::{flat_ast::FlatAst, flat_builder::FlatTreeBuilder, unified_kind::SyntaxKind};
+use crate::syntax::{flat_ast::FlatAst, flat_builder::FlatTreeBuilder, kind::SyntaxKind};
 use tree_sitter::Tree;
 
 /// Markdown node and token kinds

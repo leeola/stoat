@@ -6,7 +6,7 @@ use crate::{
     cursor::TextCursor,
     edit::Edit,
     range::TextRange,
-    syntax::{SyntaxNode, unified_kind::SyntaxKind},
+    syntax::{SyntaxNode, kind::SyntaxKind},
     view::TextView,
 };
 

@@ -6,8 +6,8 @@ use crate::{
     syntax::{
         flat_ast::FlatAst,
         flat_builder::FlatTreeBuilder,
+        kind::SyntaxKind,
         node::{SyntaxElement, SyntaxNode, SyntaxToken},
-        unified_kind::SyntaxKind,
     },
 };
 use std::sync::Arc;

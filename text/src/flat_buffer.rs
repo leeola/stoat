@@ -371,7 +371,7 @@ impl Clone for FlatTextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::unified_kind::SyntaxKind;
+    use crate::syntax::kind::SyntaxKind;
 
     #[test]
     fn test_flat_buffer_creation() {

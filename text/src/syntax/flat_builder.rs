@@ -5,7 +5,7 @@ use crate::{
     range::TextRange,
     syntax::{
         flat_ast::{ElementId, FlatAst, NodeData, NodeId, TokenData},
-        unified_kind::SyntaxKind,
+        kind::SyntaxKind,
     },
 };
 use smallvec::SmallVec;
@@ -140,7 +140,7 @@ impl FlatTreeBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{SyntaxNodeRef, unified_kind::SyntaxKind};
+    use crate::syntax::{SyntaxNodeRef, kind::SyntaxKind};
 
     #[test]
     fn test_builder_basic() {

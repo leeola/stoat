@@ -5,8 +5,8 @@ use crate::{
     range::TextRange,
     syntax::{
         flat_ast::{ElementId, FlatAst, NodeId, SyntaxNodeRef},
+        kind::SyntaxKind,
         node::{SyntaxElement, SyntaxNode, SyntaxToken},
-        unified_kind::SyntaxKind,
     },
 };
 use std::sync::Arc;
@@ -175,7 +175,7 @@ pub trait AstBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::{flat_builder::FlatTreeBuilder, unified_kind::SyntaxKind};
+    use crate::syntax::{flat_builder::FlatTreeBuilder, kind::SyntaxKind};
 
     #[test]
     fn test_compat_basic() {

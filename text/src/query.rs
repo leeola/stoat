@@ -1,6 +1,6 @@
 //! AST query operations
 
-use crate::syntax::{SyntaxNode, unified_kind::SyntaxKind};
+use crate::syntax::{SyntaxNode, kind::SyntaxKind};
 
 /// Query builder for finding nodes in the AST
 pub struct Query {
@@ -77,7 +77,7 @@ impl Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::unified_kind::SyntaxKind;
+    use crate::syntax::kind::SyntaxKind;
 
     #[test]
     fn test_query_find_all_tree_traversal() {

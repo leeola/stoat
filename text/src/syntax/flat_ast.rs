@@ -1,6 +1,6 @@
 //! Flat, ID-based AST implementation for efficient memory usage and traversal
 
-use crate::{TextSize, range::TextRange, syntax::unified_kind::SyntaxKind};
+use crate::{TextSize, range::TextRange, syntax::kind::SyntaxKind};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -316,7 +316,7 @@ impl<'a> SyntaxNodeRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::unified_kind::SyntaxKind;
+    use crate::syntax::kind::SyntaxKind;
 
     #[test]
     fn test_flat_ast_creation() {

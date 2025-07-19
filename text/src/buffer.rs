@@ -622,8 +622,8 @@ mod tests {
         );
 
         // Find Document nodes
-        let docs = buffer
-            .find_nodes(|node| node.kind() == crate::syntax::unified_kind::SyntaxKind::Document);
+        let docs =
+            buffer.find_nodes(|node| node.kind() == crate::syntax::kind::SyntaxKind::Document);
         assert_eq!(docs.len(), 1, "Should find exactly one Document");
 
         // Verify the Document contains our text
@@ -631,8 +631,7 @@ mod tests {
         assert_eq!(doc.text(), "hello world\nfoo bar\nbaz qux");
 
         // Verify tree traversal by checking we don't find non-existent node types
-        let words =
-            buffer.find_nodes(|node| node.kind() == crate::syntax::unified_kind::SyntaxKind::Word);
+        let words = buffer.find_nodes(|node| node.kind() == crate::syntax::kind::SyntaxKind::Word);
         assert_eq!(
             words.len(),
             0,
@@ -671,13 +670,13 @@ mod tests {
         // Verify we have the expected node types
         let root_count = all_nodes
             .iter()
-            .filter(|n| n.kind() == crate::syntax::unified_kind::SyntaxKind::Root)
+            .filter(|n| n.kind() == crate::syntax::kind::SyntaxKind::Root)
             .count();
         assert_eq!(root_count, 1, "Should find exactly one Root");
 
         let line_count = all_nodes
             .iter()
-            .filter(|n| n.kind() == crate::syntax::unified_kind::SyntaxKind::Line)
+            .filter(|n| n.kind() == crate::syntax::kind::SyntaxKind::Line)
             .count();
         assert_eq!(line_count, 3, "Should find 3 Line nodes");
     }

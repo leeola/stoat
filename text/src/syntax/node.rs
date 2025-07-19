@@ -1,6 +1,6 @@
 //! Syntax nodes with rope offsets
 
-use crate::{TextSize, range::TextRange, syntax::unified_kind::SyntaxKind};
+use crate::{TextSize, range::TextRange, syntax::kind::SyntaxKind};
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
