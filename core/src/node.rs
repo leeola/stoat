@@ -427,8 +427,9 @@ mod tests {
             .expect("Failed to lock node registry");
         let types = registry.registered_types();
 
-        // Should be empty - no built-in node types registered
-        assert!(types.is_empty());
+        // Should contain built-in node types
+        assert!(!types.is_empty());
+        assert!(types.contains(&"text"));
     }
 
     #[test]

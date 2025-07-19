@@ -125,19 +125,14 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        use iced::widget::{column, container, text};
+        use crate::widget::StatusBar;
+        use iced::widget::column;
 
-        // Create status bar with mode display
-        let mode_text = format!("Mode: {}", self.stoat.current_mode().as_str());
-        let status_bar = container(text(mode_text).size(16))
-            .width(iced::Length::Fill)
-            .padding(5)
-            .style(|theme: &iced::Theme| container::Style {
-                background: Some(iced::Background::Color(
-                    theme.extended_palette().background.strong.color,
-                )),
-                ..Default::default()
-            });
+        // Create enhanced status bar
+        let status_bar = StatusBar::create(
+            self.stoat.current_mode().as_str(),
+            Some("Stoat Editor".to_string()),
+        );
 
         // Create the main content
         let canvas = iced::widget::canvas(canvas::NodeCanvas::new(&self.render_state))
