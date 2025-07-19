@@ -4,10 +4,7 @@ use crate::{
     TextSize,
     edit::FlatEdit,
     range::TextRange,
-    syntax::{
-        flat_ast::{FlatAst, NodeId},
-        unified_kind::SyntaxKind,
-    },
+    syntax::flat_ast::{FlatAst, NodeId},
 };
 use std::collections::HashSet;
 
@@ -242,7 +239,7 @@ impl IncrementalParser {
     fn reparse_range(
         &mut self,
         _parent_node: NodeId,
-        text: &str,
+        _text: &str,
         _range: TextRange,
     ) -> Result<(), IncrementalParseError> {
         // FIXME: This is a placeholder implementation
@@ -282,7 +279,6 @@ pub enum IncrementalParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_text_change_net_change() {

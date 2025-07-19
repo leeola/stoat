@@ -4,10 +4,7 @@ use crate::{
     TextSize,
     edit::{Edit, EditError, EditOperation, FlatEdit, RopeEdit},
     range::TextRange,
-    syntax::{
-        FlatAst, FlatSyntaxNode, FlatTreeBuilder, IncrementalParser, SyntaxNode, TextChange,
-        unified_kind::SyntaxKind,
-    },
+    syntax::{FlatAst, FlatSyntaxNode, IncrementalParser, SyntaxNode, TextChange},
     view::TextView,
 };
 use parking_lot::RwLock;
@@ -165,13 +162,7 @@ impl FlatTextBuffer {
 
             if parser_cache.parser.is_none() {
                 // First parse - create parser with full AST
-                // FIXME: Implement parsing with unified syntax
-                // For now, create a dummy AST
-                let dummy_root = SyntaxNode::new(
-                    SyntaxKind::Root,
-                    TextRange::new(0.into(), (text.len() as u32).into()),
-                );
-                let flat_ast = self.convert_to_flat_ast(dummy_root);
+                let flat_ast = crate::syntax::parse::parse_markdown_to_flat_ast(&text);
                 parser_cache.parser = Some(IncrementalParser::new(flat_ast));
             } else {
                 // Incremental parse - apply pending changes
@@ -184,13 +175,7 @@ impl FlatTextBuffer {
                             eprintln!(
                                 "Incremental parsing failed: {e}, falling back to full reparse"
                             );
-                            // FIXME: Implement parsing with unified syntax
-                            // For now, create a dummy AST
-                            let dummy_root = SyntaxNode::new(
-                                SyntaxKind::Root,
-                                TextRange::new(0.into(), (text.len() as u32).into()),
-                            );
-                            let flat_ast = self.convert_to_flat_ast(dummy_root);
+                            let flat_ast = crate::syntax::parse::parse_markdown_to_flat_ast(&text);
                             *parser = IncrementalParser::new(flat_ast);
                             break;
                         }
@@ -200,13 +185,7 @@ impl FlatTextBuffer {
                     if let Err(e) = parser.reparse(&text) {
                         // If incremental reparse fails, fall back to full reparse
                         eprintln!("Incremental reparse failed: {e}, falling back to full reparse");
-                        // FIXME: Implement parsing with unified syntax
-                        // For now, create a dummy AST
-                        let dummy_root = SyntaxNode::new(
-                            SyntaxKind::Root,
-                            TextRange::new(0.into(), (text.len() as u32).into()),
-                        );
-                        let flat_ast = self.convert_to_flat_ast(dummy_root);
+                        let flat_ast = crate::syntax::parse::parse_markdown_to_flat_ast(&text);
                         *parser = IncrementalParser::new(flat_ast);
                     }
                 }
@@ -214,24 +193,6 @@ impl FlatTextBuffer {
 
             parser_cache.version = current_version;
         }
-    }
-
-    /// Convert legacy AST to flat AST (temporary method)
-    fn convert_to_flat_ast(&self, root: SyntaxNode) -> FlatAst {
-        // This is a simplified conversion - in practice we'd want to
-        // update the parser to build flat AST directly
-        let mut builder = FlatTreeBuilder::new();
-
-        // For now, just create a simple root node
-        builder.start_node(root.kind());
-
-        // Add tokens from the root
-        for token in root.tokens() {
-            builder.add_token(token.kind(), token.text().to_string());
-        }
-
-        builder.finish_node();
-        builder.finish()
     }
 
     /// Apply an edit to the buffer
@@ -424,9 +385,9 @@ mod tests {
     fn test_flat_ast_access() {
         let buffer = FlatTextBuffer::new("hello world");
 
-        // Get flat syntax node
+        // Get flat syntax node - markdown parser creates Document root
         let root = buffer.flat_syntax();
-        assert_eq!(root.kind(), Some(SyntaxKind::Root));
+        assert_eq!(root.kind(), Some(SyntaxKind::Document));
 
         // Get flat AST
         let ast = buffer.flat_ast();
@@ -437,9 +398,54 @@ mod tests {
     fn test_legacy_compatibility() {
         let buffer = FlatTextBuffer::new("hello world");
 
-        // Get legacy syntax node
+        // Get legacy syntax node - markdown parser creates Document root
         let root = buffer.syntax();
-        assert_eq!(root.kind(), SyntaxKind::Root);
+        assert_eq!(root.kind(), SyntaxKind::Document);
         assert_eq!(root.text_range(), TextRange::new(0.into(), 11.into()));
+    }
+
+    #[test]
+    fn test_markdown_parsing() {
+        let markdown_text = "# Hello World\n\nThis is a **bold** paragraph with `code`.";
+        let buffer = FlatTextBuffer::new(markdown_text);
+
+        // Verify the buffer contains the text
+        assert_eq!(buffer.text(), markdown_text);
+
+        // Get the flat syntax node
+        let root = buffer.flat_syntax();
+        assert_eq!(root.kind(), Some(SyntaxKind::Document));
+
+        // The markdown parser should create a proper tree structure
+        let ast = buffer.flat_ast();
+        let root_id = ast.root();
+        let root_node = ast.get_node(root_id).expect("Root node should exist");
+        assert_eq!(root_node.kind, SyntaxKind::Document);
+    }
+
+    #[test]
+    fn test_markdown_with_multiple_blocks() {
+        let markdown = r#"# Title
+
+First paragraph.
+
+## Subtitle
+
+Second paragraph with **emphasis**.
+
+```rust
+let code = "block";
+```
+
+> A quote
+"#;
+        let buffer = FlatTextBuffer::new(markdown);
+
+        // Just ensure it parses without panicking
+        let root = buffer.flat_syntax();
+        assert_eq!(root.kind(), Some(SyntaxKind::Document));
+
+        // Verify text is preserved
+        assert_eq!(buffer.text(), markdown);
     }
 }

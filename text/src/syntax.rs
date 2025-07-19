@@ -18,8 +18,8 @@ pub use flat_ast::{ElementId, FlatAst, NodeData, NodeId, SyntaxNodeRef, TokenDat
 pub use flat_builder::FlatTreeBuilder;
 pub use incremental::{IncrementalParseError, IncrementalParser, InvalidationSet, TextChange};
 pub use kind::{ParseError, ParseResult};
-pub use markdown::{MarkdownKind, MarkdownSyntax};
+pub use markdown::MarkdownKind;
 pub use node::{SyntaxElement, SyntaxNode, SyntaxToken};
 pub use parse::{parse, parse_markdown, parse_simple, parse_to_flat_ast};
-pub use simple::{SimpleKind, SimpleText};
+pub use simple::SimpleKind;
 pub use unified_kind::SyntaxKind as UnifiedSyntaxKind;

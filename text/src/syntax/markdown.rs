@@ -1,18 +1,7 @@
 //! Markdown syntax implementation using tree-sitter
 
-use crate::{
-    TextSize,
-    range::TextRange,
-    syntax::{
-        flat_ast::FlatAst, flat_builder::FlatTreeBuilder, kind::ParseResult,
-        unified_kind::SyntaxKind,
-    },
-};
-use tree_sitter::{Parser, Tree};
-
-/// Markdown syntax implementation
-#[derive(Clone)]
-pub struct MarkdownSyntax;
+use crate::syntax::{flat_ast::FlatAst, flat_builder::FlatTreeBuilder, unified_kind::SyntaxKind};
+use tree_sitter::Tree;
 
 /// Markdown node and token kinds
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,79 +41,8 @@ pub enum MarkdownKind {
     Error,
 }
 
-#[allow(deprecated)]
-impl crate::syntax::kind::Syntax for MarkdownSyntax {
-    type Kind = MarkdownKind;
-
-    fn parse(text: &str) -> ParseResult {
-        let mut parser = Parser::new();
-        let language = tree_sitter_markdown::language();
-        parser
-            .set_language(language)
-            .expect("Error loading Markdown grammar");
-
-        // Parse the text
-        let tree = parser.parse(text, None).expect("Failed to parse markdown");
-
-        // Convert tree-sitter tree to flat AST
-        let _flat_ast = convert_tree_to_flat_ast(&tree, text);
-
-        ParseResult {
-            root: create_legacy_root(text), // FIXME: Remove this when legacy support is removed
-            errors: Vec::new(),             // FIXME: Extract errors from tree-sitter
-        }
-    }
-}
-
-#[allow(deprecated)]
-impl crate::syntax::kind::SyntaxKind for MarkdownKind {
-    fn is_token(&self) -> bool {
-        matches!(
-            self,
-            MarkdownKind::Text
-                | MarkdownKind::HeadingMarker
-                | MarkdownKind::CodeFence
-                | MarkdownKind::LinkText
-                | MarkdownKind::LinkDestination
-                | MarkdownKind::Whitespace
-                | MarkdownKind::Newline
-        )
-    }
-
-    fn is_trivia(&self) -> bool {
-        matches!(self, MarkdownKind::Whitespace | MarkdownKind::Newline)
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            MarkdownKind::Document => "document",
-            MarkdownKind::Section => "section",
-            MarkdownKind::Paragraph => "paragraph",
-            MarkdownKind::Heading => "heading",
-            MarkdownKind::CodeBlock => "code_block",
-            MarkdownKind::FencedCodeBlock => "fenced_code_block",
-            MarkdownKind::BlockQuote => "block_quote",
-            MarkdownKind::List => "list",
-            MarkdownKind::ListItem => "list_item",
-            MarkdownKind::Text => "text",
-            MarkdownKind::Strong => "strong",
-            MarkdownKind::Emphasis => "emphasis",
-            MarkdownKind::Code => "code",
-            MarkdownKind::Link => "link",
-            MarkdownKind::Image => "image",
-            MarkdownKind::HeadingMarker => "heading_marker",
-            MarkdownKind::CodeFence => "code_fence",
-            MarkdownKind::LinkText => "link_text",
-            MarkdownKind::LinkDestination => "link_destination",
-            MarkdownKind::Whitespace => "whitespace",
-            MarkdownKind::Newline => "newline",
-            MarkdownKind::Error => "error",
-        }
-    }
-}
-
 /// Convert tree-sitter tree to flat AST
-fn convert_tree_to_flat_ast(tree: &Tree, text: &str) -> FlatAst {
+pub fn convert_tree_to_flat_ast(tree: &Tree, text: &str) -> FlatAst {
     let mut builder = FlatTreeBuilder::new();
     let root_node = tree.root_node();
 
@@ -164,7 +82,7 @@ fn convert_node_recursive(
 }
 
 /// Map tree-sitter node kinds to our SyntaxKind enum
-fn map_tree_sitter_kind(ts_kind: &str) -> SyntaxKind {
+pub fn map_tree_sitter_kind(ts_kind: &str) -> SyntaxKind {
     match ts_kind {
         "document" => SyntaxKind::Document,
         "section" => SyntaxKind::Section,
@@ -193,38 +111,24 @@ fn map_tree_sitter_kind(ts_kind: &str) -> SyntaxKind {
     }
 }
 
-/// Create a legacy root node for backward compatibility
-/// FIXME: Remove this when legacy support is removed
-fn create_legacy_root(text: &str) -> crate::syntax::SyntaxNode {
-    use crate::syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
-    use std::sync::Arc;
-
-    // Create a simple root with the entire text as a single token
-    let range = TextRange::new(TextSize::from(0), TextSize::from(text.len() as u32));
-    let token = SyntaxToken::new(SyntaxKind::Text, range, Arc::from(text));
-    let children = vec![SyntaxElement::Token(token)];
-
-    SyntaxNode::new_with_children(SyntaxKind::Document, range, children)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[allow(deprecated)]
-    use crate::syntax::kind::{Syntax, SyntaxKind as DeprecatedSyntaxKind};
 
     #[test]
     fn test_markdown_kind_properties() {
-        assert!(MarkdownKind::Text.is_token());
-        assert!(!MarkdownKind::Paragraph.is_token());
-        assert!(MarkdownKind::Whitespace.is_trivia());
-        assert!(!MarkdownKind::Text.is_trivia());
+        // Test the unified SyntaxKind instead of deprecated MarkdownKind
+        assert!(SyntaxKind::Text.is_token());
+        assert!(!SyntaxKind::Paragraph.is_token());
+        assert!(SyntaxKind::Whitespace.is_trivia());
+        assert!(!SyntaxKind::Text.is_trivia());
     }
 
     #[test]
     fn test_markdown_parsing() {
+        // Test using the unified parse function instead of deprecated Syntax::parse
         let text = "# Hello World\n\nThis is a paragraph.";
-        let result = MarkdownSyntax::parse(text);
+        let result = crate::syntax::parse::parse_markdown(text);
 
         assert_eq!(result.root.kind(), SyntaxKind::Document);
         assert!(result.errors.is_empty());

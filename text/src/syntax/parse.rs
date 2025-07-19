@@ -31,22 +31,65 @@ pub struct ParseError {
 
 /// Parse text as markdown (default syntax)
 pub fn parse_markdown(text: &str) -> ParseResult {
-    // For now, create a simple AST structure
-    // FIXME: Implement proper markdown parsing with tree-sitter
-    let root = SyntaxNode::new_with_children(
-        SyntaxKind::Document,
-        TextRange::new(0.into(), (text.len() as u32).into()),
-        vec![SyntaxElement::Token(SyntaxToken::new(
-            SyntaxKind::Text,
-            TextRange::new(0.into(), (text.len() as u32).into()),
-            Arc::from(text),
-        ))],
-    );
+    use tree_sitter::Parser;
 
-    ParseResult {
-        root,
-        errors: Vec::new(),
+    // Create tree-sitter parser
+    let mut parser = Parser::new();
+    let language = tree_sitter_markdown::language();
+
+    if let Err(e) = parser.set_language(language) {
+        // If we can't set up tree-sitter, fall back to simple structure
+        let root = SyntaxNode::new_with_children(
+            SyntaxKind::Document,
+            TextRange::new(0.into(), (text.len() as u32).into()),
+            vec![SyntaxElement::Token(SyntaxToken::new(
+                SyntaxKind::Text,
+                TextRange::new(0.into(), (text.len() as u32).into()),
+                Arc::from(text),
+            ))],
+        );
+
+        return ParseResult {
+            root,
+            errors: vec![ParseError {
+                range: TextRange::new(0.into(), 0.into()),
+                message: format!("Failed to initialize markdown parser: {e}"),
+            }],
+        };
     }
+
+    // Parse the text
+    let tree = match parser.parse(text, None) {
+        Some(tree) => tree,
+        None => {
+            // Parse failed, return simple structure
+            let root = SyntaxNode::new_with_children(
+                SyntaxKind::Document,
+                TextRange::new(0.into(), (text.len() as u32).into()),
+                vec![SyntaxElement::Token(SyntaxToken::new(
+                    SyntaxKind::Text,
+                    TextRange::new(0.into(), (text.len() as u32).into()),
+                    Arc::from(text),
+                ))],
+            );
+
+            return ParseResult {
+                root,
+                errors: vec![ParseError {
+                    range: TextRange::new(0.into(), 0.into()),
+                    message: "Failed to parse markdown".to_string(),
+                }],
+            };
+        },
+    };
+
+    // Convert tree-sitter tree to our AST
+    let root = convert_tree_to_syntax_node(&tree, text);
+
+    // Check for errors in the tree
+    let errors = collect_parse_errors(&tree, text);
+
+    ParseResult { root, errors }
 }
 
 /// Parse text as simple word/whitespace syntax
@@ -181,12 +224,194 @@ impl<'a> SimpleAstBuilder<'a> {
 
 /// Build a flat AST from text
 pub fn parse_to_flat_ast(text: &str) -> FlatAst {
-    let mut builder = FlatTreeBuilder::new();
+    parse_markdown_to_flat_ast(text)
+}
 
-    // For now, create a simple flat AST
-    builder.start_node(SyntaxKind::Root);
-    builder.add_token(SyntaxKind::Text, text.to_string());
-    builder.finish_node();
+/// Parse markdown text directly to flat AST
+pub fn parse_markdown_to_flat_ast(text: &str) -> FlatAst {
+    use tree_sitter::Parser;
 
-    builder.finish()
+    let mut parser = Parser::new();
+    let language = tree_sitter_markdown::language();
+
+    if parser.set_language(language).is_err() {
+        // Fallback to simple structure
+        let mut builder = FlatTreeBuilder::new();
+        builder.start_node(SyntaxKind::Document);
+        builder.add_token(SyntaxKind::Text, text.to_string());
+        builder.finish_node();
+        return builder.finish();
+    }
+
+    match parser.parse(text, None) {
+        Some(tree) => {
+            // Use the existing conversion from markdown.rs
+            crate::syntax::markdown::convert_tree_to_flat_ast(&tree, text)
+        },
+        None => {
+            // Fallback to simple structure
+            let mut builder = FlatTreeBuilder::new();
+            builder.start_node(SyntaxKind::Document);
+            builder.add_token(SyntaxKind::Text, text.to_string());
+            builder.finish_node();
+            builder.finish()
+        },
+    }
+}
+
+/// Convert tree-sitter tree to our SyntaxNode structure
+fn convert_tree_to_syntax_node(tree: &tree_sitter::Tree, text: &str) -> SyntaxNode {
+    let root_node = tree.root_node();
+    convert_ts_node_to_syntax_node(root_node, text.as_bytes(), TextSize::from(0))
+}
+
+/// Recursively convert a tree-sitter node to our SyntaxNode
+fn convert_ts_node_to_syntax_node(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    _offset: TextSize,
+) -> SyntaxNode {
+    let kind = map_tree_sitter_kind(node.kind());
+    let range = TextRange::new(
+        (node.start_byte() as u32).into(),
+        (node.end_byte() as u32).into(),
+    );
+
+    let mut children = Vec::new();
+
+    if node.child_count() == 0 {
+        // Leaf node - create a token
+        let text = node.utf8_text(source).unwrap_or("<invalid>");
+        children.push(SyntaxElement::Token(SyntaxToken::new(
+            kind,
+            range,
+            Arc::from(text),
+        )));
+
+        // For leaf nodes, return a node containing the token
+        SyntaxNode::new_with_children(kind, range, children)
+    } else {
+        // Internal node - convert children
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let child_node = convert_ts_node_to_syntax_node(child, source, TextSize::from(0));
+            children.push(SyntaxElement::Node(child_node));
+        }
+
+        SyntaxNode::new_with_children(kind, range, children)
+    }
+}
+
+/// Map tree-sitter node kinds to our SyntaxKind enum
+fn map_tree_sitter_kind(ts_kind: &str) -> SyntaxKind {
+    // Reuse the mapping from markdown.rs
+    crate::syntax::markdown::map_tree_sitter_kind(ts_kind)
+}
+
+/// Collect parse errors from tree-sitter tree
+fn collect_parse_errors(tree: &tree_sitter::Tree, text: &str) -> Vec<ParseError> {
+    let mut errors = Vec::new();
+    let mut cursor = tree.walk();
+
+    // Walk the tree looking for ERROR nodes
+    collect_errors_recursive(&mut cursor, text.as_bytes(), &mut errors);
+
+    errors
+}
+
+/// Recursively collect errors from tree
+fn collect_errors_recursive(
+    cursor: &mut tree_sitter::TreeCursor<'_>,
+    source: &[u8],
+    errors: &mut Vec<ParseError>,
+) {
+    let node = cursor.node();
+
+    if node.kind() == "ERROR" {
+        let range = TextRange::new(
+            (node.start_byte() as u32).into(),
+            (node.end_byte() as u32).into(),
+        );
+
+        let text = node.utf8_text(source).unwrap_or("<invalid>");
+        errors.push(ParseError {
+            range,
+            message: format!("Syntax error: unexpected '{text}'"),
+        });
+    }
+
+    // Check children
+    if cursor.goto_first_child() {
+        loop {
+            collect_errors_recursive(cursor, source, errors);
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        cursor.goto_parent();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_markdown() {
+        let text = "# Hello World\n\nThis is a paragraph.";
+        let result = parse_markdown(text);
+
+        assert_eq!(result.root.kind(), SyntaxKind::Document);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_parse_simple() {
+        let text = "hello world\nfoo bar";
+        let result = parse_simple(text);
+
+        assert_eq!(result.root.kind(), SyntaxKind::Root);
+        assert!(result.errors.is_empty());
+
+        // Verify line structure
+        let lines: Vec<_> = result
+            .root
+            .children()
+            .iter()
+            .filter_map(|child| match child {
+                SyntaxElement::Node(n) if n.kind() == SyntaxKind::Line => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_to_flat_ast() {
+        let text = "**bold** text";
+        let flat_ast = parse_to_flat_ast(text);
+
+        let root_id = flat_ast.root();
+        let root = flat_ast.get_node(root_id).expect("Root should exist");
+        assert_eq!(root.kind, SyntaxKind::Document);
+    }
+
+    #[test]
+    fn test_parse_markdown_error_handling() {
+        // Even invalid markdown should parse without crashing
+        let text = "**unclosed bold";
+        let result = parse_markdown(text);
+
+        // Should still have a document root
+        assert_eq!(result.root.kind(), SyntaxKind::Document);
+    }
+
+    #[test]
+    fn test_parse_empty_text() {
+        let result = parse_markdown("");
+        assert_eq!(result.root.kind(), SyntaxKind::Document);
+
+        let result = parse_simple("");
+        assert_eq!(result.root.kind(), SyntaxKind::Root);
+    }
 }

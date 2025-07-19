@@ -17,12 +17,11 @@ impl Query {
     /// Find all nodes matching a predicate
     pub fn find_all(&self, predicate: impl Fn(&SyntaxNode) -> bool) -> Vec<SyntaxNode> {
         let mut results = Vec::new();
-        self.find_all_recursive(&self.root, &predicate, &mut results);
+        Self::find_all_recursive(&self.root, &predicate, &mut results);
         results
     }
 
     fn find_all_recursive(
-        &self,
         node: &SyntaxNode,
         predicate: &impl Fn(&SyntaxNode) -> bool,
         results: &mut Vec<SyntaxNode>,
@@ -34,18 +33,17 @@ impl Query {
         // Recursively search through all child nodes
         for child in node.children() {
             if let crate::syntax::SyntaxElement::Node(child_node) = child {
-                self.find_all_recursive(child_node, predicate, results);
+                Self::find_all_recursive(child_node, predicate, results);
             }
         }
     }
 
     /// Find the first node matching a predicate
     pub fn find_first(&self, predicate: impl Fn(&SyntaxNode) -> bool) -> Option<SyntaxNode> {
-        self.find_first_recursive(&self.root, &predicate)
+        Self::find_first_recursive(&self.root, &predicate)
     }
 
     fn find_first_recursive(
-        &self,
         node: &SyntaxNode,
         predicate: &impl Fn(&SyntaxNode) -> bool,
     ) -> Option<SyntaxNode> {
@@ -56,7 +54,7 @@ impl Query {
         // Recursively search through all child nodes
         for child in node.children() {
             if let crate::syntax::SyntaxElement::Node(child_node) = child {
-                if let Some(found) = self.find_first_recursive(child_node, predicate) {
+                if let Some(found) = Self::find_first_recursive(child_node, predicate) {
                     return Some(found);
                 }
             }
@@ -79,7 +77,7 @@ impl Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{TextBuffer, syntax::unified_kind::SyntaxKind};
+    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_query_find_all_tree_traversal() {
@@ -111,7 +109,10 @@ mod tests {
         // Find first Line node (Words are tokens, not nodes)
         let first_line = query.find_first(|node| node.kind() == SyntaxKind::Line);
         assert!(first_line.is_some());
-        assert_eq!(first_line.unwrap().text(), "hello world");
+        assert_eq!(
+            first_line.expect("Should find a line").text(),
+            "hello world"
+        );
 
         // Find Root node
         let root_node = query.find_first(|node| node.kind() == SyntaxKind::Root);

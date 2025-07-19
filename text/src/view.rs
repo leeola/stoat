@@ -8,7 +8,7 @@ use crate::{
     cursor_collection::CursorCollection,
     edit::{Edit, EditOperation},
     range::TextRange,
-    syntax::{SyntaxNode, unified_kind::SyntaxKind},
+    syntax::SyntaxNode,
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -1366,7 +1366,6 @@ impl TextViewInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::unified_kind::SyntaxKind;
 
     #[test]
     fn test_view_creation() {
