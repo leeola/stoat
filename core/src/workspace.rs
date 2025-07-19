@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Workspace {
-    // Node storage will be added here when new node types are implemented
+    nodes: HashMap<NodeId, Box<dyn Node>>,
     links: Vec<Link>,
     view: View,
 }
@@ -41,7 +41,23 @@ pub struct SerializableWorkspace {
 
 impl From<&Workspace> for SerializableWorkspace {
     fn from(workspace: &Workspace) -> Self {
-        let nodes = Vec::new(); // No nodes to serialize yet
+        let nodes = workspace
+            .nodes
+            .values()
+            .map(|node| SerializableNode {
+                id: node.id(),
+                node_type: node.node_type().to_string(),
+                name: node.name().to_string(),
+                config: {
+                    let config_values = node.get_config_values();
+                    let mut map = indexmap::IndexMap::new();
+                    for (k, v) in config_values {
+                        map.insert(k.into(), v);
+                    }
+                    crate::value::Value::Map(crate::value::Map(map))
+                },
+            })
+            .collect();
 
         Self {
             links: workspace.links.clone(),
@@ -58,17 +74,38 @@ impl Workspace {
         Self::default()
     }
 
+    /// Add a node to the workspace
+    pub fn add_node(&mut self, node: Box<dyn Node>) -> NodeId {
+        let id = node.id();
+        self.nodes.insert(id, node);
+        id
+    }
+
     /// Create a workspace from a serializable representation
     pub fn from_serializable(serializable: SerializableWorkspace) -> Self {
-        // No node types to reconstruct yet
-        if !serializable.nodes.is_empty() {
-            eprintln!(
-                "Warning: {} nodes in serialized workspace cannot be reconstructed - no node types implemented",
-                serializable.nodes.len()
-            );
+        use crate::node::create_node_from_registry;
+
+        let mut nodes = HashMap::new();
+
+        // Reconstruct nodes from serialized data
+        for node_data in serializable.nodes {
+            match create_node_from_registry(
+                &node_data.node_type,
+                node_data.id,
+                node_data.name,
+                node_data.config,
+            ) {
+                Ok(node) => {
+                    nodes.insert(node.id(), node);
+                },
+                Err(e) => {
+                    eprintln!("Failed to reconstruct node {}: {}", node_data.id.0, e);
+                },
+            }
         }
 
         Self {
+            nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
         }
@@ -99,17 +136,22 @@ impl Workspace {
         })
     }
 
-    pub fn get_node(&self, _id: NodeId) -> Option<&dyn Node> {
-        // No nodes exist
-        None
+    pub fn get_node(&self, id: NodeId) -> Option<&dyn Node> {
+        self.nodes.get(&id).map(|n| n.as_ref())
     }
 
     pub fn list_nodes(&self) -> Vec<(NodeId, &dyn Node)> {
-        // No nodes exist
-        Vec::new()
+        self.nodes
+            .iter()
+            .map(|(id, node)| (*id, node.as_ref()))
+            .collect()
     }
 
     pub fn view(&self) -> &View {
         &self.view
+    }
+
+    pub fn view_mut(&mut self) -> &mut View {
+        &mut self.view
     }
 }

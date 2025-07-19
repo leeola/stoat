@@ -1,5 +1,6 @@
 pub mod app;
 pub mod canvas;
+pub mod grid_layout;
 pub mod input;
 pub mod state;
 pub mod widget;

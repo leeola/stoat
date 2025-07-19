@@ -26,6 +26,9 @@ pub trait Node: Send + Sync + Debug {
     fn node_type(&self) -> NodeType;
     fn name(&self) -> &str;
 
+    /// Get a reference to the node as Any for downcasting
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Execute this node with the given inputs, returning output values by port name
     fn execute(&mut self, inputs: &HashMap<String, Value>) -> Result<HashMap<String, Value>>;
 
@@ -169,19 +172,18 @@ pub struct NodeLoadResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeType {
-    // Placeholder for future node types
-    // This enum will be populated with text editor specific node types
+    /// Plain text node for displaying/editing text
+    Text,
     #[cfg(test)]
     MockType, // Used only in tests
 }
 
 impl std::fmt::Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[allow(unreachable_patterns)]
         match self {
+            NodeType::Text => write!(f, "text"),
             #[cfg(test)]
             NodeType::MockType => write!(f, "mock"),
-            _ => write!(f, "unknown"),
         }
     }
 }
@@ -327,9 +329,10 @@ impl NodeInitRegistry {
 ///
 /// See also: [`NodeInit`], [`NodeInitRegistry`]
 pub static NODE_INIT_REGISTRY: LazyLock<std::sync::Mutex<NodeInitRegistry>> = LazyLock::new(|| {
-    let registry = NodeInitRegistry::new();
+    let mut registry = NodeInitRegistry::new();
 
-    // No built-in node types registered yet
+    // Register built-in node types
+    registry.register(Box::new(crate::nodes::TextNodeInit));
 
     std::sync::Mutex::new(registry)
 });
@@ -376,6 +379,10 @@ mod tests {
 
         fn name(&self) -> &str {
             &self.name
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         fn execute(&mut self, _inputs: &HashMap<String, Value>) -> Result<HashMap<String, Value>> {

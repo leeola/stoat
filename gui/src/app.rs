@@ -30,6 +30,12 @@ impl App {
     }
 
     fn new() -> (Self, iced::Task<Message>) {
+        use stoat_core::{
+            node::{create_node_from_registry, NodeId},
+            value::Value,
+            view::GridPosition,
+        };
+
         // Initialize Stoat with default configuration
         let mut stoat = Stoat::new();
 
@@ -42,9 +48,40 @@ impl App {
             }
         }
 
+        // Create a text node with Hello World content
+        let node_id = NodeId(1);
+
+        // Create config as a simple String value since TextNodeInit supports that
+        let config = Value::String("Hello World!".into());
+
+        if let Ok(text_node) =
+            create_node_from_registry("text", node_id, "hello_world".to_string(), config)
+        {
+            // Add node to workspace
+            stoat.workspace_mut().add_node(text_node);
+
+            // Add node to view at grid position (0, 0)
+            stoat.workspace_mut().view_mut().add_node_view(
+                node_id,
+                stoat_core::node::NodeType::Text,
+                GridPosition::new(0, 0),
+            );
+        }
+
+        // Create render state from workspace
+        let render_state = Self::create_render_state(&stoat);
+
+        debug!(
+            "Created render state with {} nodes",
+            render_state.nodes.len()
+        );
+        for node in &render_state.nodes {
+            debug!("Node {}: {} at {:?}", node.id.0, node.title, node.position);
+        }
+
         (
             Self {
-                render_state: RenderState::stub(),
+                render_state,
                 stoat,
             },
             iced::Task::none(),
@@ -63,7 +100,12 @@ impl App {
                         // Process key through modal system
                         if let Some(action) = self.stoat.user_input(stoat_key) {
                             // Handle the action
-                            self.handle_action(action)
+                            let task = self.handle_action(action);
+
+                            // Update render state after action
+                            self.render_state = Self::create_render_state(&self.stoat);
+
+                            task
                         } else {
                             iced::Task::none()
                         }
@@ -183,6 +225,67 @@ impl App {
                 // TODO: Display command palette
                 iced::Task::none()
             },
+        }
+    }
+
+    /// Create render state from the current workspace
+    fn create_render_state(stoat: &Stoat) -> RenderState {
+        use crate::{
+            grid_layout::GridLayout,
+            state::{NodeContent, NodeId as GuiNodeId, NodeRenderData, NodeState},
+        };
+
+        let grid_layout = GridLayout::new();
+        let view = stoat.view();
+        let workspace = stoat.workspace();
+
+        let nodes: Vec<NodeRenderData> = view
+            .nodes
+            .iter()
+            .filter_map(|node_view| {
+                // Get the actual node from workspace
+                if let Some(node) = workspace.get_node(node_view.id) {
+                    let position = grid_layout.grid_to_screen(node_view.pos);
+                    let size = grid_layout.cell_size();
+
+                    // Convert content based on node type
+                    let content = if let Some(text_node) =
+                        node.as_any().downcast_ref::<stoat_core::nodes::TextNode>()
+                    {
+                        NodeContent::Text {
+                            lines: text_node.content().lines().map(|s| s.to_string()).collect(),
+                            cursor_position: None,
+                            selection: None,
+                        }
+                    } else {
+                        NodeContent::Empty
+                    };
+
+                    Some(NodeRenderData {
+                        id: GuiNodeId(node_view.id.0),
+                        position,
+                        size,
+                        title: node.name().to_string(),
+                        content,
+                        state: NodeState::Normal,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Center viewport on (0,0) with some offset to show the node nicely
+        let viewport = crate::state::Viewport {
+            offset: (100.0, 100.0), // Small offset so node isn't at edge
+            zoom: 1.0,
+        };
+
+        RenderState {
+            viewport,
+            nodes,
+            focused_node: None,
+            grid_layout,
         }
     }
 }

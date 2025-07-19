@@ -1,3 +1,5 @@
+use crate::grid_layout::GridLayout;
+
 /// Complete visual state for rendering the canvas
 #[derive(Debug, Clone)]
 pub struct RenderState {
@@ -7,6 +9,8 @@ pub struct RenderState {
     pub nodes: Vec<NodeRenderData>,
     /// Currently focused node ID (if any)
     pub focused_node: Option<NodeId>,
+    /// Grid layout for coordinate conversion
+    pub grid_layout: GridLayout,
 }
 
 /// Canvas viewport state
@@ -78,50 +82,6 @@ impl Default for Viewport {
         Self {
             offset: (0.0, 0.0),
             zoom: 1.0,
-        }
-    }
-}
-
-impl RenderState {
-    /// Create a stub render state for prototyping
-    pub fn stub() -> Self {
-        Self {
-            viewport: Viewport::default(),
-            nodes: vec![
-                NodeRenderData {
-                    id: NodeId(1),
-                    position: (100.0, 100.0),
-                    size: (400.0, 300.0),
-                    title: "main.rs".to_string(),
-                    content: NodeContent::Text {
-                        lines: vec![
-                            "fn main() {".to_string(),
-                            "    println!(\"Hello, Stoat!\");".to_string(),
-                            "}".to_string(),
-                        ],
-                        cursor_position: Some(CursorPosition { line: 1, column: 4 }),
-                        selection: None,
-                    },
-                    state: NodeState::Focused,
-                },
-                NodeRenderData {
-                    id: NodeId(2),
-                    position: (550.0, 200.0),
-                    size: (300.0, 200.0),
-                    title: "notes.txt".to_string(),
-                    content: NodeContent::Text {
-                        lines: vec![
-                            "TODO:".to_string(),
-                            "- Implement node connections".to_string(),
-                            "- Add keyboard navigation".to_string(),
-                        ],
-                        cursor_position: None,
-                        selection: None,
-                    },
-                    state: NodeState::Normal,
-                },
-            ],
-            focused_node: Some(NodeId(1)),
         }
     }
 }
