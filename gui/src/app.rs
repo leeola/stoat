@@ -1,6 +1,6 @@
 use crate::{canvas, input, state::RenderState};
 use iced::Element;
-use stoat_core::{input::Action, Stoat};
+use stoat_core::{Stoat, input::Action};
 use tracing::{debug, trace, warn};
 
 /// Main application state
@@ -31,7 +31,7 @@ impl App {
 
     fn new() -> (Self, iced::Task<Message>) {
         use stoat_core::{
-            node::{create_node_from_registry, NodeId},
+            node::{NodeId, create_node_from_registry},
             value::Value,
             view::GridPosition,
         };
@@ -139,8 +139,8 @@ impl App {
             .width(iced::Length::Fill)
             .height(iced::Length::Fill);
 
-        // Combine status bar and canvas
-        column![status_bar, canvas].into()
+        // Combine canvas and status bar (status bar at bottom)
+        column![canvas, status_bar].into()
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {

@@ -1,8 +1,8 @@
 use crate::widget::theme::{Colors, Style};
 use iced::{
-    Background, Border, Element, Length,
     alignment::{Horizontal, Vertical},
-    widget::{Row, container, row, text},
+    widget::{container, row, text, Row},
+    Background, Border, Element, Length,
 };
 
 /// Status bar widget for displaying editor state
