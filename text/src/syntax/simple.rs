@@ -179,6 +179,8 @@ impl crate::syntax::kind::SyntaxKind for SimpleKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(deprecated)]
+    use crate::syntax::kind::Syntax;
 
     #[test]
     fn test_parse_single_line() {

@@ -210,6 +210,8 @@ fn create_legacy_root(text: &str) -> crate::syntax::SyntaxNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(deprecated)]
+    use crate::syntax::kind::{Syntax, SyntaxKind as DeprecatedSyntaxKind};
 
     #[test]
     fn test_markdown_kind_properties() {
@@ -224,7 +226,7 @@ mod tests {
         let text = "# Hello World\n\nThis is a paragraph.";
         let result = MarkdownSyntax::parse(text);
 
-        assert_eq!(result.root.kind(), MarkdownKind::Document);
+        assert_eq!(result.root.kind(), SyntaxKind::Document);
         assert!(result.errors.is_empty());
     }
 

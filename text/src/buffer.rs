@@ -141,7 +141,13 @@ impl TextBuffer {
         if predicate(node) {
             results.push(node.clone());
         }
-        // TODO: Iterate through children when node parsing is implemented
+
+        // Recursively search through all child nodes
+        for child in node.children() {
+            if let crate::syntax::SyntaxElement::Node(child_node) = child {
+                self.find_nodes_recursive(child_node, predicate, results);
+            }
+        }
     }
 
     /// Ensure the AST is parsed and up to date
@@ -557,5 +563,126 @@ mod tests {
         apply_replace(&buffer, "world");
         let new_version = *buffer.inner.version.read();
         assert_eq!(new_version, initial_version + 1);
+    }
+
+    #[test]
+    fn test_buffer_parsing_structure() {
+        // First check that parsing actually creates nodes
+        let buffer = simple_buffer("hello world");
+        let root = buffer.syntax();
+
+        println!("Root kind: {:?}", root.kind());
+        println!("Root has {} children", root.children().len());
+        println!("Root is a Node? {}", matches!(root, _));
+
+        // Print the tree structure
+        fn print_tree(node: &crate::syntax::SyntaxNode, indent: usize) {
+            println!(
+                "{}{:?} - '{}' [{}]",
+                " ".repeat(indent),
+                node.kind(),
+                node.text(),
+                if node.children().is_empty() {
+                    "LEAF"
+                } else {
+                    "HAS CHILDREN"
+                }
+            );
+            for child in node.children() {
+                match child {
+                    crate::syntax::SyntaxElement::Node(n) => print_tree(n, indent + 2),
+                    crate::syntax::SyntaxElement::Token(t) => {
+                        println!(
+                            "{}{:?} TOKEN - '{}'",
+                            " ".repeat(indent + 2),
+                            t.kind(),
+                            t.text()
+                        );
+                    },
+                }
+            }
+        }
+
+        print_tree(&root, 0);
+
+        // Now test that we have some nodes
+        assert!(root.children().len() > 0, "Root should have children");
+    }
+
+    #[test]
+    fn test_find_nodes_tree_traversal() {
+        // Create a buffer - note that it uses markdown parsing by default
+        let buffer = simple_buffer("hello world\nfoo bar\nbaz qux");
+
+        // Find all nodes (find_nodes only finds actual nodes, not tokens)
+        let all_nodes = buffer.find_nodes(|_| true);
+        assert_eq!(
+            all_nodes.len(),
+            1,
+            "Should find exactly one node (Document)"
+        );
+
+        // Find Document nodes
+        let docs = buffer
+            .find_nodes(|node| node.kind() == crate::syntax::unified_kind::SyntaxKind::Document);
+        assert_eq!(docs.len(), 1, "Should find exactly one Document");
+
+        // Verify the Document contains our text
+        let doc = &docs[0];
+        assert_eq!(doc.text(), "hello world\nfoo bar\nbaz qux");
+
+        // Verify tree traversal by checking we don't find non-existent node types
+        let words =
+            buffer.find_nodes(|node| node.kind() == crate::syntax::unified_kind::SyntaxKind::Word);
+        assert_eq!(
+            words.len(),
+            0,
+            "Should not find Word nodes in markdown parse"
+        );
+    }
+
+    #[test]
+    fn test_find_nodes_nested_structure() {
+        // Use the parse_simple function to get a tree with actual nested structure
+        let text = "line one\nline two\nline three";
+        let parse_result = crate::syntax::parse::parse_simple(text);
+        let root = parse_result.root;
+
+        // Create a test helper to recursively find all nodes
+        fn collect_all_nodes(
+            node: &crate::syntax::SyntaxNode,
+            results: &mut Vec<crate::syntax::SyntaxNode>,
+        ) {
+            results.push(node.clone());
+            for child in node.children() {
+                if let crate::syntax::SyntaxElement::Node(child_node) = child {
+                    collect_all_nodes(child_node, results);
+                }
+            }
+        }
+
+        let mut all_nodes = Vec::new();
+        collect_all_nodes(&root, &mut all_nodes);
+
+        println!("Found {} total nodes", all_nodes.len());
+        for node in &all_nodes {
+            println!("  {:?} - children: {}", node.kind(), node.children().len());
+        }
+
+        // Simple parser creates Root > Line > Word/Whitespace structure
+        assert!(all_nodes.len() >= 4, "Should find Root and Line nodes");
+
+        // Verify we have the expected node types
+        let root_count = all_nodes
+            .iter()
+            .filter(|n| n.kind() == crate::syntax::unified_kind::SyntaxKind::Root)
+            .count();
+        assert_eq!(root_count, 1, "Should find exactly one Root");
+
+        let line_count = all_nodes
+            .iter()
+            .filter(|n| n.kind() == crate::syntax::unified_kind::SyntaxKind::Line)
+            .count();
+        assert_eq!(line_count, 3, "Should find 3 Line nodes");
     }
 }

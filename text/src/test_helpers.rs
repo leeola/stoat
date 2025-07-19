@@ -168,7 +168,7 @@ impl ActionBuilder {
 
 /// Multi-step test builder for complex scenarios
 pub struct TestScenario {
-    view: TextView<SimpleText>,
+    view: TextView,
 }
 
 impl TestScenario {
@@ -214,11 +214,11 @@ impl TestScenario {
         self
     }
 
-    pub fn view(&self) -> &TextView<SimpleText> {
+    pub fn view(&self) -> &TextView {
         &self.view
     }
 
-    pub fn buffer(&self) -> &TextBuffer<SimpleText> {
+    pub fn buffer(&self) -> &TextBuffer {
         self.view.buffer()
     }
 }

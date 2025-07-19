@@ -10,6 +10,7 @@ pub mod node;
 pub mod parse;
 pub mod simple;
 pub mod tree;
+// FIXME: Rename module to `kind`.
 pub mod unified_kind;
 
 pub use compat::{AstBridge, FlatSyntaxNode};
