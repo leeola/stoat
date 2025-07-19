@@ -7,6 +7,7 @@ use workspace::Workspace;
 
 pub mod config;
 pub mod error;
+pub mod log;
 pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }

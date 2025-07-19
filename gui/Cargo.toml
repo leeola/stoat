@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 iced = { version = "0.13.1", features = ["canvas", "advanced"] }
 stoat_core = { path = "../core" }
+tracing.workspace = true
 
 [lints]
 workspace = true

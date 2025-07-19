@@ -6,6 +6,9 @@ use stoat_core::{Stoat, StoatConfig};
 async fn main() {
     let cli = Cli::parse();
 
+    // Initialize logging
+    stoat_core::log::init().expect("failed to init logs");
+
     // Handle subcommands
     match cli.command {
         #[cfg(feature = "gui")]

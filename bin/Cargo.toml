@@ -29,6 +29,7 @@ stoat_core = { path = "../core" }
 stoat_gui = { path = "../gui", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 stoat_core = { path = "../core", features = ["test-utils"] }

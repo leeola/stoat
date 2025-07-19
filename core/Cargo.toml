@@ -21,6 +21,8 @@ workspace = true
 snafu.workspace = true
 async-trait.workspace = true
 serde.workspace = true
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 ron = "0.8"
 rkyv = { version = "0.8.10", features = [
   "indexmap-2",

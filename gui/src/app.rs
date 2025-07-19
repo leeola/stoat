@@ -1,6 +1,7 @@
 use crate::{canvas, input, state::RenderState};
 use iced::Element;
 use stoat_core::{input::Action, Stoat};
+use tracing::{debug, trace, warn};
 
 /// Main application state
 pub struct App {
@@ -36,7 +37,7 @@ impl App {
         if let Ok(keymap_path) = std::env::current_dir().map(|d| d.join("keymap.ron")) {
             if keymap_path.exists() {
                 if let Err(e) = stoat.load_modal_config_from_file(&keymap_path) {
-                    eprintln!("Failed to load keymap.ron: {e}");
+                    warn!("Failed to load keymap.ron: {e}");
                 }
             }
         }
@@ -127,58 +128,58 @@ impl App {
             },
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
-                println!("Changed to {} mode", mode.as_str());
+                debug!("Changed to {} mode", mode.as_str());
                 iced::Task::none()
             },
             Action::Move(direction) => {
-                println!("Move {direction:?}");
+                trace!("Move {direction:?}");
                 // TODO: Implement movement in the canvas
                 iced::Task::none()
             },
             Action::Delete => {
-                println!("Delete");
+                trace!("Delete");
                 iced::Task::none()
             },
             Action::DeleteLine => {
-                println!("Delete line");
+                trace!("Delete line");
                 iced::Task::none()
             },
             Action::Yank => {
-                println!("Yank");
+                trace!("Yank");
                 iced::Task::none()
             },
             Action::YankLine => {
-                println!("Yank line");
+                trace!("Yank line");
                 iced::Task::none()
             },
             Action::Paste => {
-                println!("Paste");
+                trace!("Paste");
                 iced::Task::none()
             },
             Action::Jump(target) => {
-                println!("Jump to {target:?}");
+                trace!("Jump to {target:?}");
                 iced::Task::none()
             },
             Action::InsertChar => {
-                println!("Insert character");
+                trace!("Insert character");
                 // TODO: Get the actual character from the last key press
                 iced::Task::none()
             },
             Action::CommandInput => {
-                println!("Command input");
+                trace!("Command input");
                 iced::Task::none()
             },
             Action::ExecuteCommand => {
-                println!("Execute command");
+                trace!("Execute command");
                 iced::Task::none()
             },
             Action::ShowActionList => {
-                println!("Show action list");
+                trace!("Show action list");
                 // TODO: Display available actions
                 iced::Task::none()
             },
             Action::ShowCommandPalette => {
-                println!("Show command palette");
+                trace!("Show command palette");
                 // TODO: Display command palette
                 iced::Task::none()
             },
