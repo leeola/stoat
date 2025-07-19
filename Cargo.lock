@@ -3471,6 +3471,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_rope"
+version = "0.1.0"
+dependencies = [
+ "compact_str",
+ "rustc-hash 2.1.1",
+ "smallvec",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "stoat_text"
 version = "0.1.0"
 dependencies = [

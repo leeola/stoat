@@ -1,0 +1,16 @@
+[package]
+name = "stoat_rope"
+version = "0.1.0"
+edition = "2024"
+readme = "../README.md"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[dependencies]
+smallvec.workspace = true
+rustc-hash.workspace = true
+thiserror.workspace = true
+compact_str.workspace = true
+
+[lints]
+workspace = true
