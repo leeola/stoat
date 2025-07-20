@@ -8,36 +8,89 @@ use std::sync::Arc;
 /// An edit operation on the rope
 #[derive(Debug, Clone)]
 pub enum EditOp {
-    /// Insert text at the given offset
-    Insert { offset: usize, text: CompactString },
-    /// Delete the given range
-    Delete { range: TextRange },
-    /// Replace the given range with new text
-    Replace {
-        range: TextRange,
-        text: CompactString,
+    /// Insert tokens at the given token index
+    InsertTokens {
+        token_index: usize,
+        tokens: Vec<AstNode>,
+    },
+    /// Delete tokens in the given range
+    DeleteTokens { token_range: std::ops::Range<usize> },
+    /// Replace tokens in the given range with new tokens
+    ReplaceTokens {
+        token_range: std::ops::Range<usize>,
+        tokens: Vec<AstNode>,
     },
 }
 
 impl EditOp {
     /// Get the range affected by this edit
-    pub fn affected_range(&self) -> TextRange {
+    /// For token operations, this requires access to the AST to compute ranges
+    pub fn affected_range(&self, root: Option<&Arc<AstNode>>) -> Option<TextRange> {
         match self {
-            EditOp::Insert { offset, .. } => TextRange::new(*offset, *offset),
-            EditOp::Delete { range } | EditOp::Replace { range, .. } => *range,
+            EditOp::InsertTokens { token_index, .. } => root
+                .and_then(|r| token_index_to_byte_offset(r, *token_index))
+                .map(|offset| TextRange::new(offset, offset)),
+            EditOp::DeleteTokens { token_range } | EditOp::ReplaceTokens { token_range, .. } => {
+                root.and_then(|r| {
+                    let start = token_index_to_byte_offset(r, token_range.start)?;
+                    let end = if token_range.end > 0 {
+                        let end_token_start = token_index_to_byte_offset(r, token_range.end - 1)?;
+                        let token = token_at_impl(r, token_range.end - 1)?.0;
+                        end_token_start + token.token_text()?.len()
+                    } else {
+                        start
+                    };
+                    Some(TextRange::new(start, end))
+                })
+            },
         }
+    }
+}
+
+/// Helper function to convert token index to byte offset
+fn token_index_to_byte_offset(node: &Arc<AstNode>, token_index: usize) -> Option<usize> {
+    token_at_impl(node, token_index).map(|(node, _)| node.range().start.0)
+}
+
+/// Helper function to find token at index
+fn token_at_impl(node: &AstNode, target_index: usize) -> Option<(&AstNode, usize)> {
+    match node {
+        AstNode::Token { .. } => {
+            if target_index == 0 {
+                Some((node, 1))
+            } else {
+                None
+            }
+        },
+        AstNode::Syntax { children, .. } => {
+            let mut tokens_consumed = 0;
+            for (child, info) in children {
+                if tokens_consumed + info.tokens > target_index {
+                    // Target is in this child
+                    return token_at_impl(child, target_index - tokens_consumed);
+                }
+                tokens_consumed += info.tokens;
+            }
+            None
+        },
     }
 }
 
 /// Apply an edit to a node, returning a new node with the edit applied
 pub fn apply_edit(node: &Arc<AstNode>, edit: &EditOp) -> Result<Arc<AstNode>, AstError> {
     let edited = match edit {
-        EditOp::Insert { offset, text } => insert_at(node, *offset, text),
-        EditOp::Delete { range } => delete_range(node, *range),
-        EditOp::Replace { range, text } => {
+        EditOp::InsertTokens {
+            token_index,
+            tokens,
+        } => insert_tokens_at(node, *token_index, tokens),
+        EditOp::DeleteTokens { token_range } => delete_tokens_range(node, token_range),
+        EditOp::ReplaceTokens {
+            token_range,
+            tokens,
+        } => {
             // Replace is delete + insert
-            let after_delete = delete_range(node, *range)?;
-            insert_at(&after_delete, range.start.0, text)
+            let after_delete = delete_tokens_range(node, token_range)?;
+            insert_tokens_at(&after_delete, token_range.start, tokens)
         },
     }?;
 
@@ -46,6 +99,52 @@ pub fn apply_edit(node: &Arc<AstNode>, edit: &EditOp) -> Result<Arc<AstNode>, As
 
     // Check if we need to split at the root level
     handle_root_split(balanced)
+}
+
+/// Insert tokens at the given token index
+fn insert_tokens_at(
+    node: &Arc<AstNode>,
+    token_index: usize,
+    tokens: &[AstNode],
+) -> Result<Arc<AstNode>, AstError> {
+    // Convert to text-based operation for now
+    // Find the byte offset for this token index
+    let byte_offset =
+        token_index_to_byte_offset(node, token_index).unwrap_or_else(|| node.range().end.0);
+
+    // Convert tokens to text
+    let text = tokens
+        .iter()
+        .filter_map(|token| token.token_text())
+        .collect::<Vec<_>>()
+        .join("");
+
+    insert_at(node, byte_offset, &text.into())
+}
+
+/// Delete tokens in the given range
+fn delete_tokens_range(
+    node: &Arc<AstNode>,
+    token_range: &std::ops::Range<usize>,
+) -> Result<Arc<AstNode>, AstError> {
+    // Convert to text-based operation
+    if let Some(start_offset) = token_index_to_byte_offset(node, token_range.start) {
+        let end_offset = if token_range.end > 0 {
+            token_index_to_byte_offset(node, token_range.end - 1)
+                .and_then(|start| {
+                    let token = token_at_impl(node, token_range.end - 1)?.0;
+                    Some(start + token.token_text()?.len())
+                })
+                .unwrap_or_else(|| node.range().end.0)
+        } else {
+            start_offset
+        };
+
+        let range = TextRange::new(start_offset, end_offset);
+        delete_range(node, range)
+    } else {
+        Ok(node.clone())
+    }
 }
 
 /// Insert text at the given offset
@@ -422,59 +521,6 @@ fn handle_root_split(node: Arc<AstNode>) -> Result<Arc<AstNode>, AstError> {
 mod tests {
     use super::*;
     use crate::{builder::AstBuilder, kind::SyntaxKind};
-
-    #[test]
-    fn test_insert_into_token() {
-        let token = AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5));
-
-        // Insert in middle
-        let edit = EditOp::Insert {
-            offset: 2,
-            text: "XXX".into(),
-        };
-
-        let result = apply_edit(&token, &edit);
-        assert!(result.is_ok());
-        let edited = result.expect("edit should succeed");
-
-        assert_eq!(edited.token_text(), Some("heXXXllo"));
-        assert_eq!(edited.range(), TextRange::new(0, 8));
-    }
-
-    #[test]
-    fn test_delete_from_token() {
-        let token = AstBuilder::token(SyntaxKind::Text, "hello world", TextRange::new(0, 11));
-
-        // Delete middle portion
-        let edit = EditOp::Delete {
-            range: TextRange::new(5, 6),
-        };
-
-        let result = apply_edit(&token, &edit);
-        assert!(result.is_ok());
-        let edited = result.expect("edit should succeed");
-
-        assert_eq!(edited.token_text(), Some("helloworld"));
-        assert_eq!(edited.range(), TextRange::new(0, 10));
-    }
-
-    #[test]
-    fn test_replace_in_token() {
-        let token = AstBuilder::token(SyntaxKind::Text, "hello world", TextRange::new(0, 11));
-
-        // Replace "world" with "rust"
-        let edit = EditOp::Replace {
-            range: TextRange::new(6, 11),
-            text: "rust".into(),
-        };
-
-        let result = apply_edit(&token, &edit);
-        assert!(result.is_ok());
-        let edited = result.expect("edit should succeed");
-
-        assert_eq!(edited.token_text(), Some("hello rust"));
-        assert_eq!(edited.range(), TextRange::new(0, 10));
-    }
 
     #[test]
     fn test_node_splitting() {
