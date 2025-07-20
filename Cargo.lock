@@ -90,7 +90,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys 0.6.0+11769913",
  "num_enum",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -493,7 +493,7 @@ dependencies = [
  "polling",
  "rustix 0.38.44",
  "slab",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -642,7 +642,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4274ea815e013e0f9f04a2633423e14194e408a0576c943ce3d14ca56c50031c"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror",
  "x11rb",
 ]
 
@@ -1466,7 +1466,7 @@ checksum = "6f56f6318968d03c18e1bcf4857ff88c61157e9da8e47c5f29055d60e1228884"
 dependencies = [
  "log",
  "presser",
- "thiserror 1.0.69",
+ "thiserror",
  "winapi",
  "windows",
 ]
@@ -1546,7 +1546,7 @@ dependencies = [
  "com",
  "libc",
  "libloading 0.8.8",
- "thiserror 1.0.69",
+ "thiserror",
  "widestring",
  "winapi",
 ]
@@ -1610,7 +1610,7 @@ dependencies = [
  "iced_renderer",
  "iced_widget",
  "iced_winit",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -1629,7 +1629,7 @@ dependencies = [
  "palette",
  "rustc-hash 2.1.1",
  "smol_str",
- "thiserror 1.0.69",
+ "thiserror",
  "web-time",
 ]
 
@@ -1677,7 +1677,7 @@ dependencies = [
  "once_cell",
  "raw-window-handle",
  "rustc-hash 2.1.1",
- "thiserror 1.0.69",
+ "thiserror",
  "unicode-segmentation",
 ]
 
@@ -1691,7 +1691,7 @@ dependencies = [
  "iced_tiny_skia",
  "iced_wgpu",
  "log",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -1704,7 +1704,7 @@ dependencies = [
  "iced_core",
  "iced_futures",
  "raw-window-handle",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -1740,7 +1740,7 @@ dependencies = [
  "lyon",
  "once_cell",
  "rustc-hash 2.1.1",
- "thiserror 1.0.69",
+ "thiserror",
  "wgpu",
 ]
 
@@ -1755,7 +1755,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "rustc-hash 2.1.1",
- "thiserror 1.0.69",
+ "thiserror",
  "unicode-segmentation",
 ]
 
@@ -1770,7 +1770,7 @@ dependencies = [
  "iced_runtime",
  "log",
  "rustc-hash 2.1.1",
- "thiserror 1.0.69",
+ "thiserror",
  "tracing",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1822,7 +1822,7 @@ dependencies = [
  "combine",
  "jni-sys",
  "log",
- "thiserror 1.0.69",
+ "thiserror",
  "walkdir",
  "windows-sys 0.45.0",
 ]
@@ -2124,7 +2124,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "spirv",
  "termcolor",
- "thiserror 1.0.69",
+ "thiserror",
  "unicode-xid",
 ]
 
@@ -2140,7 +2140,7 @@ dependencies = [
  "ndk-sys 0.6.0+11769913",
  "num_enum",
  "raw-window-handle",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -2952,7 +2952,7 @@ checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
 dependencies = [
  "getrandom 0.2.16",
  "libredox",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -3048,16 +3048,6 @@ dependencies = [
  "bitflags 2.9.1",
  "serde",
  "serde_derive",
-]
-
-[[package]]
-name = "ropey"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
-dependencies = [
- "smallvec",
- "str_indices",
 ]
 
 [[package]]
@@ -3312,7 +3302,7 @@ dependencies = [
  "log",
  "memmap2",
  "rustix 0.38.44",
- "thiserror 1.0.69",
+ "thiserror",
  "wayland-backend",
  "wayland-client",
  "wayland-csd-frame",
@@ -3422,7 +3412,7 @@ dependencies = [
  "serde",
  "stoat_core",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
 ]
 
@@ -3455,7 +3445,7 @@ dependencies = [
  "serde",
  "snafu",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3477,31 +3467,15 @@ dependencies = [
  "compact_str",
  "rustc-hash 2.1.1",
  "smallvec",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
 name = "stoat_text"
 version = "0.1.0"
 dependencies = [
- "indexmap",
- "once_cell",
- "parking_lot 0.12.4",
- "ropey",
- "rustc-hash 2.1.1",
- "smallvec",
- "snafu",
  "text-size",
- "thiserror 2.0.12",
- "tree-sitter",
- "tree-sitter-markdown",
 ]
-
-[[package]]
-name = "str_indices"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strict-num"
@@ -3597,16 +3571,7 @@ version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "567b8a2dae586314f7be2a752ec7474332959c6460e02bde30d702a66d488708"
-dependencies = [
- "thiserror-impl 2.0.12",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -3614,17 +3579,6 @@ name = "thiserror-impl"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.103",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f7cf42b4507d8ea322120659672cf1b9dbb93f8f2d4ecfd6e51350ff5b17a1d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3793,26 +3747,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "tree-sitter"
-version = "0.19.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad726ec26496bf4c083fff0f43d4eb3a2ad1bba305323af5ff91383c0b6ecac0"
-dependencies = [
- "cc",
- "regex",
-]
-
-[[package]]
-name = "tree-sitter-markdown"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c1cfe0396b0e500cc99067bcd2d48720eb08a077e2690194f0c3a3d105f9a0"
-dependencies = [
- "cc",
- "tree-sitter",
 ]
 
 [[package]]
@@ -4213,7 +4147,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 1.0.69",
+ "thiserror",
  "web-sys",
  "wgpu-hal",
  "wgpu-types",
@@ -4257,7 +4191,7 @@ dependencies = [
  "renderdoc-sys",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 1.0.69",
+ "thiserror",
  "wasm-bindgen",
  "web-sys",
  "wgpu-types",
@@ -4323,7 +4257,7 @@ dependencies = [
  "clipboard_wayland",
  "clipboard_x11",
  "raw-window-handle",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
