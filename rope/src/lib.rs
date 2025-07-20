@@ -3,7 +3,6 @@
 pub mod ast;
 pub mod batch;
 pub mod builder;
-pub mod cursor;
 pub mod edit;
 pub mod iter;
 pub mod kind;
@@ -13,7 +12,6 @@ pub mod semantic;
 use ast::{AstError, AstNode, TextInfo, TextPos, TextRange};
 pub use batch::{BatchBuilder, BatchedEdit};
 pub use builder::{AstBuilder, NodeBuilder};
-pub use cursor::AstCursor;
 use edit::{EditOp, apply_edit};
 pub use iter::{FilteredNodeIter, LineIter, NodeIter, TextChunkIter, TokenIter, TraversalOrder};
 pub use query::{PathQuery, Query, QueryResult, QueryUtils};
@@ -53,6 +51,11 @@ impl RopeAst {
     /// Get the total character count
     pub fn len_chars(&self) -> usize {
         self.info.chars
+    }
+
+    /// Get the total token count
+    pub fn len_tokens(&self) -> usize {
+        self.info.tokens
     }
 
     /// Check if empty
@@ -119,6 +122,21 @@ impl RopeAst {
         Self::find_node_at_offset_impl(&self.root, TextPos(offset))
     }
 
+    /// Get the token at the given token index (0-based)
+    pub fn token_at(&self, token_index: usize) -> Option<&AstNode> {
+        Self::token_at_impl(&self.root, token_index).map(|(node, _)| node)
+    }
+
+    /// Convert token index to byte offset (start of token)
+    pub fn token_index_to_byte_offset(&self, token_index: usize) -> Option<usize> {
+        Self::token_at_impl(&self.root, token_index).map(|(node, _)| node.range().start.0)
+    }
+
+    /// Convert byte offset to token index
+    pub fn byte_offset_to_token_index(&self, byte_offset: usize) -> Option<usize> {
+        Self::byte_offset_to_token_index_impl(&self.root, byte_offset, 0)
+    }
+
     /// Insert text at the given offset
     pub fn insert(&mut self, offset: usize, text: &str) -> Result<(), AstError> {
         let edit = EditOp::Insert {
@@ -157,6 +175,71 @@ impl RopeAst {
         Ok(())
     }
 
+    /// Insert a new token at the given token index
+    pub fn insert_token(
+        &mut self,
+        token_index: usize,
+        token: Arc<AstNode>,
+    ) -> Result<(), AstError> {
+        let byte_offset = self
+            .token_index_to_byte_offset(token_index)
+            .unwrap_or_else(|| self.len_bytes()); // Insert at end if index is beyond
+
+        if let Some(token_text) = token.token_text() {
+            self.insert(byte_offset, token_text)
+        } else {
+            Err(AstError::NotImplemented)
+        }
+    }
+
+    /// Replace tokens in the given range with new tokens
+    pub fn replace_tokens(
+        &mut self,
+        token_range: std::ops::Range<usize>,
+        tokens: Vec<Arc<AstNode>>,
+    ) -> Result<(), AstError> {
+        let start_offset = self
+            .token_index_to_byte_offset(token_range.start)
+            .unwrap_or(0);
+        let end_offset = if token_range.end > 0 {
+            self.token_index_to_byte_offset(token_range.end - 1)
+                .and_then(|start| {
+                    let token = self.token_at(token_range.end - 1)?;
+                    Some(start + token.token_text()?.len())
+                })
+                .unwrap_or_else(|| self.len_bytes())
+        } else {
+            start_offset
+        };
+
+        let replacement_text = tokens
+            .iter()
+            .filter_map(|token| token.token_text())
+            .collect::<Vec<_>>()
+            .join("");
+
+        self.replace(TextRange::new(start_offset, end_offset), &replacement_text)
+    }
+
+    /// Delete tokens in the given range
+    pub fn delete_tokens(&mut self, token_range: std::ops::Range<usize>) -> Result<(), AstError> {
+        let start_offset = self
+            .token_index_to_byte_offset(token_range.start)
+            .unwrap_or(0);
+        let end_offset = if token_range.end > 0 {
+            self.token_index_to_byte_offset(token_range.end - 1)
+                .and_then(|start| {
+                    let token = self.token_at(token_range.end - 1)?;
+                    Some(start + token.token_text()?.len())
+                })
+                .unwrap_or_else(|| self.len_bytes())
+        } else {
+            start_offset
+        };
+
+        self.delete(TextRange::new(start_offset, end_offset))
+    }
+
     fn find_node_at_offset_impl(node: &AstNode, pos: TextPos) -> Option<&AstNode> {
         let range = node.range();
 
@@ -178,9 +261,73 @@ impl RopeAst {
         Some(node)
     }
 
-    /// Create a new cursor at the beginning of the rope
-    pub fn cursor(&self) -> AstCursor {
-        AstCursor::new(self.root.clone())
+    /// Find the token at the given token index
+    /// Returns (token_node, tokens_consumed)
+    fn token_at_impl(node: &AstNode, target_index: usize) -> Option<(&AstNode, usize)> {
+        match node {
+            AstNode::Token { .. } => {
+                if target_index == 0 {
+                    Some((node, 1))
+                } else {
+                    None
+                }
+            },
+            AstNode::Syntax { children, .. } => {
+                let mut tokens_consumed = 0;
+                for (child, info) in children {
+                    if tokens_consumed + info.tokens > target_index {
+                        // Target is in this child
+                        return Self::token_at_impl(child, target_index - tokens_consumed);
+                    }
+                    tokens_consumed += info.tokens;
+                }
+                None
+            },
+        }
+    }
+
+    /// Convert byte offset to token index
+    fn byte_offset_to_token_index_impl(
+        node: &AstNode,
+        target_offset: usize,
+        tokens_before: usize,
+    ) -> Option<usize> {
+        let node_range = node.range();
+
+        // Check if target is before this node
+        if target_offset < node_range.start.0 {
+            return Some(tokens_before);
+        }
+
+        // Check if target is after this node
+        if target_offset >= node_range.end.0 {
+            return None;
+        }
+
+        match node {
+            AstNode::Token { .. } => {
+                // Target is within this token
+                Some(tokens_before)
+            },
+            AstNode::Syntax { children, .. } => {
+                let mut current_tokens = tokens_before;
+                for (child, info) in children {
+                    let child_range = child.range();
+
+                    if target_offset < child_range.end.0 {
+                        // Target is in or before this child
+                        return Self::byte_offset_to_token_index_impl(
+                            child,
+                            target_offset,
+                            current_tokens,
+                        );
+                    }
+                    current_tokens += info.tokens;
+                }
+                // Target is after all children but within this node
+                Some(current_tokens)
+            },
+        }
     }
 
     /// Create an iterator over all nodes in pre-order
@@ -452,5 +599,96 @@ mod tests {
             .find_all();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].depth, 2); // Document -> Paragraph -> Token
+    }
+
+    #[test]
+    fn test_token_offset_addressing() {
+        // Build AST with multiple tokens: ["hello", " ", "world"]
+        let tokens = vec![
+            AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5)),
+            AstBuilder::token(SyntaxKind::Whitespace, " ", TextRange::new(5, 6)),
+            AstBuilder::token(SyntaxKind::Text, "world", TextRange::new(6, 11)),
+        ];
+
+        let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, TextRange::new(0, 11))
+            .add_children(tokens)
+            .finish();
+
+        let doc = AstBuilder::start_node(SyntaxKind::Document, TextRange::new(0, 11))
+            .add_child(paragraph)
+            .finish();
+
+        let rope = RopeAst::from_root(doc);
+
+        // Test token count
+        assert_eq!(rope.len_tokens(), 3);
+
+        // Test token_at
+        let token0 = rope.token_at(0).expect("token 0 should exist");
+        assert_eq!(token0.token_text(), Some("hello"));
+
+        let token1 = rope.token_at(1).expect("token 1 should exist");
+        assert_eq!(token1.token_text(), Some(" "));
+
+        let token2 = rope.token_at(2).expect("token 2 should exist");
+        assert_eq!(token2.token_text(), Some("world"));
+
+        assert!(rope.token_at(3).is_none()); // Beyond range
+
+        // Test token_index_to_byte_offset
+        assert_eq!(rope.token_index_to_byte_offset(0), Some(0));
+        assert_eq!(rope.token_index_to_byte_offset(1), Some(5));
+        assert_eq!(rope.token_index_to_byte_offset(2), Some(6));
+        assert!(rope.token_index_to_byte_offset(3).is_none());
+
+        // Test byte_offset_to_token_index
+        assert_eq!(rope.byte_offset_to_token_index(0), Some(0));
+        assert_eq!(rope.byte_offset_to_token_index(3), Some(0)); // Within token 0
+        assert_eq!(rope.byte_offset_to_token_index(5), Some(1));
+        assert_eq!(rope.byte_offset_to_token_index(6), Some(2));
+        assert_eq!(rope.byte_offset_to_token_index(8), Some(2)); // Within token 2
+    }
+
+    #[test]
+    fn test_token_mutation() {
+        // Build initial AST: ["hello", " ", "world"]
+        let tokens = vec![
+            AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5)),
+            AstBuilder::token(SyntaxKind::Whitespace, " ", TextRange::new(5, 6)),
+            AstBuilder::token(SyntaxKind::Text, "world", TextRange::new(6, 11)),
+        ];
+
+        let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, TextRange::new(0, 11))
+            .add_children(tokens)
+            .finish();
+
+        let doc = AstBuilder::start_node(SyntaxKind::Document, TextRange::new(0, 11))
+            .add_child(paragraph)
+            .finish();
+
+        let mut rope = RopeAst::from_root(doc);
+        assert_eq!(rope.to_string(), "hello world");
+
+        // Test insert_token
+        let new_token = AstBuilder::token(SyntaxKind::Text, "beautiful ", TextRange::new(0, 10));
+        let result = rope.insert_token(2, new_token);
+        assert!(result.is_ok());
+        assert_eq!(rope.to_string(), "hello beautiful world");
+
+        // Test replace_tokens
+        let replacement_tokens = vec![AstBuilder::token(
+            SyntaxKind::Text,
+            "hi",
+            TextRange::new(0, 2),
+        )];
+        let result = rope.replace_tokens(0..1, replacement_tokens);
+        assert!(result.is_ok());
+        assert_eq!(rope.to_string(), "hi beautiful world");
+
+        // Test delete_tokens
+        // Current state: ["hi beautiful ", "world"] (2 tokens)
+        let result = rope.delete_tokens(1..2); // Delete "world"
+        assert!(result.is_ok());
+        assert_eq!(rope.to_string(), "hi beautiful ");
     }
 }
