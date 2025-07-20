@@ -3474,6 +3474,7 @@ dependencies = [
 name = "stoat_text"
 version = "0.1.0"
 dependencies = [
+ "stoat_rope",
  "text-size",
 ]
 

@@ -7,6 +7,7 @@ authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
 [dependencies]
+stoat_rope = { path = "../rope" }
 text-size = "1.1"
 
 [lints]
