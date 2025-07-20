@@ -9,6 +9,9 @@ license-file = "../LICENSE"
 [dependencies]
 stoat_rope = { path = "../rope" }
 text-size = "1.1"
+tree-sitter = "0.20"
+tree-sitter-md = "0.1"
+snafu = { version = "0.7", features = ["std"] }
 
 [lints]
 workspace = true

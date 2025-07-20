@@ -15,4 +15,5 @@ pub mod buffer;
 pub mod cursor;
 pub mod node;
 pub mod parse;
+pub mod parser;
 pub mod view;
