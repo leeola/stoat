@@ -61,4 +61,105 @@ impl Cursor {
         self.token_index = token_index;
         self.char_offset = char_offset;
     }
+
+    /// Move cursor one character left within current token
+    /// Returns true if moved, false if already at start of token
+    pub fn move_char_left(&mut self) -> bool {
+        if self.char_offset > 0 {
+            self.char_offset -= 1;
+            true
+        } else {
+            false // At start of token, can't move further
+        }
+    }
+
+    /// Move cursor one character right within current token
+    /// Returns true if moved, false if already at end of token
+    pub fn move_char_right(
+        &mut self,
+        buffer: &crate::buffer::Buffer,
+    ) -> Result<bool, crate::buffer::EditError> {
+        let token = buffer.rope().token_at(self.token_index).ok_or({
+            crate::buffer::EditError::TokenNotFound {
+                index: self.token_index,
+            }
+        })?;
+        let token_text =
+            token
+                .token_text()
+                .ok_or_else(|| crate::buffer::EditError::NotTextToken {
+                    index: self.token_index,
+                    kind: token.kind(),
+                })?;
+
+        let char_count = token_text.chars().count();
+        if self.char_offset < char_count {
+            self.char_offset += 1;
+            Ok(true)
+        } else {
+            Ok(false) // At end of token, can't move further
+        }
+    }
+
+    /// Move cursor to previous token (sets char_offset to end of previous token)
+    /// Returns true if moved, false if already at first token
+    pub fn move_left(
+        &mut self,
+        buffer: &crate::buffer::Buffer,
+    ) -> Result<bool, crate::buffer::EditError> {
+        if self.token_index > 0 {
+            self.token_index -= 1;
+            // Move to end of the new token
+            let token = buffer.rope().token_at(self.token_index).ok_or({
+                crate::buffer::EditError::TokenNotFound {
+                    index: self.token_index,
+                }
+            })?;
+            if let Some(token_text) = token.token_text() {
+                self.char_offset = token_text.chars().count();
+            } else {
+                self.char_offset = 0;
+            }
+            Ok(true)
+        } else {
+            Ok(false) // Already at first token
+        }
+    }
+
+    /// Move cursor to next token (sets char_offset to start of next token)
+    /// Returns true if moved, false if already at last token
+    pub fn move_right(
+        &mut self,
+        buffer: &crate::buffer::Buffer,
+    ) -> Result<bool, crate::buffer::EditError> {
+        let total_tokens = buffer.rope().len_tokens();
+        if self.token_index + 1 < total_tokens {
+            self.token_index += 1;
+            self.char_offset = 0; // Start of new token
+            Ok(true)
+        } else {
+            Ok(false) // Already at last token
+        }
+    }
+
+    /// Move to start of current token
+    pub fn move_to_token_start(&mut self) {
+        self.char_offset = 0;
+    }
+
+    /// Move to end of current token
+    pub fn move_to_token_end(
+        &mut self,
+        buffer: &crate::buffer::Buffer,
+    ) -> Result<(), crate::buffer::EditError> {
+        let token = buffer.rope().token_at(self.token_index).ok_or({
+            crate::buffer::EditError::TokenNotFound {
+                index: self.token_index,
+            }
+        })?;
+        if let Some(token_text) = token.token_text() {
+            self.char_offset = token_text.chars().count();
+        }
+        Ok(())
+    }
 }

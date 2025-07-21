@@ -194,6 +194,26 @@ impl Buffer {
         cursor.set_position(token_index, char_offset);
         Some(cursor)
     }
+
+    /// Create cursor at start of buffer
+    pub fn cursor_at_start(&self) -> Cursor {
+        Cursor::new(self.id) // Already defaults to token 0, char 0
+    }
+
+    /// Create cursor at end of buffer
+    pub fn cursor_at_end(&self) -> Cursor {
+        let mut cursor = Cursor::new(self.id);
+        if self.rope.len_tokens() > 0 {
+            cursor.set_position(self.rope.len_tokens() - 1, 0);
+            // Move to end of the last token
+            if let Some(token) = self.rope.token_at(cursor.token_index()) {
+                if let Some(text) = token.token_text() {
+                    cursor.set_position(cursor.token_index(), text.chars().count());
+                }
+            }
+        }
+        cursor
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +318,163 @@ mod tests {
         let cursor = cursor_from_offset.expect("cursor should be found at valid offset");
         assert_eq!(cursor.token_index(), 2); // "world" token
         assert_eq!(cursor.char_offset(), 1); // second character 'o'
+    }
+
+    #[test]
+    fn test_cursor_movement_within_token() {
+        // Create AST with "hello world"
+        let tokens = vec![
+            AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5)),
+            AstBuilder::token(SyntaxKind::Whitespace, " ", TextRange::new(5, 6)),
+            AstBuilder::token(SyntaxKind::Text, "world", TextRange::new(6, 11)),
+        ];
+
+        let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, TextRange::new(0, 11))
+            .add_children(tokens)
+            .finish();
+        let doc = AstBuilder::start_node(SyntaxKind::Document, TextRange::new(0, 11))
+            .add_child(paragraph)
+            .finish();
+
+        let rope = RopeAst::from_root(doc);
+        let buffer = Buffer::from_rope(rope, 1);
+
+        // Test character movement within first token "hello"
+        let mut cursor = Cursor::new(1);
+        cursor.set_position(0, 2); // Middle of "hello"
+
+        // Move char left
+        assert!(cursor.move_char_left());
+        assert_eq!(cursor.char_offset(), 1);
+
+        // Move char left again
+        assert!(cursor.move_char_left());
+        assert_eq!(cursor.char_offset(), 0);
+
+        // Can't move char left from start
+        assert!(!cursor.move_char_left());
+        assert_eq!(cursor.char_offset(), 0);
+
+        // Move char right
+        assert!(
+            cursor
+                .move_char_right(&buffer)
+                .expect("move_char_right should succeed")
+        );
+        assert_eq!(cursor.char_offset(), 1);
+
+        // Move to end of token
+        cursor.set_position(0, 5); // End of "hello"
+        assert!(
+            !cursor
+                .move_char_right(&buffer)
+                .expect("move_char_right should succeed")
+        ); // Already at end
+        assert_eq!(cursor.char_offset(), 5);
+    }
+
+    #[test]
+    fn test_cursor_movement_between_tokens() {
+        // Create AST with "hello world"
+        let tokens = vec![
+            AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5)),
+            AstBuilder::token(SyntaxKind::Whitespace, " ", TextRange::new(5, 6)),
+            AstBuilder::token(SyntaxKind::Text, "world", TextRange::new(6, 11)),
+        ];
+
+        let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, TextRange::new(0, 11))
+            .add_children(tokens)
+            .finish();
+        let doc = AstBuilder::start_node(SyntaxKind::Document, TextRange::new(0, 11))
+            .add_child(paragraph)
+            .finish();
+
+        let rope = RopeAst::from_root(doc);
+        let buffer = Buffer::from_rope(rope, 1);
+
+        // Start at first token
+        let mut cursor = Cursor::new(1);
+        cursor.set_position(0, 2); // Middle of "hello"
+
+        // Move to next token (should go to start of " ")
+        assert!(
+            cursor
+                .move_right(&buffer)
+                .expect("move_right should succeed")
+        );
+        assert_eq!(cursor.token_index(), 1);
+        assert_eq!(cursor.char_offset(), 0);
+
+        // Move to next token (should go to start of "world")
+        assert!(
+            cursor
+                .move_right(&buffer)
+                .expect("move_right should succeed")
+        );
+        assert_eq!(cursor.token_index(), 2);
+        assert_eq!(cursor.char_offset(), 0);
+
+        // Can't move right from last token
+        assert!(
+            !cursor
+                .move_right(&buffer)
+                .expect("move_right should succeed")
+        );
+        assert_eq!(cursor.token_index(), 2);
+
+        // Move back left (should go to end of " ")
+        assert!(cursor.move_left(&buffer).expect("move_left should succeed"));
+        assert_eq!(cursor.token_index(), 1);
+        assert_eq!(cursor.char_offset(), 1); // End of " " (1 character)
+
+        // Move back left again (should go to end of "hello")
+        assert!(cursor.move_left(&buffer).expect("move_left should succeed"));
+        assert_eq!(cursor.token_index(), 0);
+        assert_eq!(cursor.char_offset(), 5); // End of "hello" (5 characters)
+
+        // Can't move left from first token
+        assert!(!cursor.move_left(&buffer).expect("move_left should succeed"));
+        assert_eq!(cursor.token_index(), 0);
+    }
+
+    #[test]
+    fn test_cursor_utility_methods() {
+        // Create AST with "hello world"
+        let tokens = vec![
+            AstBuilder::token(SyntaxKind::Text, "hello", TextRange::new(0, 5)),
+            AstBuilder::token(SyntaxKind::Whitespace, " ", TextRange::new(5, 6)),
+            AstBuilder::token(SyntaxKind::Text, "world", TextRange::new(6, 11)),
+        ];
+
+        let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, TextRange::new(0, 11))
+            .add_children(tokens)
+            .finish();
+        let doc = AstBuilder::start_node(SyntaxKind::Document, TextRange::new(0, 11))
+            .add_child(paragraph)
+            .finish();
+
+        let rope = RopeAst::from_root(doc);
+        let buffer = Buffer::from_rope(rope, 1);
+
+        // Test move_to_token_start
+        let mut cursor = Cursor::new(1);
+        cursor.set_position(0, 3); // Middle of "hello"
+        cursor.move_to_token_start();
+        assert_eq!(cursor.char_offset(), 0);
+
+        // Test move_to_token_end
+        cursor
+            .move_to_token_end(&buffer)
+            .expect("move_to_token_end should succeed");
+        assert_eq!(cursor.char_offset(), 5); // End of "hello"
+
+        // Test buffer cursor helpers
+        let start_cursor = buffer.cursor_at_start();
+        assert_eq!(start_cursor.token_index(), 0);
+        assert_eq!(start_cursor.char_offset(), 0);
+
+        let end_cursor = buffer.cursor_at_end();
+        assert_eq!(end_cursor.token_index(), 2); // Last token "world"
+        assert_eq!(end_cursor.char_offset(), 5); // End of "world"
     }
 }
