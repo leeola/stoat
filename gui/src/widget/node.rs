@@ -3,8 +3,8 @@ use crate::{
     widget::theme::{Colors, Style, Styles},
 };
 use iced::{
-    Border, Color, Font, Point, Rectangle, Shadow, Size,
     widget::canvas::{Frame, Path, Stroke, Text},
+    Border, Color, Font, Point, Rectangle, Shadow, Size,
 };
 
 /// A node widget that can be rendered on the canvas
@@ -225,6 +225,22 @@ impl<'a> Node<'a> {
             } => {
                 self.draw_rope_text_content(frame, content_position, lines, cursors, selections);
             },
+            NodeContent::InteractiveText {
+                text,
+                cursor_position,
+                focused,
+                placeholder,
+                buffer_id: _,
+            } => {
+                self.draw_interactive_text_content(
+                    frame,
+                    content_position,
+                    text,
+                    *cursor_position,
+                    *focused,
+                    placeholder,
+                );
+            },
             NodeContent::Empty => {
                 // Draw placeholder text
                 frame.fill_text(Text {
@@ -376,6 +392,98 @@ impl<'a> Node<'a> {
                 frame.fill(&selection_path, selection_color);
             }
         }
+    }
+
+    /// Draw interactive text content with visual indicators for editing mode
+    fn draw_interactive_text_content(
+        &self,
+        frame: &mut Frame,
+        start_position: Point,
+        text: &str,
+        cursor_position: usize,
+        _focused: bool,
+        placeholder: &str,
+    ) {
+        let char_width = 8.0; // Approximate monospace character width
+
+        // Use the provided text
+        let lines: Vec<&str> = if text.is_empty() {
+            vec![placeholder]
+        } else {
+            text.lines().collect()
+        };
+
+        // No special background - use normal node background like other content types
+
+        // Draw text content
+        for (line_index, line) in lines.iter().enumerate() {
+            let line_position = Point::new(
+                start_position.x,
+                start_position.y + (line_index as f32 * Style::LINE_HEIGHT),
+            );
+
+            let text_color = if text.is_empty() {
+                Colors::TEXT_TERTIARY // Placeholder text color
+            } else {
+                Colors::TEXT_PRIMARY // Normal text color
+            };
+
+            frame.fill_text(Text {
+                content: line.to_string(),
+                position: line_position,
+                font: Font::MONOSPACE,
+                size: Style::TEXT_SIZE_REGULAR.into(),
+                color: text_color,
+                horizontal_alignment: iced::alignment::Horizontal::Left,
+                vertical_alignment: iced::alignment::Vertical::Top,
+                line_height: iced::widget::text::LineHeight::default(),
+                shaping: iced::widget::text::Shaping::Basic,
+            });
+        }
+
+        // Draw cursor position
+        if let Some((line, column)) = Self::cursor_to_line_column(text, cursor_position) {
+            let cursor_x = start_position.x + (column as f32 * char_width);
+            let cursor_y = start_position.y + (line as f32 * Style::LINE_HEIGHT);
+
+            let cursor_path = Path::new(|builder| {
+                builder.rectangle(
+                    Point::new(cursor_x, cursor_y),
+                    Size::new(2.0, Style::LINE_HEIGHT),
+                );
+            });
+
+            // Use same cursor color as regular text nodes
+            frame.fill(&cursor_path, Colors::ACCENT_SUCCESS);
+        }
+    }
+
+    /// Convert text editor cursor position to line/column coordinates
+    fn cursor_to_line_column(text: &str, cursor_position: usize) -> Option<(usize, usize)> {
+        if text.is_empty() {
+            return Some((0, 0));
+        }
+
+        let mut line = 0;
+        let mut column = 0;
+        let mut current_pos = 0;
+
+        for ch in text.chars() {
+            if current_pos == cursor_position {
+                return Some((line, column));
+            }
+
+            if ch == '\n' {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+
+            current_pos += ch.len_utf8();
+        }
+
+        Some((line, column))
     }
 
     /// Draw the node border

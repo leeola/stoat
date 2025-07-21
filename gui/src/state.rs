@@ -72,6 +72,19 @@ pub enum NodeContent {
         /// Text selection ranges
         selections: Vec<TextSelection>,
     },
+    /// Interactive text editor content with actual text editing capabilities
+    InteractiveText {
+        /// Text content as string (since Content doesn't implement Clone)
+        text: String,
+        /// Cursor position in text
+        cursor_position: usize,
+        /// Whether this text editor has focus
+        focused: bool,
+        /// Placeholder text for empty content
+        placeholder: String,
+        /// Buffer ID for connection to TextEditNode
+        buffer_id: u64,
+    },
     /// Empty node
     Empty,
 }

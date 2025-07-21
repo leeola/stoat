@@ -278,8 +278,8 @@ impl App {
                         node.as_any()
                             .downcast_ref::<stoat_core::nodes::TextEditNode>()
                     {
-                        // Convert TextEditNode to RopeText content
-                        Self::create_rope_text_content(text_edit_node)
+                        // Convert TextEditNode to InteractiveText content
+                        Self::create_interactive_text_content(text_edit_node)
                     } else {
                         NodeContent::Empty
                     };
@@ -312,57 +312,26 @@ impl App {
         }
     }
 
-    /// Convert TextEditNode to RopeText content for rendering
-    fn create_rope_text_content(
+    /// Convert TextEditNode to InteractiveText content for rendering
+    fn create_interactive_text_content(
         text_edit_node: &stoat_core::nodes::TextEditNode,
     ) -> crate::state::NodeContent {
-        use crate::state::{CursorPosition, NodeContent};
+        use crate::state::NodeContent;
 
         // Get buffer information
         let buffer = text_edit_node.buffer();
         let buffer_id = buffer.id();
 
-        // Set up viewport to show first 20 lines
-        let total_lines = text_edit_node.line_count();
-        let viewport = 0..total_lines.min(20);
+        // Get current text and cursor position
+        let text = text_edit_node.content();
+        let cursor_position = text.len(); // Start at end for simplicity
 
-        // Extract actual text lines from the rope buffer
-        let lines = Self::extract_rope_lines(text_edit_node, viewport.clone());
-
-        // Convert rope cursors to GUI cursor positions
-        let cursors: Vec<CursorPosition> = text_edit_node
-            .gui_cursor_positions()
-            .into_iter()
-            .map(|(line, column)| CursorPosition { line, column })
-            .collect();
-
-        // For now, create an empty selections array
-        // FIXME: Add selection support when text editing operations are implemented
-        let selections = Vec::new();
-
-        NodeContent::RopeText {
+        NodeContent::InteractiveText {
+            text,
+            cursor_position,
+            focused: false, // Initial state, will be managed by focus system
+            placeholder: "Enter text...".to_string(),
             buffer_id,
-            viewport,
-            lines,
-            cursors,
-            selections,
         }
-    }
-
-    /// Extract actual text lines from the rope buffer
-    fn extract_rope_lines(
-        text_edit_node: &stoat_core::nodes::TextEditNode,
-        viewport: std::ops::Range<usize>,
-    ) -> Vec<String> {
-        // Create a view for the buffer and iterate over lines
-        let buffer = text_edit_node.buffer();
-        let mut view = stoat_text::view::View::new(buffer);
-        view.set_visible_lines(viewport.len());
-        if viewport.start > 0 {
-            view.set_scroll_line(viewport.start);
-        }
-
-        // Collect lines using our rope line iterator
-        view.iter_lines(buffer).collect()
     }
 }
