@@ -18,6 +18,8 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+stoat_text = { path = "../text" }
+stoat_rope = { path = "../rope" }
 snafu.workspace = true
 async-trait.workspace = true
 serde.workspace = true

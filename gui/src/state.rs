@@ -53,11 +53,24 @@ pub enum NodeState {
 /// Node content types
 #[derive(Debug, Clone)]
 pub enum NodeContent {
-    /// Text editor content
+    /// Text editor content (legacy)
     Text {
         lines: Vec<String>,
         cursor_position: Option<CursorPosition>,
         selection: Option<TextSelection>,
+    },
+    /// Rope-based text editor content (zero-allocation)
+    RopeText {
+        /// Reference to the text buffer for zero-allocation line access
+        buffer_id: u64,
+        /// Visible line range for viewport culling
+        viewport: std::ops::Range<usize>,
+        /// Actual text lines within the viewport
+        lines: Vec<String>,
+        /// Current cursor positions
+        cursors: Vec<CursorPosition>,
+        /// Text selection ranges
+        selections: Vec<TextSelection>,
     },
     /// Empty node
     Empty,

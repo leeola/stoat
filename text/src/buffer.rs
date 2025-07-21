@@ -36,6 +36,7 @@ pub enum EditError {
 /// The Buffer is the central data structure for text storage in the editor. It wraps
 /// a [`RopeAst`] to provide efficient text manipulation while supporting multiple
 /// concurrent views and cursors operating on the same text.
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct Buffer {
     /// The underlying rope AST containing the text and structure

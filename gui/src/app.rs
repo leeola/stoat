@@ -68,6 +68,28 @@ impl App {
             );
         }
 
+        // Create a text edit node with rope-based content
+        let text_edit_node_id = NodeId(2);
+        let text_edit_config =
+            Value::String("Welcome to rope-based editing!\nThis is line 2\nThis is line 3".into());
+
+        if let Ok(text_edit_node) = create_node_from_registry(
+            "text_edit",
+            text_edit_node_id,
+            "rope_editor".to_string(),
+            text_edit_config,
+        ) {
+            // Add text edit node to workspace
+            stoat.workspace_mut().add_node(text_edit_node);
+
+            // Add text edit node to view at grid position (1, 0) - next to the text node
+            stoat.workspace_mut().view_mut().add_node_view(
+                text_edit_node_id,
+                stoat_core::node::NodeType::TextEdit,
+                GridPosition::new(1, 0),
+            );
+        }
+
         // Create render state from workspace
         let render_state = Self::create_render_state(&stoat);
 
@@ -252,6 +274,12 @@ impl App {
                             cursor_position: None,
                             selection: None,
                         }
+                    } else if let Some(text_edit_node) =
+                        node.as_any()
+                            .downcast_ref::<stoat_core::nodes::TextEditNode>()
+                    {
+                        // Convert TextEditNode to RopeText content
+                        Self::create_rope_text_content(text_edit_node)
                     } else {
                         NodeContent::Empty
                     };
@@ -282,5 +310,59 @@ impl App {
             focused_node: None,
             grid_layout,
         }
+    }
+
+    /// Convert TextEditNode to RopeText content for rendering
+    fn create_rope_text_content(
+        text_edit_node: &stoat_core::nodes::TextEditNode,
+    ) -> crate::state::NodeContent {
+        use crate::state::{CursorPosition, NodeContent};
+
+        // Get buffer information
+        let buffer = text_edit_node.buffer();
+        let buffer_id = buffer.id();
+
+        // Set up viewport to show first 20 lines
+        let total_lines = text_edit_node.line_count();
+        let viewport = 0..total_lines.min(20);
+
+        // Extract actual text lines from the rope buffer
+        let lines = Self::extract_rope_lines(text_edit_node, viewport.clone());
+
+        // Convert rope cursors to GUI cursor positions
+        let cursors: Vec<CursorPosition> = text_edit_node
+            .gui_cursor_positions()
+            .into_iter()
+            .map(|(line, column)| CursorPosition { line, column })
+            .collect();
+
+        // For now, create an empty selections array
+        // FIXME: Add selection support when text editing operations are implemented
+        let selections = Vec::new();
+
+        NodeContent::RopeText {
+            buffer_id,
+            viewport,
+            lines,
+            cursors,
+            selections,
+        }
+    }
+
+    /// Extract actual text lines from the rope buffer
+    fn extract_rope_lines(
+        text_edit_node: &stoat_core::nodes::TextEditNode,
+        viewport: std::ops::Range<usize>,
+    ) -> Vec<String> {
+        // Create a view for the buffer and iterate over lines
+        let buffer = text_edit_node.buffer();
+        let mut view = stoat_text::view::View::new(buffer);
+        view.set_visible_lines(viewport.len());
+        if viewport.start > 0 {
+            view.set_scroll_line(viewport.start);
+        }
+
+        // Collect lines using our rope line iterator
+        view.iter_lines(buffer).collect()
     }
 }

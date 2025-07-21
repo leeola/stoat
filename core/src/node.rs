@@ -174,6 +174,8 @@ pub struct NodeLoadResult {
 pub enum NodeType {
     /// Plain text node for displaying/editing text
     Text,
+    /// Advanced text editor node with rope-based editing
+    TextEdit,
     #[cfg(test)]
     MockType, // Used only in tests
 }
@@ -182,6 +184,7 @@ impl std::fmt::Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NodeType::Text => write!(f, "text"),
+            NodeType::TextEdit => write!(f, "text_edit"),
             #[cfg(test)]
             NodeType::MockType => write!(f, "mock"),
         }
@@ -333,6 +336,7 @@ pub static NODE_INIT_REGISTRY: LazyLock<std::sync::Mutex<NodeInitRegistry>> = La
 
     // Register built-in node types
     registry.register(Box::new(crate::nodes::TextNodeInit));
+    registry.register(Box::new(crate::nodes::TextEditNodeInit));
 
     std::sync::Mutex::new(registry)
 });

@@ -3,8 +3,8 @@ use crate::{
     widget::theme::{Colors, Style, Styles},
 };
 use iced::{
-    widget::canvas::{Frame, Path, Stroke, Text},
     Border, Color, Font, Point, Rectangle, Shadow, Size,
+    widget::canvas::{Frame, Path, Stroke, Text},
 };
 
 /// A node widget that can be rendered on the canvas
@@ -216,6 +216,15 @@ impl<'a> Node<'a> {
                     selection.as_ref(),
                 );
             },
+            NodeContent::RopeText {
+                buffer_id: _,
+                viewport: _,
+                lines,
+                cursors,
+                selections,
+            } => {
+                self.draw_rope_text_content(frame, content_position, lines, cursors, selections);
+            },
             NodeContent::Empty => {
                 // Draw placeholder text
                 frame.fill_text(Text {
@@ -299,6 +308,73 @@ impl<'a> Node<'a> {
             });
 
             frame.fill(&cursor_path, Colors::ACCENT_PRIMARY);
+        }
+    }
+
+    /// Draw rope-based text content with zero-allocation line iteration
+    fn draw_rope_text_content(
+        &self,
+        frame: &mut Frame,
+        start_position: Point,
+        lines: &[String],
+        cursors: &[crate::state::CursorPosition],
+        selections: &[crate::state::TextSelection],
+    ) {
+        let char_width = 8.0; // Approximate monospace character width
+
+        // Draw the actual text lines from the rope buffer
+        for (line_index, line) in lines.iter().enumerate() {
+            let line_position = Point::new(
+                start_position.x,
+                start_position.y + (line_index as f32 * Style::LINE_HEIGHT),
+            );
+
+            frame.fill_text(Text {
+                content: line.clone(),
+                position: line_position,
+                font: Font::MONOSPACE,
+                size: Style::TEXT_SIZE_REGULAR.into(),
+                color: Colors::TEXT_PRIMARY, // Primary color for actual content
+                horizontal_alignment: iced::alignment::Horizontal::Left,
+                vertical_alignment: iced::alignment::Vertical::Top,
+                line_height: iced::widget::text::LineHeight::default(),
+                shaping: iced::widget::text::Shaping::Basic,
+            });
+        }
+
+        // Draw cursors if present
+        for cursor in cursors {
+            let cursor_x = start_position.x + (cursor.column as f32 * char_width);
+            let cursor_y = start_position.y + (cursor.line as f32 * Style::LINE_HEIGHT);
+
+            let cursor_path = Path::new(|builder| {
+                builder.rectangle(
+                    Point::new(cursor_x, cursor_y),
+                    Size::new(2.0, Style::LINE_HEIGHT),
+                );
+            });
+
+            frame.fill(&cursor_path, Colors::ACCENT_SUCCESS); // Different color for rope cursors
+        }
+
+        // Draw selections if present
+        for selection in selections {
+            // For now, only support single-line selections like the original
+            if selection.start.line == selection.end.line {
+                let selection_color = Colors::SELECTION_BACKGROUND;
+                let y = start_position.y + (selection.start.line as f32 * Style::LINE_HEIGHT);
+                let x_start = start_position.x + (selection.start.column as f32 * char_width);
+                let x_end = start_position.x + (selection.end.column as f32 * char_width);
+
+                let selection_path = Path::new(|builder| {
+                    builder.rectangle(
+                        Point::new(x_start, y),
+                        Size::new(x_end - x_start, Style::LINE_HEIGHT),
+                    );
+                });
+
+                frame.fill(&selection_path, selection_color);
+            }
         }
     }
 

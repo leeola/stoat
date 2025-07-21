@@ -3478,6 +3478,8 @@ dependencies = [
  "ron",
  "serde",
  "snafu 0.8.6",
+ "stoat_rope",
+ "stoat_text",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3491,6 +3493,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "stoat_core",
+ "stoat_text",
  "tracing",
 ]
 
