@@ -6,19 +6,31 @@ use std::fmt;
 
 /// A single AST node allocated in an arena
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Node {
+pub struct Node<'arena> {
     /// The syntax kind of this node
     kind: SyntaxKind,
     /// The text content of this node (if it's a leaf)
     text: CompactString,
+    /// Child nodes (empty for leaf nodes)
+    children: Vec<&'arena Node<'arena>>,
 }
 
-impl Node {
-    /// Create a new AST node
-    pub fn new(kind: SyntaxKind, text: impl Into<CompactString>) -> Self {
+impl<'arena> Node<'arena> {
+    /// Create a new leaf node with text content
+    pub fn leaf(kind: SyntaxKind, text: impl Into<CompactString>) -> Self {
         Self {
             kind,
             text: text.into(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Create a new internal node with children
+    pub fn internal(kind: SyntaxKind, children: Vec<&'arena Node<'arena>>) -> Self {
+        Self {
+            kind,
+            text: CompactString::new(""),
+            children,
         }
     }
 
@@ -31,11 +43,25 @@ impl Node {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// Get the children of this node
+    pub fn children(&self) -> &[&'arena Node<'arena>] {
+        &self.children
+    }
+
+    /// Check if this is a leaf node
+    pub fn is_leaf(&self) -> bool {
+        self.children.is_empty()
+    }
 }
 
-impl fmt::Display for Node {
+impl<'arena> fmt::Display for Node<'arena> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}({})", self.kind, self.text)
+        if self.is_leaf() {
+            write!(f, "{:?}({})", self.kind, self.text)
+        } else {
+            write!(f, "{:?}[{}]", self.kind, self.children.len())
+        }
     }
 }
 
@@ -45,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_node_display() {
-        let node = Node::new(SyntaxKind::String, "test");
+        let node = Node::leaf(SyntaxKind::String, "test");
         let display = format!("{node}");
         assert!(display.contains("String"));
         assert!(display.contains("test"));
