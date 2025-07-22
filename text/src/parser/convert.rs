@@ -110,6 +110,10 @@ fn convert_node(
 fn map_node_kind(ts_kind: &str, language: Language) -> SyntaxKind {
     match language {
         Language::Markdown => map_markdown_kind(ts_kind),
+        Language::PlainText => {
+            // PlainText should never use tree-sitter conversion
+            unreachable!("PlainText uses manual parsing, not tree-sitter")
+        },
     }
 }
 
