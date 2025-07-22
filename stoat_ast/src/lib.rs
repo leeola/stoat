@@ -10,3 +10,6 @@ pub mod node;
 pub use arena::Arena;
 pub use kind::SyntaxKind;
 pub use node::Node;
+
+#[cfg(test)]
+mod test_utils;

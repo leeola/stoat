@@ -33,7 +33,7 @@ impl<'arena> Default for Arena<'arena> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kind::SyntaxKind;
+    use crate::{assert_kind, assert_text, kind::SyntaxKind, tree};
 
     #[test]
     fn test_basic_node_creation() {
@@ -62,26 +62,20 @@ mod tests {
     fn test_tree_building() {
         let arena = Arena::new();
 
-        // Create leaf nodes
-        let text1 = arena.alloc(Node::leaf(SyntaxKind::Text, "Hello"));
-        let text2 = arena.alloc(Node::leaf(SyntaxKind::Text, "world"));
+        // Build tree bottom-up
+        let hello = tree!(arena, Text("Hello"));
+        let world = tree!(arena, Text("world"));
+        let para = tree!(arena, Paragraph[hello, world]);
+        let doc = tree!(arena, Document[para]);
 
-        // Create a paragraph containing the text nodes
-        let paragraph = arena.alloc(Node::internal(SyntaxKind::Paragraph, vec![text1, text2]));
+        assert_kind!(doc, Document);
+        assert_eq!(doc.children().len(), 1);
 
-        // Create a document containing the paragraph
-        let document = arena.alloc(Node::internal(SyntaxKind::Document, vec![paragraph]));
+        let para_ref = doc.children()[0];
+        assert_kind!(para_ref, Paragraph);
+        assert_eq!(para_ref.children().len(), 2);
 
-        // Verify tree structure
-        assert_eq!(document.kind(), SyntaxKind::Document);
-        assert!(!document.is_leaf());
-        assert_eq!(document.children().len(), 1);
-
-        let para = document.children()[0];
-        assert_eq!(para.kind(), SyntaxKind::Paragraph);
-        assert_eq!(para.children().len(), 2);
-
-        assert_eq!(para.children()[0].text(), "Hello");
-        assert_eq!(para.children()[1].text(), "world");
+        assert_text!(para_ref.children()[0], "Hello");
+        assert_text!(para_ref.children()[1], "world");
     }
 }
