@@ -33,29 +33,44 @@ impl<'arena> Default for Arena<'arena> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{assert_kind, assert_text, kind::SyntaxKind, tree};
+    use crate::{TextRangeExt, assert_kind, assert_text, kind::SyntaxKind, tree};
 
     #[test]
     fn test_basic_node_creation() {
         let arena = Arena::new();
-        let node = arena.alloc(Node::leaf(SyntaxKind::Text, "hello"));
+        let node = arena.alloc(Node::leaf(
+            SyntaxKind::Text,
+            "hello",
+            std::ops::Range::<crate::TextPos>::from_offsets(0, 5),
+        ));
 
         assert_eq!(node.kind(), SyntaxKind::Text);
         assert_eq!(node.text(), "hello");
         assert!(node.is_leaf());
+        assert_eq!(node.len_bytes(), 5);
     }
 
     #[test]
     fn test_multiple_nodes() {
         let arena = Arena::new();
 
-        let node1 = arena.alloc(Node::leaf(SyntaxKind::Text, "hello"));
-        let node2 = arena.alloc(Node::leaf(SyntaxKind::Identifier, "world"));
+        let node1 = arena.alloc(Node::leaf(
+            SyntaxKind::Text,
+            "hello",
+            std::ops::Range::<crate::TextPos>::from_offsets(0, 5),
+        ));
+        let node2 = arena.alloc(Node::leaf(
+            SyntaxKind::Identifier,
+            "world",
+            std::ops::Range::<crate::TextPos>::from_offsets(6, 11),
+        ));
 
         // Nodes should have different addresses but same arena lifetime
         assert_ne!(node1 as *const Node<'_>, node2 as *const Node<'_>);
         assert_eq!(node1.text(), "hello");
         assert_eq!(node2.text(), "world");
+        assert_eq!(node1.range().start.0, 0);
+        assert_eq!(node2.range().start.0, 6);
     }
 
     #[test]

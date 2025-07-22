@@ -9,12 +9,24 @@ use crate::{Arena, Node};
 /// let doc = tree!(arena, Document[Paragraph[Text("hello")]]);
 /// let leaf = tree!(arena, Text("hello world"));
 /// ```
+///
+/// Note: This macro doesn't track positions accurately - it uses dummy positions.
+/// For accurate position tracking, use the Builder instead.
 #[macro_export]
 macro_rules! tree {
     // Base case: leaf node with text
-    ($arena:expr, $kind:ident($text:expr)) => {
-        $arena.alloc($crate::Node::leaf($crate::SyntaxKind::$kind, $text))
-    };
+    ($arena:expr, $kind:ident($text:expr)) => {{
+        let text_str: &str = $text;
+        let len = text_str.len();
+        $arena.alloc($crate::Node::leaf(
+            $crate::SyntaxKind::$kind,
+            text_str,
+            {
+                use $crate::TextRangeExt;
+                std::ops::Range::<$crate::TextPos>::from_offsets(0, len)
+            }
+        ))
+    }};
 
     // Internal node - parse contents as token trees
     ($arena:expr, $kind:ident[$($contents:tt)*]) => {{
