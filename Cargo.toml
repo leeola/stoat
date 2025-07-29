@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["stoat", "core", "bin", "gui", "text", "rope", "stoat_ast"]
+members = ["stoat", "core", "bin", "gui", "text", "rope", "stoat_ast", "rope_v2"]
 
 [workspace.lints.clippy]
 all = "warn"
