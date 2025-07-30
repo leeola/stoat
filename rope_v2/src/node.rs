@@ -32,16 +32,24 @@ impl SSTNode {
         start: usize,
         end: usize,
     ) -> Self {
-        unimplemented!()
+        Self {
+            semantic_kind,
+            syntax_kind,
+            language,
+            start,
+            end,
+            parent: None,
+            children: Vec::new(),
+        }
     }
 
     /// Get the text span length in bytes
     pub fn len(&self) -> usize {
-        unimplemented!()
+        self.end.saturating_sub(self.start)
     }
 
     /// Check if this is a leaf node (no children)
     pub fn is_leaf(&self) -> bool {
-        unimplemented!()
+        self.children.is_empty()
     }
 }
