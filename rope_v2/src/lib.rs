@@ -1,3 +1,9 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(clippy::len_without_is_empty)]
+#![allow(clippy::new_without_default)]
+
 pub mod builder;
 pub mod node;
 pub mod query;
