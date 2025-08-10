@@ -56,6 +56,51 @@ impl Mode {
     }
 }
 
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Action::ExitApp => write!(f, "Exit app"),
+            Action::ChangeMode(mode) => write!(f, "{} mode", mode.as_str()),
+            Action::Move(dir) => write!(f, "Move {}", dir),
+            Action::Jump(target) => write!(f, "Jump {}", target),
+            Action::InsertChar => write!(f, "Insert"),
+            Action::Delete => write!(f, "Delete"),
+            Action::DeleteLine => write!(f, "Delete line"),
+            Action::Yank => write!(f, "Yank"),
+            Action::YankLine => write!(f, "Yank line"),
+            Action::Paste => write!(f, "Paste"),
+            Action::CommandInput => write!(f, "Command input"),
+            Action::ExecuteCommand => write!(f, "Execute"),
+            Action::ShowActionList => write!(f, "Show actions"),
+            Action::ShowCommandPalette => write!(f, "Command palette"),
+        }
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Direction::Up => write!(f, "up"),
+            Direction::Down => write!(f, "down"),
+            Direction::Left => write!(f, "left"),
+            Direction::Right => write!(f, "right"),
+        }
+    }
+}
+
+impl std::fmt::Display for JumpTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JumpTarget::LineStart => write!(f, "line start"),
+            JumpTarget::LineEnd => write!(f, "line end"),
+            JumpTarget::FileStart => write!(f, "file start"),
+            JumpTarget::FileEnd => write!(f, "file end"),
+            JumpTarget::WordForward => write!(f, "word forward"),
+            JumpTarget::WordBackward => write!(f, "word backward"),
+        }
+    }
+}
+
 /// Movement directions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Direction {

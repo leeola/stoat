@@ -1,0 +1,45 @@
+( // Minimal keymap focusing on core modal system capabilities
+    modes: { // Normal mode - the default mode
+        Normal: (
+            bindings: {
+                Char('i'): ChangeMode(Insert),
+                Char('v'): ChangeMode(Visual),
+                Char(':'): ChangeMode(Command),
+                Char('n'): ChangeMode(Custom("NodeEdit")), // Custom mode example
+                Named(Esc): ExitApp, // Test multi-key sequence
+                Sequence("dd"): DeleteLine,
+            },
+        ), // Insert mode - for text entry
+        Insert: (
+            bindings: {
+                Named(Esc): ChangeMode(Normal),
+            }, // Default action for unmapped keys in insert mode
+            default_action: InsertChar,
+        ), // Visual mode - for selection
+        Visual: (
+            bindings: {
+                Named(Esc): ChangeMode(Normal),
+                Char('d'): Delete,
+            },
+        ), // Command mode - for commands
+        Command: (
+            bindings: {
+                Named(Esc): ChangeMode(Normal),
+                Named(Enter): ExecuteCommand,
+            },
+            default_action: CommandInput,
+        ), // Custom mode example: NodeEdit
+        // Demonstrates how custom modes can be defined
+        Custom("NodeEdit"): (
+            bindings: {
+                Named(Esc): ChangeMode(Normal),
+                Char('r'): ShowActionList, // Example: rename node
+                Char('c'): ShowCommandPalette, // Example: connect nodes
+            },
+        ),
+    }, // Starting mode
+    initial_mode: Normal, // Global bindings that work in all modes
+    // (empty for now, but structure is here for future use)
+    global_bindings: {
+    },
+)

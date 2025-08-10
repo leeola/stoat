@@ -34,6 +34,16 @@ impl CommandInfo {
         self.commands = Self::get_commands_for_mode(mode);
     }
 
+    /// Update the command list from the actual modal system bindings
+    pub fn update_from_bindings(&mut self, mode: &str, bindings: Vec<(String, String)>) {
+        self.mode_name = mode.to_string();
+        self.commands = bindings
+            .into_iter()
+            .take(5) // Limit display to 5 most relevant commands
+            .map(|(key, description)| CommandEntry { key, description })
+            .collect();
+    }
+
     /// Get the list of commands for a specific mode
     fn get_commands_for_mode(mode: &str) -> Vec<CommandEntry> {
         match mode.to_lowercase().as_str() {

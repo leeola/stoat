@@ -89,9 +89,10 @@ impl App {
 
         debug!("Created node canvas with chat at position (400, 100)");
 
-        // Initialize command info widget
+        // Initialize command info widget with actual bindings
         let mut command_info = CommandInfo::new();
-        command_info.update_for_mode(stoat.current_mode().as_str());
+        let bindings = stoat.get_display_bindings();
+        command_info.update_from_bindings(stoat.current_mode().as_str(), bindings);
 
         // Initialize ClaudeCode asynchronously
         let claude = Arc::new(Mutex::new(None));
@@ -349,8 +350,10 @@ impl App {
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
                 debug!("Changed to {} mode", mode.as_str());
-                // Update command info for the new mode
-                self.command_info.update_for_mode(mode.as_str());
+                // Update command info with actual bindings for the new mode
+                let bindings = self.stoat.get_display_bindings();
+                self.command_info
+                    .update_from_bindings(mode.as_str(), bindings);
                 Task::none()
             },
             Action::Move(direction) => {

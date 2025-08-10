@@ -619,6 +619,14 @@ impl Stoat {
         self.modal_system.available_actions()
     }
 
+    /// Get formatted keybindings for display (returns key string and action description)
+    pub fn get_display_bindings(&self) -> Vec<(String, String)> {
+        self.available_actions()
+            .into_iter()
+            .map(|(key, action)| (key.to_string(), action.to_string()))
+            .collect()
+    }
+
     /// Update the modal system (call on each frame/tick)
     pub fn tick(&mut self) {
         self.modal_system.tick();

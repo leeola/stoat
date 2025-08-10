@@ -70,6 +70,50 @@ impl From<NamedKey> for Key {
     }
 }
 
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Key::Char(c) => write!(f, "{}", c),
+            Key::Named(named) => write!(f, "{}", named),
+            Key::Modified(modified) => write!(f, "{}", modified),
+            Key::Sequence(seq) => write!(f, "{}", seq),
+        }
+    }
+}
+
+impl std::fmt::Display for NamedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NamedKey::Esc => write!(f, "Esc"),
+            NamedKey::Enter => write!(f, "Enter"),
+            NamedKey::Tab => write!(f, "Tab"),
+            NamedKey::Space => write!(f, "Space"),
+            NamedKey::Backspace => write!(f, "Backspace"),
+            NamedKey::Delete => write!(f, "Delete"),
+            NamedKey::Up => write!(f, "Up"),
+            NamedKey::Down => write!(f, "Down"),
+            NamedKey::Left => write!(f, "Left"),
+            NamedKey::Right => write!(f, "Right"),
+            NamedKey::Home => write!(f, "Home"),
+            NamedKey::End => write!(f, "End"),
+            NamedKey::PageUp => write!(f, "PgUp"),
+            NamedKey::PageDown => write!(f, "PgDn"),
+        }
+    }
+}
+
+impl std::fmt::Display for ModifiedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModifiedKey::Ctrl(c) => write!(f, "Ctrl+{}", c),
+            ModifiedKey::Alt(c) => write!(f, "Alt+{}", c),
+            ModifiedKey::Shift(c) => write!(f, "Shift+{}", c),
+            ModifiedKey::CtrlShift(c) => write!(f, "Ctrl+Shift+{}", c),
+            ModifiedKey::CtrlAlt(c) => write!(f, "Ctrl+Alt+{}", c),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
