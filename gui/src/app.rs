@@ -1,9 +1,11 @@
 use crate::{
-    canvas, input,
-    state::RenderState,
-    widget::{agentic_chat, AgenticChat, AgenticChatEvent, AgenticMessage},
+    input,
+    widget::{
+        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, NodeCanvas,
+        NodeId, NodeWidget, PositionedNode,
+    },
 };
-use iced::{Border, Element, Task};
+use iced::{Element, Point, Task};
 use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
 use stoat_core::{input::Action, Stoat};
@@ -12,22 +14,18 @@ use tracing::{debug, error, trace, warn};
 
 /// Main application state
 pub struct App {
-    /// The render state containing all visual data
-    render_state: RenderState,
+    /// The spatial node canvas
+    node_canvas: NodeCanvas,
     /// The Stoat editor instance
     stoat: Stoat,
     /// The ClaudeCode instance for agent chat
     claude: Arc<Mutex<Option<ClaudeCode>>>,
-    /// The agentic chat widget
-    chat_widget: AgenticChat,
+    /// ID of the chat node
+    chat_node_id: NodeId,
     /// Process status
     process_alive: bool,
     /// Session ID for display
     session_id: Option<String>,
-    /// Position of the chat node on canvas
-    chat_node_position: (f32, f32),
-    /// Size of the chat node
-    chat_node_size: (f32, f32),
 }
 
 /// Application messages
@@ -35,10 +33,8 @@ pub struct App {
 pub enum Message {
     /// Keyboard event received
     KeyPressed(iced::keyboard::Event),
-    /// Chat widget's internal message
-    ChatWidgetMessage(agentic_chat::Message),
-    /// Chat widget event
-    ChatEvent(AgenticChatEvent),
+    /// Node canvas message (contains chat messages)
+    NodeCanvasMessage(node_canvas::Message),
     /// Process status update
     ProcessStatusUpdate(bool),
     /// Session initialized
@@ -47,6 +43,12 @@ pub enum Message {
     MessageReceived(stoat_agent_claude_code::messages::SdkMessage),
     /// Tick for updating modal system and polling
     Tick,
+}
+
+impl From<node_canvas::Message> for Message {
+    fn from(msg: node_canvas::Message) -> Self {
+        Message::NodeCanvasMessage(msg)
+    }
 }
 
 impl App {
@@ -71,56 +73,19 @@ impl App {
             }
         }
 
-        // OLD NODES DISABLED - Using agentic chat instead
-        // // Create a text node with Hello World content
-        // let node_id = NodeId(1);
-        // // Create config as a simple String value since TextNodeInit supports that
-        // let config = Value::String("Hello World!".into());
-        // if let Ok(text_node) =
-        //     create_node_from_registry("text", node_id, "hello_world".to_string(), config)
-        // {
-        //     // Add node to workspace
-        //     stoat.workspace_mut().add_node(text_node);
-        //     // Add node to view at grid position (0, 0)
-        //     stoat.workspace_mut().view_mut().add_node_view(
-        //         node_id,
-        //         stoat_core::node::NodeType::Text,
-        //         GridPosition::new(0, 0),
-        //     );
-        // }
-        // // Create a text edit node with rope-based content
-        // let text_edit_node_id = NodeId(2);
-        // let text_edit_config =
-        //     Value::String("Welcome to rope-based editing!\nThis is line 2\nThis is line
-        // 3".into()); if let Ok(text_edit_node) = create_node_from_registry(
-        //     "text_edit",
-        //     text_edit_node_id,
-        //     "rope_editor".to_string(),
-        //     text_edit_config,
-        // ) {
-        //     // Add text edit node to workspace
-        //     stoat.workspace_mut().add_node(text_edit_node);
-        //     // Add text edit node to view at grid position (1, 0) - next to the text node
-        //     stoat.workspace_mut().view_mut().add_node_view(
-        //         text_edit_node_id,
-        //         stoat_core::node::NodeType::TextEdit,
-        //         GridPosition::new(1, 0),
-        //     );
-        // }
-
-        // Create agentic chat widget
+        // Create the node canvas with chat widget
+        let mut node_canvas = NodeCanvas::new();
         let chat_widget = AgenticChat::new();
+        let chat_node_id = NodeId(1);
 
-        // Create render state from workspace
-        let render_state = Self::create_render_state(&stoat);
+        // Add chat node to canvas at world position
+        node_canvas.add_node(PositionedNode {
+            id: chat_node_id,
+            position: Point::new(400.0, 100.0), // World coordinates
+            widget: NodeWidget::Chat(chat_widget),
+        });
 
-        debug!(
-            "Created render state with {} nodes",
-            render_state.nodes.len()
-        );
-        for node in &render_state.nodes {
-            debug!("Node {}: {} at {:?}", node.id.0, node.title, node.position);
-        }
+        debug!("Created node canvas with chat at position (400, 100)");
 
         // Initialize ClaudeCode asynchronously
         let claude = Arc::new(Mutex::new(None));
@@ -150,14 +115,12 @@ impl App {
 
         (
             Self {
-                render_state,
+                node_canvas,
                 stoat,
                 claude,
-                chat_widget,
+                chat_node_id,
                 process_alive: false,
                 session_id: None,
-                chat_node_position: (400.0, 100.0), // Position chat node on canvas
-                chat_node_size: (400.0, 600.0),     // Size of chat node
             },
             init_task,
         )
@@ -175,12 +138,7 @@ impl App {
                         // Process key through modal system
                         if let Some(action) = self.stoat.user_input(stoat_key) {
                             // Handle the action
-                            let task = self.handle_action(action);
-
-                            // Update render state after action
-                            self.render_state = Self::create_render_state(&self.stoat);
-
-                            task
+                            self.handle_action(action)
                         } else {
                             Task::none()
                         }
@@ -191,40 +149,43 @@ impl App {
                     Task::none()
                 }
             },
-            Message::ChatWidgetMessage(widget_msg) => {
-                // Update the widget and get any events
-                let event_task = self.chat_widget.update(widget_msg);
-                // Map the event to our ChatEvent message
-                event_task.map(Message::ChatEvent)
-            },
-            Message::ChatEvent(event) => match event {
-                AgenticChatEvent::MessageSubmitted(content) => {
-                    debug!("User submitted message: {}", content);
-                    // Send message to Claude
-                    let claude = Arc::clone(&self.claude);
-                    Task::perform(
-                        async move {
-                            let mut claude_guard = claude.lock().await;
-                            if let Some(claude) = claude_guard.as_mut() {
-                                debug!("Sending message to Claude");
-                                if let Err(e) = claude.send_message(&content).await {
-                                    error!("Failed to send message to Claude: {}", e);
-                                }
-                            } else {
-                                error!("Claude not initialized");
-                            }
+            Message::NodeCanvasMessage(canvas_msg) => {
+                match canvas_msg {
+                    node_canvas::Message::ChatMessage(_) => {
+                        // Update the node canvas (which will update the chat widget)
+                        let task = self.node_canvas.update(canvas_msg.clone());
+                        task.map(Message::NodeCanvasMessage)
+                    },
+                    node_canvas::Message::ChatEvent(event) => match event {
+                        AgenticChatEvent::MessageSubmitted(content) => {
+                            debug!("User submitted message: {}", content);
+                            // Send message to Claude
+                            let claude = Arc::clone(&self.claude);
+                            Task::perform(
+                                async move {
+                                    let mut claude_guard = claude.lock().await;
+                                    if let Some(claude) = claude_guard.as_mut() {
+                                        debug!("Sending message to Claude");
+                                        if let Err(e) = claude.send_message(&content).await {
+                                            error!("Failed to send message to Claude: {}", e);
+                                        }
+                                    } else {
+                                        error!("Claude not initialized");
+                                    }
+                                },
+                                |_| Message::Tick,
+                            )
                         },
-                        |_| Message::Tick,
-                    )
-                },
-                AgenticChatEvent::MessageSelected(id) => {
-                    // Future: highlight corresponding node in graph
-                    debug!("Message selected: {:?}", id);
-                    Task::none()
-                },
-                AgenticChatEvent::ScrollToMessage(_) | AgenticChatEvent::ClearHistory => {
-                    Task::none()
-                },
+                        AgenticChatEvent::MessageSelected(id) => {
+                            // Future: highlight corresponding node in graph
+                            debug!("Message selected: {:?}", id);
+                            Task::none()
+                        },
+                        AgenticChatEvent::ScrollToMessage(_) | AgenticChatEvent::ClearHistory => {
+                            Task::none()
+                        },
+                    },
+                }
             },
             Message::ProcessStatusUpdate(alive) => {
                 if self.process_alive != alive {
@@ -234,13 +195,16 @@ impl App {
                     } else {
                         "Agent process stopped"
                     };
-                    self.chat_widget.add_message(AgenticMessage::new(
-                        agentic_chat::AgentRole::System,
-                        status.to_string(),
-                        agentic_chat::EventType::SystemEvent {
-                            event_type: "process_status".to_string(),
-                        },
-                    ));
+                    // Find and update the chat widget in the node canvas
+                    if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
+                        chat.add_message(AgenticMessage::new(
+                            agentic_chat::AgentRole::System,
+                            status.to_string(),
+                            agentic_chat::EventType::SystemEvent {
+                                event_type: "process_status".to_string(),
+                            },
+                        ));
+                    }
                 }
                 Task::none()
             },
@@ -248,19 +212,24 @@ impl App {
                 self.session_id = Some(session_id.clone());
                 self.process_alive = alive;
 
-                // Add initialization message
-                self.chat_widget.add_message(AgenticMessage::new(
-                    agentic_chat::AgentRole::System,
-                    format!("Agent session initialized: {}", session_id),
-                    agentic_chat::EventType::SessionEvent {
-                        event_type: "initialized".to_string(),
-                    },
-                ));
+                // Add initialization message to chat in node canvas
+                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
+                    chat.add_message(AgenticMessage::new(
+                        agentic_chat::AgentRole::System,
+                        format!("Agent session initialized: {}", session_id),
+                        agentic_chat::EventType::SessionEvent {
+                            event_type: "initialized".to_string(),
+                        },
+                    ));
+                }
                 Task::none()
             },
             Message::MessageReceived(sdk_msg) => {
                 debug!("Processing SDK message: {:?}", sdk_msg);
-                self.chat_widget.process_sdk_message(sdk_msg);
+                // Process SDK message in chat widget within node canvas
+                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
+                    chat.process_sdk_message(sdk_msg);
+                }
                 Task::none()
             },
             Message::Tick => {
@@ -304,60 +273,19 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         use crate::widget::StatusBar;
-        use iced::widget::{column, container, stack};
+        use iced::widget::column;
 
         // Create enhanced status bar
         let status_bar = StatusBar::create(
             self.stoat.current_mode().as_str(),
-            Some("Stoat Editor - Agentic Chat".to_string()),
+            Some("Stoat Editor - Node Canvas".to_string()),
         );
 
-        // Create the main canvas that fills the entire view
-        let canvas = iced::widget::canvas(canvas::NodeCanvas::new(&self.render_state))
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
+        // Get the node canvas view
+        let canvas = self.node_canvas.view();
 
-        // Map the chat widget's internal messages to our app messages
-        let chat_element = self.chat_widget.view().map(Message::ChatWidgetMessage);
-
-        // Style the chat widget as a floating node with fixed size
-        let chat_panel = container(chat_element)
-            .width(iced::Length::Fixed(self.chat_node_size.0))
-            .height(iced::Length::Fixed(self.chat_node_size.1))
-            .style(|_theme| {
-                let mut style = container::Style::default();
-                style.background = Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.15, 0.15, 0.17,
-                )));
-                style.border = Border {
-                    color: iced::Color::from_rgb(0.3, 0.3, 0.35),
-                    width: 1.0,
-                    radius: 8.0.into(),
-                };
-                style
-            })
-            .padding(10);
-
-        // Position the chat panel absolutely using a container
-        let positioned_chat = container(chat_panel)
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill)
-            .padding(iced::Padding {
-                top: self.chat_node_position.1,
-                right: 0.0,
-                bottom: 0.0,
-                left: self.chat_node_position.0,
-            })
-            .align_x(iced::alignment::Horizontal::Left)
-            .align_y(iced::alignment::Vertical::Top);
-
-        // Layer the canvas and chat using a stack
-        let main_content = stack![canvas, positioned_chat]
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
-
-        // Combine main content and status bar (status bar at bottom)
-        column![main_content, status_bar].into()
+        // Combine canvas and status bar
+        column![canvas, status_bar].into()
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -443,99 +371,6 @@ impl App {
                 // TODO: Display command palette
                 Task::none()
             },
-        }
-    }
-
-    /// Create render state from the current workspace
-    fn create_render_state(stoat: &Stoat) -> RenderState {
-        use crate::{
-            grid_layout::GridLayout,
-            state::{NodeContent, NodeId as GuiNodeId, NodeRenderData, NodeState},
-        };
-
-        let grid_layout = GridLayout::new();
-        let view = stoat.view();
-        let workspace = stoat.workspace();
-
-        let nodes: Vec<NodeRenderData> = view
-            .nodes
-            .iter()
-            .filter_map(|node_view| {
-                // Get the actual node from workspace
-                if let Some(node) = workspace.get_node(node_view.id) {
-                    let position = grid_layout.grid_to_screen(node_view.pos);
-                    let size = grid_layout.cell_size();
-
-                    // Convert content based on node type
-                    let content = if let Some(text_node) =
-                        node.as_any().downcast_ref::<stoat_core::nodes::TextNode>()
-                    {
-                        NodeContent::Text {
-                            lines: text_node.content().lines().map(|s| s.to_string()).collect(),
-                            cursor_position: None,
-                            selection: None,
-                        }
-                    } else if let Some(text_edit_node) =
-                        node.as_any()
-                            .downcast_ref::<stoat_core::nodes::TextEditNode>()
-                    {
-                        // Convert TextEditNode to InteractiveText content
-                        Self::create_interactive_text_content(text_edit_node)
-                    } else {
-                        NodeContent::Empty
-                    };
-
-                    Some(NodeRenderData {
-                        id: GuiNodeId(node_view.id.0),
-                        position,
-                        size,
-                        title: node.name().to_string(),
-                        content,
-                        state: NodeState::Normal,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Don't add the chat node to the canvas nodes since it's rendered as an overlay
-        // This prevents double rendering (once as a canvas node, once as the actual widget)
-
-        // Center viewport on (0,0) with some offset to show the node nicely
-        let viewport = crate::state::Viewport {
-            offset: (100.0, 100.0), // Small offset so node isn't at edge
-            zoom: 1.0,
-        };
-
-        RenderState {
-            viewport,
-            nodes,
-            focused_node: None,
-            grid_layout,
-        }
-    }
-
-    /// Convert TextEditNode to InteractiveText content for rendering
-    fn create_interactive_text_content(
-        text_edit_node: &stoat_core::nodes::TextEditNode,
-    ) -> crate::state::NodeContent {
-        use crate::state::NodeContent;
-
-        // Get buffer information
-        let buffer = text_edit_node.buffer();
-        let buffer_id = buffer.id();
-
-        // Get current text and cursor position
-        let text = text_edit_node.content();
-        let cursor_position = text.len(); // Start at end for simplicity
-
-        NodeContent::InteractiveText {
-            text,
-            cursor_position,
-            focused: false, // Initial state, will be managed by focus system
-            placeholder: "Enter text...".to_string(),
-            buffer_id,
         }
     }
 }
