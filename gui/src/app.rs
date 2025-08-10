@@ -1,8 +1,8 @@
 use crate::{
     input,
     widget::{
-        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, NodeCanvas,
-        NodeId, NodeWidget, PositionedNode,
+        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
+        NodeCanvas, NodeId, NodeWidget, PositionedNode,
     },
 };
 use iced::{Element, Point, Task};
@@ -26,6 +26,8 @@ pub struct App {
     process_alive: bool,
     /// Session ID for display
     session_id: Option<String>,
+    /// Command info widget
+    command_info: CommandInfo,
 }
 
 /// Application messages
@@ -87,6 +89,10 @@ impl App {
 
         debug!("Created node canvas with chat at position (400, 100)");
 
+        // Initialize command info widget
+        let mut command_info = CommandInfo::new();
+        command_info.update_for_mode(stoat.current_mode().as_str());
+
         // Initialize ClaudeCode asynchronously
         let claude = Arc::new(Mutex::new(None));
         let claude_arc = Arc::clone(&claude);
@@ -121,6 +127,7 @@ impl App {
                 chat_node_id,
                 process_alive: false,
                 session_id: None,
+                command_info,
             },
             init_task,
         )
@@ -273,7 +280,11 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         use crate::widget::StatusBar;
-        use iced::widget::column;
+        use iced::{
+            alignment,
+            widget::{column, container, stack},
+            Length, Padding,
+        };
 
         // Create enhanced status bar
         let status_bar = StatusBar::create(
@@ -284,8 +295,29 @@ impl App {
         // Get the node canvas view
         let canvas = self.node_canvas.view();
 
-        // Combine canvas and status bar
-        column![canvas, status_bar].into()
+        // Get the command info view
+        let command_info = self.command_info.view();
+
+        // Position command info to appear as extension of status bar
+        let positioned_command_info = container(command_info)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(alignment::Horizontal::Right)
+            .align_y(alignment::Vertical::Bottom)
+            .padding(Padding {
+                top: 0.0,
+                right: 0.0,  // Flush with right edge
+                bottom: 1.0, // Overlap status bar border by 1px to avoid double border
+                left: 0.0,
+            });
+
+        // Stack canvas and command info
+        let main_content = stack![canvas, positioned_command_info]
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // Combine with status bar
+        column![main_content, status_bar].into()
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -317,6 +349,8 @@ impl App {
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
                 debug!("Changed to {} mode", mode.as_str());
+                // Update command info for the new mode
+                self.command_info.update_for_mode(mode.as_str());
                 Task::none()
             },
             Action::Move(direction) => {

@@ -1,8 +1,8 @@
 use crate::widget::theme::{Colors, Style};
 use iced::{
-    alignment::{Horizontal, Vertical},
-    widget::{container, row, text, Row},
     Background, Border, Element, Length,
+    alignment::{Horizontal, Vertical},
+    widget::{container, row, text},
 };
 
 /// Status bar widget for displaying editor state
@@ -87,35 +87,65 @@ impl StatusBar {
         cursor_position: Option<(usize, usize)>,
         project_name: Option<String>,
     ) -> Element<'a, Message> {
-        let mode_text = Self::build_mode_text(mode);
-        let cursor_info = Self::build_cursor_info(cursor_position);
-        let project_info = Self::build_project_info(project_name);
+        // Left section with project name and right border
+        let project_text = if let Some(name) = project_name {
+            text(name)
+        } else {
+            text("Stoat Editor")
+        };
+        let project_text = project_text
+            .size(Style::TEXT_SIZE_SMALL)
+            .color(Colors::TEXT_TERTIARY);
 
-        let content: Row<'a, Message> = row![mode_text]
-            .push_maybe(cursor_info)
-            .push_maybe(project_info)
-            .spacing(Style::SPACING_LARGE);
-
-        container(content)
+        let left_section = container(project_text)
             .width(Length::Fill)
-            .height(Length::Fixed(24.0))
-            .padding([2, Style::SPACING_MEDIUM as u16])
+            .height(Length::Fill)
+            .padding([0, Style::SPACING_MEDIUM as u16])
+            .align_x(Horizontal::Left)
+            .align_y(Vertical::Center)
             .style(|_theme: &iced::Theme| container::Style {
                 background: Some(Background::Color(Colors::NODE_TITLE_BACKGROUND)),
                 border: Border {
                     color: Colors::BORDER_DEFAULT,
-                    width: 0.0,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            });
+
+        // Right section with mode (same width as command info)
+        let mode_text = text(format!("-- {} --", mode.label()))
+            .size(Style::TEXT_SIZE_SMALL)
+            .color(Colors::TEXT_PRIMARY);
+
+        let right_section = container(mode_text)
+            .width(Length::Fixed(160.0)) // Same width as command info
+            .height(Length::Fill)
+            .padding([0, Style::SPACING_MEDIUM as u16])
+            .align_x(Horizontal::Center)
+            .align_y(Vertical::Center);
+
+        let cursor_info = Self::build_cursor_info(cursor_position);
+
+        // Combine sections
+        let full_bar = if let Some(cursor) = cursor_info {
+            row![left_section, cursor, right_section]
+        } else {
+            row![left_section, right_section]
+        };
+
+        container(full_bar)
+            .width(Length::Fill)
+            .height(Length::Fixed(24.0))
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(Background::Color(Colors::NODE_TITLE_BACKGROUND)),
+                border: Border {
+                    color: Colors::BORDER_DEFAULT,
+                    width: 1.0,
                     radius: 0.0.into(),
                 },
                 ..Default::default()
             })
-            .into()
-    }
-
-    fn build_mode_text<'a, Message: 'a>(mode: Mode) -> Element<'a, Message> {
-        text(format!("-- {} --", mode.label()))
-            .size(Style::TEXT_SIZE_SMALL)
-            .color(Colors::TEXT_PRIMARY)
             .into()
     }
 
@@ -130,22 +160,6 @@ impl StatusBar {
             container(cursor_text)
                 .align_x(Horizontal::Center)
                 .align_y(Vertical::Center)
-                .into()
-        })
-    }
-
-    fn build_project_info<'a, Message: 'a>(
-        project_name: Option<String>,
-    ) -> Option<Element<'a, Message>> {
-        project_name.map(|name| {
-            let project_text = text(name)
-                .size(Style::TEXT_SIZE_SMALL)
-                .color(Colors::TEXT_TERTIARY);
-
-            container(project_text)
-                .align_x(Horizontal::Right)
-                .align_y(Vertical::Center)
-                .width(Length::Fill)
                 .into()
         })
     }
