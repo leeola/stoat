@@ -210,7 +210,7 @@ impl AgenticChat {
                         MessageContent::ToolUse { name, id, .. } => {
                             let msg = AgenticMessage::new(
                                 AgentRole::Agent,
-                                format!("Invoking tool: {}", name),
+                                format!("Invoking tool: {name}"),
                                 EventType::ToolInvocation {
                                     tool_name: name.clone(),
                                     tool_id: id.clone(),
@@ -224,7 +224,7 @@ impl AgenticChat {
             SdkMessage::System { session_id, .. } => {
                 let msg = AgenticMessage::new(
                     AgentRole::System,
-                    format!("Session initialized: {}", session_id),
+                    format!("Session initialized: {session_id}"),
                     EventType::SessionEvent {
                         event_type: "initialized".to_string(),
                     },
@@ -234,7 +234,7 @@ impl AgenticChat {
             SdkMessage::Result { subtype, .. } => {
                 let msg = AgenticMessage::new(
                     AgentRole::System,
-                    format!("Session result: {:?}", subtype),
+                    format!("Session result: {subtype:?}"),
                     EventType::SessionEvent {
                         event_type: "completed".to_string(),
                     },
@@ -342,7 +342,7 @@ impl AgenticChat {
                     EventType::SystemEvent { event_type } => event_type.as_str(),
                     EventType::SessionEvent { event_type } => event_type.as_str(),
                 };
-                message_content = message_content.push(text(format!("[{}]", event_label)).size(10));
+                message_content = message_content.push(text(format!("[{event_label}]")).size(10));
             }
 
             // Add timestamp if configured
@@ -356,12 +356,11 @@ impl AgenticChat {
 
             // Highlight selected message
             let message_container = if Some(msg.id) == self.selected_message {
-                message_container.style(|_theme| {
-                    let mut style = container::Style::default();
-                    style.background = Some(iced::Background::Color(iced::Color::from_rgba(
+                message_container.style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
                         0.3, 0.3, 0.5, 0.2,
-                    )));
-                    style
+                    ))),
+                    ..Default::default()
                 })
             } else {
                 message_container

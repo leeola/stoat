@@ -18,14 +18,20 @@ pub struct CommandEntry {
     pub description: String,
 }
 
-impl CommandInfo {
-    /// Create a new command info widget
-    pub fn new() -> Self {
+impl Default for CommandInfo {
+    fn default() -> Self {
         Self {
             commands: Vec::new(),
             mode_name: String::new(),
             visible: true,
         }
+    }
+}
+
+impl CommandInfo {
+    /// Create a new command info widget
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Update the command list based on the current mode
@@ -152,16 +158,14 @@ impl CommandInfo {
         // Only top and right borders to connect seamlessly with status bar
         container(content)
             .width(Length::Fixed(160.0))
-            .style(|_theme| {
-                let mut style = container::Style::default();
-                style.background = Some(Background::Color(Colors::NODE_TITLE_BACKGROUND));
-                // Custom border - only top and right edges
-                style.border = Border {
+            .style(|_theme| container::Style {
+                background: Some(Background::Color(Colors::NODE_TITLE_BACKGROUND)),
+                border: Border {
                     color: Colors::BORDER_DEFAULT,
                     width: 1.0,
                     radius: 0.0.into(), // No rounded corners
-                };
-                style
+                },
+                ..Default::default()
             })
             .into()
     }

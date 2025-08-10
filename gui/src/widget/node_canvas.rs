@@ -39,9 +39,8 @@ pub enum Message {
     ChatEvent(AgenticChatEvent),
 }
 
-impl NodeCanvas {
-    /// Create a new empty node canvas
-    pub fn new() -> Self {
+impl Default for NodeCanvas {
+    fn default() -> Self {
         Self {
             nodes: Vec::new(),
             viewport: Viewport {
@@ -49,6 +48,13 @@ impl NodeCanvas {
                 zoom: 1.0,
             },
         }
+    }
+}
+
+impl NodeCanvas {
+    /// Create a new empty node canvas
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a node to the canvas
@@ -82,7 +88,7 @@ impl NodeCanvas {
         match message {
             Message::ChatMessage(msg) => {
                 // Find and update the first chat widget
-                for node in &mut self.nodes {
+                if let Some(node) = self.nodes.iter_mut().next() {
                     match &mut node.widget {
                         NodeWidget::Chat(chat) => {
                             let event_task = chat.update(msg);
@@ -117,17 +123,16 @@ impl NodeCanvas {
 
             // Style the widget with a node-like container
             let styled_widget = container(widget_element)
-                .style(|_theme| {
-                    let mut style = container::Style::default();
-                    style.background = Some(iced::Background::Color(iced::Color::from_rgb(
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgb(
                         0.15, 0.15, 0.17,
-                    )));
-                    style.border = iced::Border {
+                    ))),
+                    border: iced::Border {
                         color: iced::Color::from_rgb(0.3, 0.3, 0.35),
                         width: 1.0,
                         radius: 8.0.into(),
-                    };
-                    style
+                    },
+                    ..Default::default()
                 })
                 .padding(10)
                 .width(Length::Fixed(400.0)) // Fixed size for now

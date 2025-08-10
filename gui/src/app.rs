@@ -224,7 +224,7 @@ impl App {
                 if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
                     chat.add_message(AgenticMessage::new(
                         agentic_chat::AgentRole::System,
-                        format!("Agent session initialized: {}", session_id),
+                        format!("Agent session initialized: {session_id}"),
                         agentic_chat::EventType::SessionEvent {
                             event_type: "initialized".to_string(),
                         },
