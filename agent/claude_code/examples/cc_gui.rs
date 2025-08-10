@@ -55,11 +55,11 @@ enum Message {
     /// Text input changed
     InputChanged(String),
     /// Send button pressed or Enter key pressed
-    SendMessage,
+    Send,
     /// Response received from Claude
     ResponseReceived(String),
     /// Any message received (for debugging)
-    MessageReceived(SdkMessage),
+    SdkMessageReceived(SdkMessage),
     /// Scrollable viewport changed
     ScrollViewportChanged(scrollable::Viewport),
     /// Process status update
@@ -106,9 +106,9 @@ impl App {
                         let session_id = claude.get_session_id().to_string();
                         let alive = claude.is_alive().await;
                         *claude_arc.lock().await = Some(claude);
-                        (format!("Session started: {}", session_id), alive)
+                        (format!("Session started: {session_id}"), alive)
                     },
-                    Err(e) => (format!("Failed to initialize: {}", e), false),
+                    Err(e) => (format!("Failed to initialize: {e}"), false),
                 }
             },
             |(msg, _alive)| {
@@ -126,7 +126,7 @@ impl App {
                 self.input_value = value;
                 Task::none()
             },
-            Message::SendMessage => {
+            Message::Send => {
                 if self.input_value.trim().is_empty() {
                     return Task::none();
                 }
@@ -165,7 +165,7 @@ impl App {
                     Task::none()
                 })
             },
-            Message::MessageReceived(sdk_msg) => {
+            Message::SdkMessageReceived(sdk_msg) => {
                 match sdk_msg {
                     SdkMessage::Assistant { message, .. } => {
                         // Extract all content types, not just text
@@ -197,7 +197,7 @@ impl App {
                         // Show system initialization message
                         self.messages.push(ChatMessage {
                             role: MessageRole::System,
-                            content: format!("[System initialized for session: {}]", session_id),
+                            content: format!("[System initialized for session: {session_id}]"),
                         });
                     },
                     SdkMessage::Result {
@@ -206,8 +206,7 @@ impl App {
                         ..
                     } => {
                         // Show completion status
-                        let status =
-                            format!("[Session result: {:?} in {}ms]", subtype, duration_ms);
+                        let status = format!("[Session result: {subtype:?} in {duration_ms}ms]");
                         self.messages.push(ChatMessage {
                             role: MessageRole::System,
                             content: status,
@@ -237,8 +236,7 @@ impl App {
                                             self.messages.push(ChatMessage {
                                                 role: MessageRole::System,
                                                 content: format!(
-                                                    "[Tool result ({})]: {}",
-                                                    short_id, preview
+                                                    "[Tool result ({short_id})]: {preview}"
                                                 ),
                                             });
                                         },
@@ -337,7 +335,7 @@ impl App {
                     |result| {
                         if let Some((msg, alive)) = result {
                             if let Some(message) = msg {
-                                Message::MessageReceived(message)
+                                Message::SdkMessageReceived(message)
                             } else {
                                 Message::ProcessStatusUpdate(alive)
                             }
@@ -350,7 +348,7 @@ impl App {
         }
     }
 
-    fn view(&self) -> Element<Message> {
+    fn view(&self) -> Element<'_, Message> {
         let title = row![
             text("Claude Code Interactive Test").size(24),
             text(if self.process_alive {
@@ -390,11 +388,11 @@ impl App {
         let input_row = row![
             text_input("Type a message...", &self.input_value)
                 .on_input(Message::InputChanged)
-                .on_submit(Message::SendMessage)
+                .on_submit(Message::Send)
                 .padding(10)
                 .size(16),
             button(text("Send").size(16))
-                .on_press(Message::SendMessage)
+                .on_press(Message::Send)
                 .padding(10),
         ]
         .spacing(10)

@@ -64,7 +64,7 @@ impl MessageBuffer {
                                 tool_use_id,
                                 content,
                             } => {
-                                format!("[Tool result {}]: {}", tool_use_id, content)
+                                format!("[Tool result {tool_use_id}]: {content}")
                             },
                         })
                         .collect::<Vec<_>>()

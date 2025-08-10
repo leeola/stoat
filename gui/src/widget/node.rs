@@ -241,6 +241,21 @@ impl<'a> Node<'a> {
                     placeholder,
                 );
             },
+            NodeContent::AgenticChat => {
+                // Don't draw content here - the actual chat widget is rendered as an overlay
+                // Just show a placeholder to indicate this is the chat node
+                frame.fill_text(Text {
+                    content: "Chat Interface".to_string(),
+                    position: content_position,
+                    font: Font::default(),
+                    size: Style::TEXT_SIZE_REGULAR.into(),
+                    color: Colors::TEXT_SECONDARY,
+                    horizontal_alignment: iced::alignment::Horizontal::Left,
+                    vertical_alignment: iced::alignment::Vertical::Top,
+                    line_height: iced::widget::text::LineHeight::default(),
+                    shaping: iced::widget::text::Shaping::Basic,
+                });
+            },
             NodeContent::Empty => {
                 // Draw placeholder text
                 frame.fill_text(Text {

@@ -85,6 +85,8 @@ pub enum NodeContent {
         /// Buffer ID for connection to TextEditNode
         buffer_id: u64,
     },
+    /// Agentic chat widget content
+    AgenticChat,
     /// Empty node
     Empty,
 }

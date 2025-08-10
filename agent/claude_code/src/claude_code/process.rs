@@ -250,10 +250,10 @@ impl ProcessBuilder {
                                 stdout_tx: recovered.stdout_tx,
                             },
                             NewSessionError::SpawnFailed {
-                                source: std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("Process failed: {}", recovered.last_stderr),
-                                ),
+                                source: std::io::Error::other(format!(
+                                    "Process failed: {}",
+                                    recovered.last_stderr
+                                )),
                             },
                         ));
                     }
@@ -373,10 +373,10 @@ impl ProcessBuilder {
                             },
                             ResumeSessionError::ResumeChannelRecoveryFailed {
                                 source: CloseError::KillFailed {
-                                    source: std::io::Error::new(
-                                        std::io::ErrorKind::Other,
-                                        format!("Process failed: {}", recovered.last_stderr),
-                                    ),
+                                    source: std::io::Error::other(format!(
+                                        "Process failed: {}",
+                                        recovered.last_stderr
+                                    )),
                                 },
                             },
                         ));
@@ -419,7 +419,12 @@ impl ProcessBuilder {
         } else {
             args.push("--session-id".to_string());
         }
-        args.push(self.session_id.as_ref().unwrap().clone());
+        args.push(
+            self.session_id
+                .as_ref()
+                .expect("session_id should be set when building args")
+                .clone(),
+        );
 
         // Optional arguments
         if let Some(model) = &self.model {

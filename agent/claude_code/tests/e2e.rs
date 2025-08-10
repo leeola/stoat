@@ -98,7 +98,7 @@ mod e2e_tests {
         );
 
         // Test is_alive
-        assert!(claude.is_alive(), "Expected Claude to be alive");
+        assert!(claude.is_alive().await, "Expected Claude to be alive");
 
         // Clean shutdown
         info!("Shutting down");
@@ -179,7 +179,7 @@ mod e2e_tests {
 
         // Verify process is still alive
         assert!(
-            claude.is_alive(),
+            claude.is_alive().await,
             "Expected Claude to be alive after switch"
         );
 

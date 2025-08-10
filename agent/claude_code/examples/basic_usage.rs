@@ -1,6 +1,6 @@
 use anyhow::Result;
 use stoat_agent_claude_code::ClaudeCode;
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 

@@ -3602,9 +3602,13 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "stoat_agent_claude_code",
  "stoat_core",
  "stoat_text",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

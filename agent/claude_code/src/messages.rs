@@ -572,7 +572,7 @@ impl UserContent {
                     UserContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                    } => format!("[Tool Result {}]: {}", tool_use_id, content),
+                    } => format!("[Tool Result {tool_use_id}]: {content}"),
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),

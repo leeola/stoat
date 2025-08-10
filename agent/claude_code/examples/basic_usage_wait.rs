@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     // Wait for response with timeout
     match claude.wait_for_response(Duration::from_secs(30)).await? {
         Some(response) => {
-            info!("Got response: {}", response.content);
+            info!("Got response: {}", response);
         },
         None => {
             info!("No response received within timeout");
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     }
 
     // Check if process is still alive
-    if claude.is_alive() {
+    if claude.is_alive().await {
         info!("Claude is still running");
     }
 
