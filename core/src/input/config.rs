@@ -117,11 +117,9 @@ mod tests {
                 .get(&Mode::Normal)
                 .expect("Normal mode should exist");
             assert!(normal_mode.bindings.contains_key(&Key::Char('i')));
-            assert!(
-                normal_mode
-                    .bindings
-                    .contains_key(&Key::Named(NamedKey::Esc))
-            );
+            assert!(normal_mode
+                .bindings
+                .contains_key(&Key::Named(NamedKey::Esc)));
         }
     }
 

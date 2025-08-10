@@ -594,6 +594,9 @@ impl Stoat {
                 Action::ShowCommandPalette => {
                     // TODO: Show command palette
                 },
+                Action::AlignNodes => {
+                    // TODO: Implement node alignment in canvas mode
+                },
             }
         }
 

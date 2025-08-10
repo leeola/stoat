@@ -5,7 +5,7 @@
                 Char('i'): ChangeMode(Insert),
                 Char('v'): ChangeMode(Visual),
                 Char(':'): ChangeMode(Command),
-                Char('n'): ChangeMode(Custom("NodeEdit")), // Custom mode example
+                Char('c'): ChangeMode(Canvas), // Enter canvas mode
                 Named(Esc): ExitApp, // Test multi-key sequence
                 Sequence("dd"): DeleteLine,
             },
@@ -28,13 +28,11 @@
                 Named(Enter): ExecuteCommand,
             },
             default_action: CommandInput,
-        ), // Custom mode example: NodeEdit
-        // Demonstrates how custom modes can be defined
-        Custom("NodeEdit"): (
+        ), // Canvas mode - for node manipulation
+        Canvas: (
             bindings: {
                 Named(Esc): ChangeMode(Normal),
-                Char('r'): ShowActionList, // Example: rename node
-                Char('c'): ShowCommandPalette, // Example: connect nodes
+                Char('a'): AlignNodes, // Align nodes in view
             },
         ),
     }, // Starting mode

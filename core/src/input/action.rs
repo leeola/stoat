@@ -30,6 +30,9 @@ pub enum Action {
     /// UI actions
     ShowActionList,
     ShowCommandPalette,
+
+    /// Canvas mode actions
+    AlignNodes,
 }
 
 /// Editor modes
@@ -39,9 +42,7 @@ pub enum Mode {
     Insert,
     Visual,
     Command,
-
-    /// Custom mode with a name
-    Custom(String),
+    Canvas,
 }
 
 impl Mode {
@@ -51,7 +52,7 @@ impl Mode {
             Mode::Insert => "insert",
             Mode::Visual => "visual",
             Mode::Command => "command",
-            Mode::Custom(name) => name,
+            Mode::Canvas => "canvas",
         }
     }
 }
@@ -61,8 +62,8 @@ impl std::fmt::Display for Action {
         match self {
             Action::ExitApp => write!(f, "Exit app"),
             Action::ChangeMode(mode) => write!(f, "{} mode", mode.as_str()),
-            Action::Move(dir) => write!(f, "Move {}", dir),
-            Action::Jump(target) => write!(f, "Jump {}", target),
+            Action::Move(dir) => write!(f, "Move {dir}"),
+            Action::Jump(target) => write!(f, "Jump {target}"),
             Action::InsertChar => write!(f, "Insert"),
             Action::Delete => write!(f, "Delete"),
             Action::DeleteLine => write!(f, "Delete line"),
@@ -73,6 +74,7 @@ impl std::fmt::Display for Action {
             Action::ExecuteCommand => write!(f, "Execute"),
             Action::ShowActionList => write!(f, "Show actions"),
             Action::ShowCommandPalette => write!(f, "Command palette"),
+            Action::AlignNodes => write!(f, "Align nodes"),
         }
     }
 }
@@ -147,9 +149,8 @@ mod tests {
         let serialized = ron::to_string(&mode).expect("Failed to serialize Normal mode");
         assert_eq!(serialized, "Normal");
 
-        // Custom modes serialize with the Custom tag
-        let mode = Mode::Custom("my_mode".to_string());
-        let serialized = ron::to_string(&mode).expect("Failed to serialize Custom mode");
-        assert_eq!(serialized, "Custom(\"my_mode\")");
+        let mode = Mode::Canvas;
+        let serialized = ron::to_string(&mode).expect("Failed to serialize Canvas mode");
+        assert_eq!(serialized, "Canvas");
     }
 }

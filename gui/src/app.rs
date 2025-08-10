@@ -408,6 +408,11 @@ impl App {
                 // TODO: Display command palette
                 Task::none()
             },
+            Action::AlignNodes => {
+                trace!("Align nodes in canvas");
+                // TODO: Implement node alignment in canvas view
+                Task::none()
+            },
         }
     }
 }
