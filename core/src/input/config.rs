@@ -32,25 +32,8 @@ pub struct ModeDefinition {
 
 impl Default for ModalConfig {
     fn default() -> Self {
-        // Minimal default configuration
-        let mut modes = HashMap::new();
-
-        let mut normal_bindings = HashMap::new();
-        normal_bindings.insert(Key::Named(super::key::NamedKey::Esc), Action::ExitApp);
-
-        modes.insert(
-            Mode::Normal,
-            ModeDefinition {
-                bindings: normal_bindings,
-                default_action: None,
-            },
-        );
-
-        Self {
-            modes,
-            initial_mode: Mode::Normal,
-            global_bindings: HashMap::new(),
-        }
+        // Use the full default keymap
+        super::keymap::default_keymap()
     }
 }
 
@@ -84,12 +67,34 @@ mod tests {
     fn test_default_config() {
         let config = ModalConfig::default();
         assert_eq!(config.initial_mode, Mode::Normal);
-        assert!(config.modes.contains_key(&Mode::Normal));
 
+        // Verify all modes exist
+        assert!(config.modes.contains_key(&Mode::Normal));
+        assert!(config.modes.contains_key(&Mode::Insert));
+        assert!(config.modes.contains_key(&Mode::Visual));
+        assert!(config.modes.contains_key(&Mode::Command));
+        assert!(config.modes.contains_key(&Mode::Canvas));
+
+        // Verify some key bindings in Normal mode
         let normal_mode = &config.modes[&Mode::Normal];
         assert_eq!(
             normal_mode.bindings.get(&Key::Named(NamedKey::Esc)),
             Some(&Action::ExitApp)
+        );
+        assert_eq!(
+            normal_mode.bindings.get(&Key::Char('i')),
+            Some(&Action::ChangeMode(Mode::Insert))
+        );
+        assert_eq!(
+            normal_mode.bindings.get(&Key::Char('c')),
+            Some(&Action::ChangeMode(Mode::Canvas))
+        );
+
+        // Verify Canvas mode has AlignNodes action
+        let canvas_mode = &config.modes[&Mode::Canvas];
+        assert_eq!(
+            canvas_mode.bindings.get(&Key::Char('a')),
+            Some(&Action::AlignNodes)
         );
     }
 
@@ -101,26 +106,6 @@ mod tests {
         // Should be able to parse it back
         let parsed = ModalConfig::from_ron(&ron_str).expect("Failed to parse config from RON");
         assert_eq!(parsed.initial_mode, config.initial_mode);
-    }
-
-    #[test]
-    fn test_load_default_keymap() {
-        // Test that the default keymap.ron file is valid
-        let keymap_path = std::path::Path::new("keymap.ron");
-        if keymap_path.exists() {
-            let config = ModalConfig::from_file(keymap_path).expect("Failed to load keymap.ron");
-            assert_eq!(config.initial_mode, Mode::Normal);
-
-            // Verify some key bindings exist
-            let normal_mode = config
-                .modes
-                .get(&Mode::Normal)
-                .expect("Normal mode should exist");
-            assert!(normal_mode.bindings.contains_key(&Key::Char('i')));
-            assert!(normal_mode
-                .bindings
-                .contains_key(&Key::Named(NamedKey::Esc)));
-        }
     }
 
     #[test]

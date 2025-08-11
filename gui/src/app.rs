@@ -10,7 +10,7 @@ use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
 use stoat_core::{input::Action, Stoat};
 use tokio::sync::Mutex;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, trace};
 
 /// Main application state
 pub struct App {
@@ -64,16 +64,7 @@ impl App {
 
     fn new() -> (Self, Task<Message>) {
         // Initialize Stoat with default configuration
-        let mut stoat = Stoat::new();
-
-        // Try to load the keymap configuration
-        if let Ok(keymap_path) = std::env::current_dir().map(|d| d.join("keymap.ron")) {
-            if keymap_path.exists() {
-                if let Err(e) = stoat.load_modal_config_from_file(&keymap_path) {
-                    warn!("Failed to load keymap.ron: {e}");
-                }
-            }
-        }
+        let stoat = Stoat::new();
 
         // Create the node canvas with chat widget
         let mut node_canvas = NodeCanvas::new();

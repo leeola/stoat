@@ -30,5 +30,6 @@ pub use user::UserInput;
 pub mod action;
 pub mod config;
 pub mod key;
+pub mod keymap;
 pub mod modal;
 pub mod user;
