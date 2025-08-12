@@ -1,14 +1,14 @@
 use crate::{
     input,
     widget::{
-        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
-        NodeCanvas, NodeId, NodeWidget, PositionedNode,
+        AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo, NodeCanvas, NodeId, NodeWidget,
+        PositionedNode, agentic_chat, node_canvas,
     },
 };
 use iced::{Element, Point, Task};
 use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
-use stoat_core::{input::Action, Stoat};
+use stoat_core::{Stoat, input::Action};
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace};
 
@@ -45,6 +45,8 @@ pub enum Message {
     MessageReceived(stoat_agent_claude_code::messages::SdkMessage),
     /// Tick for updating modal system and polling
     Tick,
+    /// Window resized
+    WindowResized(iced::Size),
 }
 
 impl From<node_canvas::Message> for Message {
@@ -64,19 +66,33 @@ impl App {
 
     fn new() -> (Self, Task<Message>) {
         // Initialize Stoat with default configuration
-        let stoat = Stoat::new();
+        let mut stoat = Stoat::new();
 
         // Create the node canvas with chat widget
         let mut node_canvas = NodeCanvas::new();
         let chat_widget = AgenticChat::new();
         let chat_node_id = NodeId(1);
 
-        // Add chat node to canvas at world position
+        // Add chat node to GUI canvas
         node_canvas.add_node(PositionedNode {
             id: chat_node_id,
             position: Point::new(400.0, 100.0), // World coordinates
             widget: NodeWidget::Chat(chat_widget),
         });
+
+        // Set up view state in core with integer positions
+        let core_node_id = stoat_core::node::NodeId(chat_node_id.0);
+        stoat.view_state_mut().set_position(
+            core_node_id,
+            stoat_core::view_state::Position::new(400, 100),
+        );
+        stoat
+            .view_state_mut()
+            .set_size(core_node_id, stoat_core::view_state::Size::new(400, 600));
+        stoat.view_state_mut().select(core_node_id);
+
+        // Set initial viewport size to match window
+        stoat.view_state_mut().update_viewport_size(1280, 720);
 
         debug!("Created node canvas with chat at position (400, 100)");
 
@@ -267,15 +283,21 @@ impl App {
                     },
                 )
             },
+            Message::WindowResized(size) => {
+                // Update viewport size in core's view state
+                self.stoat
+                    .view_state_mut()
+                    .update_viewport_size(size.width as u32, size.height as u32);
+                Task::none()
+            },
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
         use crate::widget::StatusBar;
         use iced::{
-            alignment,
+            Length, Padding, alignment,
             widget::{column, container, stack},
-            Length, Padding,
         };
 
         // Create enhanced status bar
@@ -284,8 +306,9 @@ impl App {
             Some("Stoat Editor - Node Canvas".to_string()),
         );
 
-        // Get the node canvas view
-        let canvas = self.node_canvas.view();
+        // Get the view state from core and pass it to the node canvas for rendering
+        let view_state = self.stoat.view_state();
+        let canvas = self.node_canvas.view(&view_state);
 
         // Get the command info view
         let command_info = self.command_info.view();
@@ -329,6 +352,8 @@ impl App {
             }),
             // Poll every 100ms for messages from Claude
             iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
+            // Window resize events
+            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
         ])
     }
 
@@ -401,7 +426,8 @@ impl App {
             },
             Action::AlignNodes => {
                 trace!("Align nodes in canvas");
-                // TODO: Implement node alignment in canvas view
+                // AlignNodes is now handled in core lib.rs
+                // The action has already been processed by stoat.user_input()
                 Task::none()
             },
         }

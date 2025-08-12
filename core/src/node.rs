@@ -170,7 +170,7 @@ pub struct NodeLoadResult {
     pub data: Option<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum NodeType {
     /// Plain text node for displaying/editing text
     Text,

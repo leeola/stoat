@@ -9,6 +9,6 @@ pub mod theme;
 pub use agentic_chat::{AgenticChat, AgenticChatEvent, AgenticMessage};
 pub use command_info::CommandInfo;
 pub use node::Node;
-pub use node_canvas::{NodeCanvas, NodeId, NodeWidget, PositionedNode, Viewport};
+pub use node_canvas::{NodeCanvas, NodeId, NodeWidget, PositionedNode};
 pub use status_bar::StatusBar;
 pub use text_edit::{create_text_editor, TextEditMessage};

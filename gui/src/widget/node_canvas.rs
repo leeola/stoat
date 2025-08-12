@@ -1,17 +1,18 @@
 use crate::widget::{agentic_chat, AgenticChat, AgenticChatEvent};
 use iced::{
     widget::{container, stack},
-    Element, Length, Padding, Point, Task, Vector,
+    Element, Length, Padding, Point, Task,
 };
+use stoat_core::view_state::ViewState;
 
 /// A unique identifier for nodes in the canvas
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub u64);
 
 /// The spatial container that positions widgets in world space
+/// This is now a pure presentation layer that renders from core's CanvasView
 pub struct NodeCanvas {
     pub nodes: Vec<PositionedNode>,
-    pub viewport: Viewport,
 }
 
 /// A widget positioned at specific world coordinates
@@ -19,12 +20,6 @@ pub struct PositionedNode {
     pub id: NodeId,
     pub position: Point,    // World coordinates
     pub widget: NodeWidget, // The actual widget
-}
-
-/// The view into the world space
-pub struct Viewport {
-    pub offset: Vector, // Camera pan position
-    pub zoom: f32,      // Zoom level (1.0 = 100%)
 }
 
 /// Types of widgets that can be nodes
@@ -41,13 +36,7 @@ pub enum Message {
 
 impl Default for NodeCanvas {
     fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            viewport: Viewport {
-                offset: Vector::new(0.0, 0.0),
-                zoom: 1.0,
-            },
-        }
+        Self { nodes: Vec::new() }
     }
 }
 
@@ -75,14 +64,6 @@ impl NodeCanvas {
         })
     }
 
-    /// Transform world coordinates to screen coordinates
-    fn world_to_screen(&self, world_pos: Point) -> Point {
-        Point::new(
-            (world_pos.x - self.viewport.offset.x) * self.viewport.zoom,
-            (world_pos.y - self.viewport.offset.y) * self.viewport.zoom,
-        )
-    }
-
     /// Update a widget in the canvas
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -106,7 +87,8 @@ impl NodeCanvas {
     }
 
     /// Create the view of the canvas with all positioned widgets
-    pub fn view<'a, M>(&'a self) -> Element<'a, M>
+    /// Now takes a ViewState from core to render
+    pub fn view<'a, M>(&'a self, view_state: &ViewState) -> Element<'a, M>
     where
         M: 'a + From<Message>,
     {
@@ -114,22 +96,39 @@ impl NodeCanvas {
         let mut stack_widgets = vec![];
 
         for node in &self.nodes {
-            let screen_pos = self.world_to_screen(node.position);
+            // Get position from view state
+            let core_id = stoat_core::node::NodeId(node.id.0);
+
+            // Get position from view state and convert to screen coordinates
+            let screen_pos = if let Some(&pos) = view_state.positions.get(&core_id) {
+                let (screen_x, screen_y) = view_state.canvas_to_screen(pos);
+                Point::new(screen_x, screen_y)
+            } else {
+                // Fallback to GUI position if not in view state
+                Point::new(node.position.x, node.position.y)
+            };
 
             // Get the widget element based on type
             let widget_element: Element<'_, Message> = match &node.widget {
                 NodeWidget::Chat(chat) => chat.view().map(Message::ChatMessage),
             };
 
+            // Check if this node is selected
+            let is_selected = view_state.selected == Some(core_id);
+
             // Style the widget with a node-like container
             let styled_widget = container(widget_element)
-                .style(|_theme| container::Style {
+                .style(move |_theme| container::Style {
                     background: Some(iced::Background::Color(iced::Color::from_rgb(
                         0.15, 0.15, 0.17,
                     ))),
                     border: iced::Border {
-                        color: iced::Color::from_rgb(0.3, 0.3, 0.35),
-                        width: 1.0,
+                        color: if is_selected {
+                            iced::Color::from_rgb(0.4, 0.6, 0.9) // Blue border for selected
+                        } else {
+                            iced::Color::from_rgb(0.3, 0.3, 0.35) // Default border
+                        },
+                        width: if is_selected { 2.0 } else { 1.0 },
                         radius: 8.0.into(),
                     },
                     ..Default::default()

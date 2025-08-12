@@ -1,6 +1,8 @@
 use crate::{
+    graph::NodeGraph,
     node::{Node, NodeId},
     view::View,
+    view_state::ViewState,
     Result,
 };
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,8 @@ pub struct Workspace {
     nodes: HashMap<NodeId, Box<dyn Node>>,
     links: Vec<Link>,
     view: View,
+    graph: NodeGraph,
+    view_state: ViewState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +112,8 @@ impl Workspace {
             nodes,
             links: serializable.links,
             view: View::default(), // TODO: deserialize view from view_data
+            graph: NodeGraph::default(),
+            view_state: ViewState::default(),
         }
     }
 
@@ -153,5 +159,31 @@ impl Workspace {
 
     pub fn view_mut(&mut self) -> &mut View {
         &mut self.view
+    }
+
+    /// Get the node graph for querying relationships
+    pub fn graph(&self) -> &NodeGraph {
+        &self.graph
+    }
+
+    /// Get mutable access to the graph
+    pub fn graph_mut(&mut self) -> &mut NodeGraph {
+        &mut self.graph
+    }
+
+    /// Get the view state for rendering
+    pub fn view_state(&self) -> &ViewState {
+        &self.view_state
+    }
+
+    /// Get mutable access to view state
+    pub fn view_state_mut(&mut self) -> &mut ViewState {
+        &mut self.view_state
+    }
+
+    /// Initialize view layout for all nodes
+    pub fn initialize_layout(&mut self) {
+        let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        self.view_state.initialize_default_layout(&node_ids);
     }
 }

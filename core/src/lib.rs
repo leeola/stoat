@@ -12,12 +12,14 @@ pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }
 pub mod data;
+pub mod graph;
 pub mod input;
 pub mod mode;
 pub mod node;
 pub mod nodes;
 pub mod value;
 pub mod view;
+pub mod view_state;
 pub mod workspace;
 
 pub use error::{Error, Result};
@@ -595,7 +597,8 @@ impl Stoat {
                     // TODO: Show command palette
                 },
                 Action::AlignNodes => {
-                    // TODO: Implement node alignment in canvas mode
+                    // Align the selected node to the center of the viewport
+                    self.active.view_state_mut().center_on_selected();
                 },
             }
         }
@@ -610,6 +613,26 @@ impl Stoat {
     }
     pub fn view(&self) -> &View {
         self.active.view()
+    }
+
+    /// Get the current view state for rendering
+    pub fn view_state(&self) -> &view_state::ViewState {
+        self.active.view_state()
+    }
+
+    /// Get mutable access to view state
+    pub fn view_state_mut(&mut self) -> &mut view_state::ViewState {
+        self.active.view_state_mut()
+    }
+
+    /// Get the node graph
+    pub fn graph(&self) -> &graph::NodeGraph {
+        self.active.graph()
+    }
+
+    /// Get mutable access to the graph
+    pub fn graph_mut(&mut self) -> &mut graph::NodeGraph {
+        self.active.graph_mut()
     }
 
     /// Get the current modal mode
