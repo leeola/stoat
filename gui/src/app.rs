@@ -1,14 +1,14 @@
 use crate::{
     input,
     widget::{
-        AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo, NodeCanvas, NodeId, NodeWidget,
-        PositionedNode, agentic_chat, node_canvas,
+        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
+        NodeCanvas, NodeId, NodeWidget, PositionedNode,
     },
 };
 use iced::{Element, Point, Task};
 use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
-use stoat_core::{Stoat, input::Action};
+use stoat_core::{input::Action, Stoat};
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace};
 
@@ -296,8 +296,9 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         use crate::widget::StatusBar;
         use iced::{
-            Length, Padding, alignment,
+            alignment,
             widget::{column, container, stack},
+            Length, Padding,
         };
 
         // Create enhanced status bar
@@ -424,9 +425,9 @@ impl App {
                 // TODO: Display command palette
                 Task::none()
             },
-            Action::AlignNodes => {
-                trace!("Align nodes in canvas");
-                // AlignNodes is now handled in core lib.rs
+            Action::GatherNodes => {
+                trace!("Gather nodes in canvas");
+                // GatherNodes is now handled in core lib.rs
                 // The action has already been processed by stoat.user_input()
                 Task::none()
             },

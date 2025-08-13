@@ -596,8 +596,8 @@ impl Stoat {
                 Action::ShowCommandPalette => {
                     // TODO: Show command palette
                 },
-                Action::AlignNodes => {
-                    // Align the selected node to the center of the viewport
+                Action::GatherNodes => {
+                    // Gather nodes into the current viewport
                     self.active.view_state_mut().center_on_selected();
                 },
             }

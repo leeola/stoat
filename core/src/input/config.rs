@@ -90,11 +90,11 @@ mod tests {
             Some(&Action::ChangeMode(Mode::Canvas))
         );
 
-        // Verify Canvas mode has AlignNodes action
+        // Verify Canvas mode has GatherNodes action
         let canvas_mode = &config.modes[&Mode::Canvas];
         assert_eq!(
             canvas_mode.bindings.get(&Key::Char('a')),
-            Some(&Action::AlignNodes)
+            Some(&Action::GatherNodes)
         );
     }
 

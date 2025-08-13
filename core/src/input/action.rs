@@ -32,7 +32,7 @@ pub enum Action {
     ShowCommandPalette,
 
     /// Canvas mode actions
-    AlignNodes,
+    GatherNodes,
 }
 
 /// Editor modes
@@ -74,7 +74,7 @@ impl std::fmt::Display for Action {
             Action::ExecuteCommand => write!(f, "Execute"),
             Action::ShowActionList => write!(f, "Show actions"),
             Action::ShowCommandPalette => write!(f, "Command palette"),
-            Action::AlignNodes => write!(f, "Align nodes"),
+            Action::GatherNodes => write!(f, "Gather nodes"),
         }
     }
 }
