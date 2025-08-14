@@ -59,7 +59,7 @@ impl ModalConfig {
 mod tests {
     use super::*;
     use crate::input::{
-        action::{Direction, Mode},
+        action::Mode,
         key::{Key, NamedKey},
     };
 
@@ -70,20 +70,14 @@ mod tests {
 
         // Verify all modes exist
         assert!(config.modes.contains_key(&Mode::Normal));
-        assert!(config.modes.contains_key(&Mode::Insert));
-        assert!(config.modes.contains_key(&Mode::Visual));
-        assert!(config.modes.contains_key(&Mode::Command));
         assert!(config.modes.contains_key(&Mode::Canvas));
+        assert!(config.modes.contains_key(&Mode::Help));
 
         // Verify some key bindings in Normal mode
         let normal_mode = &config.modes[&Mode::Normal];
         assert_eq!(
             normal_mode.bindings.get(&Key::Named(NamedKey::Esc)),
             Some(&Action::ExitApp)
-        );
-        assert_eq!(
-            normal_mode.bindings.get(&Key::Char('i')),
-            Some(&Action::ChangeMode(Mode::Insert))
         );
         assert_eq!(
             normal_mode.bindings.get(&Key::Char('c')),
@@ -115,10 +109,9 @@ mod tests {
                 Normal: (
                     bindings: {
                         Named(Esc): ExitApp,
-                        Char('h'): Move(Left),
-                        Char('j'): Move(Down),
-                        Char('k'): Move(Up),
-                        Char('l'): Move(Right),
+                        Char('c'): ChangeMode(Canvas),
+                        Char('g'): GatherNodes,
+                        Modified(Shift('/')): ShowHelp,
                     }
                 ),
             },
@@ -130,8 +123,8 @@ mod tests {
 
         let normal_mode = &config.modes[&Mode::Normal];
         assert_eq!(
-            normal_mode.bindings.get(&Key::Char('j')),
-            Some(&Action::Move(Direction::Down))
+            normal_mode.bindings.get(&Key::Char('c')),
+            Some(&Action::ChangeMode(Mode::Canvas))
         );
     }
 }

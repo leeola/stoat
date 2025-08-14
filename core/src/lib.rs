@@ -561,44 +561,6 @@ impl Stoat {
                 Action::ChangeMode(_) => {
                     // Mode change is handled internally by ModalSystem
                 },
-                Action::Move(_direction) => {
-                    // TODO: Implement movement in workspace/view
-                    // self.active.view_mut().move_cursor(direction);
-                },
-                Action::Delete => {
-                    // TODO: Implement delete
-                },
-                Action::DeleteLine => {
-                    // TODO: Implement delete line
-                },
-                Action::Yank => {
-                    // TODO: Implement yank
-                },
-                Action::Paste => {
-                    // TODO: Implement paste
-                },
-                Action::Jump(_target) => {
-                    // TODO: Implement jump navigation
-                },
-                Action::InsertChar => {
-                    // TODO: Implement character insertion
-                    // This action would typically insert the last key pressed
-                },
-                Action::YankLine => {
-                    // TODO: Implement yank line
-                },
-                Action::CommandInput => {
-                    // TODO: Implement command mode input
-                },
-                Action::ExecuteCommand => {
-                    // TODO: Execute the current command
-                },
-                Action::ShowActionList => {
-                    // TODO: Show available actions
-                },
-                Action::ShowCommandPalette => {
-                    // TODO: Show command palette
-                },
                 Action::GatherNodes => {
                     // Gather nodes into the current viewport
                     self.active.view_state_mut().center_on_selected();
@@ -1255,11 +1217,15 @@ mod tests {
     fn test_help_escape_returns_to_previous() {
         let mut stoat = Stoat::new();
 
-        // c? enters Canvas then Help
-        // <Esc> should return to Canvas, not Normal
-        let snapshot = stoat
+        // c? enters Canvas then Help, <Esc> navigates to Normal help
+        stoat
             .execute("c?<Esc>")
-            .expect("Should execute canvas help escape sequence");
+            .expect("Should execute canvas help then navigate to normal help");
+
+        // Second <Esc> should return to Canvas (original mode)
+        let snapshot = stoat
+            .execute("<Esc>")
+            .expect("Should exit help mode and return to Canvas");
 
         assert_eq!(
             snapshot.mode,
@@ -1376,24 +1342,25 @@ mod tests {
     }
 
     #[test]
-    fn test_help_mode_navigation_to_insert() {
+    fn test_help_mode_navigation_from_normal() {
         let mut stoat = Stoat::new();
 
-        // Enter help from Normal mode, then navigate to Insert help
+        // Enter help from Normal mode, then navigate to Canvas help
         let snapshot = stoat
-            .execute("?i")
-            .expect("Should execute normal help then insert navigation");
+            .execute("?c")
+            .expect("Should execute normal help then canvas navigation");
 
         // Should be in help mode
         assert_eq!(snapshot.mode, Mode::Help);
 
-        // Should be showing Insert mode help
-        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+        // Should be showing Canvas mode help
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Canvas));
 
-        // Should have Insert commands visible
+        // Should have Canvas commands visible
         snapshot.commands.assert_has(&[
             (Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal)),
             (Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp),
+            (Key::Char('a'), Action::GatherNodes),
         ]);
     }
 
@@ -1404,39 +1371,39 @@ mod tests {
         // Start in Canvas mode, enter help
         stoat.execute("c?").expect("Should enter canvas help");
 
-        // Navigate to Insert mode help
-        let action = stoat.user_input(Key::Char('i'));
-        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Insert)));
+        // Navigate to Normal mode help (Esc is bound to ChangeMode(Normal) in Canvas)
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Normal)));
 
-        // Should now show Insert mode commands
+        // Should now show Normal mode commands
         let snapshot = stoat.snapshot();
-        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Normal));
 
-        // Navigate to Visual mode help
-        let action = stoat.user_input(Key::Char('v'));
-        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Visual)));
+        // Navigate back to Canvas mode help
+        let action = stoat.user_input(Key::Char('c'));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Canvas)));
 
-        // Should now show Visual mode commands
+        // Should now show Canvas mode commands
         let snapshot = stoat.snapshot();
-        assert_eq!(snapshot.help_target_mode, Some(Mode::Visual));
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Canvas));
     }
 
     #[test]
     fn test_help_mode_escape_returns_to_original_mode() {
         let mut stoat = Stoat::new();
 
-        // Start in Canvas mode, enter help, navigate to Insert help
+        // Start in Canvas mode, enter help, navigate to Normal help
         stoat
-            .execute("c?i")
-            .expect("Should enter canvas help then navigate to insert help");
+            .execute("c?<Esc>")
+            .expect("Should enter canvas help then navigate to normal help");
 
-        // Verify we're showing Insert help but came from Canvas
+        // Verify we're showing Normal help but came from Canvas
         let snapshot = stoat.snapshot();
         assert_eq!(snapshot.mode, Mode::Help);
         assert_eq!(snapshot.previous_mode, Some(Mode::Canvas));
-        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Normal));
 
-        // Escape should return to Canvas (original mode), not Insert
+        // Escape should return to Canvas (original mode), not Normal
         let snapshot = stoat
             .execute("<Esc>")
             .expect("Should escape back to original mode");
@@ -1458,12 +1425,25 @@ mod tests {
         let action = stoat.user_input(Key::Char('a'));
         assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
 
-        // Navigate to Insert mode
-        stoat.user_input(Key::Char('i'));
+        // Navigate to Normal mode (Esc key binding exists from Canvas mode)
+        stoat.user_input(Key::Named(NamedKey::Esc));
 
-        // Now pressing 'a' should show help for InsertChar (Insert mode's default action)
-        // Actually, 'a' isn't bound in Insert mode, so it should be ignored
+        // Now pressing 'a' should be ignored since Normal mode has no 'a' binding
         let action = stoat.user_input(Key::Char('a'));
-        assert_eq!(action, None); // No binding for 'a' in Insert mode
+        assert_eq!(action, None); // No binding for 'a' in Normal mode
+    }
+
+    #[test]
+    fn test_help_single_esc_from_normal_mode() {
+        let mut stoat = Stoat::new();
+
+        // From Normal mode, enter help then immediately exit with single Esc
+        let snapshot = stoat
+            .execute("?<Esc>")
+            .expect("Should enter help then exit with single Esc");
+
+        // Should be back in Normal mode after just one Esc
+        assert_eq!(snapshot.mode, Mode::Normal);
+        assert_eq!(snapshot.help_target_mode, None);
     }
 }

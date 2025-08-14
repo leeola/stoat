@@ -70,28 +70,49 @@ impl ModalSystem {
 
         // Special handling for Help mode
         if self.current_mode == Mode::Help {
-            // Handle Esc to return to previous mode
+            // Handle Esc to return to previous mode (only if it wouldn't trigger help navigation)
             if matches!(key, Key::Named(NamedKey::Esc)) {
-                self.key_buffer.clear();
-                self.help_target_mode = None;
-                if let Some(previous_mode) = self.mode_stack.pop() {
-                    self.current_mode = previous_mode.clone();
-                    return Some(Action::ChangeMode(previous_mode));
-                } else {
-                    self.current_mode = Mode::Normal;
-                    return Some(Action::ChangeMode(Mode::Normal));
+                // Check if Esc would navigate to a mode we're already showing help for
+                let mut target_mode_for_esc = None;
+                for (mode, mode_def) in &self.config.modes {
+                    if *mode != Mode::Help {
+                        if let Some(Action::ChangeMode(target_mode)) =
+                            mode_def.bindings.get(&Key::Named(NamedKey::Esc))
+                        {
+                            target_mode_for_esc = Some(target_mode);
+                            break;
+                        }
+                    }
+                }
+
+                // If we're already showing help for the target mode, exit help mode
+                if let Some(target_mode) = target_mode_for_esc {
+                    if self.help_target_mode == Some(target_mode.clone()) {
+                        self.key_buffer.clear();
+                        self.help_target_mode = None;
+                        if let Some(previous_mode) = self.mode_stack.pop() {
+                            self.current_mode = previous_mode.clone();
+                            return Some(Action::ChangeMode(previous_mode));
+                        } else {
+                            self.current_mode = Mode::Normal;
+                            return Some(Action::ChangeMode(Mode::Normal));
+                        }
+                    }
                 }
             }
 
             // First priority: Check if this key would trigger a mode change from any mode
             // This allows navigation to any mode from help mode
-            for mode_def in self.config.modes.values() {
-                if let Some(Action::ChangeMode(target_mode)) =
-                    self.check_sequence_match(&mode_def.bindings)
-                {
-                    self.key_buffer.clear();
-                    self.help_target_mode = Some(target_mode.clone());
-                    return Some(Action::ShowModeHelp(target_mode));
+            // Exclude Help mode itself to avoid conflicts with Help mode's own bindings
+            for (mode, mode_def) in &self.config.modes {
+                if *mode != Mode::Help {
+                    if let Some(Action::ChangeMode(target_mode)) =
+                        self.check_sequence_match(&mode_def.bindings)
+                    {
+                        self.key_buffer.clear();
+                        self.help_target_mode = Some(target_mode.clone());
+                        return Some(Action::ShowModeHelp(target_mode));
+                    }
                 }
             }
 
@@ -208,8 +229,9 @@ impl ModalSystem {
             Action::ShowHelp => {
                 // Convert ShowHelp to ChangeMode(Help)
                 self.mode_stack.push(self.current_mode.clone());
+                let previous_mode = self.current_mode.clone();
                 self.current_mode = Mode::Help;
-                self.help_target_mode = None; // Reset help target when entering help
+                self.help_target_mode = Some(previous_mode); // Set to previous mode so first Esc can exit
                 return Action::ChangeMode(Mode::Help);
             },
             _ => {},
@@ -288,10 +310,10 @@ mod tests {
             modes: {
                 Normal: (
                     bindings: {
-                        Char('i'): ChangeMode(Insert),
+                        Char('c'): ChangeMode(Canvas),
                     }
                 ),
-                Insert: (
+                Canvas: (
                     bindings: {
                         Named(Esc): ChangeMode(Normal),
                     }
@@ -306,10 +328,10 @@ mod tests {
 
         assert_eq!(system.current_mode(), &Mode::Normal);
 
-        // Press 'i' to enter insert mode
-        let action = system.process_key(Key::Char('i'));
-        assert_eq!(action, Some(Action::ChangeMode(Mode::Insert)));
-        assert_eq!(system.current_mode(), &Mode::Insert);
+        // Press 'c' to enter canvas mode
+        let action = system.process_key(Key::Char('c'));
+        assert_eq!(action, Some(Action::ChangeMode(Mode::Canvas)));
+        assert_eq!(system.current_mode(), &Mode::Canvas);
 
         // Press Esc to return to normal mode
         let action = system.process_key(Key::Named(NamedKey::Esc));
@@ -323,8 +345,8 @@ mod tests {
             modes: {
                 Normal: (
                     bindings: {
-                        Sequence("dd"): DeleteLine,
-                        Char('d'): Delete,
+                        Sequence("gg"): GatherNodes,
+                        Char('g'): ShowHelp,
                     }
                 ),
             },
@@ -335,12 +357,12 @@ mod tests {
             ModalConfig::from_ron(ron_str).expect("Failed to parse modal config for sequence test");
         let mut system = ModalSystem::with_config(config);
 
-        // First 'd' should wait
-        let action = system.process_key(Key::Char('d'));
+        // First 'g' should wait
+        let action = system.process_key(Key::Char('g'));
         assert_eq!(action, None);
 
-        // Second 'd' should trigger DeleteLine
-        let action = system.process_key(Key::Char('d'));
-        assert_eq!(action, Some(Action::DeleteLine));
+        // Second 'g' should trigger GatherNodes
+        let action = system.process_key(Key::Char('g'));
+        assert_eq!(action, Some(Action::GatherNodes));
     }
 }

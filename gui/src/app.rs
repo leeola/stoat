@@ -414,58 +414,6 @@ impl App {
                     .update_from_bindings(mode.as_str(), bindings);
                 Task::none()
             },
-            Action::Move(direction) => {
-                trace!("Move {direction:?}");
-                // TODO: Implement movement in the canvas
-                Task::none()
-            },
-            Action::Delete => {
-                trace!("Delete");
-                Task::none()
-            },
-            Action::DeleteLine => {
-                trace!("Delete line");
-                Task::none()
-            },
-            Action::Yank => {
-                trace!("Yank");
-                Task::none()
-            },
-            Action::YankLine => {
-                trace!("Yank line");
-                Task::none()
-            },
-            Action::Paste => {
-                trace!("Paste");
-                Task::none()
-            },
-            Action::Jump(target) => {
-                trace!("Jump to {target:?}");
-                Task::none()
-            },
-            Action::InsertChar => {
-                trace!("Insert character");
-                // TODO: Get the actual character from the last key press
-                Task::none()
-            },
-            Action::CommandInput => {
-                trace!("Command input");
-                Task::none()
-            },
-            Action::ExecuteCommand => {
-                trace!("Execute command");
-                Task::none()
-            },
-            Action::ShowActionList => {
-                trace!("Show action list");
-                // TODO: Display available actions
-                Task::none()
-            },
-            Action::ShowCommandPalette => {
-                trace!("Show command palette");
-                // TODO: Display command palette
-                Task::none()
-            },
             Action::GatherNodes => {
                 trace!("Gather nodes in canvas");
                 // GatherNodes is now handled in core lib.rs
