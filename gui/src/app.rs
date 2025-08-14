@@ -427,10 +427,16 @@ impl App {
             },
             Action::ShowActionHelp(ref action_key) => {
                 trace!("Show action help modal for: {}", action_key);
-                // Show help for specific action
-                let extended_help = self.stoat.get_extended_help(action_key);
-                self.help_modal.set_extended_help(extended_help);
-                self.help_modal.show_action_help(action_key.clone());
+                // Show help for specific action - get action name and extended help
+                if let Some((action_name, extended_help)) = self.stoat.get_action_info(action_key) {
+                    self.help_modal.set_extended_help(Some(extended_help));
+                    self.help_modal.show_action_help(action_name);
+                } else {
+                    // Fallback to key name if action not found
+                    let extended_help = self.stoat.get_extended_help(action_key);
+                    self.help_modal.set_extended_help(extended_help);
+                    self.help_modal.show_action_help(action_key.clone());
+                }
                 Task::none()
             },
             Action::ShowModeHelp(ref mode) => {

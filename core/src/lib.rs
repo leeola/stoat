@@ -700,6 +700,14 @@ impl Stoat {
             .map(|(_, action)| action.extended_description())
     }
 
+    /// Get action information (name and extended help) for a specific key
+    pub fn get_action_info(&self, key_str: &str) -> Option<(String, String)> {
+        self.available_actions()
+            .into_iter()
+            .find(|(key, _)| key.to_string() == key_str)
+            .map(|(_, action)| (action.to_string(), action.extended_description()))
+    }
+
     /// Execute keys using Vim-like notation and return a snapshot of the resulting state
     pub fn execute(&mut self, notation: &str) -> Result<ModeSnapshot, String> {
         let keys = input::notation::parse_keys(notation)?;

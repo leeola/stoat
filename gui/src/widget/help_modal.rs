@@ -146,9 +146,18 @@ impl HelpModal {
     where
         M: 'a + Clone,
     {
-        let title = text(format!("{} Mode - Commands", self.mode_name))
-            .size(Style::TEXT_SIZE_LARGE)
-            .color(Colors::TEXT_PRIMARY);
+        let title = text(format!(
+            "Help: {} Mode",
+            self.mode_name
+                .chars()
+                .next()
+                .unwrap()
+                .to_uppercase()
+                .collect::<String>()
+                + &self.mode_name[1..]
+        ))
+        .size(Style::TEXT_SIZE_LARGE)
+        .color(Colors::TEXT_PRIMARY);
 
         let subtitle = text("Press any key to see detailed help, Esc to close")
             .size(Style::TEXT_SIZE_SMALL)
