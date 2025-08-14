@@ -37,14 +37,14 @@ pub fn convert_key(
                     } else if modifiers.alt() && !modifiers.control() && !modifiers.shift() {
                         Some(Key::Modified(ModifiedKey::Alt(ch)))
                     } else if modifiers.shift() && !modifiers.control() && !modifiers.alt() {
-                        // For shift, just use the shifted character directly
-                        Some(Key::Char(ch))
+                        // Shift modifier - create a Shift modified key
+                        Some(Key::Modified(ModifiedKey::Shift(ch)))
                     } else if modifiers.control() && modifiers.shift() && !modifiers.alt() {
                         Some(Key::Modified(ModifiedKey::CtrlShift(ch)))
                     } else if modifiers.control() && modifiers.alt() && !modifiers.shift() {
                         Some(Key::Modified(ModifiedKey::CtrlAlt(ch)))
-                    } else if !modifiers.control() && !modifiers.alt() {
-                        // No modifiers (shift is handled by the character itself)
+                    } else if !modifiers.control() && !modifiers.alt() && !modifiers.shift() {
+                        // No modifiers
                         Some(Key::Char(ch))
                     } else {
                         None

@@ -2,7 +2,7 @@ use crate::{
     input,
     widget::{
         agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
-        NodeCanvas, NodeId, NodeWidget, PositionedNode,
+        HelpModal, NodeCanvas, NodeId, NodeWidget, PositionedNode,
     },
 };
 use iced::{Element, Point, Task};
@@ -28,6 +28,8 @@ pub struct App {
     session_id: Option<String>,
     /// Command info widget
     command_info: CommandInfo,
+    /// Help modal widget
+    help_modal: HelpModal,
 }
 
 /// Application messages
@@ -136,6 +138,7 @@ impl App {
                 process_alive: false,
                 session_id: None,
                 command_info,
+                help_modal: HelpModal::new(),
             },
             init_task,
         )
@@ -149,15 +152,23 @@ impl App {
 
                 if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
                     // Convert Iced key to Stoat key
-                    if let Some(stoat_key) = input::convert_key(key, modifiers) {
+                    if let Some(stoat_key) = input::convert_key(key.clone(), modifiers) {
+                        debug!(
+                            "Converted key: {:?} in mode: {}",
+                            stoat_key,
+                            self.stoat.current_mode().as_str()
+                        );
                         // Process key through modal system
                         if let Some(action) = self.stoat.user_input(stoat_key) {
+                            debug!("Got action: {:?}", action);
                             // Handle the action
                             self.handle_action(action)
                         } else {
+                            debug!("No action for key");
                             Task::none()
                         }
                     } else {
+                        debug!("Could not convert key: {:?}", key);
                         Task::none()
                     }
                 } else {
@@ -309,7 +320,7 @@ impl App {
 
         // Get the view state from core and pass it to the node canvas for rendering
         let view_state = self.stoat.view_state();
-        let canvas = self.node_canvas.view(&view_state);
+        let canvas = self.node_canvas.view(view_state);
 
         // Get the command info view
         let command_info = self.command_info.view();
@@ -328,9 +339,14 @@ impl App {
             });
 
         // Stack canvas and command info
-        let main_content = stack![canvas, positioned_command_info]
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let mut layers = vec![canvas, positioned_command_info.into()];
+
+        // Add help modal if visible
+        if self.help_modal.is_visible() {
+            layers.push(self.help_modal.view());
+        }
+
+        let main_content = stack(layers).width(Length::Fill).height(Length::Fill);
 
         // Combine with status bar
         column![main_content, status_bar].into()
@@ -367,6 +383,31 @@ impl App {
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
                 debug!("Changed to {} mode", mode.as_str());
+
+                // Handle help mode specially
+                if mode == stoat_core::input::action::Mode::Help {
+                    // Show help modal when entering help mode
+                    let help_info = self.stoat.get_help_info();
+                    debug!("Got {} help entries for help mode", help_info.len());
+
+                    // Get the previous mode name for display
+                    let mode_name =
+                        if let Some(previous_mode) = self.stoat.modal_system().previous_mode() {
+                            previous_mode.as_str().to_string()
+                        } else {
+                            "Unknown".to_string()
+                        };
+
+                    self.help_modal.update_content(&mode_name, help_info);
+                    self.help_modal.show_basic();
+                    debug!("Help modal visible: {}", self.help_modal.is_visible());
+                } else {
+                    // Hide help modal when leaving help mode
+                    if self.help_modal.is_visible() {
+                        self.help_modal.hide();
+                    }
+                }
+
                 // Update command info with actual bindings for the new mode
                 let bindings = self.stoat.get_display_bindings();
                 self.command_info
@@ -429,6 +470,19 @@ impl App {
                 trace!("Gather nodes in canvas");
                 // GatherNodes is now handled in core lib.rs
                 // The action has already been processed by stoat.user_input()
+                Task::none()
+            },
+            Action::ShowHelp => {
+                debug!("ShowHelp action - this should have been converted to ChangeMode(Help)");
+                // This should not happen since modal system converts ShowHelp to ChangeMode(Help)
+                Task::none()
+            },
+            Action::ShowActionHelp(ref action_key) => {
+                trace!("Show action help modal for: {}", action_key);
+                // Show help for specific action
+                let extended_help = self.stoat.get_extended_help(action_key);
+                self.help_modal.set_extended_help(extended_help);
+                self.help_modal.show_action_help(action_key.clone());
                 Task::none()
             },
         }

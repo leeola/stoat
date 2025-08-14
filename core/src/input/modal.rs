@@ -1,7 +1,7 @@
 use super::{
     action::{Action, Mode},
     config::ModalConfig,
-    key::Key,
+    key::{Key, NamedKey},
 };
 use std::collections::VecDeque;
 
@@ -62,6 +62,41 @@ impl ModalSystem {
         if let Some(action) = self.check_global_binding() {
             self.key_buffer.clear();
             return Some(self.handle_action(action));
+        }
+
+        // Special handling for Help mode
+        if self.current_mode == Mode::Help {
+            // Handle Esc to return to previous mode
+            if matches!(key, Key::Named(NamedKey::Esc)) {
+                self.key_buffer.clear();
+                if let Some(previous_mode) = self.mode_stack.pop() {
+                    self.current_mode = previous_mode.clone();
+                    return Some(Action::ChangeMode(previous_mode));
+                } else {
+                    self.current_mode = Mode::Normal;
+                    return Some(Action::ChangeMode(Mode::Normal));
+                }
+            }
+
+            // For other keys, look them up in the previous mode and show action help
+            if let Some(previous_mode) = self.mode_stack.last() {
+                if let Some(mode_def) = self.config.modes.get(previous_mode) {
+                    if let Some(_action) = self.check_sequence_match(&mode_def.bindings) {
+                        self.key_buffer.clear();
+                        let key_str = match key {
+                            Key::Char(ch) => ch.to_string(),
+                            Key::Named(named) => format!("{named:?}"),
+                            Key::Modified(modified) => format!("{modified:?}"),
+                            Key::Sequence(seq) => seq.clone(),
+                        };
+                        return Some(Action::ShowActionHelp(key_str));
+                    }
+                }
+            }
+
+            // Clear buffer and ignore unrecognized keys in help mode
+            self.key_buffer.clear();
+            return None;
         }
 
         // Check current mode bindings
@@ -149,15 +184,29 @@ impl ModalSystem {
 
     /// Handle mode changes and return the action
     fn handle_action(&mut self, action: Action) -> Action {
-        if let Action::ChangeMode(new_mode) = &action {
-            self.mode_stack.push(self.current_mode.clone());
-            self.current_mode = new_mode.clone();
+        match &action {
+            Action::ChangeMode(new_mode) => {
+                self.mode_stack.push(self.current_mode.clone());
+                self.current_mode = new_mode.clone();
+            },
+            Action::ShowHelp => {
+                // Convert ShowHelp to ChangeMode(Help)
+                self.mode_stack.push(self.current_mode.clone());
+                self.current_mode = Mode::Help;
+                return Action::ChangeMode(Mode::Help);
+            },
+            _ => {},
         }
         action
     }
 
     /// Get all available actions in the current mode
     pub fn available_actions(&self) -> Vec<(&Key, &Action)> {
+        self.available_actions_for_mode(&self.current_mode)
+    }
+
+    /// Get all available actions for a specific mode
+    pub fn available_actions_for_mode(&self, mode: &Mode) -> Vec<(&Key, &Action)> {
         let mut actions = Vec::new();
 
         // Add global actions
@@ -166,13 +215,18 @@ impl ModalSystem {
         }
 
         // Add mode-specific actions
-        if let Some(mode_def) = self.config.modes.get(&self.current_mode) {
+        if let Some(mode_def) = self.config.modes.get(mode) {
             for (key, action) in &mode_def.bindings {
                 actions.push((key, action));
             }
         }
 
         actions
+    }
+
+    /// Get the previous mode from the stack (for help mode)
+    pub fn previous_mode(&self) -> Option<&Mode> {
+        self.mode_stack.last()
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::input::{
     action::{Action, Mode},
     config::{ModalConfig, ModeDefinition},
-    key::{Key, NamedKey},
+    key::{Key, ModifiedKey, NamedKey},
 };
 use std::collections::HashMap;
 
@@ -17,6 +17,8 @@ pub fn default_keymap() -> ModalConfig {
     normal_bindings.insert(Key::Char('c'), Action::ChangeMode(Mode::Canvas));
     normal_bindings.insert(Key::Named(NamedKey::Esc), Action::ExitApp);
     normal_bindings.insert(Key::Sequence("dd".to_string()), Action::DeleteLine);
+    normal_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
+    // Note: ?? sequence would need special handling since it's Shift+/ twice
 
     modes.insert(
         Mode::Normal,
@@ -29,6 +31,7 @@ pub fn default_keymap() -> ModalConfig {
     // Insert mode - for text entry
     let mut insert_bindings = HashMap::new();
     insert_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal));
+    insert_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
 
     modes.insert(
         Mode::Insert,
@@ -42,6 +45,7 @@ pub fn default_keymap() -> ModalConfig {
     let mut visual_bindings = HashMap::new();
     visual_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal));
     visual_bindings.insert(Key::Char('d'), Action::Delete);
+    visual_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
 
     modes.insert(
         Mode::Visual,
@@ -68,12 +72,25 @@ pub fn default_keymap() -> ModalConfig {
     let mut canvas_bindings = HashMap::new();
     canvas_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal));
     canvas_bindings.insert(Key::Char('a'), Action::GatherNodes);
+    canvas_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
 
     modes.insert(
         Mode::Canvas,
         ModeDefinition {
             bindings: canvas_bindings,
             default_action: None,
+        },
+    );
+
+    // Help mode - special interactive mode
+    let mut help_bindings = HashMap::new();
+    help_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal)); // This will be overridden
+
+    modes.insert(
+        Mode::Help,
+        ModeDefinition {
+            bindings: help_bindings,
+            default_action: None, // Help mode will be handled specially
         },
     );
 

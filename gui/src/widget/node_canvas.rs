@@ -11,6 +11,7 @@ pub struct NodeId(pub u64);
 
 /// The spatial container that positions widgets in world space
 /// This is now a pure presentation layer that renders from core's CanvasView
+#[derive(Default)]
 pub struct NodeCanvas {
     pub nodes: Vec<PositionedNode>,
 }
@@ -32,12 +33,6 @@ pub enum NodeWidget {
 pub enum Message {
     ChatMessage(agentic_chat::Message),
     ChatEvent(AgenticChatEvent),
-}
-
-impl Default for NodeCanvas {
-    fn default() -> Self {
-        Self { nodes: Vec::new() }
-    }
 }
 
 impl NodeCanvas {

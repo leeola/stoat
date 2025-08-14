@@ -32,4 +32,5 @@ pub mod config;
 pub mod key;
 pub mod keymap;
 pub mod modal;
+pub mod notation;
 pub mod user;

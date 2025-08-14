@@ -1,7 +1,10 @@
 /// The core implementation the [`Stoat`] editor runtime. Ie the editor minus the GUI/TUI/CLI
 /// interfaces.
 use input::{Action, Key, ModalConfig, ModalSystem, Mode, UserInput};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use view::View;
 use workspace::Workspace;
 
@@ -600,6 +603,12 @@ impl Stoat {
                     // Gather nodes into the current viewport
                     self.active.view_state_mut().center_on_selected();
                 },
+                Action::ShowHelp => {
+                    // Show help action - GUI will handle displaying modal
+                },
+                Action::ShowActionHelp(_) => {
+                    // Show action help - GUI will handle displaying modal
+                },
             }
         }
 
@@ -640,6 +649,11 @@ impl Stoat {
         self.modal_system.current_mode()
     }
 
+    /// Get access to the modal system
+    pub fn modal_system(&self) -> &input::modal::ModalSystem {
+        &self.modal_system
+    }
+
     /// Get available actions in the current mode
     pub fn available_actions(&self) -> Vec<(&Key, &Action)> {
         self.modal_system.available_actions()
@@ -671,6 +685,101 @@ impl Stoat {
         self.modal_system = ModalSystem::with_config(config);
         Ok(())
     }
+
+    /// Get help information for current mode
+    pub fn get_help_info(&self) -> Vec<(String, String, String)> {
+        // If in help mode, show actions for previous mode
+        if self.current_mode() == &input::action::Mode::Help {
+            if let Some(previous_mode) = self.modal_system.previous_mode() {
+                return self.get_help_info_for_mode(previous_mode);
+            }
+        }
+
+        self.available_actions()
+            .into_iter()
+            .map(|(key, action)| {
+                (
+                    key.to_string(),
+                    action.to_string(),
+                    action.description().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Get help information for a specific mode
+    pub fn get_help_info_for_mode(
+        &self,
+        mode: &input::action::Mode,
+    ) -> Vec<(String, String, String)> {
+        self.modal_system
+            .available_actions_for_mode(mode)
+            .into_iter()
+            .map(|(key, action)| {
+                (
+                    key.to_string(),
+                    action.to_string(),
+                    action.description().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Get extended help for a specific action
+    pub fn get_extended_help(&self, key_str: &str) -> Option<String> {
+        self.available_actions()
+            .into_iter()
+            .find(|(key, _)| key.to_string() == key_str)
+            .map(|(_, action)| action.extended_description())
+    }
+
+    /// Execute keys using Vim-like notation and return a snapshot of the resulting state
+    pub fn execute(&mut self, notation: &str) -> Result<ModeSnapshot, String> {
+        let keys = input::notation::parse_keys(notation)?;
+
+        // Execute all keys
+        for key in keys {
+            self.user_input(key);
+        }
+
+        Ok(self.snapshot())
+    }
+
+    /// Take a snapshot of current state
+    pub fn snapshot(&self) -> ModeSnapshot {
+        ModeSnapshot {
+            mode: self.current_mode().clone(),
+            commands: self.get_command_map(),
+            previous_mode: self.modal_system.previous_mode().cloned(),
+        }
+    }
+
+    /// Get command map for current state
+    fn get_command_map(&self) -> CommandMap {
+        // When in Help mode, show previous mode's commands
+        let actions = if self.current_mode() == &Mode::Help {
+            if let Some(prev_mode) = self.modal_system.previous_mode() {
+                self.modal_system.available_actions_for_mode(prev_mode)
+            } else {
+                self.available_actions()
+            }
+        } else {
+            self.available_actions()
+        };
+
+        let entries = actions
+            .into_iter()
+            .map(|(key, action)| {
+                let command = Command {
+                    action: action.clone(),
+                    description: action.description().to_string(),
+                };
+                (key.clone(), command)
+            })
+            .collect();
+
+        CommandMap { entries }
+    }
 }
 
 #[derive(Default)]
@@ -688,9 +797,103 @@ impl StoatBuilder {
 
 // Workspace -> Node <->  Link
 
+/// Snapshot of the modal state for testing
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModeSnapshot {
+    pub mode: Mode,
+    pub commands: CommandMap,
+    pub previous_mode: Option<Mode>,
+}
+
+/// Map of available commands for testing
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandMap {
+    entries: HashMap<Key, Command>,
+}
+
+/// A command with its action and description
+#[derive(Debug, Clone, PartialEq)]
+pub struct Command {
+    pub action: Action,
+    pub description: String,
+}
+
+impl CommandMap {
+    /// Check if a key exists
+    pub fn has(&self, key: &Key) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Get command for a key
+    pub fn get(&self, key: &Key) -> Option<&Command> {
+        self.entries.get(key)
+    }
+
+    /// Check if an action is bound to any key
+    pub fn has_action(&self, action: &Action) -> bool {
+        self.entries.values().any(|cmd| cmd.action == *action)
+    }
+
+    /// Get all keys that trigger an action
+    pub fn keys_for(&self, action: &Action) -> Vec<&Key> {
+        self.entries
+            .iter()
+            .filter(|(_, cmd)| cmd.action == *action)
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    /// Total number of commands
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Assert specific commands exist with correct bindings
+    pub fn assert_has(&self, expected: &[(Key, Action)]) {
+        for (key, action) in expected {
+            match self.get(key) {
+                Some(cmd) => assert_eq!(
+                    cmd.action, *action,
+                    "Key {:?} maps to {:?}, expected {:?}",
+                    key, cmd.action, action
+                ),
+                None => panic!(
+                    "Key {:?} not found in commands. Available: {:?}",
+                    key,
+                    self.entries.keys().collect::<Vec<_>>()
+                ),
+            }
+        }
+    }
+}
+
+impl ModeSnapshot {
+    /// Debug print for test failures
+    pub fn debug_print(&self) {
+        println!("=== Mode Snapshot ===");
+        println!("Current mode: {:?}", self.mode);
+        println!("Previous mode: {:?}", self.previous_mode);
+        println!("Commands ({} total):", self.commands.len());
+
+        let mut sorted: Vec<_> = self.commands.entries.iter().collect();
+        sorted.sort_by_key(|(k, _)| format!("{:?}", k));
+
+        for (key, cmd) in sorted {
+            println!("  {:?} -> {:?}", key, cmd.action);
+        }
+        println!("===================");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input::{ModifiedKey, NamedKey};
     use tempfile::TempDir;
 
     #[test]
@@ -990,5 +1193,98 @@ mod tests {
 
         // Verify the state directory structure is correct
         assert!(custom_state_dir.exists());
+    }
+
+    // Test reproducing the help mode bug
+    #[test]
+    fn test_help_mode_shows_canvas_commands() {
+        let mut stoat = Stoat::new();
+
+        // Enter Canvas mode then Help mode using either notation:
+        // "c?" (convenience) or "c<S-/>" (explicit)
+        let snapshot = stoat.execute("c?").unwrap();
+
+        // Verify we're in Help mode
+        assert_eq!(snapshot.mode, Mode::Help);
+
+        // Verify previous mode is Canvas
+        assert_eq!(snapshot.previous_mode, Some(Mode::Canvas));
+
+        // DEBUG: Print what we actually get
+        snapshot.debug_print();
+
+        // Verify we have Canvas commands visible
+        let commands = &snapshot.commands;
+
+        // Test specific Canvas commands are present with correct actions
+        commands.assert_has(&[
+            (Key::Char('a'), Action::GatherNodes),
+            (Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal)),
+            (Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp),
+        ]);
+
+        // Also verify count
+        assert!(
+            commands.len() >= 3,
+            "Expected at least 3 Canvas commands, got {}",
+            commands.len()
+        );
+    }
+
+    #[test]
+    fn test_help_mode_interactive_key_lookup() {
+        let mut stoat = Stoat::new();
+
+        // Enter help from Canvas
+        let snapshot = stoat.execute("c?").unwrap();
+        assert_eq!(snapshot.mode, Mode::Help);
+
+        // Press 'a' in help mode - should trigger ShowActionHelp
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(
+            action,
+            Some(Action::ShowActionHelp("a".to_string())),
+            "Key 'a' in Help mode should show action help"
+        );
+    }
+
+    #[test]
+    fn test_help_escape_returns_to_previous() {
+        let mut stoat = Stoat::new();
+
+        // c? enters Canvas then Help
+        // <Esc> should return to Canvas, not Normal
+        let snapshot = stoat.execute("c?<Esc>").unwrap();
+
+        assert_eq!(
+            snapshot.mode,
+            Mode::Canvas,
+            "Esc from Help should return to Canvas"
+        );
+
+        // Verify Canvas commands are back
+        snapshot
+            .commands
+            .assert_has(&[(Key::Char('a'), Action::GatherNodes)]);
+    }
+
+    #[test]
+    fn test_snapshot_command_queries() {
+        let mut stoat = Stoat::new();
+
+        // Get Canvas snapshot
+        let canvas = stoat.execute("c").unwrap();
+
+        // Test various query methods
+        assert!(canvas.commands.has(&Key::Char('a')));
+        assert!(canvas.commands.has_action(&Action::GatherNodes));
+
+        let gather_keys = canvas.commands.keys_for(&Action::GatherNodes);
+        assert_eq!(gather_keys, vec![&Key::Char('a')]);
+
+        // Test command details
+        let cmd = canvas.commands.get(&Key::Char('a')).unwrap();
+        assert_eq!(cmd.action, Action::GatherNodes);
+        assert!(cmd.description.contains("Gather"));
     }
 }

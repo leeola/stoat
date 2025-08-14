@@ -53,8 +53,7 @@ mod e2e_tests {
         let content = response.expect("No assistant message received");
         assert!(
             content.contains("4"),
-            "Expected response to contain '4', got: {}",
-            content
+            "Expected response to contain '4', got: {content}"
         );
 
         // Clean shutdown
@@ -93,8 +92,7 @@ mod e2e_tests {
         let content = response.expect("Expected to receive a response");
         assert!(
             content.contains("20"),
-            "Expected response to contain '20', got: {}",
-            content
+            "Expected response to contain '20', got: {content}"
         );
 
         // Test is_alive
@@ -139,8 +137,7 @@ mod e2e_tests {
 
         assert!(
             response1.contains("2"),
-            "Expected response to contain '2', got: {}",
-            response1
+            "Expected response to contain '2', got: {response1}"
         );
 
         // Switch to a different model
@@ -173,8 +170,7 @@ mod e2e_tests {
 
         assert!(
             response2.contains("6"),
-            "Expected response to contain '6', got: {}",
-            response2
+            "Expected response to contain '6', got: {response2}"
         );
 
         // Verify process is still alive
