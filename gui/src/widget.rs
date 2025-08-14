@@ -9,7 +9,7 @@ pub mod theme;
 
 pub use agentic_chat::{AgenticChat, AgenticChatEvent, AgenticMessage};
 pub use command_info::CommandInfo;
-pub use help_modal::{HelpModal, HelpState};
+pub use help_modal::HelpModal;
 pub use node::Node;
 pub use node_canvas::{NodeCanvas, NodeId, NodeWidget, PositionedNode};
 pub use status_bar::StatusBar;

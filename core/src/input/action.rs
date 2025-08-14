@@ -18,6 +18,65 @@ pub enum Action {
     ShowModeHelp(Mode),
 }
 
+/// Help system state for GUI rendering
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelpDisplayState {
+    /// Whether help should be visible
+    pub visible: bool,
+    /// Type of help being displayed
+    pub help_type: HelpType,
+    /// Name of the mode or action being shown
+    pub title: String,
+    /// List of commands to display (key, action, description)
+    pub commands: Vec<(String, String, String)>,
+    /// Extended help text for action-specific help
+    pub extended_help: Option<String>,
+}
+
+/// Type of help being displayed
+#[derive(Debug, Clone, PartialEq)]
+pub enum HelpType {
+    /// Basic mode help showing key bindings
+    Mode,
+    /// Extended help with detailed descriptions
+    ExtendedMode,
+    /// Help for a specific action
+    Action,
+}
+
+impl Default for HelpDisplayState {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            help_type: HelpType::Mode,
+            title: String::new(),
+            commands: Vec::new(),
+            extended_help: None,
+        }
+    }
+}
+
+/// Command info display state for GUI rendering
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandInfoState {
+    /// Whether command info should be visible
+    pub visible: bool,
+    /// Current mode name
+    pub mode_name: String,
+    /// List of key bindings to display (key, description)
+    pub commands: Vec<(String, String)>,
+}
+
+impl Default for CommandInfoState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            mode_name: String::new(),
+            commands: Vec::new(),
+        }
+    }
+}
+
 /// Editor modes
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Mode {

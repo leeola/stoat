@@ -4,118 +4,31 @@ use iced::{
     widget::{column, container, row, scrollable, text, Column, Space},
     Background, Border, Element, Length, Padding,
 };
+use stoat_core::input::{HelpDisplayState, HelpType};
 
-/// Help modal state
-#[derive(Debug, Clone, PartialEq)]
-pub enum HelpState {
-    /// No help modal shown
-    Hidden,
-    /// Basic help showing key bindings
-    Basic,
-    /// Extended help with detailed descriptions
-    Extended,
-    /// Extended help for a specific action
-    ActionSpecific(String),
-}
-
-/// Help modal widget
-pub struct HelpModal {
-    state: HelpState,
-    commands: Vec<CommandHelp>,
-    mode_name: String,
-    extended_help: Option<String>,
-}
-
-/// A command with help information
-#[derive(Debug, Clone)]
-pub struct CommandHelp {
-    pub key: String,
-    pub action: String,
-    pub description: String,
-}
-
-impl Default for HelpModal {
-    fn default() -> Self {
-        Self {
-            state: HelpState::Hidden,
-            commands: Vec::new(),
-            mode_name: String::new(),
-            extended_help: None,
-        }
-    }
-}
+/// Help modal widget - purely presentational, no internal state
+pub struct HelpModal;
 
 impl HelpModal {
     /// Create a new help modal
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Update help content
-    pub fn update_content(&mut self, mode: &str, commands: Vec<(String, String, String)>) {
-        self.mode_name = mode.to_string();
-        self.commands = commands
-            .into_iter()
-            .map(|(key, action, description)| CommandHelp {
-                key,
-                action,
-                description,
-            })
-            .collect();
-    }
-
-    /// Set extended help text
-    pub fn set_extended_help(&mut self, help_text: Option<String>) {
-        self.extended_help = help_text;
-    }
-
-    /// Show basic help
-    pub fn show_basic(&mut self) {
-        self.state = HelpState::Basic;
-    }
-
-    /// Show extended help
-    pub fn show_extended(&mut self) {
-        self.state = HelpState::Extended;
-    }
-
-    /// Show help for specific action
-    pub fn show_action_help(&mut self, action: String) {
-        self.state = HelpState::ActionSpecific(action);
-    }
-
-    /// Hide the modal
-    pub fn hide(&mut self) {
-        self.state = HelpState::Hidden;
-    }
-
-    /// Check if modal is visible
-    pub fn is_visible(&self) -> bool {
-        self.state != HelpState::Hidden
-    }
-
-    /// Get current state
-    pub fn state(&self) -> &HelpState {
-        &self.state
+        Self
     }
 
     /// Create the view for this widget
-    pub fn view<'a, M>(&'a self) -> Element<'a, M>
+    pub fn view<M>(help_state: HelpDisplayState) -> Element<'static, M>
     where
-        M: 'a + Clone,
+        M: Clone + 'static,
     {
-        if !self.is_visible() {
+        if !help_state.visible {
             return Space::new(0, 0).into();
         }
 
-        // Create modal background overlay (not needed, we'll use the modal itself)
-
-        // Create modal content
-        let content = match &self.state {
-            HelpState::Hidden => return Space::new(0, 0).into(),
-            HelpState::Basic => self.create_basic_help(),
-            HelpState::Extended => self.create_extended_help(),
-            HelpState::ActionSpecific(action) => self.create_action_help(action),
+        // Create modal content based on help type
+        let content = match help_state.help_type {
+            HelpType::Mode => Self::create_mode_help(help_state.clone()),
+            HelpType::ExtendedMode => Self::create_extended_mode_help(help_state.clone()),
+            HelpType::Action => Self::create_action_help(help_state),
         };
 
         // Center the modal
@@ -142,22 +55,13 @@ impl HelpModal {
             .into()
     }
 
-    fn create_basic_help<'a, M>(&'a self) -> Element<'a, M>
+    fn create_mode_help<M>(help_state: HelpDisplayState) -> Element<'static, M>
     where
-        M: 'a + Clone,
+        M: Clone + 'static,
     {
-        let title = text(format!(
-            "Help: {} Mode",
-            self.mode_name
-                .chars()
-                .next()
-                .unwrap()
-                .to_uppercase()
-                .collect::<String>()
-                + &self.mode_name[1..]
-        ))
-        .size(Style::TEXT_SIZE_LARGE)
-        .color(Colors::TEXT_PRIMARY);
+        let title = text(format!("Help: {}", help_state.title))
+            .size(Style::TEXT_SIZE_LARGE)
+            .color(Colors::TEXT_PRIMARY);
 
         let subtitle = text("Press any key to see detailed help, Esc to close")
             .size(Style::TEXT_SIZE_SMALL)
@@ -165,12 +69,12 @@ impl HelpModal {
 
         let mut commands_column = Column::new().spacing(8);
 
-        for cmd in &self.commands {
-            let key_text = text(&cmd.key)
+        for (key, action, _description) in help_state.commands {
+            let key_text = text(key)
                 .size(Style::TEXT_SIZE_REGULAR)
                 .color(Colors::ACCENT_PRIMARY);
 
-            let action_text = text(&cmd.action)
+            let action_text = text(action)
                 .size(Style::TEXT_SIZE_REGULAR)
                 .color(Colors::TEXT_PRIMARY);
 
@@ -189,11 +93,11 @@ impl HelpModal {
             .into()
     }
 
-    fn create_extended_help<'a, M>(&'a self) -> Element<'a, M>
+    fn create_extended_mode_help<M>(help_state: HelpDisplayState) -> Element<'static, M>
     where
-        M: 'a + Clone,
+        M: Clone + 'static,
     {
-        let title = text(format!("{} Mode - Extended Help", self.mode_name))
+        let title = text(format!("{} - Extended Help", help_state.title))
             .size(Style::TEXT_SIZE_LARGE)
             .color(Colors::TEXT_PRIMARY);
 
@@ -203,16 +107,16 @@ impl HelpModal {
 
         let mut commands_column = Column::new().spacing(16);
 
-        for cmd in &self.commands {
-            let key_text = text(&cmd.key)
+        for (key, action, description) in help_state.commands {
+            let key_text = text(key)
                 .size(Style::TEXT_SIZE_REGULAR)
                 .color(Colors::ACCENT_PRIMARY);
 
-            let action_text = text(&cmd.action)
+            let action_text = text(action)
                 .size(Style::TEXT_SIZE_REGULAR)
                 .color(Colors::TEXT_PRIMARY);
 
-            let description_text = text(&cmd.description)
+            let description_text = text(description)
                 .size(Style::TEXT_SIZE_SMALL)
                 .color(Colors::TEXT_SECONDARY);
 
@@ -239,11 +143,11 @@ impl HelpModal {
             .into()
     }
 
-    fn create_action_help<'a, M>(&'a self, action: &str) -> Element<'a, M>
+    fn create_action_help<M>(help_state: HelpDisplayState) -> Element<'static, M>
     where
-        M: 'a + Clone,
+        M: Clone + 'static,
     {
-        let title = text(format!("Help: {action}"))
+        let title = text(help_state.title.clone())
             .size(Style::TEXT_SIZE_LARGE)
             .color(Colors::TEXT_PRIMARY);
 
@@ -251,7 +155,7 @@ impl HelpModal {
             .size(Style::TEXT_SIZE_SMALL)
             .color(Colors::TEXT_SECONDARY);
 
-        let help_content = if let Some(ref help_text) = self.extended_help {
+        let help_content = if let Some(help_text) = help_state.extended_help {
             text(help_text)
                 .size(Style::TEXT_SIZE_REGULAR)
                 .color(Colors::TEXT_PRIMARY)

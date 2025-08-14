@@ -1,6 +1,9 @@
 /// The core implementation the [`Stoat`] editor runtime. Ie the editor minus the GUI/TUI/CLI
 /// interfaces.
-use input::{Action, Key, ModalConfig, ModalSystem, Mode, UserInput};
+use input::{
+    Action, CommandInfoState, HelpDisplayState, HelpType, Key, ModalConfig, ModalSystem, Mode,
+    UserInput,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -706,6 +709,81 @@ impl Stoat {
             .into_iter()
             .find(|(key, _)| key.to_string() == key_str)
             .map(|(_, action)| (action.to_string(), action.extended_description()))
+    }
+
+    /// Get complete help display state for GUI rendering
+    pub fn get_help_state(&self) -> HelpDisplayState {
+        // Help is visible when in Help mode
+        let visible = self.current_mode() == &Mode::Help;
+
+        if !visible {
+            return HelpDisplayState::default();
+        }
+
+        // Determine what mode's help we're showing
+        let target_mode = self
+            .modal_system
+            .help_target_mode()
+            .or_else(|| self.modal_system.previous_mode())
+            .unwrap_or(&Mode::Normal);
+
+        // Get the commands for the target mode
+        let commands = self.get_help_info_for_mode(target_mode);
+
+        // Check if we're showing action-specific help
+        if self.modal_system.showing_action_help() {
+            if let Some(action_key) = self.modal_system.current_action_help() {
+                let (action_name, extended_help) = self
+                    .get_action_info(action_key)
+                    .unwrap_or_else(|| (action_key.to_string(), "No help available".to_string()));
+
+                HelpDisplayState {
+                    visible: true,
+                    help_type: HelpType::Action,
+                    title: format!("Help: {}", action_name),
+                    commands,
+                    extended_help: Some(extended_help),
+                }
+            } else {
+                // Fallback if no action is tracked
+                HelpDisplayState {
+                    visible: true,
+                    help_type: HelpType::Action,
+                    title: "Action Help".to_string(),
+                    commands,
+                    extended_help: Some("No specific action help available".to_string()),
+                }
+            }
+        } else {
+            HelpDisplayState {
+                visible: true,
+                help_type: HelpType::Mode,
+                title: format!(
+                    "{} Mode",
+                    target_mode
+                        .as_str()
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .to_uppercase()
+                        .collect::<String>()
+                        + &target_mode.as_str()[1..]
+                ),
+                commands,
+                extended_help: None,
+            }
+        }
+    }
+
+    /// Get command info display state for GUI rendering
+    pub fn get_command_info_state(&self) -> CommandInfoState {
+        let bindings = self.get_display_bindings();
+
+        CommandInfoState {
+            visible: true,
+            mode_name: self.current_mode().as_str().to_string(),
+            commands: bindings.into_iter().take(5).collect(), // Limit to 5 most relevant
+        }
     }
 
     /// Execute keys using Vim-like notation and return a snapshot of the resulting state
@@ -1433,8 +1511,13 @@ mod tests {
         let action = stoat.user_input(Key::Char('a'));
         assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
 
-        // Navigate to Normal mode (Esc key binding exists from Canvas mode)
-        stoat.user_input(Key::Named(NamedKey::Esc));
+        // Escape from action help should return to Canvas mode help
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Canvas)));
+
+        // Navigate to Normal mode help (Canvas's Esc binding)
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Normal)));
 
         // Now pressing 'a' should be ignored since Normal mode has no 'a' binding
         let action = stoat.user_input(Key::Char('a'));
@@ -1453,5 +1536,48 @@ mod tests {
         // Should be back in Normal mode after just one Esc
         assert_eq!(snapshot.mode, Mode::Normal);
         assert_eq!(snapshot.help_target_mode, None);
+    }
+
+    #[test]
+    fn test_action_help_esc_behavior() {
+        let mut stoat = Stoat::new();
+
+        // Navigate to Canvas help: ?c
+        stoat.execute("?c").expect("Should enter Canvas help");
+
+        // Show action help: a
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
+
+        // First Esc should return to Canvas help
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Canvas)));
+
+        // Second Esc should navigate to Normal help (Canvas's Esc binding)
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Normal)));
+    }
+
+    #[test]
+    fn test_action_help_esc_with_extra_action() {
+        let mut stoat = Stoat::new();
+
+        // Same sequence as the failing test
+        stoat.execute("?c").expect("Should enter Canvas help");
+
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
+
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Canvas)));
+
+        // Press 'a' again (this is the extra step in the failing test)
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
+
+        // Now Esc again
+        let action = stoat.user_input(Key::Named(NamedKey::Esc));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Canvas))); // This is what's actually
+                                                                      // happening
     }
 }

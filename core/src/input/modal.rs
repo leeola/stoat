@@ -19,6 +19,12 @@ pub struct ModalSystem {
     /// When in help mode, which mode's help is being shown
     help_target_mode: Option<Mode>,
 
+    /// Whether we're currently showing action-specific help
+    showing_action_help: bool,
+
+    /// The current action being shown in action help (if any)
+    current_action_help: Option<String>,
+
     /// Buffer for multi-key sequences
     key_buffer: VecDeque<Key>,
 
@@ -43,6 +49,8 @@ impl ModalSystem {
             current_mode: initial_mode,
             mode_stack: Vec::new(),
             help_target_mode: None,
+            showing_action_help: false,
+            current_action_help: None,
             key_buffer: VecDeque::new(),
             sequence_timeout: 30, // About 0.5 seconds at 60fps
             ticks_since_key: 0,
@@ -70,6 +78,24 @@ impl ModalSystem {
 
         // Special handling for Help mode
         if self.current_mode == Mode::Help {
+            // Handle Esc when showing action help - return to mode help
+            if matches!(key, Key::Named(NamedKey::Esc)) && self.showing_action_help {
+                self.key_buffer.clear();
+                self.showing_action_help = false;
+                self.current_action_help = None;
+                // Return to showing the current help target mode
+                if let Some(target_mode) = self.help_target_mode.clone() {
+                    return Some(Action::ShowModeHelp(target_mode));
+                } else {
+                    // Fallback to previous mode if no target set
+                    if let Some(previous_mode) = self.mode_stack.last() {
+                        return Some(Action::ShowModeHelp(previous_mode.clone()));
+                    } else {
+                        return Some(Action::ShowModeHelp(Mode::Normal));
+                    }
+                }
+            }
+
             // Handle Esc to return to previous mode (only if it wouldn't trigger help navigation)
             if matches!(key, Key::Named(NamedKey::Esc)) {
                 // Check if Esc would navigate to a mode we're already showing help for
@@ -90,6 +116,8 @@ impl ModalSystem {
                     if self.help_target_mode == Some(target_mode.clone()) {
                         self.key_buffer.clear();
                         self.help_target_mode = None;
+                        self.showing_action_help = false;
+                        self.current_action_help = None;
                         if let Some(previous_mode) = self.mode_stack.pop() {
                             self.current_mode = previous_mode.clone();
                             return Some(Action::ChangeMode(previous_mode));
@@ -111,6 +139,8 @@ impl ModalSystem {
                     {
                         self.key_buffer.clear();
                         self.help_target_mode = Some(target_mode.clone());
+                        self.showing_action_help = false;
+                        self.current_action_help = None;
                         return Some(Action::ShowModeHelp(target_mode));
                     }
                 }
@@ -126,7 +156,9 @@ impl ModalSystem {
             if let Some(mode_def) = self.config.modes.get(display_mode) {
                 if let Some(_action) = self.check_sequence_match(&mode_def.bindings) {
                     self.key_buffer.clear();
+                    self.showing_action_help = true;
                     let key_str = key.to_string();
+                    self.current_action_help = Some(key_str.clone());
                     return Some(Action::ShowActionHelp(key_str));
                 }
             }
@@ -225,6 +257,11 @@ impl ModalSystem {
             Action::ChangeMode(new_mode) => {
                 self.mode_stack.push(self.current_mode.clone());
                 self.current_mode = new_mode.clone();
+                // Reset action help when changing modes
+                if *new_mode != Mode::Help {
+                    self.showing_action_help = false;
+                    self.current_action_help = None;
+                }
             },
             Action::ShowHelp => {
                 // Convert ShowHelp to ChangeMode(Help)
@@ -232,6 +269,8 @@ impl ModalSystem {
                 let previous_mode = self.current_mode.clone();
                 self.current_mode = Mode::Help;
                 self.help_target_mode = Some(previous_mode); // Set to previous mode so first Esc can exit
+                self.showing_action_help = false; // Reset action help flag when entering help
+                self.current_action_help = None;
                 return Action::ChangeMode(Mode::Help);
             },
             _ => {},
@@ -281,6 +320,16 @@ impl ModalSystem {
     /// Get the help target mode (which mode's help is being shown)
     pub fn help_target_mode(&self) -> Option<&Mode> {
         self.help_target_mode.as_ref()
+    }
+
+    /// Check if currently showing action-specific help
+    pub fn showing_action_help(&self) -> bool {
+        self.showing_action_help
+    }
+
+    /// Get the current action being shown in help (if any)
+    pub fn current_action_help(&self) -> Option<&str> {
+        self.current_action_help.as_deref()
     }
 }
 

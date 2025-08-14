@@ -21,7 +21,7 @@
 //! The architecture supports adding this without breaking changes - bindings
 //! will be able to include conditions that must be met for activation.
 
-pub use action::{Action, Mode};
+pub use action::{Action, CommandInfoState, HelpDisplayState, HelpType, Mode};
 pub use config::{ModalConfig, ModeDefinition};
 pub use key::{Key, ModifiedKey, NamedKey};
 pub use modal::ModalSystem;

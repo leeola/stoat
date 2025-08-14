@@ -26,10 +26,6 @@ pub struct App {
     process_alive: bool,
     /// Session ID for display
     session_id: Option<String>,
-    /// Command info widget
-    command_info: CommandInfo,
-    /// Help modal widget
-    help_modal: HelpModal,
 }
 
 /// Application messages
@@ -98,11 +94,6 @@ impl App {
 
         debug!("Created node canvas with chat at position (400, 100)");
 
-        // Initialize command info widget with actual bindings
-        let mut command_info = CommandInfo::new();
-        let bindings = stoat.get_display_bindings();
-        command_info.update_from_bindings(stoat.current_mode().as_str(), bindings);
-
         // Initialize ClaudeCode asynchronously
         let claude = Arc::new(Mutex::new(None));
         let claude_arc = Arc::clone(&claude);
@@ -137,8 +128,6 @@ impl App {
                 chat_node_id,
                 process_alive: false,
                 session_id: None,
-                command_info,
-                help_modal: HelpModal::new(),
             },
             init_task,
         )
@@ -322,8 +311,9 @@ impl App {
         let view_state = self.stoat.view_state();
         let canvas = self.node_canvas.view(view_state);
 
-        // Get the command info view
-        let command_info = self.command_info.view();
+        // Get command info state and create view
+        let command_info_state = self.stoat.get_command_info_state();
+        let command_info = CommandInfo::view(command_info_state);
 
         // Position command info to appear as extension of status bar
         let positioned_command_info = container(command_info)
@@ -338,12 +328,15 @@ impl App {
                 left: 0.0,
             });
 
+        // Get help state for lifetime management
+        let help_state = self.stoat.get_help_state();
+
         // Stack canvas and command info
         let mut layers = vec![canvas, positioned_command_info.into()];
 
         // Add help modal if visible
-        if self.help_modal.is_visible() {
-            layers.push(self.help_modal.view());
+        if help_state.visible {
+            layers.push(HelpModal::view(help_state));
         }
 
         let main_content = stack(layers).width(Length::Fill).height(Length::Fill);
@@ -383,35 +376,6 @@ impl App {
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
                 debug!("Changed to {} mode", mode.as_str());
-
-                // Handle help mode specially
-                if mode == stoat_core::input::action::Mode::Help {
-                    // Show help modal when entering help mode
-                    let help_info = self.stoat.get_help_info();
-                    debug!("Got {} help entries for help mode", help_info.len());
-
-                    // Get the previous mode name for display
-                    let mode_name =
-                        if let Some(previous_mode) = self.stoat.modal_system().previous_mode() {
-                            previous_mode.as_str().to_string()
-                        } else {
-                            "Unknown".to_string()
-                        };
-
-                    self.help_modal.update_content(&mode_name, help_info);
-                    self.help_modal.show_basic();
-                    debug!("Help modal visible: {}", self.help_modal.is_visible());
-                } else {
-                    // Hide help modal when leaving help mode
-                    if self.help_modal.is_visible() {
-                        self.help_modal.hide();
-                    }
-                }
-
-                // Update command info with actual bindings for the new mode
-                let bindings = self.stoat.get_display_bindings();
-                self.command_info
-                    .update_from_bindings(mode.as_str(), bindings);
                 Task::none()
             },
             Action::GatherNodes => {
@@ -425,31 +389,10 @@ impl App {
                 // This should not happen since modal system converts ShowHelp to ChangeMode(Help)
                 Task::none()
             },
-            Action::ShowActionHelp(ref action_key) => {
-                trace!("Show action help modal for: {}", action_key);
-                // Show help for specific action - get action name and extended help
-                if let Some((action_name, extended_help)) = self.stoat.get_action_info(action_key) {
-                    self.help_modal.set_extended_help(Some(extended_help));
-                    self.help_modal.show_action_help(action_name);
-                } else {
-                    // Fallback to key name if action not found
-                    let extended_help = self.stoat.get_extended_help(action_key);
-                    self.help_modal.set_extended_help(extended_help);
-                    self.help_modal.show_action_help(action_key.clone());
-                }
-                Task::none()
-            },
-            Action::ShowModeHelp(ref mode) => {
-                debug!("ShowModeHelp action for {} mode", mode.as_str());
-                // Update help modal to show help for the specified mode
-                let help_info = self.stoat.get_help_info();
-                self.help_modal.update_content(mode.as_str(), help_info);
-
-                // Keep the help modal visible and in basic state
-                if !self.help_modal.is_visible() {
-                    self.help_modal.show_basic();
-                }
-
+            Action::ShowActionHelp(_) | Action::ShowModeHelp(_) => {
+                // These actions are now handled purely by the core state management
+                // The view method automatically shows the correct help based on get_help_state()
+                debug!("Help action handled by core state management");
                 Task::none()
             },
         }
