@@ -609,6 +609,9 @@ impl Stoat {
                 Action::ShowActionHelp(_) => {
                     // Show action help - GUI will handle displaying modal
                 },
+                Action::ShowModeHelp(_) => {
+                    // Show mode help - GUI will handle displaying modal
+                },
             }
         }
 
@@ -688,8 +691,13 @@ impl Stoat {
 
     /// Get help information for current mode
     pub fn get_help_info(&self) -> Vec<(String, String, String)> {
-        // If in help mode, show actions for previous mode
+        // If in help mode, show actions for the targeted mode or previous mode
         if self.current_mode() == &Mode::Help {
+            // First check if we've navigated to a specific mode's help
+            if let Some(target_mode) = self.modal_system.help_target_mode() {
+                return self.get_help_info_for_mode(target_mode);
+            }
+            // Fall back to previous mode if no target set
             if let Some(previous_mode) = self.modal_system.previous_mode() {
                 return self.get_help_info_for_mode(previous_mode);
             }
@@ -748,21 +756,14 @@ impl Stoat {
             mode: self.current_mode().clone(),
             commands: self.get_command_map(),
             previous_mode: self.modal_system.previous_mode().cloned(),
+            help_target_mode: self.modal_system.help_target_mode().cloned(),
         }
     }
 
     /// Get command map for current state
     fn get_command_map(&self) -> CommandMap {
-        // When in Help mode, show previous mode's commands
-        let actions = if self.current_mode() == &Mode::Help {
-            if let Some(prev_mode) = self.modal_system.previous_mode() {
-                self.modal_system.available_actions_for_mode(prev_mode)
-            } else {
-                self.available_actions()
-            }
-        } else {
-            self.available_actions()
-        };
+        // The available_actions method now handles help mode logic internally
+        let actions = self.available_actions();
 
         let entries = actions
             .into_iter()
@@ -800,6 +801,7 @@ pub struct ModeSnapshot {
     pub mode: Mode,
     pub commands: CommandMap,
     pub previous_mode: Option<Mode>,
+    pub help_target_mode: Option<Mode>,
 }
 
 /// Map of available commands for testing
@@ -1348,5 +1350,120 @@ mod tests {
             Some(Action::ShowActionHelp("?".to_string())),
             "ShowActionHelp should use friendly format '?' not 'Shift(/)'"
         );
+    }
+
+    #[test]
+    fn test_help_mode_navigation_to_canvas() {
+        let mut stoat = Stoat::new();
+
+        // Enter help from Normal mode, then navigate to Canvas help
+        let snapshot = stoat
+            .execute("?c")
+            .expect("Should execute normal help then canvas navigation");
+
+        // Should be in help mode
+        assert_eq!(snapshot.mode, Mode::Help);
+
+        // Should be showing Canvas mode help
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Canvas));
+
+        // Should have Canvas commands visible
+        snapshot.commands.assert_has(&[
+            (Key::Char('a'), Action::GatherNodes),
+            (Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal)),
+            (Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp),
+        ]);
+    }
+
+    #[test]
+    fn test_help_mode_navigation_to_insert() {
+        let mut stoat = Stoat::new();
+
+        // Enter help from Normal mode, then navigate to Insert help
+        let snapshot = stoat
+            .execute("?i")
+            .expect("Should execute normal help then insert navigation");
+
+        // Should be in help mode
+        assert_eq!(snapshot.mode, Mode::Help);
+
+        // Should be showing Insert mode help
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+
+        // Should have Insert commands visible
+        snapshot.commands.assert_has(&[
+            (Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal)),
+            (Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp),
+        ]);
+    }
+
+    #[test]
+    fn test_help_mode_navigation_between_modes() {
+        let mut stoat = Stoat::new();
+
+        // Start in Canvas mode, enter help
+        stoat.execute("c?").expect("Should enter canvas help");
+
+        // Navigate to Insert mode help
+        let action = stoat.user_input(Key::Char('i'));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Insert)));
+
+        // Should now show Insert mode commands
+        let snapshot = stoat.snapshot();
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+
+        // Navigate to Visual mode help
+        let action = stoat.user_input(Key::Char('v'));
+        assert_eq!(action, Some(Action::ShowModeHelp(Mode::Visual)));
+
+        // Should now show Visual mode commands
+        let snapshot = stoat.snapshot();
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Visual));
+    }
+
+    #[test]
+    fn test_help_mode_escape_returns_to_original_mode() {
+        let mut stoat = Stoat::new();
+
+        // Start in Canvas mode, enter help, navigate to Insert help
+        stoat
+            .execute("c?i")
+            .expect("Should enter canvas help then navigate to insert help");
+
+        // Verify we're showing Insert help but came from Canvas
+        let snapshot = stoat.snapshot();
+        assert_eq!(snapshot.mode, Mode::Help);
+        assert_eq!(snapshot.previous_mode, Some(Mode::Canvas));
+        assert_eq!(snapshot.help_target_mode, Some(Mode::Insert));
+
+        // Escape should return to Canvas (original mode), not Insert
+        let snapshot = stoat
+            .execute("<Esc>")
+            .expect("Should escape back to original mode");
+
+        assert_eq!(snapshot.mode, Mode::Canvas);
+        assert_eq!(snapshot.help_target_mode, None);
+    }
+
+    #[test]
+    fn test_help_mode_action_lookup_in_targeted_mode() {
+        let mut stoat = Stoat::new();
+
+        // Enter Normal help, navigate to Canvas help
+        stoat
+            .execute("?c")
+            .expect("Should enter help and navigate to canvas");
+
+        // Press 'a' which should show help for GatherNodes (Canvas action)
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(action, Some(Action::ShowActionHelp("a".to_string())));
+
+        // Navigate to Insert mode
+        stoat.user_input(Key::Char('i'));
+
+        // Now pressing 'a' should show help for InsertChar (Insert mode's default action)
+        // Actually, 'a' isn't bound in Insert mode, so it should be ignored
+        let action = stoat.user_input(Key::Char('a'));
+        assert_eq!(action, None); // No binding for 'a' in Insert mode
     }
 }

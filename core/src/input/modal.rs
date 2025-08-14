@@ -16,6 +16,9 @@ pub struct ModalSystem {
     /// Mode history for returning to previous modes
     mode_stack: Vec<Mode>,
 
+    /// When in help mode, which mode's help is being shown
+    help_target_mode: Option<Mode>,
+
     /// Buffer for multi-key sequences
     key_buffer: VecDeque<Key>,
 
@@ -39,6 +42,7 @@ impl ModalSystem {
             config,
             current_mode: initial_mode,
             mode_stack: Vec::new(),
+            help_target_mode: None,
             key_buffer: VecDeque::new(),
             sequence_timeout: 30, // About 0.5 seconds at 60fps
             ticks_since_key: 0,
@@ -69,6 +73,7 @@ impl ModalSystem {
             // Handle Esc to return to previous mode
             if matches!(key, Key::Named(NamedKey::Esc)) {
                 self.key_buffer.clear();
+                self.help_target_mode = None;
                 if let Some(previous_mode) = self.mode_stack.pop() {
                     self.current_mode = previous_mode.clone();
                     return Some(Action::ChangeMode(previous_mode));
@@ -78,14 +83,30 @@ impl ModalSystem {
                 }
             }
 
-            // For other keys, look them up in the previous mode and show action help
-            if let Some(previous_mode) = self.mode_stack.last() {
-                if let Some(mode_def) = self.config.modes.get(previous_mode) {
-                    if let Some(_action) = self.check_sequence_match(&mode_def.bindings) {
-                        self.key_buffer.clear();
-                        let key_str = key.to_string();
-                        return Some(Action::ShowActionHelp(key_str));
-                    }
+            // First priority: Check if this key would trigger a mode change from any mode
+            // This allows navigation to any mode from help mode
+            for mode_def in self.config.modes.values() {
+                if let Some(Action::ChangeMode(target_mode)) =
+                    self.check_sequence_match(&mode_def.bindings)
+                {
+                    self.key_buffer.clear();
+                    self.help_target_mode = Some(target_mode.clone());
+                    return Some(Action::ShowModeHelp(target_mode));
+                }
+            }
+
+            // If no mode change found, check for actions in the currently displayed mode
+            let display_mode = self
+                .help_target_mode
+                .as_ref()
+                .or_else(|| self.mode_stack.last())
+                .unwrap_or(&Mode::Normal);
+
+            if let Some(mode_def) = self.config.modes.get(display_mode) {
+                if let Some(_action) = self.check_sequence_match(&mode_def.bindings) {
+                    self.key_buffer.clear();
+                    let key_str = key.to_string();
+                    return Some(Action::ShowActionHelp(key_str));
                 }
             }
 
@@ -188,6 +209,7 @@ impl ModalSystem {
                 // Convert ShowHelp to ChangeMode(Help)
                 self.mode_stack.push(self.current_mode.clone());
                 self.current_mode = Mode::Help;
+                self.help_target_mode = None; // Reset help target when entering help
                 return Action::ChangeMode(Mode::Help);
             },
             _ => {},
@@ -197,7 +219,17 @@ impl ModalSystem {
 
     /// Get all available actions in the current mode
     pub fn available_actions(&self) -> Vec<(&Key, &Action)> {
-        self.available_actions_for_mode(&self.current_mode)
+        // When in help mode, show actions for the help target mode or previous mode
+        if self.current_mode == Mode::Help {
+            let target_mode = self
+                .help_target_mode
+                .as_ref()
+                .or_else(|| self.mode_stack.last())
+                .unwrap_or(&Mode::Normal);
+            self.available_actions_for_mode(target_mode)
+        } else {
+            self.available_actions_for_mode(&self.current_mode)
+        }
     }
 
     /// Get all available actions for a specific mode
@@ -222,6 +254,11 @@ impl ModalSystem {
     /// Get the previous mode from the stack (for help mode)
     pub fn previous_mode(&self) -> Option<&Mode> {
         self.mode_stack.last()
+    }
+
+    /// Get the help target mode (which mode's help is being shown)
+    pub fn help_target_mode(&self) -> Option<&Mode> {
+        self.help_target_mode.as_ref()
     }
 }
 

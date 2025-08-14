@@ -37,6 +37,7 @@ pub enum Action {
     /// Help actions
     ShowHelp,
     ShowActionHelp(String),
+    ShowModeHelp(Mode),
 }
 
 /// Editor modes
@@ -83,6 +84,7 @@ impl std::fmt::Display for Action {
             Action::GatherNodes => write!(f, "Gather nodes"),
             Action::ShowHelp => write!(f, "Show help"),
             Action::ShowActionHelp(action_name) => write!(f, "Help for {action_name}"),
+            Action::ShowModeHelp(mode) => write!(f, "Show {} help", mode.as_str()),
         }
     }
 }
@@ -124,6 +126,7 @@ impl Action {
             Action::GatherNodes => "Gather selected nodes into viewport",
             Action::ShowHelp => "Display help for current mode",
             Action::ShowActionHelp(_) => "Display detailed help information",
+            Action::ShowModeHelp(_) => "Display help for specific mode",
         }
     }
 
@@ -276,6 +279,19 @@ impl Action {
                     this specific action including examples\n\
                     and usage details.\n\n\
                     Accessed via Help Mode (? then key)"
+                )
+            },
+            Action::ShowModeHelp(mode) => {
+                format!(
+                    "Display help for {} mode.\n\n\
+                    Shows all available commands and keybindings\n\
+                    for {} mode without leaving help mode.\n\
+                    This allows exploring different modes' commands\n\
+                    from within the interactive help system.\n\n\
+                    Navigate modes by pressing their activation keys\n\
+                    while in help mode (e.g., 'c' for Canvas mode)",
+                    mode.as_str(),
+                    mode.as_str()
                 )
             },
         }

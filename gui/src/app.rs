@@ -485,6 +485,19 @@ impl App {
                 self.help_modal.show_action_help(action_key.clone());
                 Task::none()
             },
+            Action::ShowModeHelp(ref mode) => {
+                debug!("ShowModeHelp action for {} mode", mode.as_str());
+                // Update help modal to show help for the specified mode
+                let help_info = self.stoat.get_help_info();
+                self.help_modal.update_content(mode.as_str(), help_info);
+
+                // Keep the help modal visible and in basic state
+                if !self.help_modal.is_visible() {
+                    self.help_modal.show_basic();
+                }
+
+                Task::none()
+            },
         }
     }
 }
