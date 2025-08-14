@@ -650,7 +650,7 @@ impl Stoat {
     }
 
     /// Get access to the modal system
-    pub fn modal_system(&self) -> &input::modal::ModalSystem {
+    pub fn modal_system(&self) -> &ModalSystem {
         &self.modal_system
     }
 
@@ -689,7 +689,7 @@ impl Stoat {
     /// Get help information for current mode
     pub fn get_help_info(&self) -> Vec<(String, String, String)> {
         // If in help mode, show actions for previous mode
-        if self.current_mode() == &input::action::Mode::Help {
+        if self.current_mode() == &Mode::Help {
             if let Some(previous_mode) = self.modal_system.previous_mode() {
                 return self.get_help_info_for_mode(previous_mode);
             }
@@ -708,10 +708,7 @@ impl Stoat {
     }
 
     /// Get help information for a specific mode
-    pub fn get_help_info_for_mode(
-        &self,
-        mode: &input::action::Mode,
-    ) -> Vec<(String, String, String)> {
+    pub fn get_help_info_for_mode(&self, mode: &Mode) -> Vec<(String, String, String)> {
         self.modal_system
             .available_actions_for_mode(mode)
             .into_iter()
@@ -881,7 +878,7 @@ impl ModeSnapshot {
         println!("Commands ({} total):", self.commands.len());
 
         let mut sorted: Vec<_> = self.commands.entries.iter().collect();
-        sorted.sort_by_key(|(k, _)| format!("{:?}", k));
+        sorted.sort_by_key(|(k, _)| format!("{k:?}"));
 
         for (key, cmd) in sorted {
             println!("  {:?} -> {:?}", key, cmd.action);
@@ -1202,7 +1199,9 @@ mod tests {
 
         // Enter Canvas mode then Help mode using either notation:
         // "c?" (convenience) or "c<S-/>" (explicit)
-        let snapshot = stoat.execute("c?").unwrap();
+        let snapshot = stoat
+            .execute("c?")
+            .expect("Should execute canvas help sequence");
 
         // Verify we're in Help mode
         assert_eq!(snapshot.mode, Mode::Help);
@@ -1236,7 +1235,9 @@ mod tests {
         let mut stoat = Stoat::new();
 
         // Enter help from Canvas
-        let snapshot = stoat.execute("c?").unwrap();
+        let snapshot = stoat
+            .execute("c?")
+            .expect("Should execute canvas help sequence");
         assert_eq!(snapshot.mode, Mode::Help);
 
         // Press 'a' in help mode - should trigger ShowActionHelp
@@ -1254,7 +1255,9 @@ mod tests {
 
         // c? enters Canvas then Help
         // <Esc> should return to Canvas, not Normal
-        let snapshot = stoat.execute("c?<Esc>").unwrap();
+        let snapshot = stoat
+            .execute("c?<Esc>")
+            .expect("Should execute canvas help escape sequence");
 
         assert_eq!(
             snapshot.mode,
@@ -1273,7 +1276,7 @@ mod tests {
         let mut stoat = Stoat::new();
 
         // Get Canvas snapshot
-        let canvas = stoat.execute("c").unwrap();
+        let canvas = stoat.execute("c").expect("Should enter canvas mode");
 
         // Test various query methods
         assert!(canvas.commands.has(&Key::Char('a')));
@@ -1283,8 +1286,67 @@ mod tests {
         assert_eq!(gather_keys, vec![&Key::Char('a')]);
 
         // Test command details
-        let cmd = canvas.commands.get(&Key::Char('a')).unwrap();
+        let cmd = canvas
+            .commands
+            .get(&Key::Char('a'))
+            .expect("Should have 'a' command in canvas mode");
         assert_eq!(cmd.action, Action::GatherNodes);
         assert!(cmd.description.contains("Gather"));
+    }
+
+    #[test]
+    fn test_help_modal_shows_friendly_key_format() {
+        let mut stoat = Stoat::new();
+
+        // Get Canvas mode help
+        stoat.execute("c").expect("Should enter canvas mode");
+        let help_info = stoat.get_help_info();
+
+        // Find the help key binding - should show as "?"
+        let help_key = help_info
+            .iter()
+            .find(|(_, action, _)| action.contains("help"))
+            .map(|(key, _, _)| key.clone());
+
+        assert_eq!(
+            help_key,
+            Some("?".to_string()),
+            "Should display ? not Shift+/"
+        );
+
+        // Find escape key - should show as "<Esc>"
+        let esc_key = help_info
+            .iter()
+            .find(|(_, action, _)| action.contains("normal"))
+            .map(|(key, _, _)| key.clone());
+
+        assert_eq!(esc_key, Some("<Esc>".to_string()), "Should display <Esc>");
+
+        // Find gather key - should show as "a"
+        let gather_key = help_info
+            .iter()
+            .find(|(_, action, _)| action.contains("Gather"))
+            .map(|(key, _, _)| key.clone());
+
+        assert_eq!(gather_key, Some("a".to_string()), "Should display a");
+    }
+
+    #[test]
+    fn test_help_action_uses_friendly_key_format() {
+        let mut stoat = Stoat::new();
+
+        // Enter help mode from Canvas
+        stoat.execute("c?").expect("Should enter canvas help mode");
+        assert_eq!(stoat.current_mode(), &Mode::Help);
+
+        // Press '?' in help mode to see help for the help action
+        let action = stoat.user_input(Key::Modified(ModifiedKey::Shift('/')));
+
+        // Should get ShowActionHelp with friendly format "?" not "Shift('/')"
+        assert_eq!(
+            action,
+            Some(Action::ShowActionHelp("?".to_string())),
+            "ShowActionHelp should use friendly format '?' not 'Shift(/)'"
+        );
     }
 }

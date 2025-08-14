@@ -17,7 +17,7 @@ pub fn parse_keys(notation: &str) -> Result<Vec<Key>, String> {
                 let mut special = String::new();
                 let mut found_closing = false;
 
-                while let Some(ch) = chars.next() {
+                for ch in chars.by_ref() {
                     if ch == '>' {
                         found_closing = true;
                         break;
@@ -26,7 +26,7 @@ pub fn parse_keys(notation: &str) -> Result<Vec<Key>, String> {
                 }
 
                 if !found_closing {
-                    return Err(format!("Unclosed special key notation at '<{}'", special));
+                    return Err(format!("Unclosed special key notation at '<{special}'"));
                 }
 
                 keys.push(parse_special(&special)?);
@@ -51,16 +51,19 @@ fn parse_special(s: &str) -> Result<Key, String> {
         let key_str = &key_str[1..]; // Skip the dash
 
         if key_str.len() != 1 {
-            return Err(format!("Invalid modified key: <{}>", s));
+            return Err(format!("Invalid modified key: <{s}>"));
         }
 
-        let key_char = key_str.chars().next().unwrap();
+        let key_char = key_str
+            .chars()
+            .next()
+            .expect("Key string should have exactly one character");
 
         match mod_str {
             "C" | "Ctrl" => Ok(Key::Modified(ModifiedKey::Ctrl(key_char))),
             "S" | "Shift" => Ok(Key::Modified(ModifiedKey::Shift(key_char))),
             "A" | "Alt" | "M" | "Meta" => Ok(Key::Modified(ModifiedKey::Alt(key_char))),
-            _ => Err(format!("Unknown modifier: {}", mod_str)),
+            _ => Err(format!("Unknown modifier: {mod_str}")),
         }
     } else {
         // Named keys
@@ -79,7 +82,7 @@ fn parse_special(s: &str) -> Result<Key, String> {
             "End" => Ok(Key::Named(NamedKey::End)),
             "PageUp" | "PgUp" => Ok(Key::Named(NamedKey::PageUp)),
             "PageDown" | "PgDn" => Ok(Key::Named(NamedKey::PageDown)),
-            _ => Err(format!("Unknown special key: <{}>", s)),
+            _ => Err(format!("Unknown special key: <{s}>")),
         }
     }
 }
@@ -90,13 +93,13 @@ mod tests {
 
     #[test]
     fn test_parse_simple_keys() {
-        let keys = parse_keys("abc").unwrap();
+        let keys = parse_keys("abc").expect("Should parse simple keys");
         assert_eq!(keys, vec![Key::Char('a'), Key::Char('b'), Key::Char('c'),]);
     }
 
     #[test]
     fn test_parse_question_mark_convenience() {
-        let keys = parse_keys("c?").unwrap();
+        let keys = parse_keys("c?").expect("Should parse question mark");
         assert_eq!(
             keys,
             vec![Key::Char('c'), Key::Modified(ModifiedKey::Shift('/')),]
@@ -105,7 +108,7 @@ mod tests {
 
     #[test]
     fn test_parse_special_keys() {
-        let keys = parse_keys("a<Esc>b<Enter>").unwrap();
+        let keys = parse_keys("a<Esc>b<Enter>").expect("Should parse special keys");
         assert_eq!(
             keys,
             vec![
@@ -119,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_parse_modified_keys() {
-        let keys = parse_keys("<C-a><S-/><A-x>").unwrap();
+        let keys = parse_keys("<C-a><S-/><A-x>").expect("Should parse modified keys");
         assert_eq!(
             keys,
             vec![
@@ -132,20 +135,20 @@ mod tests {
 
     #[test]
     fn test_canvas_help_sequence() {
-        let keys = parse_keys("c<S-/>").unwrap();
+        let keys = parse_keys("c<S-/>").expect("Should parse canvas help sequence");
         assert_eq!(
             keys,
             vec![Key::Char('c'), Key::Modified(ModifiedKey::Shift('/')),]
         );
 
         // Both notations should be equivalent
-        let keys2 = parse_keys("c?").unwrap();
+        let keys2 = parse_keys("c?").expect("Should parse equivalent sequence");
         assert_eq!(keys, keys2);
     }
 
     #[test]
     fn test_complex_sequence() {
-        let keys = parse_keys("i<Esc>c?a<Esc>").unwrap();
+        let keys = parse_keys("i<Esc>c?a<Esc>").expect("Should parse complex sequence");
         assert_eq!(
             keys,
             vec![

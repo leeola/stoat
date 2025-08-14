@@ -83,12 +83,7 @@ impl ModalSystem {
                 if let Some(mode_def) = self.config.modes.get(previous_mode) {
                     if let Some(_action) = self.check_sequence_match(&mode_def.bindings) {
                         self.key_buffer.clear();
-                        let key_str = match key {
-                            Key::Char(ch) => ch.to_string(),
-                            Key::Named(named) => format!("{named:?}"),
-                            Key::Modified(modified) => format!("{modified:?}"),
-                            Key::Sequence(seq) => seq.clone(),
-                        };
+                        let key_str = key.to_string();
                         return Some(Action::ShowActionHelp(key_str));
                     }
                 }
