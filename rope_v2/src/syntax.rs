@@ -12,7 +12,7 @@
 //! 1. **Semantic Layer** ([`SemanticKind`]) - Universal programming concepts
 //! 2. **Syntax Layer** (stored as strings) - Original tree-sitter node types
 //!
-//! This enables powerful cross-language operations:
+//! This enables cross-language operations:
 //! - "Find all functions" works in Rust, Python, JavaScript, etc.
 //! - "Extract parameter" refactoring can share logic across languages
 //! - Navigation by intent rather than syntax

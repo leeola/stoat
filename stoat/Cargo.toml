@@ -2,31 +2,22 @@
 name = "stoat"
 version = "0.1.0"
 edition = "2021"
-description = "An exploration into a canvas based, relational and structured text editor."
-readme = "../README.md"
+description = "Core text editor library with data-driven architecture"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
-
-[features]
-# Include CLI entrypoints.
-cli_bin = ["cli_config", "tokio/macros", "tokio/rt-multi-thread"]
-# Include CLI configuration.
-cli_config = ["clap"]
-# Enable GUI support
-gui = []
 
 [lints]
 workspace = true
 
 [dependencies]
-stoat_core = { path = "../core" }
-tokio = { workspace = true }
-clap = { workspace = true, optional = true }
+# Keep iced for keyboard/input types to avoid conversions
+iced = { version = "0.13.1", default-features = false, features = ["advanced"] }
 serde = { workspace = true }
-ron = "0.8"
-chrono = { workspace = true, features = ["serde"] }
 thiserror = { workspace = true }
-dirs = "5.0"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.8"
+# Testing utilities
+serde_json = "1.0"

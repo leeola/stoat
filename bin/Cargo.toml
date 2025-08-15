@@ -18,19 +18,18 @@ path = "src/lib.rs"
 [features]
 default = ["gui"]
 # Enable GUI support
-gui = ["stoat_gui", "stoat/gui"]
+gui = ["stoat_gui"]
 
 [lints]
 workspace = true
 
 [dependencies]
-stoat = { path = "../stoat", features = ["cli_bin"] }
-stoat_core = { path = "../core" }
+stoat = { path = "../stoat" }
 stoat_gui = { path = "../gui", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
 tracing.workspace = true
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-stoat_core = { path = "../core", features = ["test-utils"] }
 tempfile = "3.8"

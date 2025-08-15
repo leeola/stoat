@@ -1,12 +1,5 @@
 //! Logging setup for Stoat with user-friendly environment variable controls.
 //!
-//! ## Goals
-//!
-//! - **Simple UX**: Most users should just set `STOAT_LOG=debug` or `STOAT_LOG=trace`
-//! - **Smart defaults**: Stoat crates log at `info` level, everything else at `warn`
-//! - **Advanced control**: Full `RUST_LOG` syntax support in STOAT_LOG
-//! - **Standard compliance**: Respects `RUST_LOG` when `STOAT_LOG` is not set
-//!
 //! ## User Experience
 //!
 //! ### Basic Usage (90% of users)
@@ -43,7 +36,7 @@
 //!
 //! ## Implementation Details
 //!
-//! The [`init`] function uses [`tracing_subscriber`] with [`EnvFilter`] to provide flexible
+//! The [`init`] function uses [`tracing_subscriber`] with [`EnvFilter`] to provide
 //! logging control. All functions are designed to be safe - they will not crash if called
 //! multiple times or if logging is already initialized.
 

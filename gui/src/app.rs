@@ -1,400 +1,159 @@
+//! Main application using stoat EditorEngine with iced GUI framework.
+
 use crate::{
-    input,
-    widget::{
-        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
-        HelpModal, NodeCanvas, NodeId, NodeWidget, PositionedNode,
-    },
+    effect_runner::run_effects, messages::Message, theme::EditorTheme, widget::EditorWidget,
 };
-use iced::{Element, Point, Task};
-use std::sync::Arc;
-use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
-use stoat_core::{input::Action, Stoat};
-use tokio::sync::Mutex;
-use tracing::{debug, error, trace};
+use iced::{
+    widget::{column, container, row, text},
+    Element, Task,
+};
+use stoat::{EditorEngine, EditorEvent};
 
-/// Main application state
+/// Main application state.
 pub struct App {
-    /// The spatial node canvas
-    node_canvas: NodeCanvas,
-    /// The Stoat editor instance
-    stoat: Stoat,
-    /// The ClaudeCode instance for agent chat
-    claude: Arc<Mutex<Option<ClaudeCode>>>,
-    /// ID of the chat node
-    chat_node_id: NodeId,
-    /// Process status
-    process_alive: bool,
-    /// Session ID for display
-    session_id: Option<String>,
+    /// Core editor engine containing all business logic
+    engine: EditorEngine,
+    /// Visual theme for the editor
+    theme: EditorTheme,
+    /// Current status message (for user feedback)
+    status_message: Option<String>,
 }
 
-/// Application messages
-#[derive(Debug, Clone)]
-pub enum Message {
-    /// Keyboard event received
-    KeyPressed(iced::keyboard::Event),
-    /// Node canvas message (contains chat messages)
-    NodeCanvasMessage(node_canvas::Message),
-    /// Process status update
-    ProcessStatusUpdate(bool),
-    /// Session initialized
-    SessionInitialized(String, bool),
-    /// Message received from Claude
-    MessageReceived(stoat_agent_claude_code::messages::SdkMessage),
-    /// Tick for updating modal system and polling
-    Tick,
-    /// Window resized
-    WindowResized(iced::Size),
-}
+impl Default for App {
+    fn default() -> Self {
+        let engine =
+            EditorEngine::with_text("Hello, World!\nWelcome to Stoat!\n\nTry editing this text...");
 
-impl From<node_canvas::Message> for Message {
-    fn from(msg: node_canvas::Message) -> Self {
-        Message::NodeCanvasMessage(msg)
-    }
-}
-
-impl App {
-    /// Run the application
-    pub fn run() -> iced::Result {
-        iced::application("Stoat - Node Editor Prototype", Self::update, Self::view)
-            .subscription(Self::subscription)
-            .window_size(iced::Size::new(1280.0, 720.0))
-            .run_with(Self::new)
-    }
-
-    fn new() -> (Self, Task<Message>) {
-        // Initialize Stoat with default configuration
-        let mut stoat = Stoat::new();
-
-        // Create the node canvas with chat widget
-        let mut node_canvas = NodeCanvas::new();
-        let chat_widget = AgenticChat::new();
-        let chat_node_id = NodeId(1);
-
-        // Add chat node to GUI canvas
-        node_canvas.add_node(PositionedNode {
-            id: chat_node_id,
-            position: Point::new(400.0, 100.0), // World coordinates
-            widget: NodeWidget::Chat(chat_widget),
-        });
-
-        // Set up view state in core with integer positions
-        let core_node_id = stoat_core::node::NodeId(chat_node_id.0);
-        stoat.view_state_mut().set_position(
-            core_node_id,
-            stoat_core::view_state::Position::new(400, 100),
-        );
-        stoat
-            .view_state_mut()
-            .set_size(core_node_id, stoat_core::view_state::Size::new(400, 600));
-        stoat.view_state_mut().select(core_node_id);
-
-        // Set initial viewport size to match window
-        stoat.view_state_mut().update_viewport_size(1280, 720);
-
-        debug!("Created node canvas with chat at position (400, 100)");
-
-        // Initialize ClaudeCode asynchronously
-        let claude = Arc::new(Mutex::new(None));
-        let claude_arc = Arc::clone(&claude);
-        let init_task = Task::perform(
-            async move {
-                let config = SessionConfig {
-                    model: Some("sonnet".to_string()),
-                    ..Default::default()
-                };
-
-                match ClaudeCode::new(config).await {
-                    Ok(mut claude_instance) => {
-                        let session_id = claude_instance.get_session_id();
-                        let alive = claude_instance.is_alive().await;
-                        *claude_arc.lock().await = Some(claude_instance);
-                        (session_id, alive)
-                    },
-                    Err(e) => {
-                        error!("Failed to initialize ClaudeCode: {}", e);
-                        (String::new(), false)
-                    },
-                }
-            },
-            |(session_id, alive)| Message::SessionInitialized(session_id, alive),
-        );
-
-        (
-            Self {
-                node_canvas,
-                stoat,
-                claude,
-                chat_node_id,
-                process_alive: false,
-                session_id: None,
-            },
-            init_task,
-        )
-    }
-
-    fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::KeyPressed(event) => {
-                // Update tick before processing key
-                self.stoat.tick();
-
-                if let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event {
-                    // Convert Iced key to Stoat key
-                    if let Some(stoat_key) = input::convert_key(key.clone(), modifiers) {
-                        debug!(
-                            "Converted key: {:?} in mode: {}",
-                            stoat_key,
-                            self.stoat.current_mode().as_str()
-                        );
-                        // Process key through modal system
-                        if let Some(action) = self.stoat.user_input(stoat_key) {
-                            debug!("Got action: {:?}", action);
-                            // Handle the action
-                            self.handle_action(action)
-                        } else {
-                            debug!("No action for key");
-                            Task::none()
-                        }
-                    } else {
-                        debug!("Could not convert key: {:?}", key);
-                        Task::none()
-                    }
-                } else {
-                    Task::none()
-                }
-            },
-            Message::NodeCanvasMessage(canvas_msg) => {
-                match canvas_msg {
-                    node_canvas::Message::ChatMessage(_) => {
-                        // Update the node canvas (which will update the chat widget)
-                        let task = self.node_canvas.update(canvas_msg.clone());
-                        task.map(Message::NodeCanvasMessage)
-                    },
-                    node_canvas::Message::ChatEvent(event) => match event {
-                        AgenticChatEvent::MessageSubmitted(content) => {
-                            debug!("User submitted message: {}", content);
-                            // Send message to Claude
-                            let claude = Arc::clone(&self.claude);
-                            Task::perform(
-                                async move {
-                                    let mut claude_guard = claude.lock().await;
-                                    if let Some(claude) = claude_guard.as_mut() {
-                                        debug!("Sending message to Claude");
-                                        if let Err(e) = claude.send_message(&content).await {
-                                            error!("Failed to send message to Claude: {}", e);
-                                        }
-                                    } else {
-                                        error!("Claude not initialized");
-                                    }
-                                },
-                                |_| Message::Tick,
-                            )
-                        },
-                        AgenticChatEvent::MessageSelected(id) => {
-                            // Future: highlight corresponding node in graph
-                            debug!("Message selected: {:?}", id);
-                            Task::none()
-                        },
-                        AgenticChatEvent::ScrollToMessage(_) | AgenticChatEvent::ClearHistory => {
-                            Task::none()
-                        },
-                    },
-                }
-            },
-            Message::ProcessStatusUpdate(alive) => {
-                if self.process_alive != alive {
-                    self.process_alive = alive;
-                    let status = if alive {
-                        "Agent process is running"
-                    } else {
-                        "Agent process stopped"
-                    };
-                    // Find and update the chat widget in the node canvas
-                    if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                        chat.add_message(AgenticMessage::new(
-                            agentic_chat::AgentRole::System,
-                            status.to_string(),
-                            agentic_chat::EventType::SystemEvent {
-                                event_type: "process_status".to_string(),
-                            },
-                        ));
-                    }
-                }
-                Task::none()
-            },
-            Message::SessionInitialized(session_id, alive) => {
-                self.session_id = Some(session_id.clone());
-                self.process_alive = alive;
-
-                // Add initialization message to chat in node canvas
-                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                    chat.add_message(AgenticMessage::new(
-                        agentic_chat::AgentRole::System,
-                        format!("Agent session initialized: {session_id}"),
-                        agentic_chat::EventType::SessionEvent {
-                            event_type: "initialized".to_string(),
-                        },
-                    ));
-                }
-                Task::none()
-            },
-            Message::MessageReceived(sdk_msg) => {
-                debug!("Processing SDK message: {:?}", sdk_msg);
-                // Process SDK message in chat widget within node canvas
-                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                    chat.process_sdk_message(sdk_msg);
-                }
-                Task::none()
-            },
-            Message::Tick => {
-                // Update the modal system's timeout handling
-                self.stoat.tick();
-
-                // Check for responses and process status
-                let claude = Arc::clone(&self.claude);
-                Task::perform(
-                    async move {
-                        let mut claude_guard = claude.lock().await;
-                        if let Some(claude) = claude_guard.as_mut() {
-                            // Check for any message
-                            if let Ok(Some(msg)) = claude
-                                .recv_any_message(tokio::time::Duration::from_millis(100))
-                                .await
-                            {
-                                debug!("Received message from Claude: {:?}", msg);
-                                return Some((Some(msg), claude.is_alive().await));
-                            }
-                            let alive = claude.is_alive().await;
-                            return Some((None, alive));
-                        }
-                        None
-                    },
-                    |result| {
-                        if let Some((msg, alive)) = result {
-                            if let Some(message) = msg {
-                                Message::MessageReceived(message)
-                            } else {
-                                Message::ProcessStatusUpdate(alive)
-                            }
-                        } else {
-                            Message::Tick
-                        }
-                    },
-                )
-            },
-            Message::WindowResized(size) => {
-                // Update viewport size in core's view state
-                self.stoat
-                    .view_state_mut()
-                    .update_viewport_size(size.width as u32, size.height as u32);
-                Task::none()
-            },
+        App {
+            engine,
+            theme: EditorTheme::default(),
+            status_message: None,
         }
     }
+}
 
-    fn view(&self) -> Element<'_, Message> {
-        use crate::widget::StatusBar;
-        use iced::{
-            alignment,
-            widget::{column, container, stack},
-            Length, Padding,
+/// Application functions for iced
+impl App {
+    /// Creates a new app instance.
+    pub fn new() -> (Self, Task<Message>) {
+        tracing::info!("Creating new Stoat GUI application");
+
+        let engine =
+            EditorEngine::with_text("Hello, World!\nWelcome to Stoat!\n\nTry editing this text...");
+
+        let app = App {
+            engine,
+            theme: EditorTheme::default(),
+            status_message: None,
         };
 
-        // Create enhanced status bar
-        let status_bar = StatusBar::create(
-            self.stoat.current_mode().as_str(),
-            Some("Stoat Editor - Node Canvas".to_string()),
-        );
-
-        // Get the view state from core and pass it to the node canvas for rendering
-        let view_state = self.stoat.view_state();
-        let canvas = self.node_canvas.view(view_state);
-
-        // Get command info state and create view
-        let command_info_state = self.stoat.get_command_info_state();
-        let command_info = CommandInfo::view(command_info_state);
-
-        // Position command info to appear as extension of status bar
-        let positioned_command_info = container(command_info)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .align_y(alignment::Vertical::Bottom)
-            .padding(Padding {
-                top: 0.0,
-                right: 0.0,  // Flush with right edge
-                bottom: 1.0, // Overlap status bar border by 1px to avoid double border
-                left: 0.0,
-            });
-
-        // Get help state for lifetime management
-        let help_state = self.stoat.get_help_state();
-
-        // Stack canvas and command info
-        let mut layers = vec![canvas, positioned_command_info.into()];
-
-        // Add help modal if visible
-        if help_state.visible {
-            layers.push(HelpModal::view(help_state));
-        }
-
-        let main_content = stack(layers).width(Length::Fill).height(Length::Fill);
-
-        // Combine with status bar
-        column![main_content, status_bar].into()
+        tracing::info!("GUI application initialized successfully");
+        (app, Task::none())
     }
 
-    fn subscription(&self) -> iced::Subscription<Message> {
-        iced::Subscription::batch([
-            // Keyboard subscription
-            iced::keyboard::on_key_press(|key, modifiers| {
-                Some(Message::KeyPressed(iced::keyboard::Event::KeyPressed {
-                    key: key.clone(),
-                    modified_key: key.clone(),
-                    physical_key: iced::keyboard::key::Physical::Code(
-                        iced::keyboard::key::Code::KeyA,
-                    ),
-                    location: iced::keyboard::Location::Standard,
-                    modifiers,
-                    text: None,
-                }))
-            }),
-            // Poll every 100ms for messages from Claude
-            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::Tick),
-            // Window resize events
-            iced::window::resize_events().map(|(_, size)| Message::WindowResized(size)),
-        ])
-    }
+    /// Handle messages and update state.
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        tracing::debug!("GUI handling message: {:?}", message);
 
-    fn handle_action(&mut self, action: Action) -> Task<Message> {
-        match action {
-            Action::ExitApp => {
-                // Exit the application
-                iced::exit()
+        match message {
+            Message::EditorInput(event) => {
+                tracing::debug!("Processing editor input event");
+                let effects = self.engine.handle_event(event);
+                run_effects(effects)
             },
-            Action::ChangeMode(mode) => {
-                // Mode change is handled internally by ModalSystem
-                debug!("Changed to {} mode", mode.as_str());
+
+            Message::ExitRequested => {
+                tracing::info!("Exit requested by user");
+                let effects = self.engine.handle_event(EditorEvent::Exit);
+                run_effects(effects)
+            },
+
+            Message::ShowInfo { ref message } => {
+                tracing::info!("Showing info message: {}", message);
+                self.status_message = Some(message.clone());
                 Task::none()
             },
-            Action::GatherNodes => {
-                trace!("Gather nodes in canvas");
-                // GatherNodes is now handled in core lib.rs
-                // The action has already been processed by stoat.user_input()
+
+            Message::ShowError { ref message } => {
+                tracing::error!("Showing error message: {}", message);
+                self.status_message = Some(format!("Error: {}", message));
                 Task::none()
             },
-            Action::ShowHelp => {
-                debug!("ShowHelp action - this should have been converted to ChangeMode(Help)");
-                // This should not happen since modal system converts ShowHelp to ChangeMode(Help)
-                Task::none()
-            },
-            Action::ShowActionHelp(_) | Action::ShowModeHelp(_) => {
-                // These actions are now handled purely by the core state management
-                // The view method automatically shows the correct help based on get_help_state()
-                debug!("Help action handled by core state management");
+
+            _ => {
+                tracing::debug!("Unhandled message type");
                 Task::none()
             },
         }
     }
+
+    /// Create the view.
+    pub fn view(&self) -> Element<'_, Message> {
+        let editor =
+            EditorWidget::new(self.engine.state(), &self.theme).on_input(Message::EditorInput);
+
+        let status_bar = self.create_status_bar();
+
+        let content = column![Element::from(editor), status_bar].spacing(10);
+
+        container(content)
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .padding(10)
+            .into()
+    }
+
+    /// Create status bar
+    fn create_status_bar(&self) -> Element<'_, Message> {
+        let cursor_pos = self.engine.cursor_position();
+        let mode = self.engine.mode();
+
+        let left_info = text(format!(
+            "Line {}, Col {} | {} mode | {} lines",
+            cursor_pos.line + 1,
+            cursor_pos.column + 1,
+            mode_display_name(mode),
+            self.engine.line_count()
+        ));
+
+        let right_info = if let Some(ref status) = self.status_message {
+            text(status.clone())
+        } else {
+            text("")
+        };
+
+        container(row![left_info, iced::widget::horizontal_space(), right_info].spacing(10))
+            .padding(5)
+            .width(iced::Length::Fill)
+            .into()
+    }
+
+    /// Get window title
+    pub fn title(&self) -> String {
+        let file_name = self
+            .engine
+            .file_path()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled");
+
+        let dirty_marker = if self.engine.is_dirty() { " *" } else { "" };
+
+        format!("GUI v2 - {}{}", file_name, dirty_marker)
+    }
+}
+
+fn mode_display_name(mode: stoat::actions::EditMode) -> &'static str {
+    match mode {
+        stoat::actions::EditMode::Normal => "NORMAL",
+        stoat::actions::EditMode::Insert => "INSERT",
+        stoat::actions::EditMode::Visual { line_mode: false } => "VISUAL",
+        stoat::actions::EditMode::Visual { line_mode: true } => "V-LINE",
+        stoat::actions::EditMode::Command => "COMMAND",
+    }
+}
+
+/// Run the GUI application.
+pub fn run() -> iced::Result {
+    iced::run("GUI v2", App::update, App::view)
 }

@@ -2,23 +2,31 @@
 name = "stoat_gui"
 version = "0.1.0"
 edition = "2021"
-readme = "../README.md"
+description = "Iced-based GUI for the Stoat text editor"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[lib]
-name = "stoat_gui"
-path = "src/lib.rs"
-
-[dependencies]
-iced = { version = "0.13.1", features = ["canvas", "advanced", "tokio"] }
-stoat_agent_claude_code = { path = "../agent/claude_code" }
-stoat_core = { path = "../core" }
-stoat_text = { path = "../text" }
-tokio = { version = "1", features = ["sync"] }
-tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true
+
+[dependencies]
+# Core editor logic
+stoat = { path = "../stoat" }
+
+# GUI framework
+iced = { version = "0.13.1", features = ["advanced", "tokio"] }
+
+# Async runtime
+tokio = { workspace = true, features = ["fs", "macros"] }
+
+# File dialogs
+rfd = "0.14"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
