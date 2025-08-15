@@ -1,7 +1,9 @@
-use crate::widget::{agentic_chat, AgenticChat, AgenticChatEvent};
+use crate::widget::{
+    AgenticChat, AgenticChatEvent, UserMessageMessage, UserMessageWidget, agentic_chat,
+};
 use iced::{
-    widget::{container, stack},
     Element, Length, Padding, Point, Task,
+    widget::{container, stack},
 };
 use stoat_core::view_state::ViewState;
 
@@ -25,7 +27,8 @@ pub struct PositionedNode {
 
 /// Types of widgets that can be nodes
 pub enum NodeWidget {
-    Chat(AgenticChat), // The agentic chat widget
+    Chat(AgenticChat),              // The agentic chat widget
+    UserMessage(UserMessageWidget), // User message from conversation history
 }
 
 /// Messages for node canvas interactions
@@ -33,6 +36,7 @@ pub enum NodeWidget {
 pub enum Message {
     ChatMessage(agentic_chat::Message),
     ChatEvent(AgenticChatEvent),
+    UserMessage(UserMessageMessage),
 }
 
 impl NodeCanvas {
@@ -52,6 +56,7 @@ impl NodeCanvas {
             if node.id == id {
                 match &mut node.widget {
                     NodeWidget::Chat(chat) => Some(chat),
+                    NodeWidget::UserMessage(_) => None, // User messages are not chat widgets
                 }
             } else {
                 None
@@ -70,12 +75,23 @@ impl NodeCanvas {
                             let event_task = chat.update(msg);
                             return event_task.map(Message::ChatEvent);
                         },
+                        NodeWidget::UserMessage(_) => {},
                     }
                 }
                 Task::none()
             },
             Message::ChatEvent(_) => {
                 // Events are handled at the app level
+                Task::none()
+            },
+            Message::UserMessage(msg) => {
+                // Find and update user message widgets
+                for node in self.nodes.iter_mut() {
+                    if let NodeWidget::UserMessage(user_msg_widget) = &mut node.widget {
+                        user_msg_widget.update(msg.clone());
+                        break; // For now, just update the first matching widget
+                    }
+                }
                 Task::none()
             },
         }
@@ -106,6 +122,7 @@ impl NodeCanvas {
             // Get the widget element based on type
             let widget_element: Element<'_, Message> = match &node.widget {
                 NodeWidget::Chat(chat) => chat.view().map(Message::ChatMessage),
+                NodeWidget::UserMessage(user_msg) => user_msg.view().map(Message::UserMessage),
             };
 
             // Check if this node is selected

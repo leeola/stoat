@@ -166,8 +166,9 @@ impl App {
             },
             Message::NodeCanvasMessage(canvas_msg) => {
                 match canvas_msg {
-                    node_canvas::Message::ChatMessage(_) => {
-                        // Update the node canvas (which will update the chat widget)
+                    node_canvas::Message::ChatMessage(_) | node_canvas::Message::UserMessage(_) => {
+                        // Update the node canvas (which will update the chat widget or user message
+                        // widgets)
                         let task = self.node_canvas.update(canvas_msg.clone());
                         task.map(Message::NodeCanvasMessage)
                     },
@@ -190,6 +191,58 @@ impl App {
                                 },
                                 |_| Message::Tick,
                             )
+                        },
+                        AgenticChatEvent::UserMessageForNode(message_id, content) => {
+                            debug!("Creating user message node for: {}", content);
+                            // Create a UserMessageNode in the core workspace
+                            let node_id = stoat_core::node::NodeId(message_id.as_u64());
+                            let user_message_node = stoat_core::nodes::UserMessageNode::new(
+                                node_id,
+                                format!("User Message {}", message_id.uuid()),
+                                content.clone(),
+                            );
+
+                            // Create the GUI widget first (before moving the node)
+                            let user_msg_widget =
+                                crate::widget::UserMessageWidget::new(user_message_node);
+
+                            // Create another instance for the workspace
+                            let workspace_node = stoat_core::nodes::UserMessageNode::new(
+                                node_id,
+                                format!("User Message {}", message_id.uuid()),
+                                content.clone(),
+                            );
+
+                            // Add the node to the workspace
+                            self.stoat
+                                .workspace_mut()
+                                .add_node(Box::new(workspace_node));
+
+                            // Calculate position for the new node (stack vertically)
+                            let gui_node_id = NodeId(node_id.0);
+                            let y_position = 200.0 + (self.node_canvas.nodes.len() as f32 * 150.0);
+
+                            // Add positioned node to canvas
+                            self.node_canvas.add_node(PositionedNode {
+                                id: gui_node_id,
+                                position: Point::new(100.0, y_position),
+                                widget: NodeWidget::UserMessage(user_msg_widget),
+                            });
+
+                            // Set position in core view state
+                            self.stoat.view_state_mut().set_position(
+                                node_id,
+                                stoat_core::view_state::Position::new(100, y_position as i32),
+                            );
+                            self.stoat
+                                .view_state_mut()
+                                .set_size(node_id, stoat_core::view_state::Size::new(300, 120));
+
+                            debug!(
+                                "Created user message node at position ({}, {})",
+                                100.0, y_position
+                            );
+                            Task::none()
                         },
                         AgenticChatEvent::MessageSelected(id) => {
                             // Future: highlight corresponding node in graph

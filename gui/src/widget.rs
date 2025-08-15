@@ -6,6 +6,7 @@ pub mod node_canvas;
 pub mod status_bar;
 pub mod text_edit;
 pub mod theme;
+pub mod user_message;
 
 pub use agentic_chat::{AgenticChat, AgenticChatEvent, AgenticMessage};
 pub use command_info::CommandInfo;
@@ -14,3 +15,4 @@ pub use node::Node;
 pub use node_canvas::{NodeCanvas, NodeId, NodeWidget, PositionedNode};
 pub use status_bar::StatusBar;
 pub use text_edit::{create_text_editor, TextEditMessage};
+pub use user_message::{UserMessageMessage, UserMessageWidget};

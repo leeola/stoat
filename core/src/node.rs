@@ -176,6 +176,8 @@ pub enum NodeType {
     Text,
     /// Advanced text editor node with rope-based editing
     TextEdit,
+    /// User message node from conversation history
+    UserMessage,
     #[cfg(test)]
     MockType, // Used only in tests
 }
@@ -185,6 +187,7 @@ impl std::fmt::Display for NodeType {
         match self {
             NodeType::Text => write!(f, "text"),
             NodeType::TextEdit => write!(f, "text_edit"),
+            NodeType::UserMessage => write!(f, "user_message"),
             #[cfg(test)]
             NodeType::MockType => write!(f, "mock"),
         }
@@ -337,6 +340,7 @@ pub static NODE_INIT_REGISTRY: LazyLock<std::sync::Mutex<NodeInitRegistry>> = La
     // Register built-in node types
     registry.register(Box::new(crate::nodes::TextNodeInit));
     registry.register(Box::new(crate::nodes::TextEditNodeInit));
+    registry.register(Box::new(crate::nodes::UserMessageNodeInit));
 
     std::sync::Mutex::new(registry)
 });

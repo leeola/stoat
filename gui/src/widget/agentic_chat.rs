@@ -18,6 +18,16 @@ impl MessageId {
     fn new() -> Self {
         Self(Uuid::new_v4())
     }
+
+    /// Get a u64 representation of this MessageId for use as NodeId
+    pub fn as_u64(&self) -> u64 {
+        self.0.as_u128() as u64
+    }
+
+    /// Get the underlying UUID
+    pub fn uuid(&self) -> Uuid {
+        self.0
+    }
 }
 
 /// Role of the message sender
@@ -90,6 +100,8 @@ impl AgenticMessage {
 pub enum AgenticChatEvent {
     /// User submitted a message
     MessageSubmitted(String),
+    /// User submitted a message with tracked ID for node creation
+    UserMessageForNode(MessageId, String),
     /// Request to scroll to a specific message
     ScrollToMessage(MessageId),
     /// Message selected (for future node highlighting)
@@ -277,10 +289,14 @@ impl AgenticChat {
                 // Add user message
                 let user_msg =
                     AgenticMessage::new(AgentRole::User, content.clone(), EventType::UserInput);
+                let message_id = user_msg.id;
                 self.add_message(user_msg);
 
-                // Emit event
-                let event_task = Task::done(AgenticChatEvent::MessageSubmitted(content));
+                // Emit events - both the original MessageSubmitted and the new UserMessageForNode
+                let event_task = Task::done(AgenticChatEvent::MessageSubmitted(content.clone()))
+                    .chain(Task::done(AgenticChatEvent::UserMessageForNode(
+                        message_id, content,
+                    )));
                 if self.auto_scroll {
                     event_task.chain(scrollable::scroll_to(
                         Self::scroll_id(),
