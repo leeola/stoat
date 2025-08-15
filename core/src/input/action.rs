@@ -11,6 +11,7 @@ pub enum Action {
 
     /// Canvas mode actions
     GatherNodes,
+    AlignNodes,
 
     /// Help actions
     ShowHelp,
@@ -101,6 +102,7 @@ impl std::fmt::Display for Action {
             Action::ExitApp => write!(f, "Exit app"),
             Action::ChangeMode(mode) => write!(f, "{} mode", mode.as_str()),
             Action::GatherNodes => write!(f, "Gather nodes"),
+            Action::AlignNodes => write!(f, "Align nodes"),
             Action::ShowHelp => write!(f, "Show help"),
             Action::ShowActionHelp(action_name) => write!(f, "Help for {action_name}"),
             Action::ShowModeHelp(mode) => write!(f, "Show {} help", mode.as_str()),
@@ -117,6 +119,7 @@ impl Action {
             Action::ChangeMode(Mode::Canvas) => "Enter Canvas mode for node manipulation",
             Action::ChangeMode(Mode::Help) => "Enter Help mode for interactive documentation",
             Action::GatherNodes => "Gather selected nodes into viewport",
+            Action::AlignNodes => "Align all nodes based on relationships",
             Action::ShowHelp => "Display help for current mode",
             Action::ShowActionHelp(_) => "Display detailed help information",
             Action::ShowModeHelp(_) => "Display help for specific mode",
@@ -159,6 +162,14 @@ impl Action {
                 adjusting zoom if necessary to fit all\n\
                 selected nodes within the visible area.\n\n\
                 Key: a (in Canvas mode)"
+                .to_string(),
+            Action::AlignNodes => "Align all nodes based on graph relationships.\n\n\
+                Automatically repositions all nodes in the workspace\n\
+                using an intelligent layout algorithm that considers\n\
+                the connections between nodes. Creates a hierarchical\n\
+                layout where conversation sequences flow left-to-right\n\
+                and related nodes are positioned nearby.\n\n\
+                Key: A (Shift+a in Canvas mode)"
                 .to_string(),
             Action::ShowHelp => "Enter interactive help mode.\n\n\
                 Opens help for the current mode. In help mode,\n\

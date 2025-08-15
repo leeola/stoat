@@ -1,9 +1,9 @@
 use crate::widget::{
-    AgenticChat, AgenticChatEvent, UserMessageMessage, UserMessageWidget, agentic_chat,
+    agentic_chat, AgenticChat, AgenticChatEvent, UserMessageMessage, UserMessageWidget,
 };
 use iced::{
-    Element, Length, Padding, Point, Task,
     widget::{container, stack},
+    Element, Length, Padding, Point, Task,
 };
 use stoat_core::view_state::ViewState;
 

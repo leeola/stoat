@@ -568,6 +568,16 @@ impl Stoat {
                     // Gather nodes into the current viewport
                     self.active.view_state_mut().center_on_selected();
                 },
+                Action::AlignNodes => {
+                    // Align all nodes using relationship-based layout
+                    let all_nodes: Vec<crate::node::NodeId> = self
+                        .active
+                        .list_nodes()
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .collect();
+                    self.active.view_state_mut().align_nodes(&all_nodes);
+                },
                 Action::ShowHelp => {
                     // Show help action - GUI will handle displaying modal
                 },

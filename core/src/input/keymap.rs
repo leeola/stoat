@@ -27,6 +27,7 @@ pub fn default_keymap() -> ModalConfig {
     let mut canvas_bindings = HashMap::new();
     canvas_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal));
     canvas_bindings.insert(Key::Char('a'), Action::GatherNodes);
+    canvas_bindings.insert(Key::Modified(ModifiedKey::Shift('a')), Action::AlignNodes);
     canvas_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
 
     modes.insert(
