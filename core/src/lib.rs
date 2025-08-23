@@ -17,6 +17,7 @@ pub mod log;
 pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }
+pub mod buffer_manager;
 pub mod data;
 pub mod graph;
 pub mod input;
@@ -528,19 +529,23 @@ impl Stoat {
         &mut self.state
     }
 
-    /// Create a node (currently no node types implemented)
-    pub fn create_node(
+    /// Create a buffer in the active workspace
+    pub fn create_buffer(&mut self, name: String) -> buffer_manager::BufferId {
+        self.active.create_buffer(name)
+    }
+
+    /// Create a buffer from a file
+    pub fn create_buffer_from_file(&mut self, path: PathBuf) -> Result<buffer_manager::BufferId> {
+        self.active.create_buffer_from_file(path)
+    }
+
+    /// Create a buffer with content
+    pub fn create_buffer_with_content(
         &mut self,
-        node_type: &str,
-        _name: String,
-        _config: value::Value,
-    ) -> Result<node::NodeId> {
-        // No node types are currently implemented
-        Err(Error::Generic {
-            message: format!(
-                "Unknown node type: {node_type} - no node types currently implemented"
-            ),
-        })
+        name: String,
+        content: String,
+    ) -> buffer_manager::BufferId {
+        self.active.create_buffer_with_content(name, content)
     }
 
     /// Push a user input into Stoat.
@@ -569,14 +574,8 @@ impl Stoat {
                     self.active.view_state_mut().center_on_selected();
                 },
                 Action::AlignNodes => {
-                    // Align all nodes using relationship-based layout
-                    let all_nodes: Vec<crate::node::NodeId> = self
-                        .active
-                        .list_nodes()
-                        .into_iter()
-                        .map(|(id, _)| id)
-                        .collect();
-                    self.active.view_state_mut().align_nodes(&all_nodes);
+                    // AlignNodes no longer applies in buffer-centric model
+                    // This action is kept for compatibility but does nothing
                 },
                 Action::ShowHelp => {
                     // Show help action - GUI will handle displaying modal
@@ -612,14 +611,14 @@ impl Stoat {
         self.active.view_state_mut()
     }
 
-    /// Get the node graph
-    pub fn graph(&self) -> &graph::NodeGraph {
-        self.active.graph()
+    /// Get the buffer manager
+    pub fn buffers(&self) -> &buffer_manager::BufferManager {
+        self.active.buffers()
     }
 
-    /// Get mutable access to the graph
-    pub fn graph_mut(&mut self) -> &mut graph::NodeGraph {
-        self.active.graph_mut()
+    /// Get mutable access to the buffer manager
+    pub fn buffers_mut(&mut self) -> &mut buffer_manager::BufferManager {
+        self.active.buffers_mut()
     }
 
     /// Get the current modal mode

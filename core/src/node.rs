@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn node_init_serialization_roundtrip() {
+    fn workspace_serialization_roundtrip() {
         use crate::workspace::{SerializableWorkspace, Workspace};
 
         // Create an empty workspace
@@ -488,13 +488,13 @@ mod tests {
 
         // Serialize the empty workspace
         let serializable = SerializableWorkspace::from(&workspace);
-        assert_eq!(serializable.nodes.len(), 0);
+        assert_eq!(serializable.buffers.len(), 0);
 
         // Reconstruct workspace from serializable
         let reconstructed = Workspace::from_serializable(serializable);
 
-        // Verify no nodes exist
-        let nodes = reconstructed.list_nodes();
-        assert_eq!(nodes.len(), 0);
+        // Verify no buffers exist
+        let buffers = reconstructed.list_buffers();
+        assert_eq!(buffers.len(), 0);
     }
 }

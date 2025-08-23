@@ -1,14 +1,14 @@
 use crate::{
     input,
     widget::{
-        AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo, HelpModal, NodeCanvas, NodeId,
-        NodeWidget, PositionedNode, agentic_chat, node_canvas,
+        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
+        HelpModal, NodeCanvas, NodeId, NodeWidget, PositionedNode,
     },
 };
 use iced::{Element, Point, Task};
 use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
-use stoat_core::{Stoat, input::Action};
+use stoat_core::{input::Action, Stoat};
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace};
 
@@ -206,17 +206,11 @@ impl App {
                             let user_msg_widget =
                                 crate::widget::UserMessageWidget::new(user_message_node);
 
-                            // Create another instance for the workspace
-                            let workspace_node = stoat_core::nodes::UserMessageNode::new(
-                                node_id,
-                                format!("User Message {}", message_id.uuid()),
-                                content.clone(),
-                            );
-
-                            // Add the node to the workspace
-                            self.stoat
-                                .workspace_mut()
-                                .add_node(Box::new(workspace_node));
+                            // Create a buffer for the user message content
+                            let buffer_name = format!("User Message {}", message_id.uuid());
+                            let _buffer_id = self
+                                .stoat
+                                .create_buffer_with_content(buffer_name, content.clone());
 
                             // Calculate position for the new node (stack vertically)
                             let gui_node_id = NodeId(node_id.0);
@@ -349,8 +343,9 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         use crate::widget::StatusBar;
         use iced::{
-            Length, Padding, alignment,
+            alignment,
             widget::{column, container, stack},
+            Length, Padding,
         };
 
         // Create enhanced status bar
