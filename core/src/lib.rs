@@ -671,6 +671,11 @@ impl Stoat {
         &self.modal_system
     }
 
+    /// Get command input state for GUI display
+    pub fn command_input_state(&self) -> &input::modal::CommandInputState {
+        self.modal_system.command_input()
+    }
+
     /// Get available actions in the current mode
     pub fn available_actions(&self) -> Vec<(&Key, &Action)> {
         self.modal_system.available_actions()

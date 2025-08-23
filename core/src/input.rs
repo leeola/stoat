@@ -24,7 +24,7 @@
 pub use action::{Action, CommandInfoState, HelpDisplayState, HelpType, Mode};
 pub use config::{ModalConfig, ModeDefinition};
 pub use key::{Key, ModifiedKey, NamedKey};
-pub use modal::ModalSystem;
+pub use modal::{CommandInputState, ModalSystem};
 pub use user::UserInput;
 
 pub mod action;

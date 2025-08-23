@@ -87,6 +87,7 @@ pub enum Mode {
     Normal,
     Canvas,
     Help,
+    Command,
 }
 
 impl Mode {
@@ -95,6 +96,7 @@ impl Mode {
             Mode::Normal => "normal",
             Mode::Canvas => "canvas",
             Mode::Help => "help",
+            Mode::Command => "command",
         }
     }
 }
@@ -122,6 +124,7 @@ impl Action {
             Action::ChangeMode(Mode::Normal) => "Return to Normal mode for navigation",
             Action::ChangeMode(Mode::Canvas) => "Enter Canvas mode for node manipulation",
             Action::ChangeMode(Mode::Help) => "Enter Help mode for interactive documentation",
+            Action::ChangeMode(Mode::Command) => "Enter Command mode for executing named commands",
             Action::GatherNodes => "Gather selected nodes into viewport",
             Action::AlignNodes => "Align all nodes based on relationships",
             Action::ShowHelp => "Display help for current mode",
@@ -160,6 +163,16 @@ impl Action {
                         - Navigate through help information\n\
                         - Return to previous mode with Esc\n\n\
                         Key: Shift+/ (? key) from any mode"
+                    .to_string(),
+                Mode::Command => "Command mode for executing named commands.\n\n\
+                        In this mode:\n\
+                        - Type command names to execute them\n\
+                        - Use Tab for command completion\n\
+                        - Press Enter to execute the command\n\
+                        - Press Esc to cancel and return to previous mode\n\n\
+                        Commands can take arguments separated by spaces.\n\
+                        Example: find-file /path/to/file.txt\n\n\
+                        Key: Alt+X (from any mode)"
                     .to_string(),
             },
             Action::GatherNodes => "Gather selected nodes into viewport.\n\n\

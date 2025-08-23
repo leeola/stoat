@@ -282,6 +282,158 @@ impl CommandRegistry {
                 Ok(Value::U64(buffer_id.0))
             },
         ));
+
+        // Navigation commands
+        self.register_command(Command::new(
+            "goto-line",
+            "Jump to a specific line number",
+            |context, args| {
+                let line_num = args
+                    .get(0)
+                    .and_then(|v| match v {
+                        Value::U64(n) => Some(*n as usize),
+                        Value::I64(n) if *n > 0 => Some(*n as usize),
+                        _ => None,
+                    })
+                    .ok_or_else(|| crate::Error::Generic {
+                        message: "goto-line requires a positive line number".to_string(),
+                    })?;
+
+                // Get the active buffer
+                let buffer_id = context.stoat.buffers().active_buffer().ok_or_else(|| {
+                    crate::Error::Generic {
+                        message: "No active buffer".to_string(),
+                    }
+                })?;
+
+                // Update cursor position in view state
+                if let Some(buffer) = context.stoat.buffers().get(buffer_id) {
+                    // Calculate the byte offset for the line
+                    let mut current_line = 1;
+                    let mut byte_offset = 0;
+                    let content = buffer.rope().to_string();
+
+                    for (i, ch) in content.chars().enumerate() {
+                        if current_line == line_num {
+                            byte_offset = i;
+                            break;
+                        }
+                        if ch == '\n' {
+                            current_line += 1;
+                        }
+                    }
+
+                    // Update cursor position (this is simplified - real implementation
+                    // would update the view state properly)
+                    // TODO: Implement proper cursor positioning in view state
+                    Ok(Value::U64(byte_offset as u64))
+                } else {
+                    Err(crate::Error::Generic {
+                        message: "Buffer not found".to_string(),
+                    })
+                }
+            },
+        ));
+
+        self.register_command(Command::new(
+            "search-forward",
+            "Search forward in the current buffer",
+            |context, args| {
+                let search_term = args
+                    .get(0)
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| crate::Error::Generic {
+                        message: "search-forward requires a search string".to_string(),
+                    })?;
+
+                let buffer_id = context.stoat.buffers().active_buffer().ok_or_else(|| {
+                    crate::Error::Generic {
+                        message: "No active buffer".to_string(),
+                    }
+                })?;
+
+                if let Some(buffer) = context.stoat.buffers().get(buffer_id) {
+                    let content = buffer.rope().to_string();
+                    // TODO: Start from current cursor position
+                    if let Some(pos) = content.find(search_term) {
+                        // TODO: Update cursor position to match location
+                        Ok(Value::U64(pos as u64))
+                    } else {
+                        Ok(Value::Null)
+                    }
+                } else {
+                    Err(crate::Error::Generic {
+                        message: "Buffer not found".to_string(),
+                    })
+                }
+            },
+        ));
+
+        self.register_command(Command::new(
+            "search-backward",
+            "Search backward in the current buffer",
+            |context, args| {
+                let search_term = args
+                    .get(0)
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .ok_or_else(|| crate::Error::Generic {
+                        message: "search-backward requires a search string".to_string(),
+                    })?;
+
+                let buffer_id = context.stoat.buffers().active_buffer().ok_or_else(|| {
+                    crate::Error::Generic {
+                        message: "No active buffer".to_string(),
+                    }
+                })?;
+
+                if let Some(buffer) = context.stoat.buffers().get(buffer_id) {
+                    let content = buffer.rope().to_string();
+                    // TODO: Start from current cursor position
+                    if let Some(pos) = content.rfind(search_term) {
+                        // TODO: Update cursor position to match location
+                        Ok(Value::U64(pos as u64))
+                    } else {
+                        Ok(Value::Null)
+                    }
+                } else {
+                    Err(crate::Error::Generic {
+                        message: "Buffer not found".to_string(),
+                    })
+                }
+            },
+        ));
+
+        self.register_command(Command::new(
+            "next-buffer",
+            "Switch to the next buffer",
+            |context, _args| {
+                context.stoat.buffers_mut().next_buffer();
+                if let Some(buffer_id) = context.stoat.buffers().active_buffer() {
+                    Ok(Value::U64(buffer_id.0))
+                } else {
+                    Ok(Value::Null)
+                }
+            },
+        ));
+
+        self.register_command(Command::new(
+            "previous-buffer",
+            "Switch to the previous buffer",
+            |context, _args| {
+                context.stoat.buffers_mut().previous_buffer();
+                if let Some(buffer_id) = context.stoat.buffers().active_buffer() {
+                    Ok(Value::U64(buffer_id.0))
+                } else {
+                    Ok(Value::Null)
+                }
+            },
+        ));
     }
 }
 

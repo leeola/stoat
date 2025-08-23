@@ -3,7 +3,71 @@ use super::{
     config::ModalConfig,
     key::{Key, NamedKey},
 };
+use crate::value::Value;
 use std::collections::VecDeque;
+
+/// State for command input in command mode
+#[derive(Debug, Clone, Default)]
+pub struct CommandInputState {
+    /// The current command being typed
+    pub buffer: String,
+    /// Available command completions
+    pub completions: Vec<String>,
+    /// Current completion index
+    pub completion_index: usize,
+    /// Whether we're in completion mode
+    pub showing_completions: bool,
+}
+
+impl CommandInputState {
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.completions.clear();
+        self.completion_index = 0;
+        self.showing_completions = false;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Parse the command buffer into command name and arguments
+    pub fn parse_command(&self) -> Option<(String, Vec<Value>)> {
+        if self.buffer.trim().is_empty() {
+            return None;
+        }
+
+        let parts: Vec<&str> = self.buffer.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let command_name = parts[0].to_string();
+        let args: Vec<Value> = parts[1..]
+            .iter()
+            .map(|&arg| {
+                // Try to parse as number first
+                if let Ok(num) = arg.parse::<i64>() {
+                    Value::I64(num)
+                } else if let Ok(num) = arg.parse::<u64>() {
+                    Value::U64(num)
+                } else if let Ok(num) = arg.parse::<f64>() {
+                    Value::Float(num.into())
+                } else if arg == "true" {
+                    Value::Bool(true)
+                } else if arg == "false" {
+                    Value::Bool(false)
+                } else {
+                    // Default to string, removing quotes if present
+                    let cleaned = arg.trim_matches('"').trim_matches('\'');
+                    Value::String(cleaned.into())
+                }
+            })
+            .collect();
+
+        Some((command_name, args))
+    }
+}
 
 /// The modal input system that processes keys and returns actions
 pub struct ModalSystem {
@@ -33,6 +97,9 @@ pub struct ModalSystem {
 
     /// Ticks since last key
     ticks_since_key: u32,
+
+    /// Command input state
+    command_input: CommandInputState,
 }
 
 impl ModalSystem {
@@ -54,12 +121,23 @@ impl ModalSystem {
             key_buffer: VecDeque::new(),
             sequence_timeout: 30, // About 0.5 seconds at 60fps
             ticks_since_key: 0,
+            command_input: CommandInputState::default(),
         }
     }
 
     /// Get the current mode
     pub fn current_mode(&self) -> &Mode {
         &self.current_mode
+    }
+
+    /// Get the command input state
+    pub fn command_input(&self) -> &CommandInputState {
+        &self.command_input
+    }
+
+    /// Get mutable command input state
+    pub fn command_input_mut(&mut self) -> &mut CommandInputState {
+        &mut self.command_input
     }
 
     /// Process a key input and return an action if one is triggered
@@ -74,6 +152,11 @@ impl ModalSystem {
         if let Some(action) = self.check_global_binding() {
             self.key_buffer.clear();
             return Some(self.handle_action(action));
+        }
+
+        // Special handling for Command mode
+        if self.current_mode == Mode::Command {
+            return self.handle_command_mode_key(key);
         }
 
         // Special handling for Help mode
@@ -251,6 +334,61 @@ impl ModalSystem {
             .collect()
     }
 
+    /// Handle key input in command mode
+    fn handle_command_mode_key(&mut self, key: Key) -> Option<Action> {
+        self.key_buffer.clear(); // Don't accumulate keys in command mode
+
+        match key {
+            Key::Named(NamedKey::Esc) => {
+                // Cancel command mode and return to previous mode
+                self.command_input.clear();
+                if let Some(previous_mode) = self.mode_stack.pop() {
+                    self.current_mode = previous_mode.clone();
+                    Some(Action::ChangeMode(previous_mode))
+                } else {
+                    self.current_mode = Mode::Normal;
+                    Some(Action::ChangeMode(Mode::Normal))
+                }
+            },
+            Key::Named(NamedKey::Enter) => {
+                // Execute command
+                if let Some((command_name, args)) = self.command_input.parse_command() {
+                    self.command_input.clear();
+                    // Exit command mode
+                    if let Some(previous_mode) = self.mode_stack.pop() {
+                        self.current_mode = previous_mode;
+                    } else {
+                        self.current_mode = Mode::Normal;
+                    }
+                    Some(Action::ExecuteCommand(command_name, args))
+                } else {
+                    None // Empty command, do nothing
+                }
+            },
+            Key::Named(NamedKey::Tab) => {
+                // TODO: Implement command completion
+                // For now, just ignore Tab
+                None
+            },
+            Key::Named(NamedKey::Backspace) => {
+                // Remove last character
+                if !self.command_input.buffer.is_empty() {
+                    self.command_input.buffer.pop();
+                }
+                None
+            },
+            Key::Char(c) => {
+                // Add character to command buffer
+                self.command_input.buffer.push(c);
+                None
+            },
+            _ => {
+                // Ignore other keys in command mode
+                None
+            },
+        }
+    }
+
     /// Handle mode changes and return the action
     fn handle_action(&mut self, action: Action) -> Action {
         match &action {
@@ -261,6 +399,10 @@ impl ModalSystem {
                 if *new_mode != Mode::Help {
                     self.showing_action_help = false;
                     self.current_action_help = None;
+                }
+                // Clear command input when entering command mode
+                if *new_mode == Mode::Command {
+                    self.command_input.clear();
                 }
             },
             Action::ShowHelp => {

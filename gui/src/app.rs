@@ -2,7 +2,7 @@ use crate::{
     input,
     widget::{
         agentic_chat, create_editor, update_editor_state, AgenticChat, AgenticChatEvent,
-        AgenticMessage, CommandInfo, EditorMessage, EditorState, HelpModal,
+        AgenticMessage, CommandInfo, CommandPalette, EditorMessage, EditorState, HelpModal,
     },
 };
 use iced::{Element, Task};
@@ -360,8 +360,12 @@ impl App {
 
         let main_content = stack(layers).width(Length::Fill).height(Length::Fill);
 
-        // Combine with status bar
-        column![main_content, status_bar].into()
+        // Create command palette
+        let command_palette =
+            CommandPalette::view(self.stoat.current_mode(), self.stoat.command_input_state());
+
+        // Combine with command palette and status bar
+        column![main_content, command_palette, status_bar].into()
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
