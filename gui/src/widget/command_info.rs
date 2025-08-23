@@ -8,6 +8,12 @@ use stoat_core::input::CommandInfoState;
 /// A widget that displays available commands for the current mode - purely presentational
 pub struct CommandInfo;
 
+impl Default for CommandInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandInfo {
     /// Create a new command info widget
     pub fn new() -> Self {

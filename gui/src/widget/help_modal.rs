@@ -9,6 +9,12 @@ use stoat_core::input::{HelpDisplayState, HelpType};
 /// Help modal widget - purely presentational, no internal state
 pub struct HelpModal;
 
+impl Default for HelpModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HelpModal {
     /// Create a new help modal
     pub fn new() -> Self {

@@ -7,8 +7,8 @@
 
 use crate::widget::theme::{Colors, Style};
 use iced::{
+    widget::{container, scrollable, text, Column, Row},
     Background, Border, Element, Length, Padding, Theme,
-    widget::{Column, Row, container, scrollable, text},
 };
 use stoat_core::buffer_manager::{BufferId, BufferManager};
 use stoat_text::buffer::Buffer;
@@ -186,7 +186,7 @@ where
 
         let line_row = if state.config.show_line_numbers {
             // Line number column
-            let line_num_text = text(format!("{:4}", line_number))
+            let line_num_text = text(format!("{line_number:4}"))
                 .font(iced::Font::MONOSPACE)
                 .size(Style::TEXT_SIZE_SMALL)
                 .color(Colors::TEXT_SECONDARY);
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_editor_state_with_buffer() {
-        let buffer_id = stoat_core::buffer_manager::BufferId(1);
+        let buffer_id = BufferId(1);
         let state = EditorState::with_buffer(buffer_id);
         assert_eq!(state.active_buffer, Some(buffer_id));
     }

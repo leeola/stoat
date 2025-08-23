@@ -171,7 +171,7 @@ impl BufferManager {
 
     /// Create a scratch buffer (temporary, not associated with a file)
     pub fn create_scratch_buffer(&mut self, name: String) -> BufferId {
-        self.create_buffer(format!("*{}*", name))
+        self.create_buffer(format!("*{name}*"))
     }
 
     /// Get a buffer by ID
@@ -213,7 +213,7 @@ impl BufferManager {
             .find(|(_, info)| {
                 info.file_path
                     .as_ref()
-                    .map_or(false, |buf_path| buf_path == path)
+                    .is_some_and(|buf_path| buf_path == path)
             })
             .map(|(id, _)| *id)
     }
@@ -222,7 +222,7 @@ impl BufferManager {
     pub fn kill_buffer(&mut self, id: BufferId) -> Result<()> {
         if !self.buffers.contains_key(&id) {
             return Err(Error::Generic {
-                message: format!("Buffer {} not found", id),
+                message: format!("Buffer {id} not found"),
             });
         }
 
@@ -250,14 +250,14 @@ impl BufferManager {
     /// Save a buffer to its associated file
     pub fn save_buffer(&mut self, id: BufferId) -> Result<()> {
         let buffer = self.buffers.get(&id).ok_or_else(|| Error::Generic {
-            message: format!("Buffer {} not found", id),
+            message: format!("Buffer {id} not found"),
         })?;
 
         let info = self
             .buffer_info
             .get_mut(&id)
             .ok_or_else(|| Error::Generic {
-                message: format!("Buffer info {} not found", id),
+                message: format!("Buffer info {id} not found"),
             })?;
 
         let path = info.file_path.as_ref().ok_or_else(|| Error::Generic {
@@ -281,7 +281,7 @@ impl BufferManager {
             .buffer_info
             .get_mut(&id)
             .ok_or_else(|| Error::Generic {
-                message: format!("Buffer {} not found", id),
+                message: format!("Buffer {id} not found"),
             })?;
 
         info.name = new_name;
@@ -292,7 +292,7 @@ impl BufferManager {
     pub fn switch_to_buffer(&mut self, id: BufferId) -> Result<()> {
         if !self.buffers.contains_key(&id) {
             return Err(Error::Generic {
-                message: format!("Buffer {} not found", id),
+                message: format!("Buffer {id} not found"),
             });
         }
 

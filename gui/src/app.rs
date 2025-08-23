@@ -1,11 +1,11 @@
 use crate::{
     input,
     widget::{
-        agentic_chat, node_canvas, AgenticChat, AgenticChatEvent, AgenticMessage, CommandInfo,
-        HelpModal, NodeCanvas, NodeId, NodeWidget, PositionedNode,
+        agentic_chat, create_editor, update_editor_state, AgenticChat, AgenticChatEvent,
+        AgenticMessage, CommandInfo, EditorMessage, EditorState, HelpModal,
     },
 };
-use iced::{Element, Point, Task};
+use iced::{Element, Task};
 use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
 use stoat_core::{input::Action, Stoat};
@@ -14,14 +14,14 @@ use tracing::{debug, error, trace};
 
 /// Main application state
 pub struct App {
-    /// The spatial node canvas
-    node_canvas: NodeCanvas,
     /// The Stoat editor instance
     stoat: Stoat,
+    /// Editor widget state
+    editor_state: EditorState,
     /// The ClaudeCode instance for agent chat
     claude: Arc<Mutex<Option<ClaudeCode>>>,
-    /// ID of the chat node
-    chat_node_id: NodeId,
+    /// The agentic chat widget
+    chat_widget: AgenticChat,
     /// Process status
     process_alive: bool,
     /// Session ID for display
@@ -33,8 +33,12 @@ pub struct App {
 pub enum Message {
     /// Keyboard event received
     KeyPressed(iced::keyboard::Event),
-    /// Node canvas message (contains chat messages)
-    NodeCanvasMessage(node_canvas::Message),
+    /// Editor message
+    EditorMessage(EditorMessage),
+    /// Chat message
+    ChatMessage(agentic_chat::Message),
+    /// Chat event
+    ChatEvent(AgenticChatEvent),
     /// Process status update
     ProcessStatusUpdate(bool),
     /// Session initialized
@@ -47,9 +51,15 @@ pub enum Message {
     WindowResized(iced::Size),
 }
 
-impl From<node_canvas::Message> for Message {
-    fn from(msg: node_canvas::Message) -> Self {
-        Message::NodeCanvasMessage(msg)
+impl From<EditorMessage> for Message {
+    fn from(msg: EditorMessage) -> Self {
+        Message::EditorMessage(msg)
+    }
+}
+
+impl From<agentic_chat::Message> for Message {
+    fn from(msg: agentic_chat::Message) -> Self {
+        Message::ChatMessage(msg)
     }
 }
 
@@ -66,33 +76,24 @@ impl App {
         // Initialize Stoat with default configuration
         let mut stoat = Stoat::new();
 
-        // Create the node canvas with chat widget
-        let mut node_canvas = NodeCanvas::new();
-        let chat_widget = AgenticChat::new();
-        let chat_node_id = NodeId(1);
+        // Create initial editor state
+        let mut editor_state = EditorState::default();
 
-        // Add chat node to GUI canvas
-        node_canvas.add_node(PositionedNode {
-            id: chat_node_id,
-            position: Point::new(400.0, 100.0), // World coordinates
-            widget: NodeWidget::Chat(chat_widget),
-        });
-
-        // Set up view state in core with integer positions
-        let core_node_id = stoat_core::node::NodeId(chat_node_id.0);
-        stoat.view_state_mut().set_position(
-            core_node_id,
-            stoat_core::view_state::Position::new(400, 100),
+        // Create a welcome buffer
+        let welcome_buffer_id = stoat.create_buffer_with_content(
+            "*Welcome*".to_string(),
+            "Welcome to Stoat Editor\n\nUse Ctrl+O to open files\nUse Ctrl+S to save\n".to_string(),
         );
-        stoat
-            .view_state_mut()
-            .set_size(core_node_id, stoat_core::view_state::Size::new(400, 600));
-        stoat.view_state_mut().select(core_node_id);
+        editor_state.set_active_buffer(Some(welcome_buffer_id));
+        editor_state.set_focused(true);
+
+        // Create the chat widget
+        let chat_widget = AgenticChat::new();
 
         // Set initial viewport size to match window
         stoat.view_state_mut().update_viewport_size(1280, 720);
 
-        debug!("Created node canvas with chat at position (400, 100)");
+        debug!("Created editor with welcome buffer");
 
         // Initialize ClaudeCode asynchronously
         let claude = Arc::new(Mutex::new(None));
@@ -122,10 +123,10 @@ impl App {
 
         (
             Self {
-                node_canvas,
                 stoat,
+                editor_state,
                 claude,
-                chat_node_id,
+                chat_widget,
                 process_alive: false,
                 session_id: None,
             },
@@ -164,90 +165,59 @@ impl App {
                     Task::none()
                 }
             },
-            Message::NodeCanvasMessage(canvas_msg) => {
-                match canvas_msg {
-                    node_canvas::Message::ChatMessage(_) | node_canvas::Message::UserMessage(_) => {
-                        // Update the node canvas (which will update the chat widget or user message
-                        // widgets)
-                        let task = self.node_canvas.update(canvas_msg.clone());
-                        task.map(Message::NodeCanvasMessage)
-                    },
-                    node_canvas::Message::ChatEvent(event) => match event {
-                        AgenticChatEvent::MessageSubmitted(content) => {
-                            debug!("User submitted message: {}", content);
-                            // Send message to Claude
-                            let claude = Arc::clone(&self.claude);
-                            Task::perform(
-                                async move {
-                                    let mut claude_guard = claude.lock().await;
-                                    if let Some(claude) = claude_guard.as_mut() {
-                                        debug!("Sending message to Claude");
-                                        if let Err(e) = claude.send_message(&content).await {
-                                            error!("Failed to send message to Claude: {}", e);
-                                        }
-                                    } else {
-                                        error!("Claude not initialized");
-                                    }
-                                },
-                                |_| Message::Tick,
-                            )
+            Message::EditorMessage(editor_msg) => {
+                // Update the editor state
+                update_editor_state(&mut self.editor_state, editor_msg, self.stoat.buffers_mut());
+                Task::none()
+            },
+            Message::ChatMessage(chat_msg) => {
+                // Update the chat widget
+                let event_task = self.chat_widget.update(chat_msg);
+                event_task.map(Message::ChatEvent)
+            },
+            Message::ChatEvent(event) => match event {
+                AgenticChatEvent::MessageSubmitted(content) => {
+                    debug!("User submitted message: {}", content);
+                    // Send message to Claude
+                    let claude = Arc::clone(&self.claude);
+                    Task::perform(
+                        async move {
+                            let mut claude_guard = claude.lock().await;
+                            if let Some(claude) = claude_guard.as_mut() {
+                                debug!("Sending message to Claude");
+                                if let Err(e) = claude.send_message(&content).await {
+                                    error!("Failed to send message to Claude: {}", e);
+                                }
+                            } else {
+                                error!("Claude not initialized");
+                            }
                         },
-                        AgenticChatEvent::UserMessageForNode(message_id, content) => {
-                            debug!("Creating user message node for: {}", content);
-                            // Create a UserMessageNode in the core workspace
-                            let node_id = stoat_core::node::NodeId(message_id.as_u64());
-                            let user_message_node = stoat_core::nodes::UserMessageNode::new(
-                                node_id,
-                                format!("User Message {}", message_id.uuid()),
-                                content.clone(),
-                            );
+                        |_| Message::Tick,
+                    )
+                },
+                AgenticChatEvent::UserMessageForNode(message_id, content) => {
+                    debug!("Creating user message buffer for: {}", content);
 
-                            // Create the GUI widget first (before moving the node)
-                            let user_msg_widget =
-                                crate::widget::UserMessageWidget::new(user_message_node);
+                    // Create a buffer for the user message content
+                    let buffer_name = format!("User Message {}", message_id.uuid());
+                    let buffer_id = self
+                        .stoat
+                        .create_buffer_with_content(buffer_name, content.clone());
 
-                            // Create a buffer for the user message content
-                            let buffer_name = format!("User Message {}", message_id.uuid());
-                            let _buffer_id = self
-                                .stoat
-                                .create_buffer_with_content(buffer_name, content.clone());
+                    // Switch the editor to show this buffer
+                    self.editor_state.set_active_buffer(Some(buffer_id));
 
-                            // Calculate position for the new node (stack vertically)
-                            let gui_node_id = NodeId(node_id.0);
-                            let y_position = 200.0 + (self.node_canvas.nodes.len() as f32 * 150.0);
-
-                            // Add positioned node to canvas
-                            self.node_canvas.add_node(PositionedNode {
-                                id: gui_node_id,
-                                position: Point::new(100.0, y_position),
-                                widget: NodeWidget::UserMessage(user_msg_widget),
-                            });
-
-                            // Set position in core view state
-                            self.stoat.view_state_mut().set_position(
-                                node_id,
-                                stoat_core::view_state::Position::new(100, y_position as i32),
-                            );
-                            self.stoat
-                                .view_state_mut()
-                                .set_size(node_id, stoat_core::view_state::Size::new(300, 120));
-
-                            debug!(
-                                "Created user message node at position ({}, {})",
-                                100.0, y_position
-                            );
-                            Task::none()
-                        },
-                        AgenticChatEvent::MessageSelected(id) => {
-                            // Future: highlight corresponding node in graph
-                            debug!("Message selected: {:?}", id);
-                            Task::none()
-                        },
-                        AgenticChatEvent::ScrollToMessage(_) | AgenticChatEvent::ClearHistory => {
-                            Task::none()
-                        },
-                    },
-                }
+                    debug!("Created user message buffer and switched to it");
+                    Task::none()
+                },
+                AgenticChatEvent::MessageSelected(id) => {
+                    // Future: switch to corresponding buffer
+                    debug!("Message selected: {:?}", id);
+                    Task::none()
+                },
+                AgenticChatEvent::ScrollToMessage(_) | AgenticChatEvent::ClearHistory => {
+                    Task::none()
+                },
             },
             Message::ProcessStatusUpdate(alive) => {
                 if self.process_alive != alive {
@@ -257,16 +227,14 @@ impl App {
                     } else {
                         "Agent process stopped"
                     };
-                    // Find and update the chat widget in the node canvas
-                    if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                        chat.add_message(AgenticMessage::new(
-                            agentic_chat::AgentRole::System,
-                            status.to_string(),
-                            agentic_chat::EventType::SystemEvent {
-                                event_type: "process_status".to_string(),
-                            },
-                        ));
-                    }
+                    // Update the chat widget directly
+                    self.chat_widget.add_message(AgenticMessage::new(
+                        agentic_chat::AgentRole::System,
+                        status.to_string(),
+                        agentic_chat::EventType::SystemEvent {
+                            event_type: "process_status".to_string(),
+                        },
+                    ));
                 }
                 Task::none()
             },
@@ -274,24 +242,20 @@ impl App {
                 self.session_id = Some(session_id.clone());
                 self.process_alive = alive;
 
-                // Add initialization message to chat in node canvas
-                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                    chat.add_message(AgenticMessage::new(
-                        agentic_chat::AgentRole::System,
-                        format!("Agent session initialized: {session_id}"),
-                        agentic_chat::EventType::SessionEvent {
-                            event_type: "initialized".to_string(),
-                        },
-                    ));
-                }
+                // Add initialization message to chat widget
+                self.chat_widget.add_message(AgenticMessage::new(
+                    agentic_chat::AgentRole::System,
+                    format!("Agent session initialized: {session_id}"),
+                    agentic_chat::EventType::SessionEvent {
+                        event_type: "initialized".to_string(),
+                    },
+                ));
                 Task::none()
             },
             Message::MessageReceived(sdk_msg) => {
                 debug!("Processing SDK message: {:?}", sdk_msg);
-                // Process SDK message in chat widget within node canvas
-                if let Some(chat) = self.node_canvas.find_chat_mut(self.chat_node_id) {
-                    chat.process_sdk_message(sdk_msg);
-                }
+                // Process SDK message in chat widget directly
+                self.chat_widget.process_sdk_message(sdk_msg);
                 Task::none()
             },
             Message::Tick => {
@@ -348,15 +312,23 @@ impl App {
             Length, Padding,
         };
 
-        // Create enhanced status bar
-        let status_bar = StatusBar::create(
-            self.stoat.current_mode().as_str(),
-            Some("Stoat Editor - Node Canvas".to_string()),
-        );
+        // Create enhanced status bar with buffer name if available
+        let buffer_info = if let Some(buffer_id) = self.editor_state.active_buffer {
+            if let Some(info) = self.stoat.buffers().get_info(buffer_id) {
+                Some(format!("Stoat Editor - {}", info.name))
+            } else {
+                Some("Stoat Editor - [Invalid Buffer]".to_string())
+            }
+        } else {
+            Some("Stoat Editor - No Buffer".to_string())
+        };
 
-        // Get the view state from core and pass it to the node canvas for rendering
-        let view_state = self.stoat.view_state();
-        let canvas = self.node_canvas.view(view_state);
+        let status_bar = StatusBar::create(self.stoat.current_mode().as_str(), buffer_info);
+
+        // Create the editor view
+        let editor = create_editor(&self.editor_state, self.stoat.buffers(), |msg| {
+            Message::EditorMessage(msg)
+        });
 
         // Get command info state and create view
         let command_info_state = self.stoat.get_command_info_state();
@@ -378,8 +350,8 @@ impl App {
         // Get help state for lifetime management
         let help_state = self.stoat.get_help_state();
 
-        // Stack canvas and command info
-        let mut layers = vec![canvas, positioned_command_info.into()];
+        // Stack editor and command info
+        let mut layers = vec![editor, positioned_command_info.into()];
 
         // Add help modal if visible
         if help_state.visible {
@@ -426,15 +398,13 @@ impl App {
                 Task::none()
             },
             Action::GatherNodes => {
-                trace!("Gather nodes in canvas");
-                // GatherNodes is now handled in core lib.rs
-                // The action has already been processed by stoat.user_input()
+                trace!("Gather nodes (deprecated in buffer mode)");
+                // This action is deprecated in buffer-centric mode
                 Task::none()
             },
             Action::AlignNodes => {
-                trace!("Align nodes based on relationships");
-                // AlignNodes is handled in core lib.rs
-                // The action has already been processed by stoat.user_input()
+                trace!("Align nodes (deprecated in buffer mode)");
+                // This action is deprecated in buffer-centric mode
                 Task::none()
             },
             Action::ShowHelp => {

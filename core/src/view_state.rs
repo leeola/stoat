@@ -1,18 +1,18 @@
-use crate::node::NodeId;
+use crate::buffer_manager::BufferId;
 use std::collections::HashMap;
 
 /// Runtime view state - computed per session, not persisted
 /// All coordinates are in abstract integer units
 #[derive(Debug, Clone)]
 pub struct ViewState {
-    /// Position of each node in the view
-    pub positions: HashMap<NodeId, Position>,
-    /// Size of each node
-    pub sizes: HashMap<NodeId, Size>,
+    /// Position of each buffer in the view
+    pub positions: HashMap<BufferId, Position>,
+    /// Size of each buffer
+    pub sizes: HashMap<BufferId, Size>,
     /// Current viewport into the canvas
     pub viewport: Viewport,
-    /// Currently selected node
-    pub selected: Option<NodeId>,
+    /// Currently selected buffer
+    pub selected: Option<BufferId>,
     /// Zoom level (1.0 = 100%)
     pub zoom: f32,
 }
@@ -72,18 +72,18 @@ impl ViewState {
         Self::default()
     }
 
-    /// Set the position of a node
-    pub fn set_position(&mut self, id: NodeId, pos: Position) {
+    /// Set the position of a buffer
+    pub fn set_position(&mut self, id: BufferId, pos: Position) {
         self.positions.insert(id, pos);
     }
 
-    /// Set the size of a node
-    pub fn set_size(&mut self, id: NodeId, size: Size) {
+    /// Set the size of a buffer
+    pub fn set_size(&mut self, id: BufferId, size: Size) {
         self.sizes.insert(id, size);
     }
 
-    /// Select a node
-    pub fn select(&mut self, id: NodeId) {
+    /// Select a buffer
+    pub fn select(&mut self, id: BufferId) {
         self.selected = Some(id);
     }
 
@@ -119,9 +119,9 @@ impl ViewState {
         }
     }
 
-    /// Apply a simple grid layout to position nodes
-    pub fn apply_grid_layout(&mut self, node_ids: &[NodeId], columns: usize, spacing: i32) {
-        for (index, &id) in node_ids.iter().enumerate() {
+    /// Apply a simple grid layout to position buffers
+    pub fn apply_grid_layout(&mut self, buffer_ids: &[BufferId], columns: usize, spacing: i32) {
+        for (index, &id) in buffer_ids.iter().enumerate() {
             let col = (index % columns) as i32;
             let row = (index / columns) as i32;
 
@@ -138,8 +138,8 @@ impl ViewState {
     }
 
     /// Initialize layout with default positions
-    pub fn initialize_default_layout(&mut self, node_ids: &[NodeId]) {
-        self.apply_grid_layout(node_ids, 3, 500);
+    pub fn initialize_default_layout(&mut self, buffer_ids: &[BufferId]) {
+        self.apply_grid_layout(buffer_ids, 3, 500);
     }
 
     /// Convert a canvas position to screen coordinates
@@ -157,37 +157,35 @@ impl ViewState {
         }
     }
 
-    /// Align all nodes using intelligent relationship-based layout
+    /// Align all buffers using intelligent relationship-based layout  
     ///
-    /// This method analyzes the graph structure and positions nodes according to their
-    /// relationships. User message nodes (conversation history) are positioned as a
-    /// vertical spine on the left, with other nodes positioned relative to them.
-    pub fn align_nodes(&mut self, all_nodes: &[NodeId]) {
-        if all_nodes.is_empty() {
+    /// This method positions buffers in a simple layout for viewing.
+    /// In buffer-centric mode, this is mainly for backwards compatibility.
+    pub fn align_buffers(&mut self, all_buffers: &[BufferId]) {
+        if all_buffers.is_empty() {
             return;
         }
 
-        // For now, implement a simple sequential layout for user message nodes
-        // This will be enhanced with full graph-based positioning later
+        // Implement a simple sequential layout for buffers
         let mut x_offset = 100i32;
         let mut y_offset = 100i32;
         let spacing = 200i32;
 
-        // Sort nodes by ID for consistent ordering (temporary approach)
-        let mut sorted_nodes = all_nodes.to_vec();
-        sorted_nodes.sort_by_key(|id| id.0);
+        // Sort buffers by ID for consistent ordering
+        let mut sorted_buffers = all_buffers.to_vec();
+        sorted_buffers.sort_by_key(|id| id.0);
 
-        for node_id in sorted_nodes {
-            // Set position for this node
-            self.set_position(node_id, Position::new(x_offset, y_offset));
+        for buffer_id in sorted_buffers {
+            // Set position for this buffer
+            self.set_position(buffer_id, Position::new(x_offset, y_offset));
 
             // Set default size if not already set
-            self.sizes.entry(node_id).or_insert(Size::new(300, 120));
+            self.sizes.entry(buffer_id).or_insert(Size::new(300, 120));
 
             // Move to next position - stack vertically for now
             y_offset += spacing;
 
-            // If we have too many nodes vertically, start a new column
+            // If we have too many buffers vertically, start a new column
             if y_offset > 1000 {
                 x_offset += 400;
                 y_offset = 100;

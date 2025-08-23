@@ -19,11 +19,8 @@ pub mod persist {
 }
 pub mod buffer_manager;
 pub mod data;
-pub mod graph;
 pub mod input;
 pub mod mode;
-pub mod node;
-pub mod nodes;
 pub mod value;
 pub mod view;
 pub mod view_state;
@@ -749,7 +746,7 @@ impl Stoat {
                 HelpDisplayState {
                     visible: true,
                     help_type: HelpType::Action,
-                    title: format!("Help: {}", action_name),
+                    title: format!("Help: {action_name}"),
                     commands,
                     extended_help: Some(extended_help),
                 }
@@ -773,7 +770,7 @@ impl Stoat {
                         .as_str()
                         .chars()
                         .next()
-                        .unwrap()
+                        .expect("Mode string should not be empty")
                         .to_uppercase()
                         .collect::<String>()
                         + &target_mode.as_str()[1..]
@@ -1081,7 +1078,7 @@ mod tests {
         };
 
         // Allocate IDs directly from state
-        let id1 = node::NodeId(stoat1.state_mut().allocate_id());
+        let id1 = buffer_manager::BufferId(stoat1.state_mut().allocate_id());
 
         // Create second workspace
         stoat1
@@ -1094,7 +1091,7 @@ mod tests {
             .expect("Failed to set active workspace to workspace2");
 
         // Allocate another ID
-        let id2 = node::NodeId(stoat1.state_mut().allocate_id());
+        let id2 = buffer_manager::BufferId(stoat1.state_mut().allocate_id());
 
         // IDs should be different (globally unique)
         assert_ne!(id1, id2);
@@ -1121,7 +1118,7 @@ mod tests {
         };
 
         // Allocate another ID - should get next ID after the previous ones
-        let id3 = node::NodeId(stoat2.state_mut().allocate_id());
+        let id3 = buffer_manager::BufferId(stoat2.state_mut().allocate_id());
 
         // ID should be greater than both previous IDs
         assert!(
@@ -1152,7 +1149,7 @@ mod tests {
             };
 
             // Allocate an ID
-            let id = node::NodeId(stoat1.state_mut().allocate_id());
+            let id = buffer_manager::BufferId(stoat1.state_mut().allocate_id());
             let cache_dir = stoat1.state.get_cache_dir();
 
             // Save state
@@ -1173,7 +1170,7 @@ mod tests {
             };
 
             // Allocate another ID - should continue from previous ID counter
-            node::NodeId(stoat2.state_mut().allocate_id())
+            buffer_manager::BufferId(stoat2.state_mut().allocate_id())
         }; // stoat2 dropped here
 
         // Remove the entire state directory
@@ -1191,7 +1188,7 @@ mod tests {
             };
 
             // Allocate ID - should start from 1 again
-            node::NodeId(stoat3.state_mut().allocate_id())
+            buffer_manager::BufferId(stoat3.state_mut().allocate_id())
         };
 
         // Verify ID progression

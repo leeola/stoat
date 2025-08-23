@@ -1,4 +1,4 @@
-use crate::node::{NodeId, NodeType};
+use crate::buffer_manager::BufferId;
 use serde::{Deserialize, Serialize};
 
 /// Position in a grid coordinate system
@@ -29,19 +29,18 @@ impl GridPosition {
 
 #[derive(Debug, Default, Clone)]
 pub struct View {
-    pub nodes: Vec<NodeView>,
+    pub buffers: Vec<BufferView>,
 }
 
 impl View {
-    pub fn add_node_view(&mut self, id: NodeId, node_type: NodeType, pos: GridPosition) {
-        self.nodes.push(NodeView { id, node_type, pos });
+    pub fn add_buffer_view(&mut self, id: BufferId, pos: GridPosition) {
+        self.buffers.push(BufferView { id, pos });
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct NodeView {
-    pub id: NodeId,
-    pub node_type: NodeType,
+pub struct BufferView {
+    pub id: BufferId,
     pub pos: GridPosition,
 }
 
