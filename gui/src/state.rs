@@ -1,4 +1,5 @@
 use crate::grid_layout::GridLayout;
+use stoat_core::buffer_manager::BufferId;
 
 /// Complete visual state for rendering the canvas
 #[derive(Debug, Clone)]
@@ -7,8 +8,8 @@ pub struct RenderState {
     pub viewport: Viewport,
     /// All nodes to render
     pub nodes: Vec<NodeRenderData>,
-    /// Currently focused node ID (if any)
-    pub focused_node: Option<NodeId>,
+    /// Currently focused buffer ID (if any)
+    pub focused_buffer: Option<BufferId>,
     /// Grid layout for coordinate conversion
     pub grid_layout: GridLayout,
 }
@@ -22,14 +23,10 @@ pub struct Viewport {
     pub zoom: f32,
 }
 
-/// Temporary node ID type for prototyping
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId(pub u64);
-
 /// All data needed to render a single node
 #[derive(Debug, Clone)]
 pub struct NodeRenderData {
-    pub id: NodeId,
+    pub id: BufferId,
     /// Position on canvas
     pub position: (f32, f32),
     /// Size of the node

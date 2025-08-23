@@ -1,7 +1,7 @@
 use crate::widget::theme::{Colors, Style};
 use iced::{
-    widget::{button, container, text, Column},
     Background, Border, Element, Length,
+    widget::{Column, button, container, text},
 };
 use stoat_core::nodes::UserMessageNode;
 
@@ -130,6 +130,7 @@ impl UserMessageWidget {
 impl Default for UserMessageWidget {
     fn default() -> Self {
         // Create a default user message node for default widget
+        // FIXME: This should be updated when UserMessageNode is refactored to use BufferId
         let default_node = UserMessageNode::new(
             stoat_core::node::NodeId(0),
             "Default User Message".to_string(),

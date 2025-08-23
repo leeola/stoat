@@ -1,15 +1,11 @@
 use crate::widget::{
-    agentic_chat, AgenticChat, AgenticChatEvent, UserMessageMessage, UserMessageWidget,
+    AgenticChat, AgenticChatEvent, UserMessageMessage, UserMessageWidget, agentic_chat,
 };
 use iced::{
-    widget::{container, stack},
     Element, Length, Padding, Point, Task,
+    widget::{container, stack},
 };
-use stoat_core::view_state::ViewState;
-
-/// A unique identifier for nodes in the canvas
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId(pub u64);
+use stoat_core::{buffer_manager::BufferId, view_state::ViewState};
 
 /// The spatial container that positions widgets in world space
 /// This is now a pure presentation layer that renders from core's CanvasView
@@ -20,7 +16,7 @@ pub struct NodeCanvas {
 
 /// A widget positioned at specific world coordinates
 pub struct PositionedNode {
-    pub id: NodeId,
+    pub id: BufferId,
     pub position: Point,    // World coordinates
     pub widget: NodeWidget, // The actual widget
 }
@@ -51,7 +47,7 @@ impl NodeCanvas {
     }
 
     /// Find a mutable reference to a chat widget by ID
-    pub fn find_chat_mut(&mut self, id: NodeId) -> Option<&mut AgenticChat> {
+    pub fn find_chat_mut(&mut self, id: BufferId) -> Option<&mut AgenticChat> {
         self.nodes.iter_mut().find_map(|node| {
             if node.id == id {
                 match &mut node.widget {
@@ -107,11 +103,8 @@ impl NodeCanvas {
         let mut stack_widgets = vec![];
 
         for node in &self.nodes {
-            // Get position from view state
-            let core_id = stoat_core::node::NodeId(node.id.0);
-
             // Get position from view state and convert to screen coordinates
-            let screen_pos = if let Some(&pos) = view_state.positions.get(&core_id) {
+            let screen_pos = if let Some(&pos) = view_state.positions.get(&node.id) {
                 let (screen_x, screen_y) = view_state.canvas_to_screen(pos);
                 Point::new(screen_x, screen_y)
             } else {
@@ -126,7 +119,7 @@ impl NodeCanvas {
             };
 
             // Check if this node is selected
-            let is_selected = view_state.selected == Some(core_id);
+            let is_selected = view_state.selected == Some(node.id);
 
             // Style the widget with a node-like container
             let styled_widget = container(widget_element)
