@@ -418,6 +418,12 @@ impl App {
                 debug!("Help action handled by core state management");
                 Task::none()
             },
+            Action::ExecuteCommand(name, args) => {
+                debug!("Execute command: {} with {} arguments", name, args.len());
+                // Command execution is handled internally by Stoat core
+                // Results could be processed here if needed
+                Task::none()
+            },
         }
     }
 }

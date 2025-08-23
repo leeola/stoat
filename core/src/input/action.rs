@@ -17,6 +17,9 @@ pub enum Action {
     ShowHelp,
     ShowActionHelp(String),
     ShowModeHelp(Mode),
+
+    /// Execute a named command with arguments
+    ExecuteCommand(String, Vec<crate::value::Value>),
 }
 
 /// Help system state for GUI rendering
@@ -106,6 +109,7 @@ impl std::fmt::Display for Action {
             Action::ShowHelp => write!(f, "Show help"),
             Action::ShowActionHelp(action_name) => write!(f, "Help for {action_name}"),
             Action::ShowModeHelp(mode) => write!(f, "Show {} help", mode.as_str()),
+            Action::ExecuteCommand(name, _) => write!(f, "Execute command: {name}"),
         }
     }
 }
@@ -123,6 +127,7 @@ impl Action {
             Action::ShowHelp => "Display help for current mode",
             Action::ShowActionHelp(_) => "Display detailed help information",
             Action::ShowModeHelp(_) => "Display help for specific mode",
+            Action::ExecuteCommand(_, _) => "Execute a named command",
         }
     }
 
@@ -198,6 +203,17 @@ impl Action {
                     while in help mode (e.g., 'c' for Canvas mode)",
                     mode.as_str(),
                     mode.as_str()
+                )
+            },
+            Action::ExecuteCommand(name, args) => {
+                format!(
+                    "Execute command '{name}' with {} arguments.\\n\\n\\
+                    Commands are named operations that can be executed\\n\\
+                    programmatically or through key bindings. Each command\\n\\
+                    receives arguments and returns a value.\\n\\n\\
+                    This provides an Emacs-style command system where\\n\\
+                    all editor operations can be invoked by name.",
+                    args.len()
                 )
             },
         }

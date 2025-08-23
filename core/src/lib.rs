@@ -18,6 +18,7 @@ pub mod persist {
     // TODO: save state over generic FS. Ideally configurable serialization format.
 }
 pub mod buffer_manager;
+pub mod command;
 pub mod data;
 pub mod input;
 pub mod mode;
@@ -308,6 +309,8 @@ pub struct Stoat {
     state_path: PathBuf,
     /// Modal input system
     modal_system: ModalSystem,
+    /// Command registry for named command execution
+    commands: command::CommandRegistry,
 }
 
 impl Default for Stoat {
@@ -433,6 +436,7 @@ impl Stoat {
             state,
             state_path,
             modal_system: ModalSystem::new(),
+            commands: command::CommandRegistry::with_builtins(),
         })
     }
 
@@ -444,6 +448,7 @@ impl Stoat {
             state,
             state_path,
             modal_system: ModalSystem::new(),
+            commands: command::CommandRegistry::with_builtins(),
         }
     }
 
@@ -583,6 +588,11 @@ impl Stoat {
                 Action::ShowModeHelp(_) => {
                     // Show mode help - GUI will handle displaying modal
                 },
+                Action::ExecuteCommand(name, args) => {
+                    // Execute named command using internal method to avoid borrowing conflicts
+                    let _result = self.execute_command_internal(name, args.clone());
+                    // TODO: Handle command result (display, error handling)
+                },
             }
         }
 
@@ -616,6 +626,39 @@ impl Stoat {
     /// Get mutable access to the buffer manager
     pub fn buffers_mut(&mut self) -> &mut buffer_manager::BufferManager {
         self.active.buffers_mut()
+    }
+
+    /// Get the command registry
+    pub fn commands(&self) -> &command::CommandRegistry {
+        &self.commands
+    }
+
+    /// Get mutable access to the command registry
+    pub fn commands_mut(&mut self) -> &mut command::CommandRegistry {
+        &mut self.commands
+    }
+
+    /// Execute a command by name with arguments
+    pub fn execute_command(&mut self, name: &str, args: Vec<value::Value>) -> Result<value::Value> {
+        // Use the internal execute method to avoid borrowing conflicts
+        self.execute_command_internal(name, args)
+    }
+
+    /// Internal command execution to avoid borrowing conflicts
+    fn execute_command_internal(
+        &mut self,
+        name: &str,
+        args: Vec<value::Value>,
+    ) -> Result<value::Value> {
+        // We need to temporarily take ownership of the registry to avoid borrowing conflicts
+        let commands = std::mem::replace(&mut self.commands, command::CommandRegistry::new());
+        let result = {
+            let mut context = command::CommandContext::new(self);
+            commands.execute_command(name, &mut context, args)
+        };
+        // Put the commands back
+        self.commands = commands;
+        result
     }
 
     /// Get the current modal mode
