@@ -28,12 +28,16 @@
 //! - `list-buffers`: List all open buffers
 
 use crate::{
-    value::{Array, Map, Value},
     Result, Stoat,
+    value::{Array, Map, Value},
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Type alias for command execution function
+pub type CommandFn =
+    Box<dyn Fn(&mut CommandContext<'_>, Vec<Value>) -> Result<Value> + Send + Sync>;
 
 /// A command that can be executed in the editor
 ///
@@ -45,7 +49,7 @@ pub struct Command {
     /// Human-readable description
     pub description: String,
     /// Function that executes the command
-    pub execute: Box<dyn Fn(&mut CommandContext<'_>, Vec<Value>) -> Result<Value> + Send + Sync>,
+    pub execute: CommandFn,
 }
 
 impl std::fmt::Debug for Command {
@@ -167,7 +171,7 @@ impl CommandRegistry {
             "Open a file in a new buffer",
             |context, args| {
                 let path = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.as_str()),
                         _ => None,
@@ -188,7 +192,7 @@ impl CommandRegistry {
             "save-buffer",
             "Save the current buffer to disk",
             |context, args| {
-                let buffer_id = if let Some(Value::U64(id)) = args.get(0) {
+                let buffer_id = if let Some(Value::U64(id)) = args.first() {
                     crate::buffer_manager::BufferId(*id)
                 } else if let Some(active_id) = context.stoat.buffers().active_buffer() {
                     active_id
@@ -207,7 +211,7 @@ impl CommandRegistry {
             "kill-buffer",
             "Close a buffer",
             |context, args| {
-                let buffer_id = if let Some(Value::U64(id)) = args.get(0) {
+                let buffer_id = if let Some(Value::U64(id)) = args.first() {
                     crate::buffer_manager::BufferId(*id)
                 } else if let Some(active_id) = context.stoat.buffers().active_buffer() {
                     active_id
@@ -227,7 +231,7 @@ impl CommandRegistry {
             "Switch to a different buffer",
             |context, args| {
                 let buffer_id = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::U64(id) => Some(crate::buffer_manager::BufferId(*id)),
                         _ => None,
@@ -268,7 +272,7 @@ impl CommandRegistry {
             "Create a temporary buffer",
             |context, args| {
                 let name = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.as_str()),
                         _ => None,
@@ -289,7 +293,7 @@ impl CommandRegistry {
             "Jump to a specific line number",
             |context, args| {
                 let line_num = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::U64(n) => Some(*n as usize),
                         Value::I64(n) if *n > 0 => Some(*n as usize),
@@ -340,7 +344,7 @@ impl CommandRegistry {
             "Search forward in the current buffer",
             |context, args| {
                 let search_term = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.as_str()),
                         _ => None,
@@ -377,7 +381,7 @@ impl CommandRegistry {
             "Search backward in the current buffer",
             |context, args| {
                 let search_term = args
-                    .get(0)
+                    .first()
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.as_str()),
                         _ => None,
@@ -544,7 +548,7 @@ mod tests {
 
         let result = registry
             .execute_command("list-buffers", &mut context, vec![])
-            .unwrap();
+            .expect("list-buffers command should execute successfully");
 
         if let Value::Array(buffers) = result {
             assert_eq!(buffers.0.len(), 2);
@@ -567,7 +571,7 @@ mod tests {
                 &mut context,
                 vec![Value::String("test-scratch".to_string().into())],
             )
-            .unwrap();
+            .expect("create-scratch-buffer command should execute successfully");
 
         if let Value::U64(buffer_id) = result {
             let id = BufferId(buffer_id);

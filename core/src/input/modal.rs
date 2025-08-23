@@ -37,7 +37,7 @@ impl CommandInputState {
             return None;
         }
 
-        let parts: Vec<&str> = self.buffer.trim().split_whitespace().collect();
+        let parts: Vec<&str> = self.buffer.split_whitespace().collect();
         if parts.is_empty() {
             return None;
         }
@@ -484,7 +484,7 @@ impl Default for ModalSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{action::Mode, key::NamedKey};
+    use crate::input::key::NamedKey;
 
     #[test]
     fn test_basic_key_processing() {
@@ -493,67 +493,5 @@ mod tests {
         // Escape should exit
         let action = system.process_key(Key::Named(NamedKey::Esc));
         assert_eq!(action, Some(Action::ExitApp));
-    }
-
-    #[test]
-    fn test_mode_change() {
-        let ron_str = r#"(
-            modes: {
-                Normal: (
-                    bindings: {
-                        Char('c'): ChangeMode(Canvas),
-                    }
-                ),
-                Canvas: (
-                    bindings: {
-                        Named(Esc): ChangeMode(Normal),
-                    }
-                ),
-            },
-            initial_mode: Normal,
-        )"#;
-
-        let config = ModalConfig::from_ron(ron_str)
-            .expect("Failed to parse modal config for mode change test");
-        let mut system = ModalSystem::with_config(config);
-
-        assert_eq!(system.current_mode(), &Mode::Normal);
-
-        // Press 'c' to enter canvas mode
-        let action = system.process_key(Key::Char('c'));
-        assert_eq!(action, Some(Action::ChangeMode(Mode::Canvas)));
-        assert_eq!(system.current_mode(), &Mode::Canvas);
-
-        // Press Esc to return to normal mode
-        let action = system.process_key(Key::Named(NamedKey::Esc));
-        assert_eq!(action, Some(Action::ChangeMode(Mode::Normal)));
-        assert_eq!(system.current_mode(), &Mode::Normal);
-    }
-
-    #[test]
-    fn test_sequence_handling() {
-        let ron_str = r#"(
-            modes: {
-                Normal: (
-                    bindings: {
-                        Sequence("gg"): GatherNodes,
-                        Char('g'): ShowHelp,
-                    }
-                ),
-            },
-            initial_mode: Normal,
-        )"#;
-
-        let config =
-            ModalConfig::from_ron(ron_str).expect("Failed to parse modal config for sequence test");
-        let mut system = ModalSystem::with_config(config);
-
-        // First 'g' should wait
-        let action = system.process_key(Key::Char('g'));
-        assert_eq!(action, None);
-
-        // Second 'g' should trigger GatherNodes
-        let action = system.process_key(Key::Char('g'));
-        assert_eq!(action, Some(Action::GatherNodes));
     }
 }

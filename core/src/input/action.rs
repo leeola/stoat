@@ -9,10 +9,6 @@ pub enum Action {
     /// Change to a different mode
     ChangeMode(Mode),
 
-    /// Canvas mode actions
-    GatherNodes,
-    AlignNodes,
-
     /// Help actions
     ShowHelp,
     ShowActionHelp(String),
@@ -85,7 +81,6 @@ impl Default for CommandInfoState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Mode {
     Normal,
-    Canvas,
     Help,
     Command,
 }
@@ -94,7 +89,6 @@ impl Mode {
     pub fn as_str(&self) -> &str {
         match self {
             Mode::Normal => "normal",
-            Mode::Canvas => "canvas",
             Mode::Help => "help",
             Mode::Command => "command",
         }
@@ -106,8 +100,6 @@ impl std::fmt::Display for Action {
         match self {
             Action::ExitApp => write!(f, "Exit app"),
             Action::ChangeMode(mode) => write!(f, "{} mode", mode.as_str()),
-            Action::GatherNodes => write!(f, "Gather nodes"),
-            Action::AlignNodes => write!(f, "Align nodes"),
             Action::ShowHelp => write!(f, "Show help"),
             Action::ShowActionHelp(action_name) => write!(f, "Help for {action_name}"),
             Action::ShowModeHelp(mode) => write!(f, "Show {} help", mode.as_str()),
@@ -122,11 +114,8 @@ impl Action {
         match self {
             Action::ExitApp => "Exit the application",
             Action::ChangeMode(Mode::Normal) => "Return to Normal mode for navigation",
-            Action::ChangeMode(Mode::Canvas) => "Enter Canvas mode for node manipulation",
             Action::ChangeMode(Mode::Help) => "Enter Help mode for interactive documentation",
             Action::ChangeMode(Mode::Command) => "Enter Command mode for executing named commands",
-            Action::GatherNodes => "Gather selected nodes into viewport",
-            Action::AlignNodes => "Align all nodes based on relationships",
             Action::ShowHelp => "Display help for current mode",
             Action::ShowActionHelp(_) => "Display detailed help information",
             Action::ShowModeHelp(_) => "Display help for specific mode",
@@ -144,18 +133,10 @@ impl Action {
             Action::ChangeMode(mode) => match mode {
                 Mode::Normal => "Normal mode is the default navigation mode.\n\n\
                         In this mode you can:\n\
-                        - Navigate the canvas\n\
-                        - Switch to Canvas mode\n\
+                        - Navigate buffers\n\
+                        - Execute commands\n\
                         - Access help\n\n\
                         Key: Esc (from any mode)"
-                    .to_string(),
-                Mode::Canvas => "Canvas mode for node manipulation.\n\n\
-                        In this mode:\n\
-                        - Navigate between nodes\n\
-                        - Reposition nodes on canvas\n\
-                        - Create connections between nodes\n\
-                        - Gather nodes into viewport\n\n\
-                        Key: c (from Normal mode)"
                     .to_string(),
                 Mode::Help => "Help mode for interactive command documentation.\n\n\
                         In this mode:\n\
@@ -175,20 +156,6 @@ impl Action {
                         Key: Alt+X (from any mode)"
                     .to_string(),
             },
-            Action::GatherNodes => "Gather selected nodes into viewport.\n\n\
-                Centers the viewport on selected nodes,\n\
-                adjusting zoom if necessary to fit all\n\
-                selected nodes within the visible area.\n\n\
-                Key: a (in Canvas mode)"
-                .to_string(),
-            Action::AlignNodes => "Align all nodes based on graph relationships.\n\n\
-                Automatically repositions all nodes in the workspace\n\
-                using an intelligent layout algorithm that considers\n\
-                the connections between nodes. Creates a hierarchical\n\
-                layout where conversation sequences flow left-to-right\n\
-                and related nodes are positioned nearby.\n\n\
-                Key: A (Shift+a in Canvas mode)"
-                .to_string(),
             Action::ShowHelp => "Enter interactive help mode.\n\n\
                 Opens help for the current mode. In help mode,\n\
                 press any key to see detailed documentation\n\
@@ -213,7 +180,7 @@ impl Action {
                     This allows exploring different modes' commands\n\
                     from within the interactive help system.\n\n\
                     Navigate modes by pressing their activation keys\n\
-                    while in help mode (e.g., 'c' for Canvas mode)",
+                    while in help mode",
                     mode.as_str(),
                     mode.as_str()
                 )
@@ -244,13 +211,9 @@ mod tests {
         let serialized = ron::to_string(&action).expect("Failed to serialize ExitApp action");
         assert_eq!(serialized, "ExitApp");
 
-        let action = Action::GatherNodes;
-        let serialized = ron::to_string(&action).expect("Failed to serialize GatherNodes action");
-        assert_eq!(serialized, "GatherNodes");
-
-        let action = Action::ChangeMode(Mode::Canvas);
+        let action = Action::ChangeMode(Mode::Help);
         let serialized = ron::to_string(&action).expect("Failed to serialize ChangeMode action");
-        assert_eq!(serialized, "ChangeMode(Canvas)");
+        assert_eq!(serialized, "ChangeMode(Help)");
     }
 
     #[test]
@@ -258,10 +221,6 @@ mod tests {
         let mode = Mode::Normal;
         let serialized = ron::to_string(&mode).expect("Failed to serialize Normal mode");
         assert_eq!(serialized, "Normal");
-
-        let mode = Mode::Canvas;
-        let serialized = ron::to_string(&mode).expect("Failed to serialize Canvas mode");
-        assert_eq!(serialized, "Canvas");
 
         let mode = Mode::Help;
         let serialized = ron::to_string(&mode).expect("Failed to serialize Help mode");

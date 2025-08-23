@@ -10,7 +10,7 @@ use std::sync::Arc;
 use stoat_agent_claude_code::{ClaudeCode, SessionConfig};
 use stoat_core::{input::Action, Stoat};
 use tokio::sync::Mutex;
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 /// Main application state
 pub struct App {
@@ -89,9 +89,6 @@ impl App {
 
         // Create the chat widget
         let chat_widget = AgenticChat::new();
-
-        // Set initial viewport size to match window
-        stoat.view_state_mut().update_viewport_size(1280, 720);
 
         debug!("Created editor with welcome buffer");
 
@@ -294,11 +291,8 @@ impl App {
                     },
                 )
             },
-            Message::WindowResized(size) => {
-                // Update viewport size in core's view state
-                self.stoat
-                    .view_state_mut()
-                    .update_viewport_size(size.width as u32, size.height as u32);
+            Message::WindowResized(_size) => {
+                // Window resize handled - no viewport tracking needed in buffer-centric mode
                 Task::none()
             },
         }
@@ -399,16 +393,6 @@ impl App {
             Action::ChangeMode(mode) => {
                 // Mode change is handled internally by ModalSystem
                 debug!("Changed to {} mode", mode.as_str());
-                Task::none()
-            },
-            Action::GatherNodes => {
-                trace!("Gather nodes (deprecated in buffer mode)");
-                // This action is deprecated in buffer-centric mode
-                Task::none()
-            },
-            Action::AlignNodes => {
-                trace!("Align nodes (deprecated in buffer mode)");
-                // This action is deprecated in buffer-centric mode
                 Task::none()
             },
             Action::ShowHelp => {

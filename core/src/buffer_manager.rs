@@ -542,7 +542,7 @@ mod tests {
 
         // Debug: print recent buffers to understand order
         let recent = manager.recent_buffers();
-        println!("Recent buffers after switch: {:?}", recent);
+        println!("Recent buffers after switch: {recent:?}");
         println!("Current active: {:?}", manager.active_buffer());
 
         manager.next_buffer();

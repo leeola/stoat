@@ -11,7 +11,6 @@ pub fn default_keymap() -> ModalConfig {
 
     // Normal mode - the default mode
     let mut normal_bindings = HashMap::new();
-    normal_bindings.insert(Key::Char('c'), Action::ChangeMode(Mode::Canvas));
     normal_bindings.insert(Key::Named(NamedKey::Esc), Action::ExitApp);
     normal_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
     normal_bindings.insert(
@@ -32,34 +31,6 @@ pub fn default_keymap() -> ModalConfig {
         Mode::Normal,
         ModeDefinition {
             bindings: normal_bindings,
-            default_action: None,
-        },
-    );
-
-    // Canvas mode - for node manipulation
-    let mut canvas_bindings = HashMap::new();
-    canvas_bindings.insert(Key::Named(NamedKey::Esc), Action::ChangeMode(Mode::Normal));
-    canvas_bindings.insert(Key::Char('a'), Action::GatherNodes);
-    canvas_bindings.insert(Key::Modified(ModifiedKey::Shift('a')), Action::AlignNodes);
-    canvas_bindings.insert(Key::Modified(ModifiedKey::Shift('/')), Action::ShowHelp);
-    canvas_bindings.insert(
-        Key::Modified(ModifiedKey::Alt('x')),
-        Action::ChangeMode(Mode::Command),
-    );
-    // Add direct command bindings to Canvas mode too
-    canvas_bindings.insert(
-        Key::Modified(ModifiedKey::Ctrl('s')),
-        Action::ExecuteCommand("save-buffer".to_string(), vec![]),
-    );
-    canvas_bindings.insert(
-        Key::Modified(ModifiedKey::Ctrl('x')),
-        Action::ExecuteCommand("next-buffer".to_string(), vec![]),
-    );
-
-    modes.insert(
-        Mode::Canvas,
-        ModeDefinition {
-            bindings: canvas_bindings,
             default_action: None,
         },
     );
