@@ -412,6 +412,11 @@ impl App {
                 // Results could be processed here if needed
                 Task::none()
             },
+            Action::RequestCommandCompletion => {
+                debug!("Command completion requested");
+                // Command completion is handled internally by Stoat core
+                Task::none()
+            },
         }
     }
 }

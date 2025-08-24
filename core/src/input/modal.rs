@@ -366,20 +366,25 @@ impl ModalSystem {
                 }
             },
             Key::Named(NamedKey::Tab) => {
-                // TODO: Implement command completion
-                // For now, just ignore Tab
-                None
+                // Trigger command completion
+                Some(Action::RequestCommandCompletion)
             },
             Key::Named(NamedKey::Backspace) => {
                 // Remove last character
                 if !self.command_input.buffer.is_empty() {
                     self.command_input.buffer.pop();
+                    // Clear completions when editing
+                    self.command_input.completions.clear();
+                    self.command_input.showing_completions = false;
                 }
                 None
             },
             Key::Char(c) => {
                 // Add character to command buffer
                 self.command_input.buffer.push(c);
+                // Clear completions when typing
+                self.command_input.completions.clear();
+                self.command_input.showing_completions = false;
                 None
             },
             _ => {

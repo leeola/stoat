@@ -16,6 +16,9 @@ pub enum Action {
 
     /// Execute a named command with arguments
     ExecuteCommand(String, Vec<crate::value::Value>),
+
+    /// Request command completion for current input
+    RequestCommandCompletion,
 }
 
 /// Help system state for GUI rendering
@@ -104,6 +107,7 @@ impl std::fmt::Display for Action {
             Action::ShowActionHelp(action_name) => write!(f, "Help for {action_name}"),
             Action::ShowModeHelp(mode) => write!(f, "Show {} help", mode.as_str()),
             Action::ExecuteCommand(name, _) => write!(f, "Execute command: {name}"),
+            Action::RequestCommandCompletion => write!(f, "Request command completion"),
         }
     }
 }
@@ -120,6 +124,7 @@ impl Action {
             Action::ShowActionHelp(_) => "Display detailed help information",
             Action::ShowModeHelp(_) => "Display help for specific mode",
             Action::ExecuteCommand(_, _) => "Execute a named command",
+            Action::RequestCommandCompletion => "Complete current command input",
         }
     }
 
@@ -196,6 +201,14 @@ impl Action {
                     args.len()
                 )
             },
+            Action::RequestCommandCompletion => "Tab completion for commands.\n\n\
+                When typing a command in Command mode, pressing Tab\n\
+                will complete the current partial command name or cycle\n\
+                through available matches.\n\n\
+                This helps discover commands and speeds up command entry.\n\
+                Works with all registered commands in the system.\n\n\
+                Key: Tab (in Command mode while typing)"
+                .to_string(),
         }
     }
 }

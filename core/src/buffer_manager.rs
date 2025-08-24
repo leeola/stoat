@@ -12,7 +12,7 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
-use stoat_text::buffer::Buffer;
+use stoat_text::{buffer::Buffer, cursor::Cursor};
 
 /// Unique identifier for buffers
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +70,8 @@ pub struct BufferManager {
     recent_buffers: Vec<BufferId>,
     /// Maximum number of recent buffers to track
     max_recent: usize,
+    /// Cursor positions for each buffer
+    cursor_positions: HashMap<BufferId, Cursor>,
 }
 
 impl Default for BufferManager {
@@ -88,6 +90,7 @@ impl BufferManager {
             buffer_info: HashMap::new(),
             recent_buffers: Vec::new(),
             max_recent: 10,
+            cursor_positions: HashMap::new(),
         }
     }
 
@@ -111,6 +114,10 @@ impl BufferManager {
         self.buffers.insert(id, buffer);
         self.buffer_info.insert(id, info);
         self.add_to_recent(id);
+
+        // Initialize cursor position at the beginning of buffer
+        let cursor = Cursor::new(id.0);
+        self.cursor_positions.insert(id, cursor);
 
         // Set as active (newly created buffers become active)
         self.active_buffer = Some(id);
@@ -162,6 +169,10 @@ impl BufferManager {
         self.buffers.insert(id, buffer);
         self.buffer_info.insert(id, info);
         self.add_to_recent(id);
+
+        // Initialize cursor position at the beginning of buffer
+        let cursor = Cursor::new(id.0);
+        self.cursor_positions.insert(id, cursor);
 
         // Set as active (newly created buffers become active)
         self.active_buffer = Some(id);
@@ -237,6 +248,7 @@ impl BufferManager {
 
         self.buffers.remove(&id);
         self.buffer_info.remove(&id);
+        self.cursor_positions.remove(&id);
         self.recent_buffers.retain(|&buf_id| buf_id != id);
 
         // If this was the active buffer, switch to another
@@ -348,10 +360,17 @@ impl BufferManager {
         self.buffers
             .iter()
             .filter_map(|(id, buffer)| {
-                self.buffer_info.get(id).map(|info| SerializableBuffer {
-                    info: info.clone(),
-                    content: buffer.rope().to_string(),
-                    cursors: vec![(0, 0)], // TODO: Get actual cursor positions
+                self.buffer_info.get(id).map(|info| {
+                    let cursors = if let Some(cursor) = self.cursor_positions.get(id) {
+                        vec![(cursor.token_index(), cursor.char_offset())]
+                    } else {
+                        vec![(0, 0)]
+                    };
+                    SerializableBuffer {
+                        info: info.clone(),
+                        content: buffer.rope().to_string(),
+                        cursors,
+                    }
                 })
             })
             .collect()
@@ -374,6 +393,17 @@ impl BufferManager {
             self.buffers.insert(id, buffer);
             self.buffer_info.insert(id, serializable.info);
             self.add_to_recent(id);
+
+            // Restore cursor positions
+            if let Some((token_index, char_offset)) = serializable.cursors.first() {
+                let mut cursor = Cursor::new(id.0);
+                cursor.set_position(*token_index, *char_offset);
+                self.cursor_positions.insert(id, cursor);
+            } else {
+                // Default cursor if no positions saved
+                let cursor = Cursor::new(id.0);
+                self.cursor_positions.insert(id, cursor);
+            }
 
             // Set as active if we don't have one
             if self.active_buffer.is_none() {
@@ -467,6 +497,35 @@ impl BufferManager {
                 _ => "text",
             })
             .map(|s| s.to_string())
+    }
+
+    /// Get the cursor position for a buffer
+    pub fn get_cursor(&self, buffer_id: BufferId) -> Option<&Cursor> {
+        self.cursor_positions.get(&buffer_id)
+    }
+
+    /// Get a mutable cursor position for a buffer
+    pub fn get_cursor_mut(&mut self, buffer_id: BufferId) -> Option<&mut Cursor> {
+        self.cursor_positions.get_mut(&buffer_id)
+    }
+
+    /// Set the cursor position for a buffer
+    pub fn set_cursor(&mut self, buffer_id: BufferId, cursor: Cursor) {
+        self.cursor_positions.insert(buffer_id, cursor);
+    }
+
+    /// Get the current cursor position for the active buffer
+    pub fn get_active_cursor(&self) -> Option<&Cursor> {
+        self.active_buffer.and_then(|id| self.get_cursor(id))
+    }
+
+    /// Get a mutable cursor for the active buffer
+    pub fn get_active_cursor_mut(&mut self) -> Option<&mut Cursor> {
+        if let Some(id) = self.active_buffer {
+            self.get_cursor_mut(id)
+        } else {
+            None
+        }
     }
 }
 

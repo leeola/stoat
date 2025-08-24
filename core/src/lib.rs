@@ -585,6 +585,10 @@ impl Stoat {
                     let _result = self.execute_command_internal(name, args.clone());
                     // TODO: Handle command result (display, error handling)
                 },
+                Action::RequestCommandCompletion => {
+                    // Handle tab completion for commands
+                    self.handle_command_completion();
+                },
             }
         }
 
@@ -651,6 +655,39 @@ impl Stoat {
         // Put the commands back
         self.commands = commands;
         result
+    }
+
+    /// Handle command completion for Tab key in Command mode
+    fn handle_command_completion(&mut self) {
+        let current_input = &self.modal_system.command_input().buffer;
+        let completions = self.commands.command_completions(current_input);
+
+        if !completions.is_empty() {
+            let command_input = self.modal_system.command_input_mut();
+
+            if command_input.completions.is_empty() {
+                // First time pressing Tab - populate completions
+                command_input.completions = completions;
+                command_input.completion_index = 0;
+                command_input.showing_completions = true;
+
+                // Set the buffer to the first completion
+                if let Some(first_completion) = command_input.completions.first() {
+                    command_input.buffer = first_completion.clone();
+                }
+            } else {
+                // Cycle through existing completions
+                command_input.completion_index =
+                    (command_input.completion_index + 1) % command_input.completions.len();
+
+                if let Some(completion) = command_input
+                    .completions
+                    .get(command_input.completion_index)
+                {
+                    command_input.buffer = completion.clone();
+                }
+            }
+        }
     }
 
     /// Get the current modal mode
