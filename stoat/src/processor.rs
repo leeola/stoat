@@ -89,6 +89,8 @@ pub fn process_event(
             (new_state, vec![])
         },
 
+        EditorEvent::CharacterReceived { ch } => process_character_received(state, ch, keymap),
+
         // TODO: Implement remaining events
         _ => (state, vec![]),
     };
@@ -141,6 +143,52 @@ fn process_key_press(
     tracing::trace!(
         "No command found for key: {:?} in mode: {:?}",
         key,
+        state.mode
+    );
+    (state, vec![])
+}
+
+/// Process character received events for modal editor commands.
+fn process_character_received(
+    state: EditorState,
+    ch: char,
+    keymap: &Keymap,
+) -> (EditorState, Vec<Effect>) {
+    tracing::trace!("Processing character in {:?} mode: '{}'", state.mode, ch);
+
+    let original_mode = state.mode;
+
+    // Try to look up command using a character key
+    let char_key = keyboard::Key::Character(ch.to_string().into());
+    if let Some(command) = keymap.lookup(&char_key, &keyboard::Modifiers::default(), state.mode) {
+        tracing::debug!("Found command for character '{}': {:?}", ch, command);
+        let result = process_command(state, command);
+
+        // Log mode changes
+        if result.0.mode != original_mode {
+            tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+        }
+
+        return result;
+    }
+
+    // Handle special cases for insert mode character insertion
+    if state.mode == EditMode::Insert {
+        let command = Command::InsertChar(ch);
+        tracing::debug!("Insert mode char: {:?}", command);
+        let result = process_command(state, command);
+
+        if result.0.mode != original_mode {
+            tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+        }
+
+        return result;
+    }
+
+    // If no command found, return state unchanged
+    tracing::trace!(
+        "No command found for character: '{}' in mode: {:?}",
+        ch,
         state.mode
     );
     (state, vec![])

@@ -13,11 +13,14 @@ use iced::{keyboard, mouse, Point};
 /// no behavior themselves.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
-    /// A key was pressed with optional modifiers
+    /// A key was pressed with optional modifiers (for special keys)
     KeyPress {
         key: keyboard::Key,
         modifiers: keyboard::Modifiers,
     },
+
+    /// A character was received (for modal commands)
+    CharacterReceived { ch: char },
 
     /// Text was pasted (from clipboard or drag-drop)
     TextPasted { content: String },
