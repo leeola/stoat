@@ -46,6 +46,9 @@ pub enum EditorAction {
 
     /// Mark buffer as clean (saved) or dirty (modified)
     SetDirty { dirty: bool },
+
+    /// Toggle command info display
+    ToggleCommandInfo,
 }
 
 // Basic types needed for actions - these will be proper imports later

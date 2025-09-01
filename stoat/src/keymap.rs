@@ -61,6 +61,7 @@ impl Keymap {
         self.bind_normal("i", Command::EnterInsertMode);
         self.bind_normal("v", Command::EnterVisualMode);
         self.bind_normal(":", Command::EnterCommandMode);
+        self.bind_normal("?", Command::ToggleCommandInfo);
 
         // Escape in normal mode exits
         self.bind_normal_key(
@@ -134,6 +135,20 @@ impl Keymap {
             EditMode::Command => self.command.values().collect(),
         }
     }
+
+    /// Returns key bindings for the given mode as (key_display, command) pairs.
+    pub fn get_bindings_for_mode(&self, mode: EditMode) -> Vec<(String, Command)> {
+        let map = match mode {
+            EditMode::Normal => &self.normal,
+            EditMode::Insert => &self.insert,
+            EditMode::Visual { .. } => &self.visual,
+            EditMode::Command => &self.command,
+        };
+
+        map.iter()
+            .map(|(binding, command)| (format_key_binding(&binding.key), command.clone()))
+            .collect()
+    }
 }
 
 impl Default for Keymap {
@@ -152,6 +167,26 @@ struct KeyBinding {
 impl KeyBinding {
     fn new(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Self {
         Self { key, modifiers }
+    }
+}
+
+/// Formats a keyboard key for display in UI
+fn format_key_binding(key: &keyboard::Key) -> String {
+    match key {
+        keyboard::Key::Character(s) => s.to_string(),
+        keyboard::Key::Named(named) => match named {
+            keyboard::key::Named::Escape => "Esc".to_string(),
+            keyboard::key::Named::Enter => "Enter".to_string(),
+            keyboard::key::Named::Backspace => "Backsp".to_string(),
+            keyboard::key::Named::Tab => "Tab".to_string(),
+            keyboard::key::Named::Space => "Space".to_string(),
+            keyboard::key::Named::ArrowLeft => "Left".to_string(),
+            keyboard::key::Named::ArrowRight => "Right".to_string(),
+            keyboard::key::Named::ArrowUp => "Up".to_string(),
+            keyboard::key::Named::ArrowDown => "Down".to_string(),
+            _ => format!("{:?}", named),
+        },
+        _ => format!("{:?}", key),
     }
 }
 

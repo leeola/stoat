@@ -226,6 +226,10 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
             state.is_dirty = dirty;
         },
 
+        EditorAction::ToggleCommandInfo => {
+            state.show_command_info = !state.show_command_info;
+        },
+
         // TODO: Implement remaining actions
         _ => {},
     }

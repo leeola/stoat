@@ -42,6 +42,9 @@ pub enum Command {
     // Application commands
     /// Exit the application
     Exit,
+
+    /// Toggle command info display
+    ToggleCommandInfo,
 }
 
 impl Command {
@@ -60,6 +63,26 @@ impl Command {
             Command::InsertNewline => "Insert newline",
             Command::DeleteChar => "Delete character",
             Command::Exit => "Exit application",
+            Command::ToggleCommandInfo => "Toggle command help",
+        }
+    }
+
+    /// Returns a short, concise name for display in UI.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Command::MoveCursorLeft => "Left",
+            Command::MoveCursorRight => "Right",
+            Command::MoveCursorUp => "Up",
+            Command::MoveCursorDown => "Down",
+            Command::EnterInsertMode => "Insert",
+            Command::EnterNormalMode => "Normal",
+            Command::EnterVisualMode => "Visual",
+            Command::EnterCommandMode => "Command",
+            Command::InsertChar(_) => "Char",
+            Command::InsertNewline => "Enter",
+            Command::DeleteChar => "Backsp",
+            Command::Exit => "Exit",
+            Command::ToggleCommandInfo => "Help",
         }
     }
 
@@ -132,6 +155,7 @@ impl Command {
                 }
             },
             Command::Exit => None, // Exit is handled as an effect, not an action
+            Command::ToggleCommandInfo => Some(EditorAction::ToggleCommandInfo),
         }
     }
 }

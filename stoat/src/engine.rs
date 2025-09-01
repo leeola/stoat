@@ -156,6 +156,16 @@ impl EditorEngine {
         self.state.line(index)
     }
 
+    /// Returns the keymap for querying available commands.
+    pub fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// Returns whether command info should be displayed.
+    pub fn show_command_info(&self) -> bool {
+        self.state.show_command_info
+    }
+
     /// Returns all lines as an iterator.
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.state.buffer.lines()

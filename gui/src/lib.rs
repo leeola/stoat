@@ -12,6 +12,7 @@
 //! - Separation: GUI handles rendering and I/O effects
 
 pub mod app;
+pub mod command_info;
 pub mod effect_runner;
 pub mod messages;
 pub mod theme;

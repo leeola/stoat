@@ -31,6 +31,9 @@ pub struct EditorState {
 
     /// Whether the buffer has unsaved changes
     pub is_dirty: bool,
+
+    /// Whether to show command info panel
+    pub show_command_info: bool,
 }
 
 impl EditorState {
@@ -43,6 +46,7 @@ impl EditorState {
             viewport: Viewport::new(),
             file: FileInfo::new(),
             is_dirty: false,
+            show_command_info: false,
         }
     }
 
@@ -55,6 +59,7 @@ impl EditorState {
             viewport: Viewport::new(),
             file: FileInfo::new(),
             is_dirty: false,
+            show_command_info: false,
         }
     }
 
@@ -280,6 +285,11 @@ impl EditorStateBuilder {
 
     pub fn dirty(mut self, dirty: bool) -> Self {
         self.state.is_dirty = dirty;
+        self
+    }
+
+    pub fn with_command_info(mut self, show: bool) -> Self {
+        self.state.show_command_info = show;
         self
     }
 

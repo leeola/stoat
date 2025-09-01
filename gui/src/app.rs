@@ -1,10 +1,12 @@
 //! Main application using stoat EditorEngine with iced GUI framework.
 
 use crate::{
-    effect_runner::run_effects, messages::Message, theme::EditorTheme, widget::EditorWidget,
+    command_info::CommandInfo, effect_runner::run_effects, messages::Message, theme::EditorTheme,
+    widget::EditorWidget,
 };
 use iced::{
-    widget::{column, container, row, text},
+    alignment,
+    widget::{column, container, row, stack, text},
     Element, Task,
 };
 use stoat::{EditorEngine, EditorEvent};
@@ -94,13 +96,30 @@ impl App {
 
         let status_bar = self.create_status_bar();
 
-        let content = column![Element::from(editor), status_bar].spacing(10);
+        let main_content = column![Element::from(editor), status_bar].spacing(10);
 
-        container(content)
+        let base_view = container(main_content)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
-            .padding(10)
-            .into()
+            .padding(10);
+
+        // If command info should be shown, overlay it in the lower right
+        if self.engine.show_command_info() {
+            let command_info =
+                CommandInfo::new(self.engine.mode(), self.engine.keymap(), &self.theme).build();
+
+            // Create overlay positioned in lower right
+            let overlay = container(command_info)
+                .align_x(alignment::Horizontal::Right)
+                .align_y(alignment::Vertical::Bottom)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .padding(20); // uniform padding
+
+            stack![Element::from(base_view), Element::from(overlay)].into()
+        } else {
+            base_view.into()
+        }
     }
 
     /// Create status bar

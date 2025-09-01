@@ -27,6 +27,16 @@ pub struct EditorTheme {
     pub status_bg_color: Color,
     /// Status bar text color
     pub status_text_color: Color,
+    /// Small font size for UI elements
+    pub small_font_size: f32,
+    /// Command info panel background color
+    pub command_info_bg_color: Color,
+    /// Command info panel border color  
+    pub command_info_border_color: Color,
+    /// Command info panel text color
+    pub command_info_text_color: Color,
+    /// Command info panel title color
+    pub command_info_title_color: Color,
 }
 
 impl Default for EditorTheme {
@@ -50,6 +60,11 @@ impl EditorTheme {
             show_line_numbers: true,
             status_bg_color: Color::from_rgb(0.15, 0.15, 0.15),
             status_text_color: Color::from_rgb(0.8, 0.8, 0.8),
+            small_font_size: 10.0,
+            command_info_bg_color: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+            command_info_border_color: Color::from_rgb(0.3, 0.3, 0.3),
+            command_info_text_color: Color::from_rgb(0.9, 0.9, 0.9),
+            command_info_title_color: Color::from_rgb(1.0, 1.0, 0.8),
         }
     }
 
@@ -67,6 +82,11 @@ impl EditorTheme {
             show_line_numbers: true,
             status_bg_color: Color::from_rgb(0.9, 0.9, 0.9),
             status_text_color: Color::from_rgb(0.2, 0.2, 0.2),
+            small_font_size: 10.0,
+            command_info_bg_color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+            command_info_border_color: Color::from_rgb(0.7, 0.7, 0.7),
+            command_info_text_color: Color::from_rgb(0.1, 0.1, 0.1),
+            command_info_title_color: Color::from_rgb(0.2, 0.2, 0.8),
         }
     }
 
@@ -79,5 +99,30 @@ impl EditorTheme {
     /// Calculate line height in pixels
     pub fn line_height_px(&self) -> f32 {
         self.font_size * self.line_height
+    }
+
+    /// Get small font size for UI elements
+    pub fn small_font_size(&self) -> f32 {
+        self.small_font_size
+    }
+
+    /// Get command info panel background color
+    pub fn command_info_bg_color(&self) -> Color {
+        self.command_info_bg_color
+    }
+
+    /// Get command info panel border color
+    pub fn command_info_border_color(&self) -> Color {
+        self.command_info_border_color
+    }
+
+    /// Get command info panel text color
+    pub fn command_info_text_color(&self) -> Color {
+        self.command_info_text_color
+    }
+
+    /// Get command info panel title color
+    pub fn command_info_title_color(&self) -> Color {
+        self.command_info_title_color
     }
 }
