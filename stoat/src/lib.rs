@@ -27,9 +27,11 @@
 
 pub mod actions;
 pub mod cli;
+pub mod command;
 pub mod effects;
 pub mod engine;
 pub mod events;
+pub mod keymap;
 pub mod log;
 pub mod processor;
 pub mod state;
@@ -39,10 +41,13 @@ pub mod testing;
 
 // Re-export core types for convenient use
 pub use actions::EditorAction;
+pub use command::Command;
 pub use effects::Effect;
 pub use engine::EditorEngine;
 pub use events::EditorEvent;
 // Re-export commonly used iced types for consumers
 pub use iced::{keyboard, mouse, Point};
+pub use keymap::Keymap;
+// Note: process_event now requires a keymap parameter
 pub use processor::process_event;
 pub use state::EditorState;

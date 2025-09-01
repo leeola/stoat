@@ -4,7 +4,10 @@
 //! event processing functions. This is the main API that GUI applications
 //! will use to interact with the editor core.
 
-use crate::{effects::Effect, events::EditorEvent, processor::process_event, state::EditorState};
+use crate::{
+    effects::Effect, events::EditorEvent, keymap::Keymap, processor::process_event,
+    state::EditorState,
+};
 
 /// Stateful editor engine that manages state and processes events.
 ///
@@ -36,6 +39,7 @@ use crate::{effects::Effect, events::EditorEvent, processor::process_event, stat
 /// ```
 pub struct EditorEngine {
     state: EditorState,
+    keymap: Keymap,
 }
 
 impl EditorEngine {
@@ -44,6 +48,7 @@ impl EditorEngine {
         tracing::info!("Creating new EditorEngine with empty state");
         Self {
             state: EditorState::new(),
+            keymap: Keymap::new(),
         }
     }
 
@@ -55,12 +60,16 @@ impl EditorEngine {
         );
         Self {
             state: EditorState::with_text(text),
+            keymap: Keymap::new(),
         }
     }
 
     /// Creates a new editor engine with the given initial state.
     pub fn with_state(state: EditorState) -> Self {
-        Self { state }
+        Self {
+            state,
+            keymap: Keymap::new(),
+        }
     }
 
     /// Handles an event and returns any effects that should be executed.
@@ -79,7 +88,7 @@ impl EditorEngine {
     pub fn handle_event(&mut self, event: EditorEvent) -> Vec<Effect> {
         tracing::debug!("Engine handling event: {:?}", event);
 
-        let (new_state, effects) = process_event(self.state.clone(), event);
+        let (new_state, effects) = process_event(self.state.clone(), event, &self.keymap);
 
         // Log state changes
         if self.state.is_dirty != new_state.is_dirty {

@@ -5,8 +5,10 @@
 
 use crate::{
     actions::{EditMode, EditorAction, TextPosition, TextRange},
+    command::Command,
     effects::Effect,
     events::EditorEvent,
+    keymap::Keymap,
     state::{EditorState, TextBuffer},
 };
 use iced::keyboard;
@@ -21,15 +23,22 @@ use iced::keyboard;
 ///
 /// * `state` - Current editor state
 /// * `event` - Event to process
+/// * `keymap` - Keymap for resolving key presses to commands
 ///
 /// # Returns
 ///
 /// Tuple of (new_state, effects_to_execute)
-pub fn process_event(state: EditorState, event: EditorEvent) -> (EditorState, Vec<Effect>) {
+pub fn process_event(
+    state: EditorState,
+    event: EditorEvent,
+    keymap: &Keymap,
+) -> (EditorState, Vec<Effect>) {
     tracing::debug!("Processing event: {:?} in mode: {:?}", event, state.mode);
 
     let result = match event {
-        EditorEvent::KeyPress { key, modifiers } => process_key_press(state, key, modifiers),
+        EditorEvent::KeyPress { key, modifiers } => {
+            process_key_press(state, key, modifiers, keymap)
+        },
 
         EditorEvent::TextPasted { content } => {
             let action = EditorAction::InsertText {
@@ -88,166 +97,73 @@ pub fn process_event(state: EditorState, event: EditorEvent) -> (EditorState, Ve
     result
 }
 
-/// Process keyboard input based on current mode.
+/// Process keyboard input using the command system.
 fn process_key_press(
     state: EditorState,
     key: keyboard::Key,
     modifiers: keyboard::Modifiers,
+    keymap: &Keymap,
 ) -> (EditorState, Vec<Effect>) {
     tracing::trace!("Processing key in {:?} mode: {:?}", state.mode, key);
 
     let original_mode = state.mode;
-    let result = match state.mode {
-        EditMode::Insert => process_insert_mode(state, key, modifiers),
-        EditMode::Normal => process_normal_mode(state, key, modifiers),
-        EditMode::Visual { line_mode } => process_visual_mode(state, key, modifiers, line_mode),
-        EditMode::Command => process_command_mode(state, key, modifiers),
-    };
 
-    // Log mode changes
-    if result.0.mode != original_mode {
-        tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+    // First try to look up a command from the keymap
+    if let Some(command) = keymap.lookup(&key, &modifiers, state.mode) {
+        tracing::debug!("Found command for key: {:?}", command);
+        let result = process_command(state, command);
+
+        // Log mode changes
+        if result.0.mode != original_mode {
+            tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+        }
+
+        return result;
     }
 
-    result
-}
+    // Handle special cases for insert mode character insertion
+    if state.mode == EditMode::Insert {
+        if let keyboard::Key::Character(smol_str) = &key {
+            let ch = smol_str.chars().next().unwrap_or('\0');
+            let command = Command::InsertChar(ch);
+            tracing::debug!("Insert mode char: {:?}", command);
+            let result = process_command(state, command);
 
-/// Process key press in Insert mode.
-fn process_insert_mode(
-    state: EditorState,
-    key: keyboard::Key,
-    _modifiers: keyboard::Modifiers,
-) -> (EditorState, Vec<Effect>) {
-    match key {
-        keyboard::Key::Named(keyboard::key::Named::Escape) => {
-            let action = EditorAction::SetMode {
-                mode: EditMode::Normal,
-            };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        keyboard::Key::Named(keyboard::key::Named::Enter) => {
-            let action = EditorAction::InsertText {
-                position: state.cursor_position(),
-                text: "\n".to_string(),
-            };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-            let cursor_pos = state.cursor_position();
-            if cursor_pos.line > 0 || cursor_pos.column > 0 {
-                let delete_pos = if cursor_pos.column > 0 {
-                    TextPosition::new(cursor_pos.line, cursor_pos.column - 1)
-                } else {
-                    // Delete line break - move to end of previous line
-                    let prev_line_len = state
-                        .line(cursor_pos.line - 1)
-                        .map(|l| l.len())
-                        .unwrap_or(0);
-                    TextPosition::new(cursor_pos.line - 1, prev_line_len)
-                };
-
-                let action = EditorAction::DeleteText {
-                    range: TextRange::new(delete_pos, cursor_pos),
-                };
-                let new_state = apply_action(state, action);
-                (new_state, vec![])
-            } else {
-                (state, vec![])
+            if result.0.mode != original_mode {
+                tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
             }
-        },
 
-        keyboard::Key::Character(smol_str) => {
-            let ch = smol_str.as_str();
-            let action = EditorAction::InsertText {
-                position: state.cursor_position(),
-                text: ch.to_string(),
-            };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        _ => (state, vec![]),
+            return result;
+        }
     }
-}
 
-/// Process key press in Normal mode (simplified vim commands).
-fn process_normal_mode(
-    state: EditorState,
-    key: keyboard::Key,
-    _modifiers: keyboard::Modifiers,
-) -> (EditorState, Vec<Effect>) {
-    match key {
-        // Exit on Escape key
-        keyboard::Key::Named(keyboard::key::Named::Escape) => {
-            tracing::info!("Escape pressed in Normal mode, exiting application");
-            (state, vec![Effect::Exit])
-        },
-
-        // Enter insert mode
-        keyboard::Key::Character(s) if s.as_str() == "i" => {
-            let action = EditorAction::SetMode {
-                mode: EditMode::Insert,
-            };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        // Movement keys
-        keyboard::Key::Character(s) if s.as_str() == "h" => {
-            let pos = move_cursor_left(&state);
-            let action = EditorAction::MoveCursor { position: pos };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        keyboard::Key::Character(s) if s.as_str() == "j" => {
-            let pos = move_cursor_down(&state);
-            let action = EditorAction::MoveCursor { position: pos };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        keyboard::Key::Character(s) if s.as_str() == "k" => {
-            let pos = move_cursor_up(&state);
-            let action = EditorAction::MoveCursor { position: pos };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        keyboard::Key::Character(s) if s.as_str() == "l" => {
-            let pos = move_cursor_right(&state);
-            let action = EditorAction::MoveCursor { position: pos };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-
-        _ => (state, vec![]),
-    }
-}
-
-/// Process key press in Visual mode (placeholder).
-fn process_visual_mode(
-    state: EditorState,
-    _key: keyboard::Key,
-    _modifiers: keyboard::Modifiers,
-    _line_mode: bool,
-) -> (EditorState, Vec<Effect>) {
-    // TODO: Implement visual mode
+    // If no command found, return state unchanged
+    tracing::trace!(
+        "No command found for key: {:?} in mode: {:?}",
+        key,
+        state.mode
+    );
     (state, vec![])
 }
 
-/// Process key press in Command mode (placeholder).
-fn process_command_mode(
-    state: EditorState,
-    _key: keyboard::Key,
-    _modifiers: keyboard::Modifiers,
-) -> (EditorState, Vec<Effect>) {
-    // TODO: Implement command mode
-    (state, vec![])
+/// Process a command and return new state plus effects.
+fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Effect>) {
+    tracing::debug!("Processing command: {:?}", command);
+
+    // Handle commands that produce effects but no state changes
+    match command {
+        Command::Exit => return (state, vec![Effect::Exit]),
+        _ => {},
+    }
+
+    // Convert command to action and apply it
+    if let Some(action) = command.to_action(&state) {
+        let new_state = apply_action(state, action);
+        (new_state, vec![])
+    } else {
+        // Command didn't produce an action (like Exit or invalid operations)
+        (state, vec![])
+    }
 }
 
 /// Apply an action to the state, returning new state.
@@ -392,55 +308,6 @@ fn advance_position_by_text(start: TextPosition, text: &str) -> TextPosition {
     }
 
     TextPosition::new(line, column)
-}
-
-fn move_cursor_left(state: &EditorState) -> TextPosition {
-    let pos = state.cursor_position();
-    if pos.column > 0 {
-        TextPosition::new(pos.line, pos.column - 1)
-    } else if pos.line > 0 {
-        let prev_line_len = state.line(pos.line - 1).map(|l| l.len()).unwrap_or(0);
-        TextPosition::new(pos.line - 1, prev_line_len)
-    } else {
-        pos
-    }
-}
-
-fn move_cursor_right(state: &EditorState) -> TextPosition {
-    let pos = state.cursor_position();
-    let current_line_len = state.line(pos.line).map(|l| l.len()).unwrap_or(0);
-
-    if pos.column < current_line_len {
-        TextPosition::new(pos.line, pos.column + 1)
-    } else if pos.line < state.line_count().saturating_sub(1) {
-        TextPosition::new(pos.line + 1, 0)
-    } else {
-        pos
-    }
-}
-
-fn move_cursor_up(state: &EditorState) -> TextPosition {
-    let pos = state.cursor_position();
-    if pos.line > 0 {
-        let target_column = state.cursor.desired_column;
-        let prev_line_len = state.line(pos.line - 1).map(|l| l.len()).unwrap_or(0);
-        let new_column = target_column.min(prev_line_len);
-        TextPosition::new(pos.line - 1, new_column)
-    } else {
-        pos
-    }
-}
-
-fn move_cursor_down(state: &EditorState) -> TextPosition {
-    let pos = state.cursor_position();
-    if pos.line < state.line_count().saturating_sub(1) {
-        let target_column = state.cursor.desired_column;
-        let next_line_len = state.line(pos.line + 1).map(|l| l.len()).unwrap_or(0);
-        let new_column = target_column.min(next_line_len);
-        TextPosition::new(pos.line + 1, new_column)
-    } else {
-        pos
-    }
 }
 
 fn pixel_to_text_position(state: &EditorState, position: iced::Point) -> TextPosition {
