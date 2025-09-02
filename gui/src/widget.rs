@@ -207,14 +207,28 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for EditorWidget<'a> {
                     key,
                     location: _,
                     modifiers,
-                    text: _,
+                    text,
                     modified_key: _,
                     physical_key: _,
                 }) => {
-                    // Send KeyPress event
+                    // Determine the effective key and modifiers based on the key type
+                    let (effective_key, effective_modifiers) = match (&key, text) {
+                        // If it's a Character key and we have text, use the text
+                        // (this handles shifted chars like "?")
+                        (keyboard::Key::Character(_), Some(text)) if !text.is_empty() => {
+                            // Remove SHIFT since it's already applied in the text
+                            let mut mods = modifiers;
+                            mods.remove(keyboard::Modifiers::SHIFT);
+                            (keyboard::Key::Character(text), mods)
+                        },
+                        // For everything else (Named keys, empty text, etc.), use the original
+                        _ => (key.clone(), modifiers),
+                    };
+
+                    // Send KeyPress event with the effective key and modifiers
                     let key_event = EditorEvent::KeyPress {
-                        key: key.clone(),
-                        modifiers,
+                        key: effective_key,
+                        modifiers: effective_modifiers,
                     };
                     let message = handler(key_event);
                     shell.publish(message);

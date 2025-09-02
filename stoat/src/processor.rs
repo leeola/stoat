@@ -142,16 +142,18 @@ fn process_key_press(
     // Handle special cases for insert mode character insertion
     if state.mode == EditMode::Insert {
         if let keyboard::Key::Character(smol_str) = &key {
-            let ch = smol_str.chars().next().unwrap_or('\0');
-            let command = Command::InsertChar(ch);
-            tracing::debug!("Insert mode char: {:?}", command);
-            let result = process_command(state, command);
+            // Follow iced's pattern: find first non-control character
+            if let Some(ch) = smol_str.chars().find(|c| !c.is_control()) {
+                let command = Command::InsertChar(ch);
+                tracing::debug!("Insert mode char: {:?}", command);
+                let result = process_command(state, command);
 
-            if result.0.mode != original_mode {
-                tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                if result.0.mode != original_mode {
+                    tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                }
+
+                return result;
             }
-
-            return result;
         }
     }
 
