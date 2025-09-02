@@ -11,6 +11,7 @@ use stoat_rope::{
     ast::{AstNode, TextRange},
     builder::AstBuilder,
     kind::SyntaxKind,
+    word_parser::{IdentifierPart, parse_identifier_parts},
 };
 
 /// Parse plain text content into a structured rope AST
@@ -183,6 +184,71 @@ fn group_into_paragraphs(tokens: Vec<Token>) -> Vec<Vec<Token>> {
     paragraphs
 }
 
+/// Build a token node, potentially parsing identifiers into Word sub-nodes
+fn build_token_node(token: Token) -> Arc<AstNode> {
+    // Check if this looks like an identifier (alphanumeric with possible underscores/dashes)
+    if token.kind == SyntaxKind::Text && looks_like_identifier(&token.text) {
+        let parts = parse_identifier_parts(&token.text);
+
+        // If we found multiple parts (words and separators), create a Syntax node
+        if parts.len() > 1 {
+            let part_nodes: Vec<Arc<AstNode>> = parts
+                .into_iter()
+                .map(|part| {
+                    match part {
+                        IdentifierPart::Word(text, range) => {
+                            // Adjust range to be absolute (relative to document start)
+                            let abs_range = TextRange::new(
+                                token.range.start.0 + range.start,
+                                token.range.start.0 + range.end,
+                            );
+                            AstBuilder::token(SyntaxKind::Word, &text, abs_range)
+                        },
+                        IdentifierPart::Separator(text, range) => {
+                            // Adjust range to be absolute (relative to document start)
+                            let abs_range = TextRange::new(
+                                token.range.start.0 + range.start,
+                                token.range.start.0 + range.end,
+                            );
+                            AstBuilder::token(SyntaxKind::Separator, &text, abs_range)
+                        },
+                    }
+                })
+                .collect();
+
+            // Create an Identifier syntax node containing Word and Separator tokens
+            return AstBuilder::start_node(SyntaxKind::Identifier, token.range)
+                .add_children(part_nodes)
+                .finish();
+        }
+
+        // Single word identifier stays as a simple token
+        if parts.len() == 1 {
+            return AstBuilder::token(SyntaxKind::Identifier, &token.text, token.range);
+        }
+    }
+
+    // Default: create token as-is
+    AstBuilder::token(token.kind, &token.text, token.range)
+}
+
+/// Check if text looks like an identifier (variable name, function name, etc.)
+fn looks_like_identifier(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    // Check if it starts with a letter or underscore
+    let first_char = text.chars().next().unwrap();
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return false;
+    }
+
+    // Check if all characters are alphanumeric, underscore, or dash
+    text.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Build the document AST from paragraphs
 fn build_document(paragraphs: Vec<Vec<Token>>, total_len: usize) -> Arc<AstNode> {
     let document_range = TextRange::new(0, total_len);
@@ -213,10 +279,10 @@ fn build_document(paragraphs: Vec<Vec<Token>>, total_len: usize) -> Arc<AstNode>
             .0;
         let paragraph_range = TextRange::new(start, end);
 
-        // Build tokens for this paragraph
+        // Build tokens for this paragraph, parsing identifiers into words
         let token_nodes: Vec<Arc<AstNode>> = paragraph_tokens
             .into_iter()
-            .map(|token| AstBuilder::token(token.kind, &token.text, token.range))
+            .map(|token| build_token_node(token))
             .collect();
 
         // Create paragraph node
@@ -263,6 +329,122 @@ mod tests {
         assert_round_trip("hello world");
         assert_round_trip("hello");
         assert_round_trip("a");
+    }
+
+    #[test]
+    fn identifier_word_parsing() {
+        // Test camelCase identifier parsing
+        let ast = parse_plain_text("fooBarBaz").expect("Parse should succeed");
+        let root = ast.root();
+
+        // Navigate to the identifier
+        let doc_children = root.children().expect("Document should have children");
+        let para = &doc_children[0].0;
+        let para_children = para.children().expect("Paragraph should have children");
+        let identifier = &para_children[0].0;
+
+        // Verify it's an Identifier syntax node with Word children
+        assert_eq!(identifier.kind(), SyntaxKind::Identifier);
+        let word_children = identifier
+            .children()
+            .expect("Identifier should have word children");
+        assert_eq!(word_children.len(), 3);
+
+        // Check each word
+        assert_eq!(word_children[0].0.kind(), SyntaxKind::Word);
+        assert_eq!(word_children[0].0.token_text(), Some("foo"));
+
+        assert_eq!(word_children[1].0.kind(), SyntaxKind::Word);
+        assert_eq!(word_children[1].0.token_text(), Some("Bar"));
+
+        assert_eq!(word_children[2].0.kind(), SyntaxKind::Word);
+        assert_eq!(word_children[2].0.token_text(), Some("Baz"));
+
+        // Verify round-trip still works
+        assert_eq!(ast.to_string(), "fooBarBaz");
+    }
+
+    #[test]
+    fn snake_case_identifier() {
+        let ast = parse_plain_text("foo_bar_baz").expect("Parse should succeed");
+        let root = ast.root();
+
+        // Navigate to the identifier
+        let doc_children = root.children().expect("Document should have children");
+        let para = &doc_children[0].0;
+        let para_children = para.children().expect("Paragraph should have children");
+        let identifier = &para_children[0].0;
+
+        // Verify it's an Identifier with Word and Separator children
+        assert_eq!(identifier.kind(), SyntaxKind::Identifier);
+        let children = identifier
+            .children()
+            .expect("Identifier should have children");
+        assert_eq!(children.len(), 5); // "foo", "_", "bar", "_", "baz"
+
+        // Check the parts
+        assert_eq!(children[0].0.kind(), SyntaxKind::Word);
+        assert_eq!(children[0].0.token_text(), Some("foo"));
+
+        assert_eq!(children[1].0.kind(), SyntaxKind::Separator);
+        assert_eq!(children[1].0.token_text(), Some("_"));
+
+        assert_eq!(children[2].0.kind(), SyntaxKind::Word);
+        assert_eq!(children[2].0.token_text(), Some("bar"));
+
+        assert_eq!(children[3].0.kind(), SyntaxKind::Separator);
+        assert_eq!(children[3].0.token_text(), Some("_"));
+
+        assert_eq!(children[4].0.kind(), SyntaxKind::Word);
+        assert_eq!(children[4].0.token_text(), Some("baz"));
+
+        // Verify round-trip works
+        assert_eq!(ast.to_string(), "foo_bar_baz");
+    }
+
+    #[test]
+    fn single_word_identifier() {
+        let ast = parse_plain_text("hello").expect("Parse should succeed");
+        let root = ast.root();
+
+        // Navigate to the token
+        let doc_children = root.children().expect("Document should have children");
+        let para = &doc_children[0].0;
+        let para_children = para.children().expect("Paragraph should have children");
+        let identifier = &para_children[0].0;
+
+        // Single word should be a Token, not a Syntax node
+        assert_eq!(identifier.kind(), SyntaxKind::Identifier);
+        assert!(identifier.is_token());
+        assert_eq!(identifier.token_text(), Some("hello"));
+    }
+
+    #[test]
+    fn mixed_content_with_identifiers() {
+        let content = "The fooBarBaz function calls XMLHttpRequest";
+        let ast = parse_plain_text(content).expect("Parse should succeed");
+
+        // Verify round-trip
+        assert_eq!(ast.to_string(), content);
+
+        // Check that we have multiple tokens including identifiers
+        let root = ast.root();
+        let doc_children = root.children().expect("Document should have children");
+        let para = &doc_children[0].0;
+        let para_children = para.children().expect("Paragraph should have children");
+
+        // Should have: "The", " ", "fooBarBaz", " ", "function", " ", "calls", " ",
+        // "XMLHttpRequest"
+        assert!(para_children.len() >= 9);
+
+        // Find and check fooBarBaz
+        let foo_bar_baz = para_children
+            .iter()
+            .find(|(node, _)| node.kind() == SyntaxKind::Identifier && node.children().is_some())
+            .expect("Should find multi-word identifier");
+
+        let words = foo_bar_baz.0.children().expect("Should have word children");
+        assert_eq!(words.len(), 3);
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod iter;
 pub mod kind;
 pub mod query;
 pub mod semantic;
+pub mod word_parser;
 
 use ast::{AstError, AstNode, TextInfo, TextPos, TextRange};
 pub use batch::{BatchBuilder, BatchedEdit};
