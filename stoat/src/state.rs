@@ -4,8 +4,12 @@
 //! All state transitions happen by creating new state instances, making
 //! the system predictable and enabling features like time-travel debugging.
 
-use crate::actions::{EditMode, TextPosition, TextRange};
+use crate::{
+    actions::{EditMode, TextPosition, TextRange},
+    rope_adapter::{lines_from_rope, rope_from_text, text_from_rope},
+};
 use std::path::PathBuf;
+use stoat_rope::RopeAst;
 
 /// Complete immutable state of the text editor.
 ///
@@ -74,8 +78,8 @@ impl EditorState {
     }
 
     /// Returns the complete text content.
-    pub fn text(&self) -> &str {
-        &self.buffer.text
+    pub fn text(&self) -> String {
+        self.buffer.text()
     }
 
     /// Returns the number of lines in the buffer.
@@ -84,7 +88,7 @@ impl EditorState {
     }
 
     /// Returns a specific line from the buffer.
-    pub fn line(&self, index: usize) -> Option<&str> {
+    pub fn line(&self, index: usize) -> Option<String> {
         self.buffer.lines().nth(index)
     }
 
@@ -103,37 +107,47 @@ impl Default for EditorState {
 /// Text buffer containing the document content.
 #[derive(Debug, Clone)]
 pub struct TextBuffer {
-    /// The complete text content
-    text: String,
+    /// The rope AST containing text and structure
+    rope: RopeAst,
 }
 
 impl TextBuffer {
     pub fn new() -> Self {
         Self {
-            text: String::new(),
+            rope: rope_from_text(""),
         }
     }
 
     pub fn with_text(text: &str) -> Self {
         Self {
-            text: text.to_string(),
+            rope: rope_from_text(text),
         }
     }
 
-    pub fn text(&self) -> &str {
-        &self.text
+    pub fn text(&self) -> String {
+        text_from_rope(&self.rope)
     }
 
-    pub fn lines(&self) -> impl Iterator<Item = &str> {
-        self.text.lines()
+    pub fn lines(&self) -> impl Iterator<Item = String> {
+        lines_from_rope(&self.rope)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.rope.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.text.len()
+        self.rope.len_bytes()
+    }
+
+    /// Get access to the underlying rope for advanced operations
+    pub fn rope(&self) -> &RopeAst {
+        &self.rope
+    }
+
+    /// Update the rope content
+    pub fn set_rope(&mut self, rope: RopeAst) {
+        self.rope = rope;
     }
 }
 

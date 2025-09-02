@@ -34,6 +34,7 @@ pub mod events;
 pub mod keymap;
 pub mod log;
 pub mod processor;
+pub mod rope_adapter;
 pub mod state;
 
 #[cfg(test)]

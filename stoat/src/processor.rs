@@ -218,8 +218,9 @@ fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Ef
 fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
     match action {
         EditorAction::InsertText { position, text } => {
-            // Insert text and update cursor position
-            let new_content = insert_text_at_position(&state.buffer.text(), position, &text);
+            // For now, use the compatibility approach - extract text, modify, rebuild rope
+            let current_text = state.buffer.text();
+            let new_content = insert_text_at_position(&current_text, position, &text);
             state.buffer = TextBuffer::with_text(&new_content);
 
             // Move cursor to end of inserted text
@@ -230,7 +231,9 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
         },
 
         EditorAction::DeleteText { range } => {
-            let new_content = delete_text_in_range(&state.buffer.text(), range.clone());
+            // For now, use the compatibility approach - extract text, modify, rebuild rope
+            let current_text = state.buffer.text();
+            let new_content = delete_text_in_range(&current_text, range.clone());
             state.buffer = TextBuffer::with_text(&new_content);
             state.cursor.position = range.start;
             state.cursor.desired_column = range.start.column;

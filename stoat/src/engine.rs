@@ -117,7 +117,7 @@ impl EditorEngine {
     }
 
     /// Returns the current text content of the buffer.
-    pub fn text(&self) -> &str {
+    pub fn text(&self) -> String {
         self.state.text()
     }
 
@@ -152,7 +152,7 @@ impl EditorEngine {
     }
 
     /// Returns a specific line from the buffer.
-    pub fn line(&self, index: usize) -> Option<&str> {
+    pub fn line(&self, index: usize) -> Option<String> {
         self.state.line(index)
     }
 
@@ -167,7 +167,7 @@ impl EditorEngine {
     }
 
     /// Returns all lines as an iterator.
-    pub fn lines(&self) -> impl Iterator<Item = &str> {
+    pub fn lines(&self) -> impl Iterator<Item = String> {
         self.state.buffer.lines()
     }
 

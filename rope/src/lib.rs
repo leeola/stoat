@@ -19,7 +19,7 @@ pub use semantic::{SemanticId, SemanticInfo, SemanticKind};
 use std::{fmt, sync::Arc};
 
 /// A rope-based Abstract Syntax Tree for efficient text editing
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RopeAst {
     /// Root node of the AST
     root: Arc<AstNode>,

@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
+stoat_rope = { path = "../rope" }
 
 [dev-dependencies]
 # Testing utilities
