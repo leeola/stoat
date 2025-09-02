@@ -4,6 +4,9 @@
 //! and the low-level actions that transform editor state. They represent
 //! semantic operations that users want to perform.
 
+// Use the SmolStr type from iced to match keyboard input
+use iced::advanced::graphics::core::SmolStr;
+
 /// High-level editor commands.
 ///
 /// Commands represent the user's intent - what operation they want to perform.
@@ -32,8 +35,8 @@ pub enum Command {
     EnterCommandMode,
 
     // Text manipulation commands
-    /// Insert a character at cursor position
-    InsertChar(char),
+    /// Insert a string at cursor position
+    InsertStr(SmolStr),
     /// Insert a newline at cursor position
     InsertNewline,
     /// Delete character before cursor (backspace)
@@ -59,7 +62,7 @@ impl Command {
             Command::EnterNormalMode => "Enter Normal mode",
             Command::EnterVisualMode => "Enter Visual mode",
             Command::EnterCommandMode => "Enter Command mode",
-            Command::InsertChar(_) => "Insert character",
+            Command::InsertStr(_) => "Insert text",
             Command::InsertNewline => "Insert newline",
             Command::DeleteChar => "Delete character",
             Command::Exit => "Exit application",
@@ -78,7 +81,7 @@ impl Command {
             Command::EnterNormalMode => "Normal",
             Command::EnterVisualMode => "Visual",
             Command::EnterCommandMode => "Command",
-            Command::InsertChar(_) => "Char",
+            Command::InsertStr(_) => "Insert",
             Command::InsertNewline => "Enter",
             Command::DeleteChar => "Backsp",
             Command::Exit => "Exit",
@@ -125,9 +128,9 @@ impl Command {
             Command::EnterCommandMode => Some(EditorAction::SetMode {
                 mode: EditMode::Command,
             }),
-            Command::InsertChar(ch) => Some(EditorAction::InsertText {
+            Command::InsertStr(text) => Some(EditorAction::InsertText {
                 position: state.cursor_position(),
-                text: ch.to_string(),
+                text: text.to_string(),
             }),
             Command::InsertNewline => Some(EditorAction::InsertText {
                 position: state.cursor_position(),

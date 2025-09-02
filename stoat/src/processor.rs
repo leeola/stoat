@@ -141,11 +141,12 @@ fn process_key_press(
 
     // Handle special cases for insert mode character insertion
     if state.mode == EditMode::Insert {
-        if let keyboard::Key::Character(smol_str) = &key {
-            // Follow iced's pattern: find first non-control character
-            if let Some(ch) = smol_str.chars().find(|c| !c.is_control()) {
-                let command = Command::InsertChar(ch);
-                tracing::debug!("Insert mode char: {:?}", command);
+        if let keyboard::Key::Character(text) = &key {
+            // Filter out control characters - only insert printable text
+            // This prevents Ctrl+T (\u{14}) and similar from being inserted
+            if text.chars().any(|c| !c.is_control()) {
+                let command = Command::InsertStr(text.clone());
+                tracing::debug!("Insert mode text: {:?}", command);
                 let result = process_command(state, command);
 
                 if result.0.mode != original_mode {
