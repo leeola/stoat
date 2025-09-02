@@ -167,7 +167,7 @@ impl EditorEngine {
     }
 
     /// Returns all lines as an iterator.
-    pub fn lines(&self) -> impl Iterator<Item = String> {
+    pub fn lines(&self) -> impl Iterator<Item = String> + use<'_> {
         self.state.buffer.lines()
     }
 

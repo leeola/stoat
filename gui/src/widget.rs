@@ -207,28 +207,17 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for EditorWidget<'a> {
                     key,
                     location: _,
                     modifiers,
-                    text,
+                    text: _,
                     modified_key: _,
                     physical_key: _,
                 }) => {
-                    // Always send KeyPress event
+                    // Send KeyPress event
                     let key_event = EditorEvent::KeyPress {
                         key: key.clone(),
                         modifiers,
                     };
                     let message = handler(key_event);
                     shell.publish(message);
-
-                    // Also send CharacterReceived for printable characters
-                    if let Some(text) = text {
-                        if let Some(ch) = text.chars().next() {
-                            if ch.is_ascii_graphic() || ch == ' ' {
-                                let char_event = EditorEvent::CharacterReceived { ch };
-                                let char_message = handler(char_event);
-                                shell.publish(char_message);
-                            }
-                        }
-                    }
 
                     return event::Status::Captured;
                 },

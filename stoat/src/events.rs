@@ -19,9 +19,6 @@ pub enum EditorEvent {
         modifiers: keyboard::Modifiers,
     },
 
-    /// A character was received (for modal commands)
-    CharacterReceived { ch: char },
-
     /// Text was pasted (from clipboard or drag-drop)
     TextPasted { content: String },
 

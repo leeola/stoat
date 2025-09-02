@@ -4,7 +4,7 @@
 //! editor state. All business logic lives here as testable, pure functions.
 
 use crate::{
-    actions::{EditMode, EditorAction, TextPosition, TextRange},
+    actions::{EditMode, EditorAction, TextPosition},
     command::Command,
     effects::Effect,
     events::EditorEvent,
@@ -89,8 +89,6 @@ pub fn process_event(
             (new_state, vec![])
         },
 
-        EditorEvent::CharacterReceived { ch } => process_character_received(state, ch, keymap),
-
         // TODO: Implement remaining events
         _ => (state, vec![]),
     };
@@ -148,52 +146,6 @@ fn process_key_press(
     (state, vec![])
 }
 
-/// Process character received events for modal editor commands.
-fn process_character_received(
-    state: EditorState,
-    ch: char,
-    keymap: &Keymap,
-) -> (EditorState, Vec<Effect>) {
-    tracing::trace!("Processing character in {:?} mode: '{}'", state.mode, ch);
-
-    let original_mode = state.mode;
-
-    // Try to look up command using a character key
-    let char_key = keyboard::Key::Character(ch.to_string().into());
-    if let Some(command) = keymap.lookup(&char_key, &keyboard::Modifiers::default(), state.mode) {
-        tracing::debug!("Found command for character '{}': {:?}", ch, command);
-        let result = process_command(state, command);
-
-        // Log mode changes
-        if result.0.mode != original_mode {
-            tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
-        }
-
-        return result;
-    }
-
-    // Handle special cases for insert mode character insertion
-    if state.mode == EditMode::Insert {
-        let command = Command::InsertChar(ch);
-        tracing::debug!("Insert mode char: {:?}", command);
-        let result = process_command(state, command);
-
-        if result.0.mode != original_mode {
-            tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
-        }
-
-        return result;
-    }
-
-    // If no command found, return state unchanged
-    tracing::trace!(
-        "No command found for character: '{}' in mode: {:?}",
-        ch,
-        state.mode
-    );
-    (state, vec![])
-}
-
 /// Process a command and return new state plus effects.
 fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Effect>) {
     tracing::debug!("Processing command: {:?}", command);
@@ -218,26 +170,19 @@ fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Ef
 fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
     match action {
         EditorAction::InsertText { position, text } => {
-            // For now, use the compatibility approach - extract text, modify, rebuild rope
-            let current_text = state.buffer.text();
-            let new_content = insert_text_at_position(&current_text, position, &text);
-            state.buffer = TextBuffer::with_text(&new_content);
-
-            // Move cursor to end of inserted text
-            let new_cursor_pos = advance_position_by_text(position, &text);
-            state.cursor.position = new_cursor_pos;
-            state.cursor.desired_column = new_cursor_pos.column;
-            state.is_dirty = true;
+            // TODO: Implement direct rope text insertion
+            // Need: position conversion, token creation, rope edit operations
+            todo!(
+                "Direct rope text insertion at TextPosition {:?} with text {:?}",
+                position,
+                text
+            );
         },
 
         EditorAction::DeleteText { range } => {
-            // For now, use the compatibility approach - extract text, modify, rebuild rope
-            let current_text = state.buffer.text();
-            let new_content = delete_text_in_range(&current_text, range.clone());
-            state.buffer = TextBuffer::with_text(&new_content);
-            state.cursor.position = range.start;
-            state.cursor.desired_column = range.start.column;
-            state.is_dirty = true;
+            // TODO: Implement direct rope text deletion
+            // Need: range conversion, rope delete operations
+            todo!("Direct rope text deletion for range {:?}", range);
         },
 
         EditorAction::MoveCursor { position } => {
@@ -289,81 +234,6 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 }
 
 // Helper functions for text manipulation and cursor movement
-
-fn insert_text_at_position(text: &str, position: TextPosition, insert: &str) -> String {
-    let mut result = String::new();
-    let mut current_line = 0;
-    let mut current_col = 0;
-
-    for ch in text.chars() {
-        if current_line == position.line && current_col == position.column {
-            result.push_str(insert);
-        }
-
-        result.push(ch);
-
-        if ch == '\n' {
-            current_line += 1;
-            current_col = 0;
-        } else {
-            current_col += 1;
-        }
-    }
-
-    // Handle insertion at end of file
-    if current_line == position.line && current_col == position.column {
-        result.push_str(insert);
-    }
-
-    result
-}
-
-fn delete_text_in_range(text: &str, range: TextRange) -> String {
-    let mut result = String::new();
-    let mut current_line = 0;
-    let mut current_col = 0;
-    let mut in_delete_range = false;
-
-    for ch in text.chars() {
-        let pos = TextPosition::new(current_line, current_col);
-
-        if pos == range.start {
-            in_delete_range = true;
-        }
-        if pos == range.end {
-            in_delete_range = false;
-        }
-
-        if !in_delete_range {
-            result.push(ch);
-        }
-
-        if ch == '\n' {
-            current_line += 1;
-            current_col = 0;
-        } else {
-            current_col += 1;
-        }
-    }
-
-    result
-}
-
-fn advance_position_by_text(start: TextPosition, text: &str) -> TextPosition {
-    let mut line = start.line;
-    let mut column = start.column;
-
-    for ch in text.chars() {
-        if ch == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-
-    TextPosition::new(line, column)
-}
 
 fn pixel_to_text_position(state: &EditorState, position: iced::Point) -> TextPosition {
     let line = ((position.y - state.viewport.scroll_y) / state.viewport.line_height) as usize;

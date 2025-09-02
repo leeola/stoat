@@ -4,12 +4,9 @@
 //! All state transitions happen by creating new state instances, making
 //! the system predictable and enabling features like time-travel debugging.
 
-use crate::{
-    actions::{EditMode, TextPosition, TextRange},
-    rope_adapter::{lines_from_rope, rope_from_text, text_from_rope},
-};
-use std::path::PathBuf;
-use stoat_rope::RopeAst;
+use crate::actions::{EditMode, TextPosition, TextRange};
+use std::{path::PathBuf, sync::Arc};
+use stoat_rope::{ast::AstNode, kind::SyntaxKind, RopeAst};
 
 /// Complete immutable state of the text editor.
 ///
@@ -113,23 +110,41 @@ pub struct TextBuffer {
 
 impl TextBuffer {
     pub fn new() -> Self {
+        // Create empty rope
+        let root = Arc::new(AstNode::syntax(
+            SyntaxKind::Document,
+            stoat_rope::ast::TextRange::new(0, 0),
+        ));
         Self {
-            rope: rope_from_text(""),
+            rope: RopeAst::from_root(root),
         }
     }
 
     pub fn with_text(text: &str) -> Self {
+        if text.is_empty() {
+            return Self::new();
+        }
+
+        // Create a simple single-token rope for now
+        let token = Arc::new(AstNode::token(
+            SyntaxKind::Text,
+            text.into(),
+            stoat_rope::ast::TextRange::new(0, text.len()),
+        ));
         Self {
-            rope: rope_from_text(text),
+            rope: RopeAst::from_root(token),
         }
     }
 
     pub fn text(&self) -> String {
-        text_from_rope(&self.rope)
+        // Use rope's native text extraction
+        let total_range = stoat_rope::ast::TextRange::new(0, self.rope.len_bytes());
+        self.rope.text_at_range(total_range)
     }
 
-    pub fn lines(&self) -> impl Iterator<Item = String> {
-        lines_from_rope(&self.rope)
+    pub fn lines(&self) -> impl Iterator<Item = String> + use<'_> {
+        // Use rope's native line iterator
+        self.rope.iter_lines()
     }
 
     pub fn is_empty(&self) -> bool {
