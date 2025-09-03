@@ -384,6 +384,88 @@ mod stoat_tests {
     }
 
     #[test]
+    fn test_tab_cursor_positioning() {
+        let mut editor = Stoat::new();
+
+        // Enter insert mode and type: "a<tab>b"
+        editor.keyboard_input("i");
+        editor.keyboard_input("a");
+
+        // Insert tab
+        let tab_event = EditorEvent::KeyPress {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers: keyboard::Modifiers::default(),
+        };
+        editor.engine_mut().handle_event(tab_event);
+
+        // The cursor should be at column 5 (1 for 'a' + 4 for tab display width)
+        // But the actual character position is 2 (a + \t)
+        let (_, col) = editor.cursor_position();
+        assert_eq!(
+            col, 2,
+            "Cursor character position should be at 2 after 'a' and tab"
+        );
+
+        // Now type 'b'
+        editor.keyboard_input("b");
+
+        // Buffer should contain "a\tb"
+        assert_eq!(
+            editor.buffer_contents(),
+            "a\tb",
+            "Buffer should contain 'a<tab>b'"
+        );
+
+        // Cursor should be at character position 3
+        let (_, col) = editor.cursor_position();
+        assert_eq!(
+            col, 3,
+            "Cursor should be at character position 3 after 'a<tab>b'"
+        );
+    }
+
+    #[test]
+    fn test_tab_display_column_tracking() {
+        let mut editor = Stoat::new();
+
+        // Enter insert mode
+        editor.keyboard_input("i");
+
+        // Type "abc<tab>def"
+        editor.keyboard_input("abc");
+
+        // Insert tab - this should move cursor to next tab stop (column 4 in display)
+        let tab_event = EditorEvent::KeyPress {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers: keyboard::Modifiers::default(),
+        };
+        editor.engine_mut().handle_event(tab_event);
+
+        // Check that desired_column reflects display position
+        // "abc" = 3 display columns, then tab advances to column 4 (next tab stop)
+        // So cursor should be at display column 4
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.desired_column, 4,
+            "Desired column should be 4 after 'abc<tab>'"
+        );
+
+        // Character position should be 4 (a, b, c, \t)
+        let (_, col) = editor.cursor_position();
+        assert_eq!(col, 4, "Character position should be 4");
+
+        // Type more text
+        editor.keyboard_input("def");
+
+        // Desired column should now be 7 (4 + 3 characters)
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.desired_column, 7,
+            "Desired column should be 7 after 'abc<tab>def'"
+        );
+    }
+
+    #[test]
     fn test_literal_tab_key_event() {
         let mut editor = Stoat::new();
         // Enter insert mode

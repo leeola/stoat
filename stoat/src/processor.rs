@@ -276,6 +276,45 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 
 // Helper functions for text manipulation and cursor movement
 
+/// Calculate the display column for a position in a line, accounting for tabs
+fn calculate_display_column(line: &str, byte_position: usize, tab_width: usize) -> usize {
+    let mut display_col = 0;
+    let mut byte_col = 0;
+
+    for ch in line.chars() {
+        if byte_col >= byte_position {
+            break;
+        }
+
+        if ch == '\t' {
+            // Tab advances to next tab stop
+            display_col = (display_col / tab_width + 1) * tab_width;
+        } else {
+            display_col += 1;
+        }
+        byte_col += ch.len_utf8();
+    }
+
+    display_col
+}
+
+/// Calculate how many display columns a string spans, accounting for tabs
+fn text_display_width(text: &str, starting_column: usize, tab_width: usize) -> usize {
+    let mut display_col = starting_column;
+
+    for ch in text.chars() {
+        if ch == '\t' {
+            // Tab advances to next tab stop
+            let next_tab_stop = (display_col / tab_width + 1) * tab_width;
+            display_col = next_tab_stop;
+        } else if ch != '\n' {
+            display_col += 1;
+        }
+    }
+
+    display_col - starting_column
+}
+
 /// Insert text at a specific TextPosition
 fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text: String) {
     // For now, let's do a simple string-based insertion to get tests passing
@@ -333,9 +372,46 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
         state.buffer = TextBuffer::with_text(&new_text);
 
         // Update cursor position to after inserted text
-        let new_position = TextPosition::new(position.line, position.column + text.chars().count());
-        state.cursor.position = new_position;
-        state.cursor.desired_column = new_position.column;
+        // For tabs and special characters, we need to calculate the display width
+        if text.contains('\t') || text.contains('\n') {
+            // Handle newlines - cursor goes to beginning of next line
+            if text.contains('\n') {
+                let newline_count = text.chars().filter(|&c| c == '\n').count();
+                let after_last_newline = text.rsplit('\n').next().unwrap_or("");
+                let new_column = after_last_newline.chars().count();
+                let new_position = TextPosition::new(position.line + newline_count, new_column);
+                state.cursor.position = new_position;
+                state.cursor.desired_column = new_column;
+            } else {
+                // Handle tabs - calculate display width
+                let line_before = if position.line < lines.len() {
+                    &lines[position.line][..position.column.min(lines[position.line].len())]
+                } else {
+                    ""
+                };
+
+                // Calculate the display column where we started
+                let start_display_col =
+                    calculate_display_column(line_before, line_before.len(), state.tab_width);
+
+                // Calculate how many display columns the inserted text spans
+                let text_width = text_display_width(&text, start_display_col, state.tab_width);
+
+                // The new cursor position in characters (not display columns)
+                let new_char_position = position.column + text.chars().count();
+                let new_position = TextPosition::new(position.line, new_char_position);
+
+                // Store both character position and desired display column
+                state.cursor.position = new_position;
+                state.cursor.desired_column = start_display_col + text_width;
+            }
+        } else {
+            // Simple case - no tabs or newlines
+            let new_position =
+                TextPosition::new(position.line, position.column + text.chars().count());
+            state.cursor.position = new_position;
+            state.cursor.desired_column = new_position.column;
+        }
     }
 }
 
