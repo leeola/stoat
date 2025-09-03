@@ -184,9 +184,9 @@ fn format_key_binding(key: &keyboard::Key) -> String {
             keyboard::key::Named::ArrowRight => "Right".to_string(),
             keyboard::key::Named::ArrowUp => "Up".to_string(),
             keyboard::key::Named::ArrowDown => "Down".to_string(),
-            _ => format!("{:?}", named),
+            _ => format!("{named:?}"),
         },
-        _ => format!("{:?}", key),
+        _ => format!("{key:?}"),
     }
 }
 

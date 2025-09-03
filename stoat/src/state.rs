@@ -113,6 +113,12 @@ pub struct TextBuffer {
     rope: RopeAst,
 }
 
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TextBuffer {
     pub fn new() -> Self {
         // Create empty rope
@@ -221,6 +227,12 @@ pub struct Cursor {
     pub desired_column: usize,
 }
 
+impl Default for Cursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Cursor {
     pub fn new() -> Self {
         Self {
@@ -261,6 +273,12 @@ pub struct Viewport {
     pub line_height: f32,
 }
 
+impl Default for Viewport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Viewport {
     pub fn new() -> Self {
         Self {
@@ -294,6 +312,12 @@ pub struct FileInfo {
     pub name: String,
 }
 
+impl Default for FileInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileInfo {
     pub fn new() -> Self {
         Self {
@@ -319,6 +343,12 @@ impl FileInfo {
 /// Builder for creating editor states (useful for testing).
 pub struct EditorStateBuilder {
     state: EditorState,
+}
+
+impl Default for EditorStateBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EditorStateBuilder {

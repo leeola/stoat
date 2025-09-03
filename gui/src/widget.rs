@@ -329,6 +329,7 @@ impl<'a> EditorWidget<'a> {
     }
 
     /// Draws text selection highlighting.
+    #[allow(clippy::too_many_arguments)]
     fn draw_selection(
         &self,
         renderer: &mut iced::Renderer,
@@ -351,10 +352,7 @@ impl<'a> EditorWidget<'a> {
         // Simple single-line selection for now
         if start_pos.line == end_pos.line {
             // Get visual columns for selection start and end
-            let line_text = self
-                .state
-                .line(start_pos.line)
-                .unwrap_or_else(|| String::new());
+            let line_text = self.state.line(start_pos.line).unwrap_or_default();
             let start_visual =
                 self.calculate_visual_column(&line_text, start_pos.column, self.state.tab_width);
             let end_visual =
@@ -388,9 +386,8 @@ impl<'a> EditorWidget<'a> {
     /// Calculate the visual column position accounting for tabs
     fn calculate_visual_column(&self, line: &str, char_column: usize, tab_width: usize) -> usize {
         let mut visual_col = 0;
-        let mut char_col = 0;
 
-        for ch in line.chars() {
+        for (char_col, ch) in line.chars().enumerate() {
             if char_col >= char_column {
                 break;
             }
@@ -401,8 +398,6 @@ impl<'a> EditorWidget<'a> {
             } else {
                 visual_col += 1;
             }
-
-            char_col += 1;
         }
 
         visual_col

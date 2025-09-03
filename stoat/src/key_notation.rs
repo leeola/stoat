@@ -39,7 +39,11 @@ pub fn parse_sequence(input: &str) -> Vec<EditorEvent> {
                     found_closing = true;
                     break;
                 }
-                key_seq.push(chars.next().unwrap());
+                key_seq.push(
+                    chars
+                        .next()
+                        .expect("chars should have next since we peeked"),
+                );
             }
 
             if !found_closing {
@@ -119,14 +123,14 @@ fn parse_special_key(seq: &str) -> Option<EditorEvent> {
 fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
     // Check for Ctrl+key pattern (C-x or Ctrl-x)
     if seq.starts_with("C-") || seq.starts_with("Ctrl-") {
-        let key_part = if seq.starts_with("C-") {
-            &seq[2..]
+        let key_part = if let Some(stripped) = seq.strip_prefix("C-") {
+            stripped
         } else {
             &seq[5..]
         };
 
         if key_part.len() == 1 {
-            let ch = key_part.chars().next().unwrap();
+            let ch = key_part.chars().next().expect("key_part has length 1");
             return Some(EditorEvent::KeyPress {
                 key: keyboard::Key::Character(ch.to_lowercase().to_string().into()),
                 modifiers: keyboard::Modifiers::CTRL,
@@ -142,14 +146,14 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
     {
         let key_part = if seq.starts_with("A-") || seq.starts_with("M-") {
             &seq[2..]
-        } else if seq.starts_with("Alt-") {
-            &seq[4..]
+        } else if let Some(stripped) = seq.strip_prefix("Alt-") {
+            stripped
         } else {
             &seq[5..]
         };
 
         if key_part.len() == 1 {
-            let ch = key_part.chars().next().unwrap();
+            let ch = key_part.chars().next().expect("key_part has length 1");
             return Some(EditorEvent::KeyPress {
                 key: keyboard::Key::Character(ch.to_lowercase().to_string().into()),
                 modifiers: keyboard::Modifiers::ALT,
@@ -159,8 +163,8 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
 
     // Check for Shift+key pattern (S-Tab, Shift-Tab)
     if seq.starts_with("S-") || seq.starts_with("Shift-") {
-        let key_part = if seq.starts_with("S-") {
-            &seq[2..]
+        let key_part = if let Some(stripped) = seq.strip_prefix("S-") {
+            stripped
         } else {
             &seq[6..]
         };
@@ -175,7 +179,7 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
             _ => {
                 // For single characters with shift
                 if key_part.len() == 1 {
-                    let ch = key_part.chars().next().unwrap();
+                    let ch = key_part.chars().next().expect("key_part has length 1");
                     return Some(EditorEvent::KeyPress {
                         key: keyboard::Key::Character(ch.to_uppercase().to_string().into()),
                         modifiers: keyboard::Modifiers::SHIFT,

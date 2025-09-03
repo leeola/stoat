@@ -195,9 +195,8 @@ fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Ef
     tracing::debug!("Processing command: {:?}", command);
 
     // Handle commands that produce effects but no state changes
-    match command {
-        Command::Exit => return (state, vec![Effect::Exit]),
-        _ => {},
+    if command == Command::Exit {
+        return (state, vec![Effect::Exit]);
     }
 
     // Convert command to action and apply it
@@ -286,28 +285,6 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 }
 
 // Helper functions for text manipulation and cursor movement
-
-/// Calculate the display column for a position in a line, accounting for tabs
-fn calculate_display_column(line: &str, byte_position: usize, tab_width: usize) -> usize {
-    let mut display_col = 0;
-    let mut byte_col = 0;
-
-    for ch in line.chars() {
-        if byte_col >= byte_position {
-            break;
-        }
-
-        if ch == '\t' {
-            // Tab advances to next tab stop
-            display_col = (display_col / tab_width + 1) * tab_width;
-        } else {
-            display_col += 1;
-        }
-        byte_col += ch.len_utf8();
-    }
-
-    display_col
-}
 
 /// Convert a visual column position back to a character/byte position
 pub fn visual_to_char_column(line: &str, visual_target: usize, tab_width: usize) -> (usize, usize) {
@@ -839,7 +816,7 @@ mod tests {
 
         let new_state = apply_action(state, action);
         assert!(new_state.cursor.selection.is_some());
-        let selection = new_state.cursor.selection.unwrap();
+        let selection = new_state.cursor.selection.expect("selection should be set");
         assert_eq!(selection.start, TextPosition::new(0, 0));
         assert_eq!(selection.end, TextPosition::new(0, 5));
     }
@@ -899,6 +876,28 @@ mod tests {
 
         // Visual column 12 -> char 7 (W in World, after tab)
         assert_eq!(visual_to_char_column(line, 12, 4), (7, 7));
+    }
+
+    /// Calculate the display column for a position in a line, accounting for tabs
+    fn calculate_display_column(line: &str, byte_position: usize, tab_width: usize) -> usize {
+        let mut display_col = 0;
+        let mut byte_col = 0;
+
+        for ch in line.chars() {
+            if byte_col >= byte_position {
+                break;
+            }
+
+            if ch == '\t' {
+                // Tab advances to next tab stop
+                display_col = (display_col / tab_width + 1) * tab_width;
+            } else {
+                display_col += 1;
+            }
+            byte_col += ch.len_utf8();
+        }
+
+        display_col
     }
 
     #[test]
@@ -980,8 +979,7 @@ mod tests {
         let line_count = state.line_count();
         assert!(
             line_count > 1,
-            "Expected more than 1 line, got {}",
-            line_count
+            "Expected more than 1 line, got {line_count}"
         );
 
         // Debug: Check what line content we get

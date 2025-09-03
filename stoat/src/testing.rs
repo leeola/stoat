@@ -182,7 +182,11 @@ pub mod events {
                         chars.next(); // consume '>'
                         break;
                     }
-                    key_name.push(chars.next().unwrap());
+                    key_name.push(
+                        chars
+                            .next()
+                            .expect("chars should have next since we peeked"),
+                    );
                 }
 
                 let key = match key_name.as_str() {
@@ -311,9 +315,7 @@ pub mod assertions {
     pub fn assert_has_effect(effects: &[Effect], expected: &Effect) {
         assert!(
             effects.contains(expected),
-            "Expected effect {:?} not found in {:?}",
-            expected,
-            effects
+            "Expected effect {expected:?} not found in {effects:?}"
         );
     }
 
@@ -321,8 +323,7 @@ pub mod assertions {
     pub fn assert_no_effects(effects: &[Effect]) {
         assert!(
             effects.is_empty(),
-            "Expected no effects, but got: {:?}",
-            effects
+            "Expected no effects, but got: {effects:?}"
         );
     }
 
@@ -333,8 +334,7 @@ pub mod assertions {
         });
         assert!(
             has_error,
-            "Expected error effect containing '{}', got: {:?}",
-            message_contains, effects
+            "Expected error effect containing '{message_contains}', got: {effects:?}"
         );
     }
 }

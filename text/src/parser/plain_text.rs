@@ -239,7 +239,7 @@ fn looks_like_identifier(text: &str) -> bool {
     }
 
     // Check if it starts with a letter or underscore
-    let first_char = text.chars().next().unwrap();
+    let first_char = text.chars().next().expect("text should not be empty");
     if !first_char.is_ascii_alphabetic() && first_char != '_' {
         return false;
     }
@@ -280,10 +280,8 @@ fn build_document(paragraphs: Vec<Vec<Token>>, total_len: usize) -> Arc<AstNode>
         let paragraph_range = TextRange::new(start, end);
 
         // Build tokens for this paragraph, parsing identifiers into words
-        let token_nodes: Vec<Arc<AstNode>> = paragraph_tokens
-            .into_iter()
-            .map(|token| build_token_node(token))
-            .collect();
+        let token_nodes: Vec<Arc<AstNode>> =
+            paragraph_tokens.into_iter().map(build_token_node).collect();
 
         // Create paragraph node
         let paragraph = AstBuilder::start_node(SyntaxKind::Paragraph, paragraph_range)

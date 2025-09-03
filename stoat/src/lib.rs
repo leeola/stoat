@@ -220,8 +220,7 @@ impl Stoat {
         let actual = self.buffer_contents();
         assert_eq!(
             actual, expected,
-            "Buffer content mismatch:\nExpected:\n{}\nActual:\n{}",
-            expected, actual
+            "Buffer content mismatch:\nExpected:\n{expected}\nActual:\n{actual}"
         );
     }
 
@@ -236,11 +235,7 @@ impl Stoat {
         assert_eq!(
             (actual_line, actual_col),
             (line, column),
-            "Cursor position mismatch: expected ({}, {}), got ({}, {})",
-            line,
-            column,
-            actual_line,
-            actual_col
+            "Cursor position mismatch: expected ({line}, {column}), got ({actual_line}, {actual_col})"
         );
     }
 }
@@ -378,8 +373,7 @@ mod stoat_tests {
         let contents = editor.buffer_contents();
         assert!(
             contents == "Hello\tWorld" || contents.starts_with("Hello "),
-            "Literal tab should be inserted as tab or spaces, got: {:?}",
-            contents
+            "Literal tab should be inserted as tab or spaces, got: {contents:?}"
         );
     }
 
@@ -631,8 +625,7 @@ mod stoat_tests {
         let contents = editor.buffer_contents();
         assert!(
             contents == "\t" || contents == "    " || contents == "  ",
-            "Tab key should insert tab character or spaces, got: {:?}",
-            contents
+            "Tab key should insert tab character or spaces, got: {contents:?}"
         );
     }
 }

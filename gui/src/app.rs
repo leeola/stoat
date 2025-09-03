@@ -78,7 +78,7 @@ impl App {
 
             Message::ShowError { ref message } => {
                 tracing::error!("Showing error message: {}", message);
-                self.status_message = Some(format!("Error: {}", message));
+                self.status_message = Some(format!("Error: {message}"));
                 Task::none()
             },
 
@@ -158,7 +158,7 @@ impl App {
 
         let dirty_marker = if self.engine.is_dirty() { " *" } else { "" };
 
-        format!("GUI v2 - {}{}", file_name, dirty_marker)
+        format!("GUI v2 - {file_name}{dirty_marker}")
     }
 }
 
