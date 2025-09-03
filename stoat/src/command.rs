@@ -165,36 +165,59 @@ impl Command {
 
 // Helper functions moved from processor.rs
 fn move_cursor_left(state: &crate::state::EditorState) -> crate::actions::TextPosition {
-    use crate::actions::TextPosition;
+    use crate::{
+        actions::TextPosition,
+        processor::{byte_to_visual, char_to_byte},
+    };
 
     let pos = state.cursor_position();
     if pos.column > 0 {
-        TextPosition::new(pos.line, pos.column - 1)
+        let line_text = state.line(pos.line).unwrap_or_default();
+        let new_column = pos.column - 1;
+        let new_byte_offset = char_to_byte(&line_text, new_column);
+        let new_visual_column = byte_to_visual(&line_text, new_byte_offset, state.tab_width);
+
+        TextPosition::new_with_byte_offset(pos.line, new_column, new_byte_offset, new_visual_column)
     } else if pos.line > 0 {
-        let prev_line_len = state.line(pos.line - 1).map(|l| l.len()).unwrap_or(0);
-        TextPosition::new(pos.line - 1, prev_line_len)
+        let prev_line = state.line(pos.line - 1).unwrap_or_default();
+        let prev_line_len = prev_line.chars().count();
+        let byte_offset = prev_line.len();
+        let visual_column = byte_to_visual(&prev_line, byte_offset, state.tab_width);
+
+        TextPosition::new_with_byte_offset(pos.line - 1, prev_line_len, byte_offset, visual_column)
     } else {
         pos
     }
 }
 
 fn move_cursor_right(state: &crate::state::EditorState) -> crate::actions::TextPosition {
-    use crate::actions::TextPosition;
+    use crate::{
+        actions::TextPosition,
+        processor::{byte_to_visual, char_to_byte},
+    };
 
     let pos = state.cursor_position();
-    let current_line_len = state.line(pos.line).map(|l| l.len()).unwrap_or(0);
+    let line_text = state.line(pos.line).unwrap_or_default();
+    let current_line_len = line_text.chars().count();
 
     if pos.column < current_line_len {
-        TextPosition::new(pos.line, pos.column + 1)
+        let new_column = pos.column + 1;
+        let new_byte_offset = char_to_byte(&line_text, new_column);
+        let new_visual_column = byte_to_visual(&line_text, new_byte_offset, state.tab_width);
+
+        TextPosition::new_with_byte_offset(pos.line, new_column, new_byte_offset, new_visual_column)
     } else if pos.line < state.line_count().saturating_sub(1) {
-        TextPosition::new(pos.line + 1, 0)
+        TextPosition::new_with_byte_offset(pos.line + 1, 0, 0, 0)
     } else {
         pos
     }
 }
 
 fn move_cursor_up(state: &crate::state::EditorState) -> crate::actions::TextPosition {
-    use crate::actions::TextPosition;
+    use crate::{
+        actions::TextPosition,
+        processor::{byte_to_char, visual_to_byte},
+    };
 
     let pos = state.cursor_position();
     if pos.line > 0 {
@@ -203,15 +226,25 @@ fn move_cursor_up(state: &crate::state::EditorState) -> crate::actions::TextPosi
 
         // Get the target line text and convert visual to char column
         if let Some(target_line) = state.line(pos.line - 1) {
-            let (char_col, _) = crate::processor::visual_to_char_column(
-                &target_line,
-                target_visual_column,
-                state.tab_width,
-            );
-            let new_column = char_col.min(target_line.len());
-            TextPosition::new(pos.line - 1, new_column)
+            let (byte_offset, actual_visual) =
+                visual_to_byte(&target_line, target_visual_column, state.tab_width);
+            let char_col = byte_to_char(&target_line, byte_offset);
+            let line_char_len = target_line.chars().count();
+            let new_column = char_col.min(line_char_len);
+            let final_byte_offset = if new_column < char_col {
+                target_line.len()
+            } else {
+                byte_offset
+            };
+
+            TextPosition::new_with_byte_offset(
+                pos.line - 1,
+                new_column,
+                final_byte_offset,
+                actual_visual,
+            )
         } else {
-            TextPosition::new(pos.line - 1, 0)
+            TextPosition::new_with_byte_offset(pos.line - 1, 0, 0, 0)
         }
     } else {
         pos
@@ -219,7 +252,10 @@ fn move_cursor_up(state: &crate::state::EditorState) -> crate::actions::TextPosi
 }
 
 fn move_cursor_down(state: &crate::state::EditorState) -> crate::actions::TextPosition {
-    use crate::actions::TextPosition;
+    use crate::{
+        actions::TextPosition,
+        processor::{byte_to_char, visual_to_byte},
+    };
 
     let pos = state.cursor_position();
     if pos.line < state.line_count().saturating_sub(1) {
@@ -228,15 +264,25 @@ fn move_cursor_down(state: &crate::state::EditorState) -> crate::actions::TextPo
 
         // Get the target line text and convert visual to char column
         if let Some(target_line) = state.line(pos.line + 1) {
-            let (char_col, _) = crate::processor::visual_to_char_column(
-                &target_line,
-                target_visual_column,
-                state.tab_width,
-            );
-            let new_column = char_col.min(target_line.len());
-            TextPosition::new(pos.line + 1, new_column)
+            let (byte_offset, actual_visual) =
+                visual_to_byte(&target_line, target_visual_column, state.tab_width);
+            let char_col = byte_to_char(&target_line, byte_offset);
+            let line_char_len = target_line.chars().count();
+            let new_column = char_col.min(line_char_len);
+            let final_byte_offset = if new_column < char_col {
+                target_line.len()
+            } else {
+                byte_offset
+            };
+
+            TextPosition::new_with_byte_offset(
+                pos.line + 1,
+                new_column,
+                final_byte_offset,
+                actual_visual,
+            )
         } else {
-            TextPosition::new(pos.line + 1, 0)
+            TextPosition::new_with_byte_offset(pos.line + 1, 0, 0, 0)
         }
     } else {
         pos

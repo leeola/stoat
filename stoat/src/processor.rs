@@ -229,13 +229,13 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
             state.cursor.position = position;
             // Update desired_column to be the visual column for proper tab handling
             if let Some(line) = state.line(position.line) {
-                let byte_pos = line
-                    .char_indices()
-                    .nth(position.column)
-                    .map(|(idx, _)| idx)
-                    .unwrap_or(line.len());
-                state.cursor.desired_column =
-                    calculate_display_column(&line, byte_pos, state.tab_width);
+                // Always calculate visual column when moving cursor
+                let byte_pos = if position.byte_offset > 0 {
+                    position.byte_offset
+                } else {
+                    char_to_byte(&line, position.column)
+                };
+                state.cursor.desired_column = byte_to_visual(&line, byte_pos, state.tab_width);
             } else {
                 state.cursor.desired_column = position.column;
             }
@@ -341,6 +341,68 @@ pub fn visual_to_char_column(line: &str, visual_target: usize, tab_width: usize)
     (char_col, byte_col)
 }
 
+/// Convert character index to byte offset in a string
+pub fn char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(text.len())
+}
+
+/// Convert byte offset to character index
+pub fn byte_to_char(text: &str, byte_offset: usize) -> usize {
+    text[..byte_offset.min(text.len())].chars().count()
+}
+
+/// Calculate visual column from byte offset (accounting for tabs)
+pub fn byte_to_visual(text: &str, byte_offset: usize, tab_width: usize) -> usize {
+    let mut visual_col = 0;
+    let mut current_byte = 0;
+
+    for ch in text.chars() {
+        if current_byte >= byte_offset {
+            break;
+        }
+
+        visual_col += match ch {
+            '\t' => tab_width - (visual_col % tab_width), // Align to next tab stop
+            _ => 1,                                       /* For now, assume other chars are
+                                                            * width 1 */
+        };
+
+        current_byte += ch.len_utf8();
+    }
+
+    visual_col
+}
+
+/// Find byte offset for a target visual column
+pub fn visual_to_byte(text: &str, target_visual: usize, tab_width: usize) -> (usize, usize) {
+    let mut visual_col = 0;
+    let mut byte_offset = 0;
+
+    for ch in text.chars() {
+        let char_width = match ch {
+            '\t' => tab_width - (visual_col % tab_width),
+            _ => 1,
+        };
+
+        if visual_col + char_width > target_visual {
+            // Target is in the middle of this character
+            return (byte_offset, visual_col);
+        }
+
+        visual_col += char_width;
+        byte_offset += ch.len_utf8();
+
+        if visual_col >= target_visual {
+            return (byte_offset, visual_col);
+        }
+    }
+
+    (byte_offset, visual_col)
+}
+
 /// Insert text at a specific TextPosition
 fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text: String) {
     // For now, let's do a simple string-based insertion to get tests passing
@@ -359,22 +421,18 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
                 new_text.push_str(line);
                 new_text.push('\n');
             } else if i == position.line {
-                // Insert within this line
-                let chars: Vec<char> = line.chars().collect();
-                let insert_pos = position.column.min(chars.len());
+                // Use byte offset for insertion if available, otherwise convert from char position
+                let byte_pos = if position.byte_offset > 0 || position.column == 0 {
+                    position.byte_offset.min(line.len())
+                } else {
+                    // Fallback: convert char position to byte offset
+                    char_to_byte(line, position.column)
+                };
 
-                // Add characters before insertion point
-                for &ch in chars.iter().take(insert_pos) {
-                    new_text.push(ch);
-                }
-
-                // Insert the new text
+                // Insert at byte position
+                new_text.push_str(&line[..byte_pos]);
                 new_text.push_str(&text);
-
-                // Add characters after insertion point
-                for &ch in chars.iter().skip(insert_pos) {
-                    new_text.push(ch);
-                }
+                new_text.push_str(&line[byte_pos..]);
 
                 // Add newline if not the last line
                 if i < lines.len() - 1 {
@@ -398,48 +456,62 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
         let new_cursor_position;
         let new_desired_column;
 
-        if text.contains('\t') || text.contains('\n') {
+        if text.contains('\n') {
             // Handle newlines - cursor goes to beginning of next line
-            if text.contains('\n') {
-                let newline_count = text.chars().filter(|&c| c == '\n').count();
-                let after_last_newline = text.rsplit('\n').next().unwrap_or("");
-                let new_column = after_last_newline.chars().count();
-                new_cursor_position = TextPosition::new(position.line + newline_count, new_column);
-                new_desired_column = new_column;
-            } else {
-                // Handle tabs - need to calculate based on the NEW text that will be in the buffer
-                // Get the full line and split it at the insertion point
-                let (line_before, line_after) = if position.line < lines.len() {
-                    let line = lines[position.line];
-                    let split_pos = position.column.min(line.len());
-                    (&line[..split_pos], &line[split_pos..])
-                } else {
-                    ("", "")
-                };
+            let newline_count = text.chars().filter(|&c| c == '\n').count();
+            let after_last_newline = text.rsplit('\n').next().unwrap_or("");
+            let new_column = after_last_newline.chars().count();
+            let new_byte_offset = after_last_newline.len();
+            let new_visual_column =
+                byte_to_visual(after_last_newline, new_byte_offset, state.tab_width);
 
-                // Build what the complete line will look like after insertion
-                let line_after_insertion = format!("{}{}{}", line_before, text, line_after);
-
-                // The new cursor position in characters
-                let new_char_position = position.column + text.chars().count();
-
-                // Calculate display column at the cursor position (not at end of line)
-                // We need to calculate up to where the cursor will be
-                let cursor_byte_pos = line_before.len() + text.len();
-                let final_display_col = calculate_display_column(
-                    &line_after_insertion,
-                    cursor_byte_pos,
-                    state.tab_width,
-                );
-
-                new_cursor_position = TextPosition::new(position.line, new_char_position);
-                new_desired_column = final_display_col;
-            }
+            new_cursor_position = TextPosition::new_with_byte_offset(
+                position.line + newline_count,
+                new_column,
+                new_byte_offset,
+                new_visual_column,
+            );
+            new_desired_column = new_visual_column;
         } else {
-            // Simple case - no tabs or newlines
-            new_cursor_position =
-                TextPosition::new(position.line, position.column + text.chars().count());
-            new_desired_column = new_cursor_position.column;
+            // Calculate new position after insertion (including tabs)
+            let line_text = if position.line < lines.len() {
+                lines[position.line]
+            } else {
+                ""
+            };
+
+            // Get byte position where we inserted
+            let insert_byte_pos = if position.byte_offset > 0 || position.column == 0 {
+                position.byte_offset.min(line_text.len())
+            } else {
+                char_to_byte(line_text, position.column)
+            };
+
+            // Calculate new cursor position
+            let inserted_chars = text.chars().count();
+            let inserted_bytes = text.len();
+
+            let new_column = position.column + inserted_chars;
+            let new_byte_offset = insert_byte_pos + inserted_bytes;
+
+            // Build the line after insertion to calculate visual column
+            let line_after_insertion = format!(
+                "{}{}{}",
+                &line_text[..insert_byte_pos],
+                text,
+                &line_text[insert_byte_pos..]
+            );
+
+            let new_visual_column =
+                byte_to_visual(&line_after_insertion, new_byte_offset, state.tab_width);
+
+            new_cursor_position = TextPosition::new_with_byte_offset(
+                position.line,
+                new_column,
+                new_byte_offset,
+                new_visual_column,
+            );
+            new_desired_column = new_visual_column;
         }
 
         // Update the buffer with new content

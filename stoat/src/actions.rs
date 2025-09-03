@@ -57,11 +57,32 @@ pub enum EditorAction {
 pub struct TextPosition {
     pub line: usize,
     pub column: usize,
+    pub byte_offset: usize,
+    pub visual_column: usize,
 }
 
 impl TextPosition {
     pub fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
+        Self {
+            line,
+            column,
+            byte_offset: 0,
+            visual_column: column,
+        }
+    }
+
+    pub fn new_with_byte_offset(
+        line: usize,
+        column: usize,
+        byte_offset: usize,
+        visual_column: usize,
+    ) -> Self {
+        Self {
+            line,
+            column,
+            byte_offset,
+            visual_column,
+        }
     }
 
     pub fn start() -> Self {

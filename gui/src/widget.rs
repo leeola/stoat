@@ -294,11 +294,16 @@ impl<'a> EditorWidget<'a> {
             bounds.x
         };
 
-        // Get the line text to calculate visual column
-        let visual_column = if let Some(line) = self.state.line(cursor_pos.line) {
-            self.calculate_visual_column(&line, cursor_pos.column, self.state.tab_width)
+        // Use the visual column from the cursor position
+        let visual_column = if cursor_pos.visual_column > 0 || cursor_pos.column == 0 {
+            cursor_pos.visual_column
         } else {
-            cursor_pos.column
+            // Fallback: calculate visual column if not set
+            if let Some(line) = self.state.line(cursor_pos.line) {
+                self.calculate_visual_column(&line, cursor_pos.column, self.state.tab_width)
+            } else {
+                cursor_pos.column
+            }
         };
 
         let cursor_x = text_start_x + (visual_column as f32 * char_width) - scroll_x;

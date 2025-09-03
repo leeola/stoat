@@ -398,7 +398,7 @@ mod stoat_tests {
         };
         editor.engine_mut().handle_event(tab_event);
 
-        // The cursor should be at column 5 (1 for 'a' + 4 for tab display width)
+        // The cursor should be at column 8 (tab aligns to column 8)
         // But the actual character position is 2 (a + \t)
         let (_, col) = editor.cursor_position();
         assert_eq!(
@@ -434,7 +434,7 @@ mod stoat_tests {
         // Type "abc<tab>def"
         editor.keyboard_input("abc");
 
-        // Insert tab - this should move cursor to next tab stop (column 4 in display)
+        // Insert tab - this should move cursor to next tab stop (column 8 in display)
         let tab_event = EditorEvent::KeyPress {
             key: keyboard::Key::Named(keyboard::key::Named::Tab),
             modifiers: keyboard::Modifiers::default(),
@@ -442,12 +442,12 @@ mod stoat_tests {
         editor.engine_mut().handle_event(tab_event);
 
         // Check that desired_column reflects display position
-        // "abc" = 3 display columns, then tab advances to column 4 (next tab stop)
-        // So cursor should be at display column 4
+        // "abc" = 3 display columns, then tab advances to column 8 (next tab stop)
+        // So cursor should be at display column 8
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 4,
-            "Desired column should be 4 after 'abc<tab>'"
+            state.cursor.desired_column, 8,
+            "Desired column should be 8 after 'abc<tab>'"
         );
 
         // Character position should be 4 (a, b, c, \t)
@@ -457,11 +457,11 @@ mod stoat_tests {
         // Type more text
         editor.keyboard_input("def");
 
-        // Desired column should now be 7 (4 + 3 characters)
+        // Desired column should now be 11 (8 + 3 characters)
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 7,
-            "Desired column should be 7 after 'abc<tab>def'"
+            state.cursor.desired_column, 11,
+            "Desired column should be 11 after 'abc<tab>def'"
         );
     }
 
@@ -508,16 +508,16 @@ mod stoat_tests {
         let mut editor = Stoat::new();
 
         // Test that tabs align to tab stops correctly
-        // Tab width is 4, so tab stops are at columns 0, 4, 8, 12, etc.
+        // Tab width is 8, so tab stops are at columns 0, 8, 16, 24, etc.
 
         editor.keyboard_input("i");
 
-        // Test 1: "a\t" should put cursor at column 4
+        // Test 1: "a\t" should put cursor at column 8
         editor.keyboard_input("a\t");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 4,
-            "After 'a<tab>', cursor should be at display column 4"
+            state.cursor.desired_column, 8,
+            "After 'a<tab>', cursor should be at display column 8"
         );
         assert_eq!(
             editor.cursor_position().1,
@@ -529,12 +529,12 @@ mod stoat_tests {
         editor = Stoat::new();
         editor.keyboard_input("i");
 
-        // Test 2: "ab\t" should also put cursor at column 4
+        // Test 2: "ab\t" should also put cursor at column 8
         editor.keyboard_input("ab\t");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 4,
-            "After 'ab<tab>', cursor should be at display column 4"
+            state.cursor.desired_column, 8,
+            "After 'ab<tab>', cursor should be at display column 8"
         );
         assert_eq!(
             editor.cursor_position().1,
@@ -546,12 +546,12 @@ mod stoat_tests {
         editor = Stoat::new();
         editor.keyboard_input("i");
 
-        // Test 3: "abc\t" should also put cursor at column 4
+        // Test 3: "abc\t" should also put cursor at column 8
         editor.keyboard_input("abc\t");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 4,
-            "After 'abc<tab>', cursor should be at display column 4"
+            state.cursor.desired_column, 8,
+            "After 'abc<tab>', cursor should be at display column 8"
         );
         assert_eq!(
             editor.cursor_position().1,
@@ -563,7 +563,7 @@ mod stoat_tests {
         editor = Stoat::new();
         editor.keyboard_input("i");
 
-        // Test 4: "abcd\t" should put cursor at column 8 (next tab stop)
+        // Test 4: "abcd\t" should put cursor at column 8 (same tab stop since 4 < 8)
         editor.keyboard_input("abcd\t");
         let state = editor.engine().state();
         assert_eq!(
@@ -590,8 +590,8 @@ mod stoat_tests {
         // Check display column after tab
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 4,
-            "After 'abc<tab>', display column should be 4"
+            state.cursor.desired_column, 8,
+            "After 'abc<tab>', display column should be 8"
         );
 
         // Now type more text
@@ -604,11 +604,11 @@ mod stoat_tests {
         let (_, col) = editor.cursor_position();
         assert_eq!(col, 7, "Character position should be 7");
 
-        // Display column should be 7 (4 for tab stop + 3 for "def")
+        // Display column should be 11 (8 for tab stop + 3 for "def")
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.desired_column, 7,
-            "Display column should be 7 after 'abc<tab>def'"
+            state.cursor.desired_column, 11,
+            "Display column should be 11 after 'abc<tab>def'"
         );
     }
 

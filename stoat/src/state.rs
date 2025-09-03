@@ -51,7 +51,7 @@ impl EditorState {
             file: FileInfo::new(),
             is_dirty: false,
             show_command_info: false,
-            tab_width: 4,
+            tab_width: 8,
         }
     }
 
@@ -65,7 +65,7 @@ impl EditorState {
             file: FileInfo::new(),
             is_dirty: false,
             show_command_info: false,
-            tab_width: 4,
+            tab_width: 8,
         }
     }
 

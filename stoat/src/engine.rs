@@ -370,22 +370,27 @@ mod tests {
     #[test]
     fn cursor_movement_in_normal_mode() {
         let mut engine = EditorEngine::with_text("Hello World");
-        assert_eq!(engine.cursor_position(), TextPosition::new(0, 0));
+        assert_eq!(engine.cursor_position().line, 0);
+        assert_eq!(engine.cursor_position().column, 0);
 
         // Move right
         engine.handle_event(events::char_key('l'));
-        assert_eq!(engine.cursor_position(), TextPosition::new(0, 1));
+        assert_eq!(engine.cursor_position().line, 0);
+        assert_eq!(engine.cursor_position().column, 1);
 
         // Move right again
         engine.handle_event(events::char_key('l'));
-        assert_eq!(engine.cursor_position(), TextPosition::new(0, 2));
+        assert_eq!(engine.cursor_position().line, 0);
+        assert_eq!(engine.cursor_position().column, 2);
 
         // Move left
         engine.handle_event(events::char_key('h'));
-        assert_eq!(engine.cursor_position(), TextPosition::new(0, 1));
+        assert_eq!(engine.cursor_position().line, 0);
+        assert_eq!(engine.cursor_position().column, 1);
 
         // Move left again
         engine.handle_event(events::char_key('h'));
-        assert_eq!(engine.cursor_position(), TextPosition::new(0, 0));
+        assert_eq!(engine.cursor_position().line, 0);
+        assert_eq!(engine.cursor_position().column, 0);
     }
 }
