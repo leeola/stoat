@@ -141,20 +141,43 @@ fn process_key_press(
 
     // Handle special cases for insert mode character insertion
     if state.mode == EditMode::Insert {
-        if let keyboard::Key::Character(text) = &key {
-            // Filter out control characters - only insert printable text
-            // This prevents Ctrl+T (\u{14}) and similar from being inserted
-            if text.chars().any(|c| !c.is_control()) {
-                let command = Command::InsertStr(text.clone());
-                tracing::debug!("Insert mode text: {:?}", command);
-                let result = process_command(state, command);
+        match &key {
+            keyboard::Key::Character(text) => {
+                // Filter out control characters - only insert printable text
+                // This prevents Ctrl+T (\u{14}) and similar from being inserted
+                if text.chars().any(|c| !c.is_control()) {
+                    let command = Command::InsertStr(text.clone());
+                    tracing::debug!("Insert mode text: {:?}", command);
+                    let result = process_command(state, command);
 
-                if result.0.mode != original_mode {
-                    tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                    if result.0.mode != original_mode {
+                        tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                    }
+
+                    return result;
                 }
+            },
+            keyboard::Key::Named(named) => {
+                // Handle special named keys that should insert text
+                let text_to_insert = match named {
+                    keyboard::key::Named::Space => Some(" ".to_string()),
+                    keyboard::key::Named::Tab => Some("\t".to_string()),
+                    _ => None,
+                };
 
-                return result;
-            }
+                if let Some(text) = text_to_insert {
+                    let command = Command::InsertStr(text.into());
+                    tracing::debug!("Insert mode named key: {:?}", command);
+                    let result = process_command(state, command);
+
+                    if result.0.mode != original_mode {
+                        tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                    }
+
+                    return result;
+                }
+            },
+            _ => {},
         }
     }
 

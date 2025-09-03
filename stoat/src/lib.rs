@@ -334,4 +334,76 @@ mod stoat_tests {
         editor.keyboard_input("iHello<BS><BS>"); // Type and delete
         assert_eq!(editor.buffer_contents(), "Hel");
     }
+
+    #[test]
+    fn test_literal_space_key_event() {
+        let mut editor = Stoat::new();
+        // Enter insert mode
+        editor.keyboard_input("i");
+        assert_eq!(editor.mode(), "insert");
+
+        // Manually create and send a Space key event
+        let space_event = EditorEvent::KeyPress {
+            key: keyboard::Key::Named(keyboard::key::Named::Space),
+            modifiers: keyboard::Modifiers::default(),
+        };
+
+        editor.engine_mut().handle_event(space_event);
+
+        // Verify that a space was inserted
+        assert_eq!(
+            editor.buffer_contents(),
+            " ",
+            "Space key should insert a space character"
+        );
+    }
+
+    #[test]
+    fn test_keyboard_input_with_literal_space() {
+        let mut editor = Stoat::new();
+        // Type with literal space in the string
+        editor.keyboard_input("iHello World");
+        assert_eq!(
+            editor.buffer_contents(),
+            "Hello World",
+            "Literal space should be inserted"
+        );
+    }
+
+    #[test]
+    fn test_keyboard_input_with_literal_tab() {
+        let mut editor = Stoat::new();
+        // Type with literal tab in the string
+        editor.keyboard_input("iHello\tWorld");
+        let contents = editor.buffer_contents();
+        assert!(
+            contents == "Hello\tWorld" || contents.starts_with("Hello "),
+            "Literal tab should be inserted as tab or spaces, got: {:?}",
+            contents
+        );
+    }
+
+    #[test]
+    fn test_literal_tab_key_event() {
+        let mut editor = Stoat::new();
+        // Enter insert mode
+        editor.keyboard_input("i");
+        assert_eq!(editor.mode(), "insert");
+
+        // Manually create and send a Tab key event
+        let tab_event = EditorEvent::KeyPress {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers: keyboard::Modifiers::default(),
+        };
+
+        editor.engine_mut().handle_event(tab_event);
+
+        // Verify that a tab was inserted (or spaces if tab expansion is enabled)
+        let contents = editor.buffer_contents();
+        assert!(
+            contents == "\t" || contents == "    " || contents == "  ",
+            "Tab key should insert tab character or spaces, got: {:?}",
+            contents
+        );
+    }
 }

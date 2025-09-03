@@ -67,8 +67,15 @@ pub fn parse_sequence(input: &str) -> Vec<EditorEvent> {
 
 /// Creates a key press event for a regular character.
 fn create_char_event(ch: char) -> EditorEvent {
+    // Handle space and tab as named keys
+    let key = match ch {
+        ' ' => keyboard::Key::Named(keyboard::key::Named::Space),
+        '\t' => keyboard::Key::Named(keyboard::key::Named::Tab),
+        _ => keyboard::Key::Character(ch.to_string().into()),
+    };
+
     EditorEvent::KeyPress {
-        key: keyboard::Key::Character(ch.to_string().into()),
+        key,
         modifiers: keyboard::Modifiers::default(),
     }
 }
