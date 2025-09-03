@@ -198,10 +198,21 @@ fn move_cursor_up(state: &crate::state::EditorState) -> crate::actions::TextPosi
 
     let pos = state.cursor_position();
     if pos.line > 0 {
-        let target_column = state.cursor.desired_column;
-        let prev_line_len = state.line(pos.line - 1).map(|l| l.len()).unwrap_or(0);
-        let new_column = target_column.min(prev_line_len);
-        TextPosition::new(pos.line - 1, new_column)
+        // Use visual column for consistent tab-aware vertical movement
+        let target_visual_column = state.cursor.desired_column;
+
+        // Get the target line text and convert visual to char column
+        if let Some(target_line) = state.line(pos.line - 1) {
+            let (char_col, _) = crate::processor::visual_to_char_column(
+                &target_line,
+                target_visual_column,
+                state.tab_width,
+            );
+            let new_column = char_col.min(target_line.len());
+            TextPosition::new(pos.line - 1, new_column)
+        } else {
+            TextPosition::new(pos.line - 1, 0)
+        }
     } else {
         pos
     }
@@ -212,10 +223,21 @@ fn move_cursor_down(state: &crate::state::EditorState) -> crate::actions::TextPo
 
     let pos = state.cursor_position();
     if pos.line < state.line_count().saturating_sub(1) {
-        let target_column = state.cursor.desired_column;
-        let next_line_len = state.line(pos.line + 1).map(|l| l.len()).unwrap_or(0);
-        let new_column = target_column.min(next_line_len);
-        TextPosition::new(pos.line + 1, new_column)
+        // Use visual column for consistent tab-aware vertical movement
+        let target_visual_column = state.cursor.desired_column;
+
+        // Get the target line text and convert visual to char column
+        if let Some(target_line) = state.line(pos.line + 1) {
+            let (char_col, _) = crate::processor::visual_to_char_column(
+                &target_line,
+                target_visual_column,
+                state.tab_width,
+            );
+            let new_column = char_col.min(target_line.len());
+            TextPosition::new(pos.line + 1, new_column)
+        } else {
+            TextPosition::new(pos.line + 1, 0)
+        }
     } else {
         pos
     }

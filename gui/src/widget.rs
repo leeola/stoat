@@ -287,14 +287,21 @@ impl<'a> EditorWidget<'a> {
     ) {
         let cursor_pos = self.state.cursor.position;
 
-        // Calculate cursor pixel position
+        // Calculate cursor pixel position using visual columns
         let text_start_x = if self.theme.show_line_numbers {
             bounds.x + char_width * 5.5
         } else {
             bounds.x
         };
 
-        let cursor_x = text_start_x + (cursor_pos.column as f32 * char_width) - scroll_x;
+        // Get the line text to calculate visual column
+        let visual_column = if let Some(line) = self.state.line(cursor_pos.line) {
+            self.calculate_visual_column(&line, cursor_pos.column, self.state.tab_width)
+        } else {
+            cursor_pos.column
+        };
+
+        let cursor_x = text_start_x + (visual_column as f32 * char_width) - scroll_x;
         let cursor_y = bounds.y + (cursor_pos.line as f32 * line_height) - scroll_y;
 
         // Only draw cursor if it's visible in viewport
@@ -338,9 +345,19 @@ impl<'a> EditorWidget<'a> {
 
         // Simple single-line selection for now
         if start_pos.line == end_pos.line {
-            let sel_x = text_start_x + (start_pos.column as f32 * char_width) - scroll_x;
+            // Get visual columns for selection start and end
+            let line_text = self
+                .state
+                .line(start_pos.line)
+                .unwrap_or_else(|| String::new());
+            let start_visual =
+                self.calculate_visual_column(&line_text, start_pos.column, self.state.tab_width);
+            let end_visual =
+                self.calculate_visual_column(&line_text, end_pos.column, self.state.tab_width);
+
+            let sel_x = text_start_x + (start_visual as f32 * char_width) - scroll_x;
             let sel_y = bounds.y + (start_pos.line as f32 * line_height) - scroll_y;
-            let sel_width = (end_pos.column - start_pos.column) as f32 * char_width;
+            let sel_width = (end_visual - start_visual) as f32 * char_width;
 
             if sel_y >= bounds.y && sel_y <= bounds.y + bounds.height {
                 let selection_quad = Quad {
@@ -359,6 +376,31 @@ impl<'a> EditorWidget<'a> {
             }
         }
         // TODO: Handle multi-line selections
+    }
+}
+
+impl<'a> EditorWidget<'a> {
+    /// Calculate the visual column position accounting for tabs
+    fn calculate_visual_column(&self, line: &str, char_column: usize, tab_width: usize) -> usize {
+        let mut visual_col = 0;
+        let mut char_col = 0;
+
+        for ch in line.chars() {
+            if char_col >= char_column {
+                break;
+            }
+
+            if ch == '\t' {
+                // Tab aligns to next tab stop
+                visual_col = (visual_col / tab_width + 1) * tab_width;
+            } else {
+                visual_col += 1;
+            }
+
+            char_col += 1;
+        }
+
+        visual_col
     }
 }
 

@@ -198,10 +198,7 @@ pub fn detect_word_pattern(text: &str) -> WordPattern {
     let has_dash = text.contains('-');
     let has_uppercase = text.chars().any(|c| c.is_ascii_uppercase());
     let has_lowercase = text.chars().any(|c| c.is_ascii_lowercase());
-    let starts_with_uppercase = text
-        .chars()
-        .next()
-        .map_or(false, |c| c.is_ascii_uppercase());
+    let starts_with_uppercase = text.chars().next().is_some_and(|c| c.is_ascii_uppercase());
 
     match (has_underscore, has_dash, has_uppercase, has_lowercase) {
         // snake_case or SCREAMING_SNAKE_CASE

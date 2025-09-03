@@ -227,7 +227,18 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 
         EditorAction::MoveCursor { position } => {
             state.cursor.position = position;
-            state.cursor.desired_column = position.column;
+            // Update desired_column to be the visual column for proper tab handling
+            if let Some(line) = state.line(position.line) {
+                let byte_pos = line
+                    .char_indices()
+                    .nth(position.column)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(line.len());
+                state.cursor.desired_column =
+                    calculate_display_column(&line, byte_pos, state.tab_width);
+            } else {
+                state.cursor.desired_column = position.column;
+            }
         },
 
         EditorAction::SetSelection { range } => {
@@ -298,21 +309,36 @@ fn calculate_display_column(line: &str, byte_position: usize, tab_width: usize) 
     display_col
 }
 
-/// Calculate how many display columns a string spans, accounting for tabs
-fn text_display_width(text: &str, starting_column: usize, tab_width: usize) -> usize {
-    let mut display_col = starting_column;
+/// Convert a visual column position back to a character/byte position
+pub fn visual_to_char_column(line: &str, visual_target: usize, tab_width: usize) -> (usize, usize) {
+    let mut visual_col = 0;
+    let mut char_col = 0;
+    let mut byte_col = 0;
 
-    for ch in text.chars() {
-        if ch == '\t' {
-            // Tab advances to next tab stop
-            let next_tab_stop = (display_col / tab_width + 1) * tab_width;
-            display_col = next_tab_stop;
-        } else if ch != '\n' {
-            display_col += 1;
+    for ch in line.chars() {
+        let char_width = if ch == '\t' {
+            // Tab aligns to next tab stop
+            (visual_col / tab_width + 1) * tab_width - visual_col
+        } else {
+            1
+        };
+
+        if visual_col + char_width > visual_target {
+            // We're in the middle of this character
+            // Return both the char position and actual byte position
+            return (char_col, byte_col);
+        }
+
+        visual_col += char_width;
+        char_col += 1;
+        byte_col += ch.len_utf8();
+
+        if visual_col >= visual_target {
+            return (char_col, byte_col);
         }
     }
 
-    display_col - starting_column
+    (char_col, byte_col)
 }
 
 /// Insert text at a specific TextPosition
@@ -368,50 +394,60 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
             new_text = text.clone();
         }
 
-        // Update the buffer with new content
-        state.buffer = TextBuffer::with_text(&new_text);
+        // Calculate cursor position BEFORE updating the buffer
+        let new_cursor_position;
+        let new_desired_column;
 
-        // Update cursor position to after inserted text
-        // For tabs and special characters, we need to calculate the display width
         if text.contains('\t') || text.contains('\n') {
             // Handle newlines - cursor goes to beginning of next line
             if text.contains('\n') {
                 let newline_count = text.chars().filter(|&c| c == '\n').count();
                 let after_last_newline = text.rsplit('\n').next().unwrap_or("");
                 let new_column = after_last_newline.chars().count();
-                let new_position = TextPosition::new(position.line + newline_count, new_column);
-                state.cursor.position = new_position;
-                state.cursor.desired_column = new_column;
+                new_cursor_position = TextPosition::new(position.line + newline_count, new_column);
+                new_desired_column = new_column;
             } else {
-                // Handle tabs - calculate display width
-                let line_before = if position.line < lines.len() {
-                    &lines[position.line][..position.column.min(lines[position.line].len())]
+                // Handle tabs - need to calculate based on the NEW text that will be in the buffer
+                // Get the full line and split it at the insertion point
+                let (line_before, line_after) = if position.line < lines.len() {
+                    let line = lines[position.line];
+                    let split_pos = position.column.min(line.len());
+                    (&line[..split_pos], &line[split_pos..])
                 } else {
-                    ""
+                    ("", "")
                 };
 
-                // Calculate the display column where we started
-                let start_display_col =
-                    calculate_display_column(line_before, line_before.len(), state.tab_width);
+                // Build what the complete line will look like after insertion
+                let line_after_insertion = format!("{}{}{}", line_before, text, line_after);
 
-                // Calculate how many display columns the inserted text spans
-                let text_width = text_display_width(&text, start_display_col, state.tab_width);
-
-                // The new cursor position in characters (not display columns)
+                // The new cursor position in characters
                 let new_char_position = position.column + text.chars().count();
-                let new_position = TextPosition::new(position.line, new_char_position);
 
-                // Store both character position and desired display column
-                state.cursor.position = new_position;
-                state.cursor.desired_column = start_display_col + text_width;
+                // Calculate display column at the cursor position (not at end of line)
+                // We need to calculate up to where the cursor will be
+                let cursor_byte_pos = line_before.len() + text.len();
+                let final_display_col = calculate_display_column(
+                    &line_after_insertion,
+                    cursor_byte_pos,
+                    state.tab_width,
+                );
+
+                new_cursor_position = TextPosition::new(position.line, new_char_position);
+                new_desired_column = final_display_col;
             }
         } else {
             // Simple case - no tabs or newlines
-            let new_position =
+            new_cursor_position =
                 TextPosition::new(position.line, position.column + text.chars().count());
-            state.cursor.position = new_position;
-            state.cursor.desired_column = new_position.column;
+            new_desired_column = new_cursor_position.column;
         }
+
+        // Update the buffer with new content
+        state.buffer = TextBuffer::with_text(&new_text);
+
+        // Apply the pre-calculated cursor position
+        state.cursor.position = new_cursor_position;
+        state.cursor.desired_column = new_desired_column;
     }
 }
 
@@ -513,12 +549,20 @@ fn replace_text_in_range(state: &mut EditorState, range: TextRange, new_text: St
 
 fn pixel_to_text_position(state: &EditorState, position: iced::Point) -> TextPosition {
     let line = ((position.y - state.viewport.scroll_y) / state.viewport.line_height) as usize;
-    let column = ((position.x - state.viewport.scroll_x) / state.viewport.char_width) as usize;
+    let visual_column =
+        ((position.x - state.viewport.scroll_x) / state.viewport.char_width) as usize;
 
-    // Clamp to valid text boundaries
+    // Clamp line to valid boundaries
     let line = line.min(state.line_count().saturating_sub(1));
-    let max_column = state.line(line).map(|l| l.len()).unwrap_or(0);
-    let column = column.min(max_column);
+
+    // Convert visual column to character column
+    let column = if let Some(line_text) = state.line(line) {
+        let (char_col, _byte_col) =
+            visual_to_char_column(&line_text, visual_column, state.tab_width);
+        char_col.min(line_text.len())
+    } else {
+        0
+    };
 
     TextPosition::new(line, column)
 }
@@ -761,5 +805,134 @@ mod tests {
         // Should return unchanged state (for now)
         assert_eq!(new_state.text(), state.text());
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn test_visual_to_char_column_with_tabs() {
+        // Test converting visual columns to character positions with tabs
+        let line = "\tHello\tWorld";
+
+        // Visual column 0 -> char 0 (before first tab)
+        assert_eq!(visual_to_char_column(line, 0, 4), (0, 0));
+
+        // Visual columns 1-3 -> char 0 (within first tab)
+        assert_eq!(visual_to_char_column(line, 1, 4), (0, 0));
+        assert_eq!(visual_to_char_column(line, 3, 4), (0, 0));
+
+        // Visual column 4 -> char 1 (H in Hello)
+        assert_eq!(visual_to_char_column(line, 4, 4), (1, 1));
+
+        // Visual column 9 -> char 6 (after Hello)
+        assert_eq!(visual_to_char_column(line, 9, 4), (6, 6));
+
+        // Visual column 12 -> char 7 (W in World, after tab)
+        assert_eq!(visual_to_char_column(line, 12, 4), (7, 7));
+    }
+
+    #[test]
+    fn test_calculate_display_column_with_tabs() {
+        // Test calculating display columns with tabs
+        let line = "\tHello\tWorld";
+
+        // Byte position 0 (before first tab) -> visual column 0
+        assert_eq!(calculate_display_column(line, 0, 4), 0);
+
+        // Byte position 1 (after first tab, at H) -> visual column 4
+        assert_eq!(calculate_display_column(line, 1, 4), 4);
+
+        // Byte position 6 (at second tab) -> visual column 9
+        assert_eq!(calculate_display_column(line, 6, 4), 9);
+
+        // Byte position 7 (at W after second tab) -> visual column 12
+        assert_eq!(calculate_display_column(line, 7, 4), 12);
+    }
+
+    #[test]
+    fn test_tab_alignment_at_different_positions() {
+        // Test that tabs align to tab stops correctly
+        let tab_width = 4;
+
+        // Tab at position 0 should take full width
+        assert_eq!(calculate_display_column("\tabc", 1, tab_width), 4);
+
+        // Tab at position 3 should only take 1 column to reach position 4
+        assert_eq!(calculate_display_column("abc\tdef", 4, tab_width), 4);
+
+        // Tab at position 5 should take 3 columns to reach position 8
+        assert_eq!(calculate_display_column("12345\tdef", 6, tab_width), 8);
+    }
+
+    #[test]
+    fn test_movecursor_desired_column_calculation() {
+        // Simpler test to debug the MoveCursor desired_column calculation
+        let mut state = EditorState::with_text("\tghi");
+        state.tab_width = 4;
+
+        // Move to character position 1 (g)
+        let action = EditorAction::MoveCursor {
+            position: TextPosition::new(0, 1),
+        };
+        state = apply_action(state, action);
+
+        // Character position 1 (g) should have visual column 4
+        // because the tab before it expands to 4 spaces
+        assert_eq!(state.cursor.desired_column, 4);
+    }
+
+    #[test]
+    fn test_cursor_movement_with_tabs_vertical() {
+        // Test that MoveCursor action properly updates desired_column to visual column
+        let mut state = EditorState::with_text("abc\tdef\n\tghi\njklmn");
+        state.tab_width = 4;
+
+        // Move cursor to position 4 on first line (d in def, after tab)
+        // "abc\tdef" - character position 4 is 'd'
+        // Visual: "abc " (tab expands to 1 space to reach column 4) "def"
+        // So 'd' is at visual column 4
+        let action = EditorAction::MoveCursor {
+            position: TextPosition::new(0, 4),
+        };
+        state = apply_action(state, action);
+
+        // The desired_column should be set to the visual column (4)
+        assert_eq!(state.cursor.desired_column, 4);
+
+        // Now test moving to a line with a tab at the beginning
+        // Move to position 1 on second line (g in ghi, after tab)
+        // Character position 1 is at visual column 4 (\t expands to 4 spaces)
+        let action2 = EditorAction::MoveCursor {
+            position: TextPosition::new(1, 1),
+        };
+
+        // Debug: Check line count
+        let line_count = state.line_count();
+        assert!(
+            line_count > 1,
+            "Expected more than 1 line, got {}",
+            line_count
+        );
+
+        // Debug: Check what line content we get
+        let line1_content = state.line(1).expect("Line 1 should exist");
+        assert_eq!(line1_content, "\tghi");
+
+        // Debug: Check byte position calculation
+        let byte_pos = line1_content
+            .char_indices()
+            .nth(1)
+            .map(|(idx, _)| idx)
+            .unwrap_or(line1_content.len());
+        assert_eq!(byte_pos, 1); // Tab is 1 byte, so 'g' starts at byte 1
+
+        // Debug: Check display column calculation
+        let visual_col = calculate_display_column(&line1_content, byte_pos, 4);
+        assert_eq!(visual_col, 4); // Should be 4
+
+        state = apply_action(state, action2);
+
+        // The desired_column should be updated to visual column 4
+        assert_eq!(state.cursor.position.line, 1);
+        assert_eq!(state.cursor.position.column, 1);
+        assert_eq!(state.cursor.desired_column, 4);
     }
 }

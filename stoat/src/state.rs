@@ -130,14 +130,51 @@ impl TextBuffer {
             return Self::new();
         }
 
-        // Create a simple single-token rope for now
-        let token = Arc::new(AstNode::token(
-            SyntaxKind::Text,
-            text.into(),
+        // Parse the text into tokens, splitting by newlines
+        let mut tokens = Vec::new();
+        let mut byte_offset = 0;
+
+        // Split the text by lines and create appropriate tokens
+        let lines: Vec<&str> = text.split('\n').collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            // Add text token for the line content (even if empty)
+            let line_bytes = line.len();
+            if line_bytes > 0 {
+                let text_token = Arc::new(AstNode::token(
+                    SyntaxKind::Text,
+                    (*line).into(),
+                    stoat_rope::ast::TextRange::new(byte_offset, byte_offset + line_bytes),
+                ));
+                tokens.push(text_token);
+                byte_offset += line_bytes;
+            }
+
+            // Add newline token (except for the last line)
+            if i < lines.len() - 1 {
+                let newline_token = Arc::new(AstNode::token(
+                    SyntaxKind::Newline,
+                    "\n".into(),
+                    stoat_rope::ast::TextRange::new(byte_offset, byte_offset + 1),
+                ));
+                tokens.push(newline_token);
+                byte_offset += 1;
+            }
+        }
+
+        // Create a document root node with all the tokens as children
+        let mut root = AstNode::syntax(
+            SyntaxKind::Document,
             stoat_rope::ast::TextRange::new(0, text.len()),
-        ));
+        );
+
+        // Add all tokens as children to the document node
+        for token in tokens {
+            root.add_child(token).expect("Failed to add child token");
+        }
+
         Self {
-            rope: RopeAst::from_root(token),
+            rope: RopeAst::from_root(Arc::new(root)),
         }
     }
 
