@@ -1,8 +1,8 @@
 //! Main application using stoat EditorEngine with iced GUI framework.
 
 use crate::{
-    command_info::CommandInfo, effect_runner::run_effects, messages::Message, theme::EditorTheme,
-    widget::EditorWidget,
+    command_info::CommandInfo, editor, effect_runner::run_effects, messages::Message,
+    theme::EditorTheme, widget::EditorWidget,
 };
 use iced::{
     alignment,
@@ -19,6 +19,8 @@ pub struct App {
     theme: EditorTheme,
     /// Current status message (for user feedback)
     status_message: Option<String>,
+    /// Use the new cosmic-text widget (for testing)
+    use_cosmic_widget: bool,
 }
 
 impl Default for App {
@@ -30,6 +32,7 @@ impl Default for App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
+            use_cosmic_widget: false, // Use old widget for now
         }
     }
 }
@@ -47,6 +50,7 @@ impl App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
+            use_cosmic_widget: false, // Use old widget for now
         };
 
         tracing::info!("GUI application initialized successfully");
@@ -91,12 +95,23 @@ impl App {
 
     /// Create the view.
     pub fn view(&self) -> Element<'_, Message> {
-        let editor =
-            EditorWidget::new(self.engine.state(), &self.theme).on_input(Message::EditorInput);
+        let editor: Element<'_, Message> = if self.use_cosmic_widget {
+            // Use new simplified custom widget
+            editor::SimpleCustomTextEditor::new(self.engine.state(), &self.theme)
+                .on_input(Message::EditorInput)
+                .show_line_numbers(self.theme.show_line_numbers)
+                .highlight_current_line(true)
+                .into()
+        } else {
+            // Use old widget
+            EditorWidget::new(self.engine.state(), &self.theme)
+                .on_input(Message::EditorInput)
+                .into()
+        };
 
         let status_bar = self.create_status_bar();
 
-        let main_content = column![Element::from(editor), status_bar].spacing(10);
+        let main_content = column![editor, status_bar].spacing(10);
 
         let base_view = container(main_content)
             .width(iced::Length::Fill)

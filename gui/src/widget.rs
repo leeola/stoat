@@ -4,16 +4,15 @@
 
 use crate::{messages::Message, theme::EditorTheme};
 use iced::{
-    Element, Length, Point, Rectangle, Size, Theme,
     advanced::{
-        Clipboard, Shell,
         layout::{self, Layout},
         renderer::{self, Quad, Renderer as RendererTrait},
         text::Renderer as TextRenderer,
         widget::{self, Widget},
+        Clipboard, Shell,
     },
     event::{self, Event},
-    keyboard, mouse,
+    keyboard, mouse, Element, Length, Point, Rectangle, Size, Theme,
 };
 use stoat::{EditorEvent, EditorState};
 
@@ -119,7 +118,7 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for EditorWidget<'a> {
             // Draw line numbers if enabled
             if self.theme.show_line_numbers {
                 let line_number = format!("{:>4} ", line_index + 1); // Right-pad in the string itself
-                // Position line numbers at the left edge
+                                                                     // Position line numbers at the left edge
                 let line_num_x = bounds.x;
 
                 renderer.fill_text(

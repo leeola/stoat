@@ -13,6 +13,7 @@
 
 pub mod app;
 pub mod command_info;
+pub mod editor;
 pub mod effect_runner;
 pub mod messages;
 pub mod theme;
