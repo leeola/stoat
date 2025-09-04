@@ -234,7 +234,7 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
                 } else {
                     char_to_byte(&line, position.column)
                 };
-                state.cursor.desired_column = byte_to_visual(&line, byte_pos, state.tab_width);
+                state.cursor.desired_column = byte_to_visual(&line, byte_pos);
             } else {
                 state.cursor.desired_column = position.column;
             }
@@ -287,7 +287,9 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 // Helper functions for text manipulation and cursor movement
 
 /// Convert a visual column position back to a character/byte position
-pub fn visual_to_char_column(line: &str, visual_target: usize, tab_width: usize) -> (usize, usize) {
+/// Uses a fixed tab width of 8 (Iced's default)
+pub fn visual_to_char_column(line: &str, visual_target: usize) -> (usize, usize) {
+    const TAB_WIDTH: usize = 8;
     let mut visual_col = 0;
     let mut char_col = 0;
     let mut byte_col = 0;
@@ -295,7 +297,7 @@ pub fn visual_to_char_column(line: &str, visual_target: usize, tab_width: usize)
     for ch in line.chars() {
         let char_width = if ch == '\t' {
             // Tab aligns to next tab stop
-            (visual_col / tab_width + 1) * tab_width - visual_col
+            (visual_col / TAB_WIDTH + 1) * TAB_WIDTH - visual_col
         } else {
             1
         };
@@ -332,7 +334,9 @@ pub fn byte_to_char(text: &str, byte_offset: usize) -> usize {
 }
 
 /// Calculate visual column from byte offset (accounting for tabs)
-pub fn byte_to_visual(text: &str, byte_offset: usize, tab_width: usize) -> usize {
+/// Uses a fixed tab width of 8 (Iced's default)
+pub fn byte_to_visual(text: &str, byte_offset: usize) -> usize {
+    const TAB_WIDTH: usize = 8;
     let mut visual_col = 0;
     let mut current_byte = 0;
 
@@ -342,7 +346,7 @@ pub fn byte_to_visual(text: &str, byte_offset: usize, tab_width: usize) -> usize
         }
 
         visual_col += match ch {
-            '\t' => tab_width - (visual_col % tab_width), // Align to next tab stop
+            '\t' => TAB_WIDTH - (visual_col % TAB_WIDTH), // Align to next tab stop
             _ => 1,                                       /* For now, assume other chars are
                                                             * width 1 */
         };
@@ -354,13 +358,15 @@ pub fn byte_to_visual(text: &str, byte_offset: usize, tab_width: usize) -> usize
 }
 
 /// Find byte offset for a target visual column
-pub fn visual_to_byte(text: &str, target_visual: usize, tab_width: usize) -> (usize, usize) {
+/// Uses a fixed tab width of 8 (Iced's default)
+pub fn visual_to_byte(text: &str, target_visual: usize) -> (usize, usize) {
+    const TAB_WIDTH: usize = 8;
     let mut visual_col = 0;
     let mut byte_offset = 0;
 
     for ch in text.chars() {
         let char_width = match ch {
-            '\t' => tab_width - (visual_col % tab_width),
+            '\t' => TAB_WIDTH - (visual_col % TAB_WIDTH),
             _ => 1,
         };
 
@@ -439,8 +445,7 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
             let after_last_newline = text.rsplit('\n').next().unwrap_or("");
             let new_column = after_last_newline.chars().count();
             let new_byte_offset = after_last_newline.len();
-            let new_visual_column =
-                byte_to_visual(after_last_newline, new_byte_offset, state.tab_width);
+            let new_visual_column = byte_to_visual(after_last_newline, new_byte_offset);
 
             new_cursor_position = TextPosition::new_with_byte_offset(
                 position.line + newline_count,
@@ -479,8 +484,7 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
                 &line_text[insert_byte_pos..]
             );
 
-            let new_visual_column =
-                byte_to_visual(&line_after_insertion, new_byte_offset, state.tab_width);
+            let new_visual_column = byte_to_visual(&line_after_insertion, new_byte_offset);
 
             new_cursor_position = TextPosition::new_with_byte_offset(
                 position.line,
@@ -584,8 +588,25 @@ fn delete_text_in_range(state: &mut EditorState, range: TextRange) {
     state.buffer = TextBuffer::with_text(&new_text);
 
     // Update cursor position to the start of the deletion range
+    // Need to recalculate visual column for proper tab handling
     state.cursor.position = range.start;
-    state.cursor.desired_column = range.start.column;
+
+    // Get the line after deletion to calculate proper visual column
+    if let Some(line) = state.line(range.start.line) {
+        // If we have a valid byte offset, use it; otherwise calculate from column
+        let byte_pos = if range.start.byte_offset > 0 {
+            range.start.byte_offset.min(line.len())
+        } else {
+            char_to_byte(&line, range.start.column)
+        };
+
+        let visual_col = byte_to_visual(&line, byte_pos);
+        state.cursor.position.visual_column = visual_col;
+        state.cursor.desired_column = visual_col;
+    } else {
+        // Fallback if line not found
+        state.cursor.desired_column = range.start.column;
+    }
 }
 
 /// Replace text in a specific TextRange with new text
@@ -606,8 +627,7 @@ fn pixel_to_text_position(state: &EditorState, position: iced::Point) -> TextPos
 
     // Convert visual column to character column
     let column = if let Some(line_text) = state.line(line) {
-        let (char_col, _byte_col) =
-            visual_to_char_column(&line_text, visual_column, state.tab_width);
+        let (char_col, _byte_col) = visual_to_char_column(&line_text, visual_column);
         char_col.min(line_text.len())
     } else {
         0
@@ -859,27 +879,30 @@ mod tests {
     #[test]
     fn test_visual_to_char_column_with_tabs() {
         // Test converting visual columns to character positions with tabs
+        // Now using fixed tab width of 8
         let line = "\tHello\tWorld";
 
         // Visual column 0 -> char 0 (before first tab)
-        assert_eq!(visual_to_char_column(line, 0, 4), (0, 0));
+        assert_eq!(visual_to_char_column(line, 0), (0, 0));
 
-        // Visual columns 1-3 -> char 0 (within first tab)
-        assert_eq!(visual_to_char_column(line, 1, 4), (0, 0));
-        assert_eq!(visual_to_char_column(line, 3, 4), (0, 0));
+        // Visual columns 1-7 -> char 0 (within first tab)
+        assert_eq!(visual_to_char_column(line, 1), (0, 0));
+        assert_eq!(visual_to_char_column(line, 7), (0, 0));
 
-        // Visual column 4 -> char 1 (H in Hello)
-        assert_eq!(visual_to_char_column(line, 4, 4), (1, 1));
+        // Visual column 8 -> char 1 (H in Hello)
+        assert_eq!(visual_to_char_column(line, 8), (1, 1));
 
-        // Visual column 9 -> char 6 (after Hello)
-        assert_eq!(visual_to_char_column(line, 9, 4), (6, 6));
+        // Visual column 13 -> char 6 (after Hello)
+        assert_eq!(visual_to_char_column(line, 13), (6, 6));
 
-        // Visual column 12 -> char 7 (W in World, after tab)
-        assert_eq!(visual_to_char_column(line, 12, 4), (7, 7));
+        // Visual column 16 -> char 7 (W in World, after tab)
+        assert_eq!(visual_to_char_column(line, 16), (7, 7));
     }
 
     /// Calculate the display column for a position in a line, accounting for tabs
-    fn calculate_display_column(line: &str, byte_position: usize, tab_width: usize) -> usize {
+    /// Uses a fixed tab width of 8 (Iced's default)
+    fn calculate_display_column(line: &str, byte_position: usize) -> usize {
+        const TAB_WIDTH: usize = 8;
         let mut display_col = 0;
         let mut byte_col = 0;
 
@@ -890,7 +913,7 @@ mod tests {
 
             if ch == '\t' {
                 // Tab advances to next tab stop
-                display_col = (display_col / tab_width + 1) * tab_width;
+                display_col = (display_col / TAB_WIDTH + 1) * TAB_WIDTH;
             } else {
                 display_col += 1;
             }
@@ -906,38 +929,36 @@ mod tests {
         let line = "\tHello\tWorld";
 
         // Byte position 0 (before first tab) -> visual column 0
-        assert_eq!(calculate_display_column(line, 0, 4), 0);
+        assert_eq!(calculate_display_column(line, 0), 0);
 
-        // Byte position 1 (after first tab, at H) -> visual column 4
-        assert_eq!(calculate_display_column(line, 1, 4), 4);
+        // Byte position 1 (after first tab, at H) -> visual column 8 (with tab width 8)
+        assert_eq!(calculate_display_column(line, 1), 8);
 
-        // Byte position 6 (at second tab) -> visual column 9
-        assert_eq!(calculate_display_column(line, 6, 4), 9);
+        // Byte position 6 (at second tab) -> visual column 13
+        assert_eq!(calculate_display_column(line, 6), 13);
 
-        // Byte position 7 (at W after second tab) -> visual column 12
-        assert_eq!(calculate_display_column(line, 7, 4), 12);
+        // Byte position 7 (at W after second tab) -> visual column 16
+        assert_eq!(calculate_display_column(line, 7), 16);
     }
 
     #[test]
     fn test_tab_alignment_at_different_positions() {
-        // Test that tabs align to tab stops correctly
-        let tab_width = 4;
+        // Test that tabs align to tab stops correctly (tab width 8)
 
-        // Tab at position 0 should take full width
-        assert_eq!(calculate_display_column("\tabc", 1, tab_width), 4);
+        // Tab at position 0 should take full width (8 columns)
+        assert_eq!(calculate_display_column("\tabc", 1), 8);
 
-        // Tab at position 3 should only take 1 column to reach position 4
-        assert_eq!(calculate_display_column("abc\tdef", 4, tab_width), 4);
+        // Tab at position 3 should take 5 columns to reach position 8
+        assert_eq!(calculate_display_column("abc\tdef", 4), 8);
 
         // Tab at position 5 should take 3 columns to reach position 8
-        assert_eq!(calculate_display_column("12345\tdef", 6, tab_width), 8);
+        assert_eq!(calculate_display_column("12345\tdef", 6), 8);
     }
 
     #[test]
     fn test_movecursor_desired_column_calculation() {
         // Simpler test to debug the MoveCursor desired_column calculation
         let mut state = EditorState::with_text("\tghi");
-        state.tab_width = 4;
 
         // Move to character position 1 (g)
         let action = EditorAction::MoveCursor {
@@ -945,16 +966,15 @@ mod tests {
         };
         state = apply_action(state, action);
 
-        // Character position 1 (g) should have visual column 4
-        // because the tab before it expands to 4 spaces
-        assert_eq!(state.cursor.desired_column, 4);
+        // Character position 1 (g) should have visual column 8
+        // because the tab before it expands to 8 spaces
+        assert_eq!(state.cursor.desired_column, 8);
     }
 
     #[test]
     fn test_cursor_movement_with_tabs_vertical() {
         // Test that MoveCursor action properly updates desired_column to visual column
         let mut state = EditorState::with_text("abc\tdef\n\tghi\njklmn");
-        state.tab_width = 4;
 
         // Move cursor to position 4 on first line (d in def, after tab)
         // "abc\tdef" - character position 4 is 'd'
@@ -965,12 +985,13 @@ mod tests {
         };
         state = apply_action(state, action);
 
-        // The desired_column should be set to the visual column (4)
-        assert_eq!(state.cursor.desired_column, 4);
+        // The desired_column should be set to the visual column (8)
+        // 'd' at column 4 has visual column 8 because "abc\t" -> abc then tab aligns to 8
+        assert_eq!(state.cursor.desired_column, 8);
 
         // Now test moving to a line with a tab at the beginning
         // Move to position 1 on second line (g in ghi, after tab)
-        // Character position 1 is at visual column 4 (\t expands to 4 spaces)
+        // Character position 1 is at visual column 8 (\t expands to 8 spaces)
         let action2 = EditorAction::MoveCursor {
             position: TextPosition::new(1, 1),
         };
@@ -995,14 +1016,14 @@ mod tests {
         assert_eq!(byte_pos, 1); // Tab is 1 byte, so 'g' starts at byte 1
 
         // Debug: Check display column calculation
-        let visual_col = calculate_display_column(&line1_content, byte_pos, 4);
-        assert_eq!(visual_col, 4); // Should be 4
+        let visual_col = calculate_display_column(&line1_content, byte_pos);
+        assert_eq!(visual_col, 8); // Should be 8 with tab width of 8
 
         state = apply_action(state, action2);
 
-        // The desired_column should be updated to visual column 4
+        // The desired_column should be updated to visual column 8
         assert_eq!(state.cursor.position.line, 1);
         assert_eq!(state.cursor.position.column, 1);
-        assert_eq!(state.cursor.desired_column, 4);
+        assert_eq!(state.cursor.desired_column, 8);
     }
 }

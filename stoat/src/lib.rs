@@ -628,4 +628,165 @@ mod stoat_tests {
             "Tab key should insert tab character or spaces, got: {contents:?}"
         );
     }
+
+    #[test]
+    fn test_tab_backspace_cursor_position() {
+        let mut editor = Stoat::new();
+
+        // Enter insert mode
+        editor.keyboard_input("i");
+        assert_eq!(editor.mode(), "insert");
+
+        // Type: a<Tab>a<Tab>
+        editor.keyboard_input("a");
+        editor.keyboard_input("<Tab>");
+        editor.keyboard_input("a");
+        editor.keyboard_input("<Tab>");
+
+        // At this point we should have "a\ta\t"
+        let contents = editor.buffer_contents();
+        assert_eq!(contents, "a\ta\t", "Should have 'a<tab>a<tab>'");
+
+        // Check cursor position before backspace (should be at visual column 16)
+        // a=1, tab aligns to 8, a=9, tab aligns to 16
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 16,
+            "Visual column should be 16 after 'a<tab>a<tab>'"
+        );
+        assert_eq!(
+            state.cursor.position.column, 4,
+            "Character column should be 4"
+        );
+        assert_eq!(
+            state.cursor.position.byte_offset, 4,
+            "Byte offset should be 4"
+        );
+
+        // Now press backspace
+        editor.keyboard_input("<Backspace>");
+
+        // Should have "a\ta" now
+        let contents = editor.buffer_contents();
+        assert_eq!(contents, "a\ta", "Should have 'a<tab>a' after backspace");
+
+        // Check cursor position after backspace
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 9,
+            "Visual column should be 9 after backspace"
+        );
+        assert_eq!(
+            state.cursor.position.column, 3,
+            "Character column should be 3 after backspace"
+        );
+        assert_eq!(
+            state.cursor.position.byte_offset, 3,
+            "Byte offset should be 3 after backspace"
+        );
+        assert_eq!(
+            state.cursor.desired_column, 9,
+            "Desired column should match visual column"
+        );
+    }
+
+    #[test]
+    fn test_backspace_after_single_tab() {
+        let mut editor = Stoat::new();
+
+        editor.keyboard_input("i");
+        editor.keyboard_input("<Tab>");
+
+        // Should have a single tab
+        assert_eq!(editor.buffer_contents(), "\t");
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 8,
+            "Tab should move to column 8"
+        );
+
+        // Backspace should delete the tab
+        editor.keyboard_input("<Backspace>");
+        assert_eq!(editor.buffer_contents(), "");
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 0,
+            "Should be back at column 0"
+        );
+        assert_eq!(state.cursor.position.column, 0);
+    }
+
+    #[test]
+    fn test_backspace_in_middle_of_tabs() {
+        let mut editor = Stoat::new();
+
+        editor.keyboard_input("i");
+        editor.keyboard_input("<Tab>");
+        editor.keyboard_input("<Tab>");
+        editor.keyboard_input("<Tab>");
+
+        // Three tabs
+        assert_eq!(editor.buffer_contents(), "\t\t\t");
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 24,
+            "Three tabs: 8, 16, 24"
+        );
+
+        // Move left twice
+        editor.keyboard_input("<Esc>"); // Back to normal mode
+        editor.keyboard_input("h");
+        editor.keyboard_input("h");
+
+        // Should be at position 1 (after first tab)
+        let state = editor.engine().state();
+        assert_eq!(state.cursor.position.column, 1);
+
+        // Enter insert mode and backspace
+        editor.keyboard_input("i");
+        editor.keyboard_input("<Backspace>");
+
+        // Should have deleted the first tab
+        assert_eq!(editor.buffer_contents(), "\t\t");
+        let state = editor.engine().state();
+        assert_eq!(state.cursor.position.column, 0);
+        assert_eq!(state.cursor.position.visual_column, 0);
+    }
+
+    #[test]
+    fn test_multiple_backspaces_with_tabs() {
+        let mut editor = Stoat::new();
+
+        editor.keyboard_input("i");
+        editor.keyboard_input("abc");
+        editor.keyboard_input("<Tab>");
+        editor.keyboard_input("def");
+        editor.keyboard_input("<Tab>");
+        editor.keyboard_input("ghi");
+
+        // "abc\tdef\tghi"
+        assert_eq!(editor.buffer_contents(), "abc\tdef\tghi");
+
+        // Multiple backspaces
+        editor.keyboard_input("<Backspace>"); // Delete 'i'
+        editor.keyboard_input("<Backspace>"); // Delete 'h'
+        editor.keyboard_input("<Backspace>"); // Delete 'g'
+        assert_eq!(editor.buffer_contents(), "abc\tdef\t");
+
+        editor.keyboard_input("<Backspace>"); // Delete tab
+        assert_eq!(editor.buffer_contents(), "abc\tdef");
+        let state = editor.engine().state();
+        assert_eq!(
+            state.cursor.position.visual_column, 11,
+            "abc=3, tab to 8, def=11"
+        );
+
+        editor.keyboard_input("<Backspace>"); // Delete 'f'
+        editor.keyboard_input("<Backspace>"); // Delete 'e'
+        editor.keyboard_input("<Backspace>"); // Delete 'd'
+        editor.keyboard_input("<Backspace>"); // Delete tab
+        assert_eq!(editor.buffer_contents(), "abc");
+        let state = editor.engine().state();
+        assert_eq!(state.cursor.position.visual_column, 3);
+    }
 }

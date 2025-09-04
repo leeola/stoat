@@ -140,7 +140,38 @@ impl Command {
                 let cursor_pos = state.cursor_position();
                 if cursor_pos.line > 0 || cursor_pos.column > 0 {
                     let delete_pos = if cursor_pos.column > 0 {
-                        TextPosition::new(cursor_pos.line, cursor_pos.column - 1)
+                        // We need to find the position of the previous character
+                        // This requires proper handling of byte positions for tabs
+                        if let Some(line_text) = state.line(cursor_pos.line) {
+                            // Find the byte position of the previous character
+                            let mut prev_byte_pos = 0;
+                            let mut byte_pos = 0;
+
+                            for (char_count, ch) in line_text.chars().enumerate() {
+                                if char_count == cursor_pos.column - 1 {
+                                    prev_byte_pos = byte_pos;
+                                }
+                                if char_count == cursor_pos.column {
+                                    break;
+                                }
+                                byte_pos += ch.len_utf8();
+                            }
+
+                            // Use helper function to calculate visual column for the delete
+                            // position
+                            use crate::processor::byte_to_visual;
+                            let visual_col = byte_to_visual(&line_text, prev_byte_pos);
+
+                            TextPosition::new_with_byte_offset(
+                                cursor_pos.line,
+                                cursor_pos.column - 1,
+                                prev_byte_pos,
+                                visual_col,
+                            )
+                        } else {
+                            // Fallback if line not found
+                            TextPosition::new(cursor_pos.line, cursor_pos.column - 1)
+                        }
                     } else {
                         // Delete line break - move to end of previous line
                         let prev_line_len = state
@@ -175,14 +206,14 @@ fn move_cursor_left(state: &crate::state::EditorState) -> crate::actions::TextPo
         let line_text = state.line(pos.line).unwrap_or_default();
         let new_column = pos.column - 1;
         let new_byte_offset = char_to_byte(&line_text, new_column);
-        let new_visual_column = byte_to_visual(&line_text, new_byte_offset, state.tab_width);
+        let new_visual_column = byte_to_visual(&line_text, new_byte_offset);
 
         TextPosition::new_with_byte_offset(pos.line, new_column, new_byte_offset, new_visual_column)
     } else if pos.line > 0 {
         let prev_line = state.line(pos.line - 1).unwrap_or_default();
         let prev_line_len = prev_line.chars().count();
         let byte_offset = prev_line.len();
-        let visual_column = byte_to_visual(&prev_line, byte_offset, state.tab_width);
+        let visual_column = byte_to_visual(&prev_line, byte_offset);
 
         TextPosition::new_with_byte_offset(pos.line - 1, prev_line_len, byte_offset, visual_column)
     } else {
@@ -203,7 +234,7 @@ fn move_cursor_right(state: &crate::state::EditorState) -> crate::actions::TextP
     if pos.column < current_line_len {
         let new_column = pos.column + 1;
         let new_byte_offset = char_to_byte(&line_text, new_column);
-        let new_visual_column = byte_to_visual(&line_text, new_byte_offset, state.tab_width);
+        let new_visual_column = byte_to_visual(&line_text, new_byte_offset);
 
         TextPosition::new_with_byte_offset(pos.line, new_column, new_byte_offset, new_visual_column)
     } else if pos.line < state.line_count().saturating_sub(1) {
@@ -226,8 +257,7 @@ fn move_cursor_up(state: &crate::state::EditorState) -> crate::actions::TextPosi
 
         // Get the target line text and convert visual to char column
         if let Some(target_line) = state.line(pos.line - 1) {
-            let (byte_offset, actual_visual) =
-                visual_to_byte(&target_line, target_visual_column, state.tab_width);
+            let (byte_offset, actual_visual) = visual_to_byte(&target_line, target_visual_column);
             let char_col = byte_to_char(&target_line, byte_offset);
             let line_char_len = target_line.chars().count();
             let new_column = char_col.min(line_char_len);
@@ -264,8 +294,7 @@ fn move_cursor_down(state: &crate::state::EditorState) -> crate::actions::TextPo
 
         // Get the target line text and convert visual to char column
         if let Some(target_line) = state.line(pos.line + 1) {
-            let (byte_offset, actual_visual) =
-                visual_to_byte(&target_line, target_visual_column, state.tab_width);
+            let (byte_offset, actual_visual) = visual_to_byte(&target_line, target_visual_column);
             let char_col = byte_to_char(&target_line, byte_offset);
             let line_char_len = target_line.chars().count();
             let new_column = char_col.min(line_char_len);

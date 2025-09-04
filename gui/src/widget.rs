@@ -295,16 +295,8 @@ impl<'a> EditorWidget<'a> {
         };
 
         // Use the visual column from the cursor position
-        let visual_column = if cursor_pos.visual_column > 0 || cursor_pos.column == 0 {
-            cursor_pos.visual_column
-        } else {
-            // Fallback: calculate visual column if not set
-            if let Some(line) = self.state.line(cursor_pos.line) {
-                self.calculate_visual_column(&line, cursor_pos.column, self.state.tab_width)
-            } else {
-                cursor_pos.column
-            }
-        };
+        // Since tab width is now fixed at 8, use the visual_column directly
+        let visual_column = cursor_pos.visual_column;
 
         let cursor_x = text_start_x + (visual_column as f32 * char_width) - scroll_x;
         let cursor_y = bounds.y + (cursor_pos.line as f32 * line_height) - scroll_y;
@@ -352,11 +344,9 @@ impl<'a> EditorWidget<'a> {
         // Simple single-line selection for now
         if start_pos.line == end_pos.line {
             // Get visual columns for selection start and end
-            let line_text = self.state.line(start_pos.line).unwrap_or_default();
-            let start_visual =
-                self.calculate_visual_column(&line_text, start_pos.column, self.state.tab_width);
-            let end_visual =
-                self.calculate_visual_column(&line_text, end_pos.column, self.state.tab_width);
+            // Using the stored visual columns directly
+            let start_visual = start_pos.visual_column;
+            let end_visual = end_pos.visual_column;
 
             let sel_x = text_start_x + (start_visual as f32 * char_width) - scroll_x;
             let sel_y = bounds.y + (start_pos.line as f32 * line_height) - scroll_y;
@@ -379,28 +369,6 @@ impl<'a> EditorWidget<'a> {
             }
         }
         // TODO: Handle multi-line selections
-    }
-}
-
-impl<'a> EditorWidget<'a> {
-    /// Calculate the visual column position accounting for tabs
-    fn calculate_visual_column(&self, line: &str, char_column: usize, tab_width: usize) -> usize {
-        let mut visual_col = 0;
-
-        for (char_col, ch) in line.chars().enumerate() {
-            if char_col >= char_column {
-                break;
-            }
-
-            if ch == '\t' {
-                // Tab aligns to next tab stop
-                visual_col = (visual_col / tab_width + 1) * tab_width;
-            } else {
-                visual_col += 1;
-            }
-        }
-
-        visual_col
     }
 }
 

@@ -35,9 +35,6 @@ pub struct EditorState {
 
     /// Whether to show command info panel
     pub show_command_info: bool,
-
-    /// Tab width for display (number of spaces a tab represents)
-    pub tab_width: usize,
 }
 
 impl EditorState {
@@ -51,7 +48,6 @@ impl EditorState {
             file: FileInfo::new(),
             is_dirty: false,
             show_command_info: false,
-            tab_width: 8,
         }
     }
 
@@ -65,7 +61,6 @@ impl EditorState {
             file: FileInfo::new(),
             is_dirty: false,
             show_command_info: false,
-            tab_width: 8,
         }
     }
 
