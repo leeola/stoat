@@ -7,17 +7,15 @@
 //! # Architecture
 //!
 //! - [`App`]: Main iced application using [`stoat::EditorEngine`]
-//! - [`EditorWidget`]: Custom widget that renders [`stoat::EditorState`]
+//! - [`editor::CustomTextEditor`]: Custom widget with cosmic-text integration
 //! - [`EffectRunner`]: Converts [`stoat::Effect`] to iced [`Task`]
 //! - Separation: GUI handles rendering and I/O effects
 
 pub mod app;
-pub mod command_info;
 pub mod editor;
 pub mod effect_runner;
 pub mod messages;
 pub mod theme;
-pub mod widget;
 
 // Re-export main types
 pub use app::App;

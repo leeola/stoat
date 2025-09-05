@@ -1,13 +1,9 @@
 //! Main application using stoat EditorEngine with iced GUI framework.
 
-use crate::{
-    command_info::CommandInfo, editor, effect_runner::run_effects, messages::Message,
-    theme::EditorTheme, widget::EditorWidget,
-};
+use crate::{editor, effect_runner::run_effects, messages::Message, theme::EditorTheme};
 use iced::{
-    alignment,
-    widget::{column, container, row, stack, text},
     Element, Task,
+    widget::{column, container, row, text},
 };
 use stoat::{EditorEngine, EditorEvent};
 
@@ -19,8 +15,6 @@ pub struct App {
     theme: EditorTheme,
     /// Current status message (for user feedback)
     status_message: Option<String>,
-    /// Use the new cosmic-text widget (for testing)
-    use_cosmic_widget: bool,
 }
 
 impl Default for App {
@@ -32,7 +26,6 @@ impl Default for App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
-            use_cosmic_widget: false, // Use old widget for now
         }
     }
 }
@@ -50,7 +43,6 @@ impl App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
-            use_cosmic_widget: false, // Use old widget for now
         };
 
         tracing::info!("GUI application initialized successfully");
@@ -95,46 +87,22 @@ impl App {
 
     /// Create the view.
     pub fn view(&self) -> Element<'_, Message> {
-        let editor: Element<'_, Message> = if self.use_cosmic_widget {
-            // Use new simplified custom widget
-            editor::SimpleCustomTextEditor::new(self.engine.state(), &self.theme)
+        let editor: Element<'_, Message> =
+            editor::CustomTextEditor::new(self.engine.state(), &self.theme)
                 .on_input(Message::EditorInput)
                 .show_line_numbers(self.theme.show_line_numbers)
                 .highlight_current_line(true)
-                .into()
-        } else {
-            // Use old widget
-            EditorWidget::new(self.engine.state(), &self.theme)
-                .on_input(Message::EditorInput)
-                .into()
-        };
+                .into();
 
         let status_bar = self.create_status_bar();
 
         let main_content = column![editor, status_bar].spacing(10);
 
-        let base_view = container(main_content)
+        container(main_content)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
-            .padding(10);
-
-        // If command info should be shown, overlay it in the lower right
-        if self.engine.show_command_info() {
-            let command_info =
-                CommandInfo::new(self.engine.mode(), self.engine.keymap(), &self.theme).build();
-
-            // Create overlay positioned in lower right
-            let overlay = container(command_info)
-                .align_x(alignment::Horizontal::Right)
-                .align_y(alignment::Vertical::Bottom)
-                .width(iced::Length::Fill)
-                .height(iced::Length::Fill)
-                .padding(20); // uniform padding
-
-            stack![Element::from(base_view), Element::from(overlay)].into()
-        } else {
-            base_view.into()
-        }
+            .padding(10)
+            .into()
     }
 
     /// Create status bar

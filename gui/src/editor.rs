@@ -8,12 +8,10 @@ mod cache;
 mod event_handler;
 mod layout;
 mod renderer;
-mod simple_widget;
 mod widget;
 
-// Re-export the main widgets
+// Re-export the main widget and utilities
 pub use buffer::{calculate_visual_column, visual_column_to_byte_offset};
-pub use simple_widget::SimpleCustomTextEditor;
 pub use widget::CustomTextEditor;
 
 /// Creates a new custom text editor widget

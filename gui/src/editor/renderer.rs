@@ -233,24 +233,36 @@ impl<'a> EditorRenderer<'a> {
 
     /// Draws the cursor
     fn draw_cursor(&self, renderer: &mut Renderer, buffer: &TextBuffer, cursor: TextPosition) {
-        let metrics = buffer.metrics();
+        let _metrics = buffer.metrics();
         let text_area = self.layout.text_area();
 
-        // Calculate cursor position using visual column
-        let cursor_x = cursor.visual_column as f32 * metrics.font_size * 0.6 - self.layout.scroll_x;
-        let cursor_y = cursor.line as f32 * metrics.line_height - self.layout.scroll_y;
+        // Better cursor positioning with proper character width
+        let char_width = self.theme.char_width();
+        let line_height = self.theme.line_height_px();
 
-        let cursor_rect = Rectangle::new(
-            Point::new(text_area.x + cursor_x, text_area.y + cursor_y),
-            Size::new(2.0, metrics.line_height),
-        );
+        // Account for line numbers gutter if shown
+        let text_start_x = if self.show_line_numbers {
+            text_area.x + self.layout.gutter_width + self.layout.padding
+        } else {
+            text_area.x + self.layout.padding
+        };
 
-        // Only draw if visible
+        // Calculate cursor position
+        let cursor_x =
+            text_start_x + (cursor.visual_column as f32 * char_width) - self.layout.scroll_x;
+        let cursor_y = text_area.y + (cursor.line as f32 * line_height) - self.layout.scroll_y;
+
+        // Create cursor rectangle (2px wide for visibility)
+        let cursor_rect =
+            Rectangle::new(Point::new(cursor_x, cursor_y), Size::new(2.0, line_height));
+
+        // Only draw if visible in viewport
         if cursor_rect.x >= text_area.x
             && cursor_rect.x <= text_area.x + text_area.width
             && cursor_rect.y >= text_area.y
             && cursor_rect.y <= text_area.y + text_area.height
         {
+            // Draw cursor with a subtle animation effect (could add blinking later)
             let quad = Quad {
                 bounds: cursor_rect,
                 border: Border::default(),
@@ -258,6 +270,27 @@ impl<'a> EditorRenderer<'a> {
             };
 
             renderer.fill_quad(quad, self.theme.cursor_color);
+
+            // Optional: Draw a subtle glow around cursor for better visibility
+            let glow_rect = Rectangle::new(
+                Point::new(cursor_x - 1.0, cursor_y),
+                Size::new(4.0, line_height),
+            );
+
+            let glow_quad = Quad {
+                bounds: glow_rect,
+                border: Border::default(),
+                shadow: Default::default(),
+            };
+
+            let glow_color = Color::from_rgba(
+                self.theme.cursor_color.r,
+                self.theme.cursor_color.g,
+                self.theme.cursor_color.b,
+                0.2, // Semi-transparent glow
+            );
+
+            renderer.fill_quad(glow_quad, glow_color);
         }
     }
 

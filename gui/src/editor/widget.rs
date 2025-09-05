@@ -30,8 +30,6 @@ pub struct CustomTextEditor<'a> {
     state: &'a EditorState,
     /// Visual theme
     theme: &'a EditorTheme,
-    /// Text buffer with cosmic-text
-    buffer: TextBuffer,
     /// Layout manager
     layout: EditorLayout,
     /// Event callback
@@ -48,24 +46,11 @@ impl<'a> CustomTextEditor<'a> {
     /// Creates a new custom text editor widget
     pub fn new(state: &'a EditorState, theme: &'a EditorTheme) -> Self {
         let tab_width = 8; // Fixed tab width for now
-        let metrics = Metrics {
-            font_size: theme.font_size,
-            line_height: theme.line_height_px(),
-        };
-
-        let mut buffer = TextBuffer::new(metrics, tab_width);
-
-        // Convert state buffer to text and set in cosmic-text buffer
-        let text = state.buffer.rope().to_string();
-        buffer.set_text(&text);
-        buffer.shape_as_needed();
-
         let layout = EditorLayout::new(tab_width);
 
         Self {
             state,
             theme,
-            buffer,
             layout,
             on_input: None,
             tab_width,
@@ -98,6 +83,8 @@ impl<'a> CustomTextEditor<'a> {
 
 /// Widget state stored in the tree
 struct WidgetState {
+    /// Text buffer with cosmic-text
+    buffer: TextBuffer,
     /// Event handler state
     event_handler: EventHandler,
     /// Glyph cache for text rendering
@@ -106,15 +93,23 @@ struct WidgetState {
     layout_cache: LayoutCache,
     /// Focus state
     is_focused: bool,
+    /// Last text content (for change detection)
+    last_text: String,
 }
 
-impl Default for WidgetState {
-    fn default() -> Self {
+impl WidgetState {
+    fn new(tab_width: usize) -> Self {
+        let metrics = Metrics {
+            font_size: 14.0,
+            line_height: 20.0,
+        };
         Self {
+            buffer: TextBuffer::new(metrics, tab_width),
             event_handler: EventHandler::new(),
             glyph_cache: GlyphCache::new(),
             layout_cache: LayoutCache::new(),
             is_focused: false,
+            last_text: String::new(),
         }
     }
 }
@@ -125,7 +120,7 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
     }
 
     fn state(&self) -> widget::tree::State {
-        widget::tree::State::new(WidgetState::default())
+        widget::tree::State::new(WidgetState::new(self.tab_width))
     }
 
     fn size(&self) -> Size<Length> {
@@ -138,8 +133,12 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         _renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        // Calculate required size based on buffer content
-        let (buffer_width, buffer_height) = self.buffer.size();
+        // Calculate required size based on content
+        // For now use estimated sizes
+        let line_count = self.state.buffer.rope().to_string().lines().count();
+        let max_line_width = 80.0; // Estimated
+        let buffer_width = Some(max_line_width * self.theme.char_width());
+        let buffer_height = Some(line_count as f32 * self.theme.line_height_px());
         let content_size = Size::new(
             buffer_width.unwrap_or(100.0)
                 + self.layout.padding * 2.0
@@ -174,10 +173,21 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         let mut editor_layout = self.layout.clone();
         editor_layout.set_bounds(layout.bounds());
 
+        // We can't mutate the buffer here since draw takes &self
+        // For now, create a temporary buffer for rendering
+        let current_text = self.state.buffer.rope().to_string();
+        let metrics = Metrics {
+            font_size: self.theme.font_size,
+            line_height: self.theme.line_height_px(),
+        };
+        let mut temp_buffer = TextBuffer::new(metrics, self.tab_width);
+        temp_buffer.set_text(&current_text);
+        temp_buffer.shape_as_needed();
+
         // Update gutter width if line numbers are enabled
         if self.show_line_numbers {
             let char_width = self.theme.char_width();
-            editor_layout.update_gutter_width(self.buffer.line_count(), char_width, true);
+            editor_layout.update_gutter_width(temp_buffer.line_count(), char_width, true);
         }
 
         // Create renderer
@@ -188,10 +198,10 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         // Draw everything
         renderer_impl.draw(
             renderer,
-            &self.buffer,
+            &temp_buffer,
             &mut state.glyph_cache.clone(), // Clone for now to avoid borrow issues
             Some(self.state.cursor.position),
-            self.state.cursor.selection.map(|s| s),
+            self.state.cursor.selection,
         );
     }
 
@@ -209,14 +219,47 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         let state = tree.state.downcast_mut::<WidgetState>();
 
         if let Some(ref handler) = self.on_input {
-            // Get cursor position for mouse events
-            let cursor_position = cursor.position().unwrap_or_default();
+            match event {
+                // Handle keyboard events
+                Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    let editor_event = stoat::EditorEvent::KeyPress { key, modifiers };
+                    let message = handler(editor_event);
+                    shell.publish(message);
+                    return event::Status::Captured;
+                },
+                // Handle mouse clicks
+                Event::Mouse(iced::mouse::Event::ButtonPressed(button)) => {
+                    if let Some(position) = cursor.position() {
+                        // TODO: Convert position to text position using cosmic-text hit testing
+                        let editor_event = stoat::EditorEvent::MouseClick { position, button };
+                        let message = handler(editor_event);
+                        shell.publish(message);
+                        return event::Status::Captured;
+                    }
+                },
+                // Handle scroll
+                Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                    let (delta_x, delta_y) = match delta {
+                        iced::mouse::ScrollDelta::Lines { x, y } => (x * 20.0, y * 20.0),
+                        iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                    };
+                    let editor_event = stoat::EditorEvent::Scroll {
+                        delta_x,
+                        delta_y: -delta_y,
+                    };
+                    let message = handler(editor_event);
+                    shell.publish(message);
+                    return event::Status::Captured;
+                },
+                _ => {},
+            }
 
-            // Process event
+            // Fall back to event handler for complex events
+            let cursor_position = cursor.position().unwrap_or_default();
             if let Some(editor_event) = state.event_handler.process_event(
                 event,
                 &self.layout,
-                &self.buffer,
+                &state.buffer,
                 cursor_position,
             ) {
                 let message = handler(editor_event);
@@ -247,23 +290,27 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
                 }
 
                 // Check if over scrollbars
-                let metrics = self.buffer.metrics();
+                let metrics = Metrics {
+                    font_size: self.theme.font_size,
+                    line_height: self.theme.line_height_px(),
+                };
                 let (start_line, end_line) = self.layout.visible_line_range(metrics);
                 let v_scrollbar = self.layout.vertical_scrollbar_bounds(
                     start_line,
                     end_line,
-                    self.buffer.line_count(),
+                    self.state.buffer.rope().to_string().lines().count(),
                 );
 
                 if v_scrollbar.contains(position) {
                     return mouse::Interaction::Grabbing;
                 }
 
-                if let Some(h_scrollbar) = self.layout.horizontal_scrollbar_bounds(&self.buffer) {
-                    if h_scrollbar.contains(position) {
-                        return mouse::Interaction::Grabbing;
-                    }
-                }
+                // TODO: Implement horizontal scrollbar bounds check
+                // if let Some(h_scrollbar) = self.layout.horizontal_scrollbar_bounds(&buffer) {
+                //     if h_scrollbar.contains(position) {
+                //         return mouse::Interaction::Grabbing;
+                //     }
+                // }
             }
         }
 
