@@ -50,10 +50,10 @@ impl EditorTheme {
     pub fn dark() -> Self {
         Self {
             font: Font::MONOSPACE,
-            font_size: 14.0,
+            font_size: 24.0,
             line_height: 1.4,
-            text_color: Color::from_rgb(0.9, 0.9, 0.9),
-            background_color: Color::from_rgb(0.1, 0.1, 0.1),
+            text_color: Color::WHITE,       // Pure white for crisp text
+            background_color: Color::BLACK, // Pure black for maximum contrast
             cursor_color: Color::WHITE,
             selection_color: Color::from_rgba(0.2, 0.4, 0.8, 0.3),
             line_number_color: Color::from_rgb(0.5, 0.5, 0.5),
