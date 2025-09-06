@@ -98,10 +98,10 @@ struct WidgetState {
 }
 
 impl WidgetState {
-    fn new(tab_width: usize) -> Self {
+    fn new(tab_width: usize, font_size: f32, line_height: f32) -> Self {
         let metrics = Metrics {
-            font_size: 14.0,
-            line_height: 20.0,
+            font_size,
+            line_height,
         };
         Self {
             buffer: TextBuffer::new(metrics, tab_width),
@@ -120,7 +120,17 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
     }
 
     fn state(&self) -> widget::tree::State {
-        widget::tree::State::new(WidgetState::new(self.tab_width))
+        // Initialize widget state with the current text and theme metrics
+        let mut state = WidgetState::new(
+            self.tab_width,
+            self.theme.font_size,
+            self.theme.line_height_px(),
+        );
+        let initial_text = self.state.buffer.rope().to_string();
+        state.buffer.set_text(&initial_text);
+        state.buffer.shape_as_needed();
+        state.last_text = initial_text;
+        widget::tree::State::new(state)
     }
 
     fn size(&self) -> Size<Length> {
@@ -173,21 +183,13 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         let mut editor_layout = self.layout.clone();
         editor_layout.set_bounds(layout.bounds());
 
-        // We can't mutate the buffer here since draw takes &self
-        // For now, create a temporary buffer for rendering
-        let current_text = self.state.buffer.rope().to_string();
-        let metrics = Metrics {
-            font_size: self.theme.font_size,
-            line_height: self.theme.line_height_px(),
-        };
-        let mut temp_buffer = TextBuffer::new(metrics, self.tab_width);
-        temp_buffer.set_text(&current_text);
-        temp_buffer.shape_as_needed();
+        // Use the pre-shaped buffer from WidgetState
+        let buffer = &state.buffer;
 
         // Update gutter width if line numbers are enabled
         if self.show_line_numbers {
             let char_width = self.theme.char_width();
-            editor_layout.update_gutter_width(temp_buffer.line_count(), char_width, true);
+            editor_layout.update_gutter_width(buffer.line_count(), char_width, true);
         }
 
         // Create renderer
@@ -198,7 +200,7 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         // Draw everything
         renderer_impl.draw(
             renderer,
-            &temp_buffer,
+            buffer,
             &mut state.glyph_cache.clone(), // Clone for now to avoid borrow issues
             Some(self.state.cursor.position),
             self.state.cursor.selection,
@@ -222,6 +224,17 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
             match event {
                 // Handle keyboard events
                 Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    // Update buffer with current text and shape it
+                    // TODO: This is very inefficient - we should only reshape when the text
+                    // actually changes Need to track if the buffer has been
+                    // modified to avoid unnecessary reshaping
+                    let current_text = self.state.buffer.rope().to_string();
+                    if current_text != state.last_text {
+                        state.last_text = current_text.clone();
+                        state.buffer.set_text(&current_text);
+                        state.buffer.shape_as_needed();
+                    }
+
                     let editor_event = stoat::EditorEvent::KeyPress { key, modifiers };
                     let message = handler(editor_event);
                     shell.publish(message);

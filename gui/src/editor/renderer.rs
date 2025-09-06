@@ -3,14 +3,19 @@
 //! This module handles all rendering operations including text, cursor,
 //! selections, line numbers, and scrollbars.
 
-use super::{buffer::TextBuffer, cache::GlyphCache, layout::EditorLayout};
+use super::{
+    buffer::{FONT_SYSTEM, SWASH_CACHE, TextBuffer},
+    cache::GlyphCache,
+    layout::EditorLayout,
+};
 use crate::theme::EditorTheme;
 use iced::{
+    Border, Color, Point, Rectangle, Renderer, Size,
     advanced::{
+        image::{self, Renderer as ImageRenderer},
         renderer::{Quad, Renderer as RendererTrait},
         text::Renderer as TextRenderer,
     },
-    Border, Color, Point, Rectangle, Renderer, Size,
 };
 use stoat::actions::{TextPosition, TextRange};
 
@@ -189,7 +194,7 @@ impl<'a> EditorRenderer<'a> {
         }
     }
 
-    /// Draws the main text content using cosmic_text layout runs
+    /// Draws the main text content using cosmic_text layout runs with proper glyph rendering
     fn draw_text_content(
         &self,
         renderer: &mut Renderer,
@@ -199,8 +204,37 @@ impl<'a> EditorRenderer<'a> {
         let text_area = self.layout.text_area();
         let metrics = buffer.metrics();
 
-        // For now, use simple text rendering
-        // TODO: Implement proper glyph rendering with cosmic_text
+        // Create pixel buffer for text rendering
+        let image_w = text_area.width.ceil() as u32;
+        let image_h = text_area.height.ceil() as u32;
+
+        // Debug: Text area and font metrics
+        // eprintln!("DEBUG: Text area size: {}x{}", image_w, image_h);
+        // eprintln!("DEBUG: Font metrics - size: {}, line_height: {}", metrics.font_size,
+        // metrics.line_height);
+
+        if image_w == 0 || image_h == 0 {
+            return;
+        }
+
+        // Create RGBA pixel buffer - transparent background
+        // Note: iced expects RGBA byte order in memory
+        let mut pixels = vec![0x00000000_u32; (image_w * image_h) as usize];
+
+        // Get the font system and swash cache
+        let mut font_system = FONT_SYSTEM.lock().unwrap();
+        let mut swash_cache = SWASH_CACHE.lock().unwrap();
+
+        let mut glyph_count = 0;
+        let mut pixel_count = 0;
+
+        // Debug: Check actual font metrics from cosmic-text
+        eprintln!(
+            "Metrics from buffer: font_size={}, line_height={}",
+            metrics.font_size, metrics.line_height
+        );
+
+        // Render glyphs to pixel buffer
         for run in buffer.layout_runs() {
             // Check if this run is visible
             let run_y = run.line_top - self.layout.scroll_y;
@@ -208,27 +242,133 @@ impl<'a> EditorRenderer<'a> {
                 continue; // Skip invisible runs
             }
 
-            // Draw the run text
-            let text_x = text_area.x - self.layout.scroll_x;
-            let text_y = text_area.y + run_y;
-
-            renderer.fill_text(
-                iced::advanced::text::Text {
-                    content: run.text.to_string(),
-                    bounds: Size::new(text_area.width, metrics.line_height),
-                    size: iced::Pixels(self.theme.font_size),
-                    line_height: iced::widget::text::LineHeight::default(),
-                    font: self.theme.font,
-                    horizontal_alignment: iced::alignment::Horizontal::Left,
-                    vertical_alignment: iced::alignment::Vertical::Top,
-                    shaping: iced::widget::text::Shaping::Advanced,
-                    wrapping: iced::widget::text::Wrapping::None,
-                },
-                Point::new(text_x, text_y),
-                self.theme.text_color,
-                self.layout.bounds,
+            eprintln!(
+                "DEBUG: Run line_top={}, y={}, text={:?}",
+                run.line_top, run_y, run.text
             );
+
+            // Process each glyph in the run
+            for (idx, glyph) in run.glyphs.iter().enumerate() {
+                glyph_count += 1;
+
+                // Skip if glyph is outside visible area (simple bounds check)
+                if glyph.x < self.layout.scroll_x - 50.0
+                    || glyph.x > self.layout.scroll_x + text_area.width + 50.0
+                {
+                    continue;
+                }
+
+                // Debug first few glyphs
+                if idx < 3 {
+                    eprintln!(
+                        "  Glyph[{}]: x={:.2}, w={:.2}, font_size_hint={:?}",
+                        idx, glyph.x, glyph.w, glyph.font_size
+                    );
+                }
+
+                // Use the baseline position that cosmic-text provides
+                // run.line_y already contains the correct baseline position for this line
+                let run_line_y = run.line_y;
+
+                // Get physical glyph for rendering
+                // Pass (0, 0) since we handle positioning ourselves in the pixel calculation
+                // Scale of 1.0 means use the glyph at its shaped size (already scaled)
+                let physical = glyph.physical((0., 0.), 1.0);
+
+                // Debug physical position
+                if idx < 3 {
+                    eprintln!("    Physical: x={}, y={}", physical.x, physical.y);
+                }
+
+                // Use theme text color
+                let text_color = cosmic_text::Color::rgba(
+                    (self.theme.text_color.r * 255.0) as u8,
+                    (self.theme.text_color.g * 255.0) as u8,
+                    (self.theme.text_color.b * 255.0) as u8,
+                    (self.theme.text_color.a * 255.0) as u8,
+                );
+
+                // Track pixel bounds for this glyph
+                let mut min_x = i32::MAX;
+                let mut max_x = i32::MIN;
+                let mut glyph_pixel_count = 0;
+
+                swash_cache.with_pixels(
+                    &mut *font_system,
+                    physical.cache_key,
+                    text_color,
+                    |x, y, color| {
+                        // Calculate final pixel position
+                        // glyph.x already contains the horizontal position from cosmic-text
+                        // physical.x/y contain the glyph's rendered position offset (includes
+                        // baseline) x/y are the pixel offsets within the
+                        // glyph bitmap
+
+                        // Calculate pixel position from glyph position
+                        // We passed (0, 0) to physical() so we don't use physical.x/y
+                        let px = (glyph.x - self.layout.scroll_x) as i32 + x;
+                        let py = (run_line_y - self.layout.scroll_y) as i32 + y;
+
+                        if glyph_pixel_count < 3 {
+                            dbg!(px);
+                        }
+
+                        // Track the actual pixel bounds of this glyph
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        glyph_pixel_count += 1;
+
+                        if px >= 0 && px < image_w as i32 && py >= 0 && py < image_h as i32 {
+                            let idx = (py * image_w as i32 + px) as usize;
+                            if idx < pixels.len() {
+                                pixel_count += 1;
+                                // Convert from ARGB to RGBA for iced
+                                let argb = color.0;
+                                let a = (argb >> 24) & 0xFF;
+                                let r = (argb >> 16) & 0xFF;
+                                let g = (argb >> 8) & 0xFF;
+                                let b = argb & 0xFF;
+                                let rgba = (r << 24) | (g << 16) | (b << 8) | a;
+                                pixels[idx] = rgba;
+                                // Debug first few pixels
+                                // if pixel_count <= 10 {
+                                //     eprintln!("      Pixel at ({}, {}): ARGB={:08X} ->
+                                // RGBA={:08X}", px, py, argb, rgba);
+                                // }
+                            }
+                        }
+                    },
+                );
+
+                // Debug glyph pixel width
+                if idx < 3 && glyph_pixel_count > 0 {
+                    let actual_width = max_x - min_x + 1;
+                    eprintln!(
+                        "    Glyph[{}] actual pixel width: {} (min_x={}, max_x={}, pixels={})",
+                        idx, actual_width, min_x, max_x, glyph_pixel_count
+                    );
+                }
+            }
         }
+
+        // eprintln!("DEBUG: Rendered {} glyphs, {} pixels modified", glyph_count, pixel_count);
+
+        // Convert pixel buffer to bytes for image
+        let pixels_u8 =
+            unsafe { std::slice::from_raw_parts(pixels.as_ptr() as *const u8, pixels.len() * 4) };
+
+        // Create image handle from pixel buffer
+        let handle = image::Handle::from_rgba(image_w, image_h, pixels_u8.to_vec());
+
+        // Draw the image to the screen
+        let image_bounds = Rectangle::new(
+            Point::new(text_area.x, text_area.y),
+            Size::new(image_w as f32, image_h as f32),
+        );
+
+        // eprintln!("DEBUG: Drawing image at {:?}", image_bounds);
+
+        <Renderer as ImageRenderer>::draw_image(renderer, image::Image::new(handle), image_bounds);
     }
 
     /// Draws the cursor
@@ -357,4 +497,43 @@ impl<'a> EditorRenderer<'a> {
             renderer.fill_quad(thumb_quad, Color::from_rgba(0.7, 0.7, 0.7, 0.5));
         }
     }
+}
+
+/// Blends a foreground pixel with a background pixel using alpha blending
+fn blend_pixel(background: u32, foreground: u32) -> u32 {
+    // Extract RGBA components from foreground (cosmic-text format: RGBA)
+    let fg_a = ((foreground >> 24) & 0xFF) as f32 / 255.0;
+    let fg_r = ((foreground >> 16) & 0xFF) as f32 / 255.0;
+    let fg_g = ((foreground >> 8) & 0xFF) as f32 / 255.0;
+    let fg_b = (foreground & 0xFF) as f32 / 255.0;
+
+    // Extract RGBA components from background
+    let bg_a = ((background >> 24) & 0xFF) as f32 / 255.0;
+    let bg_r = ((background >> 16) & 0xFF) as f32 / 255.0;
+    let bg_g = ((background >> 8) & 0xFF) as f32 / 255.0;
+    let bg_b = (background & 0xFF) as f32 / 255.0;
+
+    // Alpha blend
+    let out_a = fg_a + bg_a * (1.0 - fg_a);
+    let out_r = if out_a > 0.0 {
+        (fg_r * fg_a + bg_r * bg_a * (1.0 - fg_a)) / out_a
+    } else {
+        0.0
+    };
+    let out_g = if out_a > 0.0 {
+        (fg_g * fg_a + bg_g * bg_a * (1.0 - fg_a)) / out_a
+    } else {
+        0.0
+    };
+    let out_b = if out_a > 0.0 {
+        (fg_b * fg_a + bg_b * bg_a * (1.0 - fg_a)) / out_a
+    } else {
+        0.0
+    };
+
+    // Convert back to u32
+    ((out_a * 255.0) as u32) << 24
+        | ((out_r * 255.0) as u32) << 16
+        | ((out_g * 255.0) as u32) << 8
+        | ((out_b * 255.0) as u32)
 }

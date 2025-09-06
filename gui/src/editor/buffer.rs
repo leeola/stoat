@@ -3,12 +3,15 @@
 //! This module provides integration with cosmic-text for proper text shaping,
 //! layout, and rendering. It handles font systems, metrics, and text buffers.
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
 /// Global font system instance (cosmic-text requires a singleton)
 pub static FONT_SYSTEM: Lazy<Mutex<FontSystem>> = Lazy::new(|| Mutex::new(FontSystem::new()));
+
+/// Global swash cache for glyph rasterization
+pub static SWASH_CACHE: Lazy<Mutex<SwashCache>> = Lazy::new(|| Mutex::new(SwashCache::new()));
 
 /// Wrapper around cosmic-text Buffer with our text management
 pub struct TextBuffer {
@@ -23,6 +26,8 @@ pub struct TextBuffer {
 impl TextBuffer {
     /// Creates a new text buffer with the given metrics
     pub fn new(metrics: Metrics, tab_width: usize) -> Self {
+        // Use a specific monospace font for consistent rendering
+        // Family::Monospace will pick the system's default monospace font
         let attrs = Attrs::new().family(Family::Monospace);
         let mut buffer = Buffer::new_empty(metrics);
 

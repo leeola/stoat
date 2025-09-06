@@ -2,8 +2,8 @@
 
 use crate::{editor, effect_runner::run_effects, messages::Message, theme::EditorTheme};
 use iced::{
-    Element, Task,
     widget::{column, container, row, text},
+    Element, Task,
 };
 use stoat::{EditorEngine, EditorEvent};
 
@@ -19,8 +19,7 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
-        let engine =
-            EditorEngine::with_text("Hello, World!\nWelcome to Stoat!\n\nTry editing this text...");
+        let engine = EditorEngine::with_text("foo");
 
         App {
             engine,
@@ -36,8 +35,7 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         tracing::info!("Creating new Stoat GUI application");
 
-        let engine =
-            EditorEngine::with_text("Hello, World!\nWelcome to Stoat!\n\nTry editing this text...");
+        let engine = EditorEngine::with_text("");
 
         let app = App {
             engine,
