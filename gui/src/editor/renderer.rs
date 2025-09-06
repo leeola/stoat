@@ -380,12 +380,9 @@ impl<'a> EditorRenderer<'a> {
         let char_width = self.theme.char_width();
         let line_height = self.theme.line_height_px();
 
-        // Account for line numbers gutter if shown
-        let text_start_x = if self.show_line_numbers {
-            text_area.x + self.layout.gutter_width + self.layout.padding
-        } else {
-            text_area.x + self.layout.padding
-        };
+        // Text is rendered starting at text_area.x without padding
+        // Cursor should align with the text
+        let text_start_x = text_area.x;
 
         // Calculate cursor position
         let cursor_x =
