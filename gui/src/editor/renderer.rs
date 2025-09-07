@@ -69,13 +69,8 @@ impl<'a> EditorRenderer<'a> {
             self.draw_line_numbers(renderer, buffer);
         }
 
-        // Layer 5: Main text content
-        self.draw_text_content(renderer, buffer, glyph_cache);
-
-        // Layer 6: Cursor
-        if let Some(cursor) = cursor_pos {
-            self.draw_cursor(renderer, buffer, cursor);
-        }
+        // Layer 5: Main text content (including cursor)
+        self.draw_text_content(renderer, buffer, glyph_cache, cursor_pos);
 
         // Layer 7: Scrollbars
         self.draw_scrollbars(renderer, buffer);
@@ -202,6 +197,7 @@ impl<'a> EditorRenderer<'a> {
         renderer: &mut Renderer,
         buffer: &TextBuffer,
         _glyph_cache: &mut GlyphCache,
+        cursor_pos: Option<TextPosition>,
     ) {
         let text_area = self.layout.text_area();
         let metrics = buffer.metrics();
@@ -356,6 +352,42 @@ impl<'a> EditorRenderer<'a> {
         }
 
         // eprintln!("DEBUG: Rendered {} glyphs, {} pixels modified", glyph_count, pixel_count);
+
+        // Draw cursor into the pixel buffer if provided
+        if let Some(cursor) = cursor_pos {
+            let char_width = self.theme.char_width();
+            let line_height = self.theme.line_height_px();
+
+            // Calculate cursor position in buffer coordinates
+            let cursor_x = (cursor.visual_column as f32 * char_width - self.layout.scroll_x)
+                * self.scale_factor;
+            let cursor_y =
+                (cursor.line as f32 * line_height - self.layout.scroll_y) * self.scale_factor;
+
+            // Draw a 2-pixel wide cursor (scaled)
+            let cursor_width = (2.0 * self.scale_factor).ceil() as i32;
+            let cursor_height = (line_height * self.scale_factor).ceil() as i32;
+
+            let cursor_color = ((self.theme.cursor_color.r * 255.0) as u32
+                | ((self.theme.cursor_color.g * 255.0) as u32) << 8
+                | ((self.theme.cursor_color.b * 255.0) as u32) << 16
+                | 0xFF << 24);
+
+            // Draw cursor pixels
+            for dy in 0..cursor_height {
+                for dx in 0..cursor_width {
+                    let px = cursor_x as i32 + dx;
+                    let py = cursor_y as i32 + dy;
+
+                    if px >= 0 && px < image_w as i32 && py >= 0 && py < image_h as i32 {
+                        let idx = (py * image_w as i32 + px) as usize;
+                        if idx < pixels.len() {
+                            pixels[idx] = cursor_color;
+                        }
+                    }
+                }
+            }
+        }
 
         // Convert pixel buffer to bytes for image
         let pixels_u8 =
