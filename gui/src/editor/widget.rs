@@ -40,6 +40,8 @@ pub struct CustomTextEditor<'a> {
     show_line_numbers: bool,
     /// Highlight current line
     highlight_current_line: bool,
+    /// Scale factor for high-DPI displays
+    scale_factor: f32,
 }
 
 impl<'a> CustomTextEditor<'a> {
@@ -56,6 +58,7 @@ impl<'a> CustomTextEditor<'a> {
             tab_width,
             show_line_numbers: true,
             highlight_current_line: true,
+            scale_factor: 1.0,
         }
     }
 
@@ -79,6 +82,12 @@ impl<'a> CustomTextEditor<'a> {
         self.highlight_current_line = highlight;
         self
     }
+
+    /// Sets the scale factor for high-DPI displays
+    pub fn scale_factor(mut self, scale: f32) -> Self {
+        self.scale_factor = scale;
+        self
+    }
 }
 
 /// Widget state stored in the tree
@@ -99,6 +108,7 @@ struct WidgetState {
 
 impl WidgetState {
     fn new(tab_width: usize, font_size: f32, line_height: f32) -> Self {
+        // Don't scale the metrics - keep the logical font size
         let metrics = Metrics {
             font_size,
             line_height,
@@ -193,7 +203,7 @@ impl<'a> Widget<Message, Theme, iced::Renderer> for CustomTextEditor<'a> {
         }
 
         // Create renderer
-        let mut renderer_impl = EditorRenderer::new(self.theme, &editor_layout);
+        let mut renderer_impl = EditorRenderer::new(self.theme, &editor_layout, self.scale_factor);
         renderer_impl.show_line_numbers = self.show_line_numbers;
         renderer_impl.highlight_current_line = self.highlight_current_line;
 

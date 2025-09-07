@@ -15,6 +15,8 @@ pub struct App {
     theme: EditorTheme,
     /// Current status message (for user feedback)
     status_message: Option<String>,
+    /// Window scale factor for high-DPI support
+    scale_factor: f32,
 }
 
 impl Default for App {
@@ -25,6 +27,7 @@ impl Default for App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
+            scale_factor: 2.0, // Hardcoded for high-DPI testing (adjust as needed)
         }
     }
 }
@@ -41,6 +44,7 @@ impl App {
             engine,
             theme: EditorTheme::default(),
             status_message: None,
+            scale_factor: 2.0, // Hardcoded for high-DPI testing (adjust as needed)
         };
 
         tracing::info!("GUI application initialized successfully");
@@ -90,6 +94,7 @@ impl App {
                 .on_input(Message::EditorInput)
                 .show_line_numbers(self.theme.show_line_numbers)
                 .highlight_current_line(true)
+                .scale_factor(self.scale_factor)
                 .into();
 
         let status_bar = self.create_status_bar();

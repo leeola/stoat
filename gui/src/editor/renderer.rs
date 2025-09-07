@@ -4,18 +4,18 @@
 //! selections, line numbers, and scrollbars.
 
 use super::{
-    buffer::{FONT_SYSTEM, SWASH_CACHE, TextBuffer},
+    buffer::{TextBuffer, FONT_SYSTEM, SWASH_CACHE},
     cache::GlyphCache,
     layout::EditorLayout,
 };
 use crate::theme::EditorTheme;
 use iced::{
-    Border, Color, Point, Rectangle, Renderer, Size,
     advanced::{
         image::{self, Renderer as ImageRenderer},
         renderer::{Quad, Renderer as RendererTrait},
         text::Renderer as TextRenderer,
     },
+    Border, Color, Point, Rectangle, Renderer, Size,
 };
 use stoat::actions::{TextPosition, TextRange};
 
@@ -25,16 +25,18 @@ pub struct EditorRenderer<'a> {
     pub layout: &'a EditorLayout,
     pub show_line_numbers: bool,
     pub highlight_current_line: bool,
+    pub scale_factor: f32,
 }
 
 impl<'a> EditorRenderer<'a> {
     /// Creates a new renderer with the given configuration
-    pub fn new(theme: &'a EditorTheme, layout: &'a EditorLayout) -> Self {
+    pub fn new(theme: &'a EditorTheme, layout: &'a EditorLayout, scale_factor: f32) -> Self {
         Self {
             theme,
             layout,
             show_line_numbers: true,
             highlight_current_line: true,
+            scale_factor,
         }
     }
 
@@ -204,9 +206,11 @@ impl<'a> EditorRenderer<'a> {
         let text_area = self.layout.text_area();
         let metrics = buffer.metrics();
 
-        // Create pixel buffer for text rendering
-        let image_w = text_area.width.ceil() as u32;
-        let image_h = text_area.height.ceil() as u32;
+        // Create pixel buffer for text rendering at scaled resolution for high-DPI
+        let logical_w = text_area.width.ceil() as u32;
+        let logical_h = text_area.height.ceil() as u32;
+        let image_w = (logical_w as f32 * self.scale_factor).ceil() as u32;
+        let image_h = (logical_h as f32 * self.scale_factor).ceil() as u32;
 
         // Debug: Text area and font metrics
         // eprintln!("DEBUG: Text area size: {}x{}", image_w, image_h);
@@ -217,9 +221,12 @@ impl<'a> EditorRenderer<'a> {
             return;
         }
 
-        // Create RGBA pixel buffer - transparent background
-        // Note: iced expects RGBA byte order in memory
-        let mut pixels = vec![0x00000000_u32; (image_w * image_h) as usize];
+        // Create RGBA pixel buffer with transparent background
+        // IMPORTANT: We store as u32 but need RGBA byte order in memory
+        // On little-endian systems, u32 is stored with LSB first
+        // So for RGBA bytes [R,G,B,A] we need u32 = 0xAABBGGRR
+        // Use transparent pixels (alpha = 0) so background layers show through
+        let mut pixels = vec![0u32; (image_w * image_h) as usize];
 
         // Get the font system and swash cache
         let mut font_system = FONT_SYSTEM.lock().unwrap();
@@ -228,12 +235,6 @@ impl<'a> EditorRenderer<'a> {
         let mut glyph_count = 0;
         let mut pixel_count = 0;
 
-        // Debug: Check actual font metrics from cosmic-text
-        eprintln!(
-            "Metrics from buffer: font_size={}, line_height={}",
-            metrics.font_size, metrics.line_height
-        );
-
         // Render glyphs to pixel buffer
         for run in buffer.layout_runs() {
             // Check if this run is visible
@@ -241,11 +242,6 @@ impl<'a> EditorRenderer<'a> {
             if run_y + metrics.line_height < 0.0 || run_y > text_area.height {
                 continue; // Skip invisible runs
             }
-
-            eprintln!(
-                "DEBUG: Run line_top={}, y={}, text={:?}",
-                run.line_top, run_y, run.text
-            );
 
             // Process each glyph in the run
             for (idx, glyph) in run.glyphs.iter().enumerate() {
@@ -258,27 +254,14 @@ impl<'a> EditorRenderer<'a> {
                     continue;
                 }
 
-                // Debug first few glyphs
-                if idx < 3 {
-                    eprintln!(
-                        "  Glyph[{}]: x={:.2}, w={:.2}, font_size_hint={:?}",
-                        idx, glyph.x, glyph.w, glyph.font_size
-                    );
-                }
-
                 // Use the baseline position that cosmic-text provides
                 // run.line_y already contains the correct baseline position for this line
                 let run_line_y = run.line_y;
 
                 // Get physical glyph for rendering
                 // Pass (0, 0) since we handle positioning ourselves in the pixel calculation
-                // Scale of 1.0 means use the glyph at its shaped size (already scaled)
-                let physical = glyph.physical((0., 0.), 1.0);
-
-                // Debug physical position
-                if idx < 3 {
-                    eprintln!("    Physical: x={}, y={}", physical.x, physical.y);
-                }
+                // Use scale_factor to render at higher resolution for high-DPI
+                let physical = glyph.physical((0., 0.), self.scale_factor);
 
                 // Use theme text color
                 let text_color = cosmic_text::Color::rgba(
@@ -305,13 +288,10 @@ impl<'a> EditorRenderer<'a> {
                         // glyph bitmap
 
                         // Calculate pixel position from glyph position
-                        // We passed (0, 0) to physical() so we don't use physical.x/y
-                        let px = (glyph.x - self.layout.scroll_x) as i32 + x;
-                        let py = (run_line_y - self.layout.scroll_y) as i32 + y;
-
-                        if glyph_pixel_count < 3 {
-                            dbg!(px);
-                        }
+                        // Scale up positions for high-DPI rendering
+                        let px = ((glyph.x - self.layout.scroll_x) * self.scale_factor) as i32 + x;
+                        let py =
+                            ((run_line_y - self.layout.scroll_y) * self.scale_factor) as i32 + y;
 
                         // Track the actual pixel bounds of this glyph
                         min_x = min_x.min(x);
@@ -322,14 +302,47 @@ impl<'a> EditorRenderer<'a> {
                             let idx = (py * image_w as i32 + px) as usize;
                             if idx < pixels.len() {
                                 pixel_count += 1;
-                                // Convert from ARGB to RGBA for iced
+                                // Extract ARGB components from cosmic-text
                                 let argb = color.0;
-                                let a = (argb >> 24) & 0xFF;
-                                let r = (argb >> 16) & 0xFF;
-                                let g = (argb >> 8) & 0xFF;
-                                let b = argb & 0xFF;
-                                let rgba = (r << 24) | (g << 16) | (b << 8) | a;
-                                pixels[idx] = rgba;
+
+                                // Convert ARGB to RGBA format for iced
+                                // cosmic-text gives us ARGB, we need RGBA
+                                let alpha = (argb >> 24) & 0xFF;
+                                let text_r = (argb >> 16) & 0xFF;
+                                let text_g = (argb >> 8) & 0xFF;
+                                let text_b = argb & 0xFF;
+
+                                match alpha {
+                                    0 => {
+                                        // Fully transparent, skip
+                                    },
+                                    255 => {
+                                        // Fully opaque, direct write
+                                        // Pack as 0xAABBGGRR for little-endian RGBA byte order
+                                        let rgba =
+                                            text_r | (text_g << 8) | (text_b << 16) | (0xFF << 24);
+                                        pixels[idx] = rgba;
+                                    },
+                                    _ => {
+                                        // Alpha blend using integer math (like cosmic-edit)
+                                        let existing = pixels[idx];
+                                        // Unpack from 0xAABBGGRR format
+                                        let bg_r = existing & 0xFF;
+                                        let bg_g = (existing >> 8) & 0xFF;
+                                        let bg_b = (existing >> 16) & 0xFF;
+
+                                        let inv_alpha = 255 - alpha;
+
+                                        // Blend each channel using integer math
+                                        let r = ((text_r * alpha + bg_r * inv_alpha) / 255) & 0xFF;
+                                        let g = ((text_g * alpha + bg_g * inv_alpha) / 255) & 0xFF;
+                                        let b = ((text_b * alpha + bg_b * inv_alpha) / 255) & 0xFF;
+
+                                        // Pack as 0xAABBGGRR for little-endian RGBA byte order
+                                        let rgba = r | (g << 8) | (b << 16) | (0xFF << 24);
+                                        pixels[idx] = rgba;
+                                    },
+                                }
                                 // Debug first few pixels
                                 // if pixel_count <= 10 {
                                 //     eprintln!("      Pixel at ({}, {}): ARGB={:08X} ->
@@ -339,15 +352,6 @@ impl<'a> EditorRenderer<'a> {
                         }
                     },
                 );
-
-                // Debug glyph pixel width
-                if idx < 3 && glyph_pixel_count > 0 {
-                    let actual_width = max_x - min_x + 1;
-                    eprintln!(
-                        "    Glyph[{}] actual pixel width: {} (min_x={}, max_x={}, pixels={})",
-                        idx, actual_width, min_x, max_x, glyph_pixel_count
-                    );
-                }
             }
         }
 
@@ -360,15 +364,19 @@ impl<'a> EditorRenderer<'a> {
         // Create image handle from pixel buffer
         let handle = image::Handle::from_rgba(image_w, image_h, pixels_u8.to_vec());
 
-        // Draw the image to the screen
+        // Draw the image to the screen at logical size (scaled down from physical size)
         let image_bounds = Rectangle::new(
             Point::new(text_area.x, text_area.y),
-            Size::new(image_w as f32, image_h as f32),
+            Size::new(logical_w as f32, logical_h as f32),
         );
 
         // eprintln!("DEBUG: Drawing image at {:?}", image_bounds);
 
-        <Renderer as ImageRenderer>::draw_image(renderer, image::Image::new(handle), image_bounds);
+        // Use nearest filtering for pixel-perfect text
+        let mut img = image::Image::new(handle);
+        img.filter_method = image::FilterMethod::Nearest;
+
+        <Renderer as ImageRenderer>::draw_image(renderer, img, image_bounds);
     }
 
     /// Draws the cursor
@@ -407,27 +415,6 @@ impl<'a> EditorRenderer<'a> {
             };
 
             renderer.fill_quad(quad, self.theme.cursor_color);
-
-            // Optional: Draw a subtle glow around cursor for better visibility
-            let glow_rect = Rectangle::new(
-                Point::new(cursor_x - 1.0, cursor_y),
-                Size::new(4.0, line_height),
-            );
-
-            let glow_quad = Quad {
-                bounds: glow_rect,
-                border: Border::default(),
-                shadow: Default::default(),
-            };
-
-            let glow_color = Color::from_rgba(
-                self.theme.cursor_color.r,
-                self.theme.cursor_color.g,
-                self.theme.cursor_color.b,
-                0.2, // Semi-transparent glow
-            );
-
-            renderer.fill_quad(glow_quad, glow_color);
         }
     }
 
