@@ -1,70 +1,54 @@
-mod editor;
+mod buffer_view;
+mod editor_view;
+mod stoat_bridge;
 mod theme;
 
 use anyhow::Result;
-use editor::Editor;
+use editor_view::EditorView;
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
 };
-use std::process;
 use theme::ThemeSettings;
 use tracing::info;
 
 pub fn run() -> Result<()> {
-    info!("Starting Stoat GUI");
+    info!("Starting Stoat GUI with integrated editor");
 
     // Run the GPUI application
     Application::new().run(|cx: &mut App| {
         // Initialize global theme settings
         cx.set_global(ThemeSettings::new());
 
-        // Create the main window
+        // Create the main window with the editor view
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(gpui::TitlebarOptions {
-                        title: Some("Stoat GUI - Keyboard Observer".into()),
-                        ..Default::default()
-                    }),
-                    focus: true,
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(gpui::TitlebarOptions {
+                    title: Some("Stoat Editor".into()),
                     ..Default::default()
-                },
-                |window, cx| {
-                    // Activate the window to bring it to foreground
-                    cx.activate(true);
-                    // Create the simple keyboard observer
-                    let editor = cx.new(|cx| Editor::new(cx));
-                    // Focus it immediately
-                    editor.focus_handle(cx).focus(window);
-                    editor
-                },
-            )
-            .unwrap();
+                }),
+                focus: true,
+                ..Default::default()
+            },
+            |window, cx| {
+                // Activate the window to bring it to foreground
+                cx.activate(true);
 
-        // Get the editor entity for keystroke observation
-        let editor = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+                // Create the editor view with some sample text
+                let editor = cx.new(|cx| {
+                    EditorView::with_text(
+                        "Welcome to Stoat Editor!\n\nPress 'i' to enter insert mode.\nPress 'Esc' to return to normal mode.\nPress ':q' to quit.",
+                        cx,
+                    )
+                });
 
-        // Observe all keystrokes and forward to the editor
-        cx.observe_keystrokes(move |event, _, cx| {
-            info!("Keystroke observed in lib.rs: {:?}", event.keystroke);
-            window
-                .update(cx, |_, window, cx| {
-                    editor.update(cx, |editor, cx| {
-                        editor.on_keystroke(event.keystroke.clone(), window, cx)
-                    })
-                })
-                .ok();
-        })
-        .detach();
-
-        // Force exit when window closes - use detach() to avoid warning
-        cx.on_window_closed(|_cx| {
-            info!("Window closed, exiting");
-            process::exit(0);
-        })
-        .detach();
+                // Focus the editor immediately
+                editor.focus_handle(cx).focus(window);
+                editor
+            },
+        )
+        .unwrap();
     });
 
     Ok(())

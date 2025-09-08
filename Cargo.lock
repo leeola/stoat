@@ -6329,6 +6329,7 @@ dependencies = [
  "collections",
  "futures",
  "gpui",
+ "iced",
  "indexmap",
  "parking_lot 0.12.4",
  "smallvec",
