@@ -6324,11 +6324,22 @@ dependencies = [
 name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "collections",
+ "futures",
  "gpui",
+ "indexmap",
+ "parking_lot 0.12.4",
+ "smallvec",
  "stoat",
+ "stoat_rope",
+ "sum_tree",
+ "thiserror 2.0.16",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "util",
 ]
 
 [[package]]

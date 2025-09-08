@@ -1,29 +1,30 @@
+mod actions;
+mod buffer;
+mod editor;
+mod element;
+mod theme;
+mod vim;
+
+use anyhow::Result;
+use editor::Editor;
 use gpui::{
-    App, Application, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    prelude::*, px, size, App, Application, Bounds, Context, SharedString, Window, WindowBounds,
+    WindowOptions,
 };
+use theme::ThemeSettings;
+use tracing_subscriber::{self, EnvFilter};
 
-struct StoatEditor {
-    title: SharedString,
-}
-
-impl Render for StoatEditor {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .bg(rgb(0x1e1e1e))
-            .size_full()
-            .justify_center()
-            .items_center()
-            .text_xl()
-            .text_color(rgb(0xffffff))
-            .child(format!("{} - GPUI", &self.title))
-    }
-}
-
-pub fn run() -> Result<(), String> {
+pub fn run() -> Result<()> {
+    // Run the GPUI application
     Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(800.), px(600.)), cx);
+        // Initialize global theme settings
+        cx.set_global(ThemeSettings::new());
+
+        // Register key bindings
+        editor::register_key_bindings(cx);
+
+        // Create the main window
+        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -31,16 +32,24 @@ pub fn run() -> Result<(), String> {
                     title: Some("Stoat Editor".into()),
                     ..Default::default()
                 }),
+                focus: true,
                 ..Default::default()
             },
-            |_, cx| {
-                cx.new(|_| StoatEditor {
-                    title: "Stoat Editor".into(),
+            |_window, cx| {
+                // Create the editor with some initial text
+                cx.new(|cx| {
+                    Editor::new(
+                        Some("Welcome to Stoat Editor!\n\nA high-performance modal text editor built with GPUI.\n\nPress 'i' to enter insert mode, 'Esc' to return to normal mode.\nUse h/j/k/l to navigate in normal mode.".to_string()),
+                        cx,
+                    )
                 })
             },
         )
         .unwrap();
+
+        // Activate the application
         cx.activate(true);
     });
+
     Ok(())
 }

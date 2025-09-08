@@ -13,12 +13,27 @@ workspace = true
 [dependencies]
 # Core editor logic
 stoat = { path = "../stoat" }
+stoat_rope = { path = "../rope" }
 
-# GPUI framework from zed repository
+# GPUI framework and related crates from zed repository
 gpui = { git = "https://github.com/zed-industries/zed.git" }
+sum_tree = { git = "https://github.com/zed-industries/zed.git" }
+collections = { git = "https://github.com/zed-industries/zed.git" }
+util = { git = "https://github.com/zed-industries/zed.git" }
 
 # Async runtime
-tokio = { workspace = true, features = ["fs", "macros"] }
+tokio = { workspace = true, features = ["fs", "macros", "sync"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Data structures
+parking_lot = "0.12"
+smallvec = "1.13"
+indexmap = "2.0"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "2.0"
 
 # Logging
 tracing = { workspace = true }
