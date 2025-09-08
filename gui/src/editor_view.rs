@@ -5,12 +5,13 @@
 
 use crate::{
     buffer_view::{BufferView, RenderedLine},
+    help_dialog::HelpDialog,
     stoat_bridge::{process_effects, StoatBridge},
     theme::EditorTheme,
 };
 use gpui::{
-    div, App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    Keystroke, ParentElement, Render, SharedString, Styled, Window,
+    div, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window,
 };
 
 /// Main editor view Entity for GPUI.
@@ -27,6 +28,8 @@ pub struct EditorView {
     font_family: SharedString,
     font_size: f32,
     line_height: f32,
+    /// Whether to show help dialog
+    show_help: bool,
 }
 
 impl EditorView {
@@ -42,6 +45,7 @@ impl EditorView {
             font_family: "JetBrains Mono".into(),
             font_size: 14.0,
             line_height: 20.0,
+            show_help: true,
         }
     }
 
@@ -57,6 +61,7 @@ impl EditorView {
             font_family: "JetBrains Mono".into(),
             font_size: 14.0,
             line_height: 20.0,
+            show_help: true,
         }
     }
 
@@ -193,7 +198,7 @@ impl Render for EditorView {
         // Update viewport based on current window size
         self.update_viewport(window);
 
-        div()
+        let main_view = div()
             .key_context("EditorView")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -216,7 +221,14 @@ impl Render for EditorView {
             .child(
                 // Status bar
                 self.render_status_bar(window),
-            )
+            );
+
+        // Always show help dialog for design iteration
+        div()
+            .relative()
+            .size_full()
+            .child(main_view)
+            .child(cx.new(|_cx| HelpDialog::new(self.theme.clone())))
     }
 }
 
