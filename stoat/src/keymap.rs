@@ -3,8 +3,11 @@
 //! The keymap provides mode-dependent key bindings, allowing the same key
 //! to perform different operations depending on the current editor mode.
 
-use crate::{actions::EditMode, command::Command};
-use iced::keyboard;
+use crate::{
+    actions::EditMode,
+    command::Command,
+    input::{Key, Modifiers, keys},
+};
 use std::collections::HashMap;
 
 /// Mode-dependent keymap for converting key presses to commands.
@@ -34,12 +37,7 @@ impl Keymap {
     }
 
     /// Looks up a command for the given key and mode.
-    pub fn lookup(
-        &self,
-        key: &keyboard::Key,
-        modifiers: &keyboard::Modifiers,
-        mode: EditMode,
-    ) -> Option<Command> {
+    pub fn lookup(&self, key: &Key, modifiers: &Modifiers, mode: EditMode) -> Option<Command> {
         let binding = KeyBinding::new(key.clone(), *modifiers);
 
         match mode {
@@ -64,65 +62,46 @@ impl Keymap {
         self.bind_normal("?", Command::ToggleCommandInfo);
 
         // Escape in normal mode exits
-        self.bind_normal_key(
-            keyboard::Key::Named(keyboard::key::Named::Escape),
-            Command::Exit,
-        );
+        self.bind_normal_key(keys::ESCAPE.to_string(), Command::Exit);
 
         // Insert mode bindings
-        self.bind_insert_key(
-            keyboard::Key::Named(keyboard::key::Named::Escape),
-            Command::EnterNormalMode,
-        );
-        self.bind_insert_key(
-            keyboard::Key::Named(keyboard::key::Named::Enter),
-            Command::InsertNewline,
-        );
-        self.bind_insert_key(
-            keyboard::Key::Named(keyboard::key::Named::Backspace),
-            Command::DeleteChar,
-        );
+        self.bind_insert_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
+        self.bind_insert_key(keys::ENTER.to_string(), Command::InsertNewline);
+        self.bind_insert_key(keys::BACKSPACE.to_string(), Command::DeleteChar);
 
         // Visual mode bindings
-        self.bind_visual_key(
-            keyboard::Key::Named(keyboard::key::Named::Escape),
-            Command::EnterNormalMode,
-        );
+        self.bind_visual_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
 
         // Command mode bindings
-        self.bind_command_key(
-            keyboard::Key::Named(keyboard::key::Named::Escape),
-            Command::EnterNormalMode,
-        );
+        self.bind_command_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
     }
 
     /// Convenience method for binding character keys in normal mode.
     fn bind_normal(&mut self, ch: &str, command: Command) {
-        let key = keyboard::Key::Character(ch.to_string().into());
-        self.bind_normal_key(key, command);
+        self.bind_normal_key(ch.to_string(), command);
     }
 
     /// Bind a key to a command in normal mode.
-    fn bind_normal_key(&mut self, key: keyboard::Key, command: Command) {
-        let binding = KeyBinding::new(key, keyboard::Modifiers::default());
+    fn bind_normal_key(&mut self, key: Key, command: Command) {
+        let binding = KeyBinding::new(key, Modifiers::default());
         self.normal.insert(binding, command);
     }
 
     /// Bind a key to a command in insert mode.
-    fn bind_insert_key(&mut self, key: keyboard::Key, command: Command) {
-        let binding = KeyBinding::new(key, keyboard::Modifiers::default());
+    fn bind_insert_key(&mut self, key: Key, command: Command) {
+        let binding = KeyBinding::new(key, Modifiers::default());
         self.insert.insert(binding, command);
     }
 
     /// Bind a key to a command in visual mode.
-    fn bind_visual_key(&mut self, key: keyboard::Key, command: Command) {
-        let binding = KeyBinding::new(key, keyboard::Modifiers::default());
+    fn bind_visual_key(&mut self, key: Key, command: Command) {
+        let binding = KeyBinding::new(key, Modifiers::default());
         self.visual.insert(binding, command);
     }
 
     /// Bind a key to a command in command mode.
-    fn bind_command_key(&mut self, key: keyboard::Key, command: Command) {
-        let binding = KeyBinding::new(key, keyboard::Modifiers::default());
+    fn bind_command_key(&mut self, key: Key, command: Command) {
+        let binding = KeyBinding::new(key, Modifiers::default());
         self.command.insert(binding, command);
     }
 
@@ -160,33 +139,40 @@ impl Default for Keymap {
 /// A key binding consisting of a key and modifiers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct KeyBinding {
-    key: keyboard::Key,
-    modifiers: keyboard::Modifiers,
+    key: Key,
+    modifiers: Modifiers,
 }
 
 impl KeyBinding {
-    fn new(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Self {
+    fn new(key: Key, modifiers: Modifiers) -> Self {
+        // Normalize the key to lowercase for consistent matching
+        let key = key.to_lowercase();
         Self { key, modifiers }
     }
 }
 
-/// Formats a keyboard key for display in UI
-fn format_key_binding(key: &keyboard::Key) -> String {
-    match key {
-        keyboard::Key::Character(s) => s.to_string(),
-        keyboard::Key::Named(named) => match named {
-            keyboard::key::Named::Escape => "Esc".to_string(),
-            keyboard::key::Named::Enter => "Enter".to_string(),
-            keyboard::key::Named::Backspace => "Backsp".to_string(),
-            keyboard::key::Named::Tab => "Tab".to_string(),
-            keyboard::key::Named::Space => "Space".to_string(),
-            keyboard::key::Named::ArrowLeft => "Left".to_string(),
-            keyboard::key::Named::ArrowRight => "Right".to_string(),
-            keyboard::key::Named::ArrowUp => "Up".to_string(),
-            keyboard::key::Named::ArrowDown => "Down".to_string(),
-            _ => format!("{named:?}"),
+/// Formats a key for display in UI
+fn format_key_binding(key: &Key) -> String {
+    match key.as_str() {
+        "escape" | "esc" => "Esc".to_string(),
+        "enter" | "return" => "Enter".to_string(),
+        "backspace" => "Backsp".to_string(),
+        "tab" => "Tab".to_string(),
+        "space" => "Space".to_string(),
+        "left" => "Left".to_string(),
+        "right" => "Right".to_string(),
+        "up" => "Up".to_string(),
+        "down" => "Down".to_string(),
+        // Single characters stay as-is
+        s if s.len() == 1 => s.to_string(),
+        // Everything else gets capitalized first letter
+        s => {
+            let mut chars = s.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+            }
         },
-        _ => format!("{key:?}"),
     }
 }
 
@@ -197,18 +183,16 @@ mod tests {
     #[test]
     fn default_keymap_has_normal_mode_bindings() {
         let keymap = Keymap::new();
-        let h_key = keyboard::Key::Character("h".to_string().into());
-        let command = keymap.lookup(&h_key, &keyboard::Modifiers::default(), EditMode::Normal);
+        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), EditMode::Normal);
         assert_eq!(command, Some(Command::MoveCursorLeft));
     }
 
     #[test]
     fn insert_mode_escape_returns_to_normal() {
         let keymap = Keymap::new();
-        let escape_key = keyboard::Key::Named(keyboard::key::Named::Escape);
         let command = keymap.lookup(
-            &escape_key,
-            &keyboard::Modifiers::default(),
+            &keys::ESCAPE.to_string(),
+            &Modifiers::default(),
             EditMode::Insert,
         );
         assert_eq!(command, Some(Command::EnterNormalMode));
@@ -217,12 +201,7 @@ mod tests {
     #[test]
     fn unknown_key_returns_none() {
         let keymap = Keymap::new();
-        let unknown_key = keyboard::Key::Character("z".to_string().into());
-        let command = keymap.lookup(
-            &unknown_key,
-            &keyboard::Modifiers::default(),
-            EditMode::Normal,
-        );
+        let command = keymap.lookup(&"z".to_string(), &Modifiers::default(), EditMode::Normal);
         assert_eq!(command, None);
     }
 
@@ -232,5 +211,19 @@ mod tests {
         let normal_commands = keymap.available_commands(EditMode::Normal);
         assert!(!normal_commands.is_empty());
         assert!(normal_commands.contains(&&Command::MoveCursorLeft));
+    }
+
+    #[test]
+    fn key_normalization_works() {
+        let mut keymap = Keymap::new();
+        keymap.bind_normal_key("H".to_string(), Command::MoveCursorLeft);
+
+        // Should find it with lowercase
+        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), EditMode::Normal);
+        assert_eq!(command, Some(Command::MoveCursorLeft));
+
+        // Should also find it with uppercase
+        let command = keymap.lookup(&"H".to_string(), &Modifiers::default(), EditMode::Normal);
+        assert_eq!(command, Some(Command::MoveCursorLeft));
     }
 }

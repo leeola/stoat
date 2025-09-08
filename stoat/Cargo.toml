@@ -10,8 +10,8 @@ license-file = "../LICENSE"
 workspace = true
 
 [dependencies]
-# Keep iced for keyboard/input types to avoid conversions
-iced = { version = "0.13.1", default-features = false, features = ["advanced"] }
+# GPUI for keyboard/input types
+gpui = { git = "https://github.com/zed-industries/zed.git" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

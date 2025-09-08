@@ -17,12 +17,11 @@
 //!
 //! ```rust
 //! use stoat::*;
-//! use iced::keyboard;
 //!
 //! let mut engine = EditorEngine::new();
 //! let effects = engine.handle_event(EditorEvent::KeyPress {
-//!     key: keyboard::Key::Character("i".to_string().into()),
-//!     modifiers: keyboard::Modifiers::default()
+//!     key: "i".to_string(),
+//!     modifiers: input::Modifiers::default()
 //! });
 //! ```
 //!
@@ -42,6 +41,7 @@ pub mod command;
 pub mod effects;
 pub mod engine;
 pub mod events;
+pub mod input;
 pub mod key_notation;
 pub mod keymap;
 pub mod log;
@@ -58,8 +58,8 @@ pub use command::Command;
 pub use effects::Effect;
 pub use engine::EditorEngine;
 pub use events::EditorEvent;
-// Re-export commonly used iced types for consumers
-pub use iced::{keyboard, mouse, Point};
+// Re-export input types for consumers
+pub use input::{Key, Modifiers, MouseButton, Point};
 pub use keymap::Keymap;
 // Note: process_event now requires a keymap parameter
 pub use processor::process_event;
@@ -298,14 +298,14 @@ mod stoat_tests {
         let events = key_notation::parse_sequence("<C-a>");
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, .. } = &events[0] {
-            assert!(modifiers.control());
+            assert!(modifiers.control);
         }
 
         // Test Alt+key
         let events = key_notation::parse_sequence("<A-x>");
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, .. } = &events[0] {
-            assert!(modifiers.alt());
+            assert!(modifiers.alt);
         }
     }
 
@@ -339,8 +339,8 @@ mod stoat_tests {
 
         // Manually create and send a Space key event
         let space_event = EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Space),
-            modifiers: keyboard::Modifiers::default(),
+            key: input::keys::SPACE.to_string(),
+            modifiers: input::Modifiers::default(),
         };
 
         editor.engine_mut().handle_event(space_event);
@@ -387,8 +387,8 @@ mod stoat_tests {
 
         // Insert tab
         let tab_event = EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Tab),
-            modifiers: keyboard::Modifiers::default(),
+            key: input::keys::TAB.to_string(),
+            modifiers: input::Modifiers::default(),
         };
         editor.engine_mut().handle_event(tab_event);
 
@@ -430,8 +430,8 @@ mod stoat_tests {
 
         // Insert tab - this should move cursor to next tab stop (column 8 in display)
         let tab_event = EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Tab),
-            modifiers: keyboard::Modifiers::default(),
+            key: input::keys::TAB.to_string(),
+            modifiers: input::Modifiers::default(),
         };
         editor.engine_mut().handle_event(tab_event);
 
@@ -615,8 +615,8 @@ mod stoat_tests {
 
         // Manually create and send a Tab key event
         let tab_event = EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Tab),
-            modifiers: keyboard::Modifiers::default(),
+            key: input::keys::TAB.to_string(),
+            modifiers: input::Modifiers::default(),
         };
 
         editor.engine_mut().handle_event(tab_event);

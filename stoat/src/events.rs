@@ -1,10 +1,9 @@
 //! Event types for the Stoat editor.
 //!
 //! This module defines all possible input events that the editor can process.
-//! Events use iced types directly to avoid unnecessary conversions while
-//! separating input events from state processing.
+//! Events use GPUI-compatible types for better integration with the GUI layer.
 
-use iced::{keyboard, mouse, Point};
+use crate::input::{Key, Modifiers, MouseButton, Point};
 
 /// Events that the editor can process.
 ///
@@ -13,11 +12,8 @@ use iced::{keyboard, mouse, Point};
 /// no behavior themselves.
 #[derive(Debug, Clone)]
 pub enum EditorEvent {
-    /// A key was pressed with optional modifiers (for special keys)
-    KeyPress {
-        key: keyboard::Key,
-        modifiers: keyboard::Modifiers,
-    },
+    /// A key was pressed with optional modifiers
+    KeyPress { key: Key, modifiers: Modifiers },
 
     /// Text was pasted (from clipboard or drag-drop)
     TextPasted { content: String },
@@ -25,7 +21,7 @@ pub enum EditorEvent {
     /// Mouse was clicked at a specific point
     MouseClick {
         position: Point,
-        button: mouse::Button,
+        button: MouseButton,
     },
 
     /// Mouse was moved (for hover, selection extension, etc.)

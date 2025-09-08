@@ -8,10 +8,10 @@ use crate::{
     command::Command,
     effects::Effect,
     events::EditorEvent,
+    input::{Key, Modifiers},
     keymap::Keymap,
     state::{EditorState, TextBuffer},
 };
-use iced::keyboard;
 
 /// Process a single event and return new state plus effects.
 ///
@@ -118,8 +118,8 @@ pub fn process_event(
 /// Process keyboard input using the command system.
 fn process_key_press(
     state: EditorState,
-    key: keyboard::Key,
-    modifiers: keyboard::Modifiers,
+    key: Key,
+    modifiers: Modifiers,
     keymap: &Keymap,
 ) -> (EditorState, Vec<Effect>) {
     tracing::trace!("Processing key in {:?} mode: {:?}", state.mode, key);
@@ -141,43 +141,33 @@ fn process_key_press(
 
     // Handle special cases for insert mode character insertion
     if state.mode == EditMode::Insert {
-        match &key {
-            keyboard::Key::Character(text) => {
-                // Filter out control characters - only insert printable text
-                // This prevents Ctrl+T (\u{14}) and similar from being inserted
-                if text.chars().any(|c| !c.is_control()) {
-                    let command = Command::InsertStr(text.clone());
-                    tracing::debug!("Insert mode text: {:?}", command);
-                    let result = process_command(state, command);
-
-                    if result.0.mode != original_mode {
-                        tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
-                    }
-
-                    return result;
+        // Check what kind of key we have
+        let text_to_insert = match key.as_str() {
+            // Special keys that insert text
+            "space" => Some(" ".to_string()),
+            "tab" => Some("\t".to_string()),
+            // Single characters (but not control characters)
+            s if s.len() == 1 => {
+                let ch = s.chars().next().unwrap();
+                if !ch.is_control() {
+                    Some(s.to_string())
+                } else {
+                    None
                 }
             },
-            keyboard::Key::Named(named) => {
-                // Handle special named keys that should insert text
-                let text_to_insert = match named {
-                    keyboard::key::Named::Space => Some(" ".to_string()),
-                    keyboard::key::Named::Tab => Some("\t".to_string()),
-                    _ => None,
-                };
+            _ => None,
+        };
 
-                if let Some(text) = text_to_insert {
-                    let command = Command::InsertStr(text.into());
-                    tracing::debug!("Insert mode named key: {:?}", command);
-                    let result = process_command(state, command);
+        if let Some(text) = text_to_insert {
+            let command = Command::InsertStr(text.into());
+            tracing::debug!("Insert mode text: {:?}", command);
+            let result = process_command(state, command);
 
-                    if result.0.mode != original_mode {
-                        tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
-                    }
+            if result.0.mode != original_mode {
+                tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+            }
 
-                    return result;
-                }
-            },
-            _ => {},
+            return result;
         }
     }
 
@@ -617,7 +607,7 @@ fn replace_text_in_range(state: &mut EditorState, range: TextRange, new_text: St
     insert_text_at_position(state, range.start, new_text);
 }
 
-fn pixel_to_text_position(state: &EditorState, position: iced::Point) -> TextPosition {
+fn pixel_to_text_position(state: &EditorState, position: crate::input::Point) -> TextPosition {
     let line = ((position.y - state.viewport.scroll_y) / state.viewport.line_height) as usize;
     let visual_column =
         ((position.x - state.viewport.scroll_x) / state.viewport.char_width) as usize;
@@ -866,7 +856,7 @@ mod tests {
         let (new_state, effects) = process_event(
             state.clone(),
             EditorEvent::MouseMove {
-                position: iced::Point::new(10.0, 20.0),
+                position: crate::input::Point::new(10.0, 20.0),
             },
             &keymap,
         );

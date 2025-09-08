@@ -19,20 +19,19 @@ use crate::{
 ///
 /// ```rust
 /// use stoat::*;
-/// use iced::keyboard;
 ///
 /// let mut engine = EditorEngine::new();
 ///
 /// // Enter insert mode first
 /// engine.handle_event(EditorEvent::KeyPress {
-///     key: keyboard::Key::Character("i".to_string().into()),
-///     modifiers: keyboard::Modifiers::default()
+///     key: "i".to_string(),
+///     modifiers: input::Modifiers::default()
 /// });
 ///
 /// // Type a character
 /// engine.handle_event(EditorEvent::KeyPress {
-///     key: keyboard::Key::Character("H".to_string().into()),
-///     modifiers: keyboard::Modifiers::default()
+///     key: "H".to_string(),
+///     modifiers: input::Modifiers::default()
 /// });
 ///
 /// assert_eq!(engine.text(), "H");
@@ -231,27 +230,45 @@ impl std::fmt::Debug for EditorEngine {
 ///
 /// These functions make it easier to create events for testing and simulation.
 pub mod events {
-    use crate::events::EditorEvent;
-    use iced::{keyboard, mouse};
+    use crate::{
+        events::EditorEvent,
+        input::{Key, Modifiers, MouseButton, keys},
+    };
 
     /// Creates a key press event.
-    pub fn key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> EditorEvent {
+    pub fn key_press(key: Key, modifiers: Modifiers) -> EditorEvent {
         EditorEvent::KeyPress { key, modifiers }
     }
 
     /// Creates a key press event for a character with no modifiers.
     pub fn char_key(ch: char) -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Character(ch.to_string().into()),
-            modifiers: keyboard::Modifiers::default(),
+            key: ch.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates a key press event for a named key with no modifiers.
-    pub fn named_key(key: keyboard::key::Named) -> EditorEvent {
+    pub fn named_key(key_name: &str) -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Named(key),
-            modifiers: keyboard::Modifiers::default(),
+            key: key_name.to_string(),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    /// Creates an escape key press event.
+    pub fn escape() -> EditorEvent {
+        EditorEvent::KeyPress {
+            key: keys::ESCAPE.to_string(),
+            modifiers: Modifiers::default(),
+        }
+    }
+
+    /// Creates an enter key press event.
+    pub fn enter() -> EditorEvent {
+        EditorEvent::KeyPress {
+            key: keys::ENTER.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
@@ -265,8 +282,8 @@ pub mod events {
     /// Creates a mouse click event.
     pub fn mouse_click(x: f32, y: f32) -> EditorEvent {
         EditorEvent::MouseClick {
-            position: iced::Point::new(x, y),
-            button: mouse::Button::Left,
+            position: gpui::point(x, y),
+            button: MouseButton::Left,
         }
     }
 
@@ -290,7 +307,6 @@ pub mod events {
 mod tests {
     use super::*;
     use crate::actions::{EditMode, TextPosition};
-    use iced::keyboard;
 
     #[test]
     fn new_engine_starts_empty() {
@@ -327,7 +343,7 @@ mod tests {
         assert_eq!(engine.text(), "Hi");
 
         // Exit insert mode
-        let effects = engine.handle_event(events::named_key(keyboard::key::Named::Escape));
+        let effects = engine.handle_event(events::escape());
         assert!(effects.is_empty());
         assert_eq!(engine.mode(), EditMode::Normal);
     }

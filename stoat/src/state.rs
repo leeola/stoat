@@ -6,7 +6,7 @@
 
 use crate::actions::{EditMode, TextPosition, TextRange};
 use std::{path::PathBuf, sync::Arc};
-use stoat_rope::{ast::AstNode, kind::SyntaxKind, RopeAst};
+use stoat_rope::{RopeAst, ast::AstNode, kind::SyntaxKind};
 
 /// Complete immutable state of the text editor.
 ///

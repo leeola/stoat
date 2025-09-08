@@ -8,9 +8,9 @@ use crate::{
     effects::Effect,
     engine::EditorEngine,
     events::EditorEvent,
+    input::{Key, Modifiers, MouseButton, Point, keys},
     state::EditorState,
 };
-use iced::{keyboard, mouse};
 use std::path::PathBuf;
 
 /// Builder for creating [`EditorState`] instances in tests.
@@ -159,8 +159,8 @@ pub mod events {
     pub fn type_text(text: &str) -> Vec<EditorEvent> {
         text.chars()
             .map(|ch| EditorEvent::KeyPress {
-                key: keyboard::Key::Character(ch.to_string().into()),
-                modifiers: keyboard::Modifiers::default(),
+                key: ch.to_string(),
+                modifiers: Modifiers::default(),
             })
             .collect()
     }
@@ -190,26 +190,26 @@ pub mod events {
                 }
 
                 let key = match key_name.as_str() {
-                    "Esc" | "Escape" => keyboard::Key::Named(keyboard::key::Named::Escape),
-                    "Enter" | "Return" => keyboard::Key::Named(keyboard::key::Named::Enter),
-                    "Backspace" | "BS" => keyboard::Key::Named(keyboard::key::Named::Backspace),
-                    "Tab" => keyboard::Key::Named(keyboard::key::Named::Tab),
-                    "Space" => keyboard::Key::Named(keyboard::key::Named::Space),
-                    "Left" => keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
-                    "Right" => keyboard::Key::Named(keyboard::key::Named::ArrowRight),
-                    "Up" => keyboard::Key::Named(keyboard::key::Named::ArrowUp),
-                    "Down" => keyboard::Key::Named(keyboard::key::Named::ArrowDown),
-                    _ => keyboard::Key::Character(ch.to_string().into()), // Fallback
+                    "Esc" | "Escape" => keys::ESCAPE.to_string(),
+                    "Enter" | "Return" => keys::ENTER.to_string(),
+                    "Backspace" | "BS" => keys::BACKSPACE.to_string(),
+                    "Tab" => keys::TAB.to_string(),
+                    "Space" => keys::SPACE.to_string(),
+                    "Left" => keys::LEFT.to_string(),
+                    "Right" => keys::RIGHT.to_string(),
+                    "Up" => keys::UP.to_string(),
+                    "Down" => keys::DOWN.to_string(),
+                    _ => ch.to_string(), // Fallback
                 };
 
                 events.push(EditorEvent::KeyPress {
                     key,
-                    modifiers: keyboard::Modifiers::default(),
+                    modifiers: Modifiers::default(),
                 });
             } else {
                 events.push(EditorEvent::KeyPress {
-                    key: keyboard::Key::Character(ch.to_string().into()),
-                    modifiers: keyboard::Modifiers::default(),
+                    key: ch.to_string(),
+                    modifiers: Modifiers::default(),
                 });
             }
         }
@@ -218,55 +218,55 @@ pub mod events {
     }
 
     /// Creates a key press event.
-    pub fn key(key: keyboard::Key) -> EditorEvent {
+    pub fn key(key: Key) -> EditorEvent {
         EditorEvent::KeyPress {
             key,
-            modifiers: keyboard::Modifiers::default(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates a key press event with modifiers.
-    pub fn key_with_mods(key: keyboard::Key, modifiers: keyboard::Modifiers) -> EditorEvent {
+    pub fn key_with_mods(key: Key, modifiers: Modifiers) -> EditorEvent {
         EditorEvent::KeyPress { key, modifiers }
     }
 
     /// Creates a character key press event.
     pub fn char(ch: char) -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Character(ch.to_string().into()),
-            modifiers: keyboard::Modifiers::default(),
+            key: ch.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates an escape key press event.
     pub fn escape() -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Escape),
-            modifiers: keyboard::Modifiers::default(),
+            key: keys::ESCAPE.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates an enter key press event.
     pub fn enter() -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Enter),
-            modifiers: keyboard::Modifiers::default(),
+            key: keys::ENTER.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates a backspace key press event.
     pub fn backspace() -> EditorEvent {
         EditorEvent::KeyPress {
-            key: keyboard::Key::Named(keyboard::key::Named::Backspace),
-            modifiers: keyboard::Modifiers::default(),
+            key: keys::BACKSPACE.to_string(),
+            modifiers: Modifiers::default(),
         }
     }
 
     /// Creates a mouse click event.
     pub fn click(x: f32, y: f32) -> EditorEvent {
         EditorEvent::MouseClick {
-            position: iced::Point::new(x, y),
-            button: mouse::Button::Left,
+            position: Point::new(x, y),
+            button: MouseButton::Left,
         }
     }
 
@@ -426,14 +426,14 @@ mod tests {
 
         // Check first event is 'i'
         if let EditorEvent::KeyPress { key, .. } = &events[0] {
-            assert_eq!(*key, keyboard::Key::Character("i".into()));
+            assert_eq!(*key, "i");
         } else {
             panic!("Expected KeyPress event");
         }
 
         // Check second event is Escape
         if let EditorEvent::KeyPress { key, .. } = &events[1] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Escape));
+            assert_eq!(*key, keys::ESCAPE);
         } else {
             panic!("Expected KeyPress event");
         }
@@ -446,7 +446,7 @@ mod tests {
 
         for (i, ch) in "Hello".chars().enumerate() {
             if let EditorEvent::KeyPress { key, .. } = &events[i] {
-                assert_eq!(*key, keyboard::Key::Character(ch.to_string().into()));
+                assert_eq!(*key, ch.to_string());
             } else {
                 panic!("Expected KeyPress event");
             }

@@ -4,8 +4,10 @@
 //! keyboard input into [`EditorEvent`]s. It supports vim-like notation
 //! including special keys in angle brackets and modifier combinations.
 
-use crate::events::EditorEvent;
-use iced::keyboard;
+use crate::{
+    events::EditorEvent,
+    input::{Modifiers, keys},
+};
 
 /// Parses a keyboard input string into a sequence of [`EditorEvent`]s.
 ///
@@ -73,14 +75,14 @@ pub fn parse_sequence(input: &str) -> Vec<EditorEvent> {
 fn create_char_event(ch: char) -> EditorEvent {
     // Handle space and tab as named keys
     let key = match ch {
-        ' ' => keyboard::Key::Named(keyboard::key::Named::Space),
-        '\t' => keyboard::Key::Named(keyboard::key::Named::Tab),
-        _ => keyboard::Key::Character(ch.to_string().into()),
+        ' ' => keys::SPACE.to_string(),
+        '\t' => keys::TAB.to_string(),
+        _ => ch.to_string(),
     };
 
     EditorEvent::KeyPress {
         key,
-        modifiers: keyboard::Modifiers::default(),
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -96,26 +98,26 @@ fn parse_special_key(seq: &str) -> Option<EditorEvent> {
 
     // Parse unmodified special keys
     let key = match seq.to_lowercase().as_str() {
-        "esc" | "escape" => keyboard::Key::Named(keyboard::key::Named::Escape),
-        "enter" | "return" | "cr" => keyboard::Key::Named(keyboard::key::Named::Enter),
-        "tab" => keyboard::Key::Named(keyboard::key::Named::Tab),
-        "bs" | "backspace" => keyboard::Key::Named(keyboard::key::Named::Backspace),
-        "del" | "delete" => keyboard::Key::Named(keyboard::key::Named::Delete),
-        "space" => keyboard::Key::Named(keyboard::key::Named::Space),
-        "left" => keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
-        "right" => keyboard::Key::Named(keyboard::key::Named::ArrowRight),
-        "up" => keyboard::Key::Named(keyboard::key::Named::ArrowUp),
-        "down" => keyboard::Key::Named(keyboard::key::Named::ArrowDown),
-        "home" => keyboard::Key::Named(keyboard::key::Named::Home),
-        "end" => keyboard::Key::Named(keyboard::key::Named::End),
-        "pageup" | "pgup" => keyboard::Key::Named(keyboard::key::Named::PageUp),
-        "pagedown" | "pgdn" => keyboard::Key::Named(keyboard::key::Named::PageDown),
+        "esc" | "escape" => keys::ESCAPE.to_string(),
+        "enter" | "return" | "cr" => keys::ENTER.to_string(),
+        "tab" => keys::TAB.to_string(),
+        "bs" | "backspace" => keys::BACKSPACE.to_string(),
+        "del" | "delete" => keys::DELETE.to_string(),
+        "space" => keys::SPACE.to_string(),
+        "left" => keys::LEFT.to_string(),
+        "right" => keys::RIGHT.to_string(),
+        "up" => keys::UP.to_string(),
+        "down" => keys::DOWN.to_string(),
+        "home" => keys::HOME.to_string(),
+        "end" => keys::END.to_string(),
+        "pageup" | "pgup" => keys::PAGE_UP.to_string(),
+        "pagedown" | "pgdn" => keys::PAGE_DOWN.to_string(),
         _ => return None,
     };
 
     Some(EditorEvent::KeyPress {
         key,
-        modifiers: keyboard::Modifiers::default(),
+        modifiers: Modifiers::default(),
     })
 }
 
@@ -132,8 +134,11 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
         if key_part.len() == 1 {
             let ch = key_part.chars().next().expect("key_part has length 1");
             return Some(EditorEvent::KeyPress {
-                key: keyboard::Key::Character(ch.to_lowercase().to_string().into()),
-                modifiers: keyboard::Modifiers::CTRL,
+                key: ch.to_lowercase().to_string(),
+                modifiers: Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
             });
         }
     }
@@ -155,8 +160,11 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
         if key_part.len() == 1 {
             let ch = key_part.chars().next().expect("key_part has length 1");
             return Some(EditorEvent::KeyPress {
-                key: keyboard::Key::Character(ch.to_lowercase().to_string().into()),
-                modifiers: keyboard::Modifiers::ALT,
+                key: ch.to_lowercase().to_string(),
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
             });
         }
     }
@@ -172,8 +180,11 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
         match key_part.to_lowercase().as_str() {
             "tab" => {
                 return Some(EditorEvent::KeyPress {
-                    key: keyboard::Key::Named(keyboard::key::Named::Tab),
-                    modifiers: keyboard::Modifiers::SHIFT,
+                    key: keys::TAB.to_string(),
+                    modifiers: Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
                 });
             },
             _ => {
@@ -181,8 +192,11 @@ fn parse_modified_key(seq: &str) -> Option<EditorEvent> {
                 if key_part.len() == 1 {
                     let ch = key_part.chars().next().expect("key_part has length 1");
                     return Some(EditorEvent::KeyPress {
-                        key: keyboard::Key::Character(ch.to_uppercase().to_string().into()),
-                        modifiers: keyboard::Modifiers::SHIFT,
+                        key: ch.to_uppercase().to_string(),
+                        modifiers: Modifiers {
+                            shift: true,
+                            ..Modifiers::default()
+                        },
                     });
                 }
             },
@@ -203,10 +217,10 @@ mod tests {
 
         for (i, ch) in "abc".chars().enumerate() {
             if let EditorEvent::KeyPress { key, modifiers } = &events[i] {
-                assert_eq!(*key, keyboard::Key::Character(ch.to_string().into()));
-                assert!(!modifiers.control());
-                assert!(!modifiers.alt());
-                assert!(!modifiers.shift());
+                assert_eq!(*key, ch.to_string());
+                assert!(!modifiers.control);
+                assert!(!modifiers.alt);
+                assert!(!modifiers.shift);
             } else {
                 panic!("Expected KeyPress event");
             }
@@ -219,15 +233,15 @@ mod tests {
         assert_eq!(events.len(), 3);
 
         if let EditorEvent::KeyPress { key, .. } = &events[0] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Escape));
+            assert_eq!(*key, keys::ESCAPE);
         }
 
         if let EditorEvent::KeyPress { key, .. } = &events[1] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Enter));
+            assert_eq!(*key, keys::ENTER);
         }
 
         if let EditorEvent::KeyPress { key, .. } = &events[2] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Tab));
+            assert_eq!(*key, keys::TAB);
         }
     }
 
@@ -243,22 +257,22 @@ mod tests {
         let events = parse_sequence("<C-a>");
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, .. } = &events[0] {
-            assert!(modifiers.control());
+            assert!(modifiers.control);
         }
 
         // Alt+X
         let events = parse_sequence("<A-x>");
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, .. } = &events[0] {
-            assert!(modifiers.alt());
+            assert!(modifiers.alt);
         }
 
         // Shift+Tab
         let events = parse_sequence("<S-Tab>");
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, key } = &events[0] {
-            assert!(modifiers.shift());
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Tab));
+            assert!(modifiers.shift);
+            assert_eq!(*key, keys::TAB);
         }
     }
 
@@ -275,16 +289,16 @@ mod tests {
         assert_eq!(events.len(), 4);
 
         if let EditorEvent::KeyPress { key, .. } = &events[0] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::ArrowLeft));
+            assert_eq!(*key, keys::LEFT);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[1] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::ArrowRight));
+            assert_eq!(*key, keys::RIGHT);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[2] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::ArrowUp));
+            assert_eq!(*key, keys::UP);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[3] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::ArrowDown));
+            assert_eq!(*key, keys::DOWN);
         }
     }
 
@@ -294,16 +308,16 @@ mod tests {
         assert_eq!(events.len(), 4);
 
         if let EditorEvent::KeyPress { key, .. } = &events[0] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Home));
+            assert_eq!(*key, keys::HOME);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[1] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::End));
+            assert_eq!(*key, keys::END);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[2] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::PageUp));
+            assert_eq!(*key, keys::PAGE_UP);
         }
         if let EditorEvent::KeyPress { key, .. } = &events[3] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::PageDown));
+            assert_eq!(*key, keys::PAGE_DOWN);
         }
     }
 
@@ -314,17 +328,17 @@ mod tests {
 
         // Check first char is 'i'
         if let EditorEvent::KeyPress { key, .. } = &events[0] {
-            assert_eq!(*key, keyboard::Key::Character("i".into()));
+            assert_eq!(*key, "i");
         }
 
         // Check Escape
         if let EditorEvent::KeyPress { key, .. } = &events[6] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Escape));
+            assert_eq!(*key, keys::ESCAPE);
         }
 
         // Check Enter at the end
         if let EditorEvent::KeyPress { key, .. } = &events[10] {
-            assert_eq!(*key, keyboard::Key::Named(keyboard::key::Named::Enter));
+            assert_eq!(*key, keys::ENTER);
         }
     }
 }
