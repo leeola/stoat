@@ -2,7 +2,7 @@
 name = "stoat_gui"
 version = "0.1.0"
 edition = "2021"
-description = "Iced-based GUI for the Stoat text editor"
+description = "GPUI-based GUI for the Stoat text editor"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
@@ -13,6 +13,13 @@ workspace = true
 [dependencies]
 # Core editor logic
 stoat = { path = "../stoat" }
+
+# GPUI framework from zed repository
+gpui = { git = "https://github.com/zed-industries/zed.git" }
+
+# Async runtime
 tokio = { workspace = true, features = ["fs", "macros"] }
+
+# Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
