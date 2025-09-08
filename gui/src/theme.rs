@@ -1,6 +1,6 @@
 //! Theme system for the editor
 
-use gpui::{hsla, rgb, Global, Hsla};
+use gpui::{hsla, Global, Hsla};
 
 /// Editor theme configuration
 #[derive(Debug, Clone)]
