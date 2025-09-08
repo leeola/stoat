@@ -32,7 +32,8 @@ pub fn run() -> Result<()> {
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.activate(false);
+                    // Activate the window to bring it to foreground
+                    cx.activate(true);
                     // Create the simple keyboard observer
                     let editor = cx.new(|cx| Editor::new(cx));
                     // Focus it immediately
