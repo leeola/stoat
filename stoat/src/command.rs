@@ -4,8 +4,8 @@
 //! and the low-level actions that transform editor state. They represent
 //! semantic operations that users want to perform.
 
-// Use the SmolStr type from iced to match keyboard input
-use iced::advanced::graphics::core::SmolStr;
+// Use SmolStr for efficient small string storage
+use smol_str::SmolStr;
 
 /// High-level editor commands.
 ///

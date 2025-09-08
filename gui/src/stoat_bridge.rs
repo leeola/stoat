@@ -1,117 +1,24 @@
 //! Bridge between GPUI events and Stoat editor engine.
 //!
-//! This module handles the translation layer between GPUI's event system
-//! and Stoat's pure functional event processing. It ensures clean separation
-//! between the UI layer and the editor logic.
+//! This module provides a thin layer between GPUI's event system
+//! and Stoat's pure functional event processing. Since both now use
+//! the same types, this bridge is greatly simplified.
 
-use gpui::{Keystroke, Modifiers, MouseButton, Point};
-use iced::keyboard;
-use stoat::{EditorEngine, EditorEvent, Effect};
+use gpui::{Keystroke, Point};
+use stoat::{EditorEngine, EditorEvent, Effect, MouseButton};
 
 /// Converts GPUI keystrokes to Stoat editor events.
 pub fn keystroke_to_event(keystroke: &Keystroke) -> Option<EditorEvent> {
-    // Convert GPUI modifiers to iced modifiers
-    let modifiers = convert_modifiers(&keystroke.modifiers);
-
-    // Convert key string to iced key
-    let key = convert_key(&keystroke.key)?;
-
-    Some(EditorEvent::KeyPress { key, modifiers })
-}
-
-/// Converts GPUI modifiers to iced keyboard modifiers.
-fn convert_modifiers(gpui_mods: &Modifiers) -> keyboard::Modifiers {
-    let mut mods = keyboard::Modifiers::empty();
-
-    if gpui_mods.control {
-        mods |= keyboard::Modifiers::CTRL;
-    }
-    if gpui_mods.alt {
-        mods |= keyboard::Modifiers::ALT;
-    }
-    if gpui_mods.shift {
-        mods |= keyboard::Modifiers::SHIFT;
-    }
-    if gpui_mods.platform {
-        // On macOS, command is the primary modifier (like Ctrl on other platforms)
-        #[cfg(target_os = "macos")]
-        {
-            mods |= keyboard::Modifiers::LOGO;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            mods |= keyboard::Modifiers::CTRL;
-        }
-    }
-
-    mods
-}
-
-/// Converts GPUI key string to iced keyboard key.
-fn convert_key(key_str: &str) -> Option<keyboard::Key> {
-    Some(match key_str {
-        // Special keys
-        "escape" | "esc" => keyboard::Key::Named(keyboard::key::Named::Escape),
-        "enter" | "return" => keyboard::Key::Named(keyboard::key::Named::Enter),
-        "tab" => keyboard::Key::Named(keyboard::key::Named::Tab),
-        "backspace" => keyboard::Key::Named(keyboard::key::Named::Backspace),
-        "delete" => keyboard::Key::Named(keyboard::key::Named::Delete),
-        "space" => keyboard::Key::Named(keyboard::key::Named::Space),
-
-        // Arrow keys
-        "up" => keyboard::Key::Named(keyboard::key::Named::ArrowUp),
-        "down" => keyboard::Key::Named(keyboard::key::Named::ArrowDown),
-        "left" => keyboard::Key::Named(keyboard::key::Named::ArrowLeft),
-        "right" => keyboard::Key::Named(keyboard::key::Named::ArrowRight),
-
-        // Navigation keys
-        "home" => keyboard::Key::Named(keyboard::key::Named::Home),
-        "end" => keyboard::Key::Named(keyboard::key::Named::End),
-        "pageup" => keyboard::Key::Named(keyboard::key::Named::PageUp),
-        "pagedown" => keyboard::Key::Named(keyboard::key::Named::PageDown),
-
-        // Function keys
-        "f1" => keyboard::Key::Named(keyboard::key::Named::F1),
-        "f2" => keyboard::Key::Named(keyboard::key::Named::F2),
-        "f3" => keyboard::Key::Named(keyboard::key::Named::F3),
-        "f4" => keyboard::Key::Named(keyboard::key::Named::F4),
-        "f5" => keyboard::Key::Named(keyboard::key::Named::F5),
-        "f6" => keyboard::Key::Named(keyboard::key::Named::F6),
-        "f7" => keyboard::Key::Named(keyboard::key::Named::F7),
-        "f8" => keyboard::Key::Named(keyboard::key::Named::F8),
-        "f9" => keyboard::Key::Named(keyboard::key::Named::F9),
-        "f10" => keyboard::Key::Named(keyboard::key::Named::F10),
-        "f11" => keyboard::Key::Named(keyboard::key::Named::F11),
-        "f12" => keyboard::Key::Named(keyboard::key::Named::F12),
-
-        // Regular characters (including shifted ones)
-        s if s.len() == 1 => keyboard::Key::Character(s.into()),
-
-        // Multi-character strings or unknown keys
-        _ => {
-            tracing::warn!("Unknown key: {}", key_str);
-            return None;
-        },
+    // Stoat now uses GPUI types directly, so conversion is straightforward
+    Some(EditorEvent::KeyPress {
+        key: keystroke.key.clone(),
+        modifiers: keystroke.modifiers,
     })
 }
 
 /// Converts GPUI mouse click to Stoat editor event.
 pub fn mouse_click_to_event(position: Point<f32>, button: MouseButton) -> EditorEvent {
-    EditorEvent::MouseClick {
-        position: iced::Point::new(position.x, position.y),
-        button: convert_mouse_button(button),
-    }
-}
-
-/// Converts GPUI mouse button to iced mouse button.
-fn convert_mouse_button(button: MouseButton) -> iced::mouse::Button {
-    match button {
-        MouseButton::Left => iced::mouse::Button::Left,
-        MouseButton::Right => iced::mouse::Button::Right,
-        MouseButton::Middle => iced::mouse::Button::Middle,
-        MouseButton::Navigate(gpui::NavigationDirection::Back) => iced::mouse::Button::Back,
-        MouseButton::Navigate(gpui::NavigationDirection::Forward) => iced::mouse::Button::Forward,
-    }
+    EditorEvent::MouseClick { position, button }
 }
 
 /// Processes effects returned from Stoat engine.

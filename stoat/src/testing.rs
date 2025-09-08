@@ -8,7 +8,7 @@ use crate::{
     effects::Effect,
     engine::EditorEngine,
     events::EditorEvent,
-    input::{Key, Modifiers, MouseButton, Point, keys},
+    input::{keys, Key, Modifiers, MouseButton, Point},
     state::EditorState,
 };
 use std::path::PathBuf;
