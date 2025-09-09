@@ -53,7 +53,7 @@ pub enum EditorAction {
 
 // Basic types needed for actions - these will be proper imports later
 /// Text position in the buffer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextPosition {
     pub line: usize,
     pub column: usize,
@@ -108,6 +108,5 @@ impl TextRange {
 pub enum EditMode {
     Normal,
     Insert,
-    Visual { line_mode: bool },
     Command,
 }

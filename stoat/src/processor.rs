@@ -262,7 +262,8 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
         },
 
         EditorAction::MoveCursor { position } => {
-            state.cursor.position = position;
+            // Move both anchor and head to the new position (collapse selection)
+            state.cursor.move_to(position.clone());
             // Update desired_column to be the visual column for proper tab handling
             if let Some(line) = state.line(position.line) {
                 // Always calculate visual column when moving cursor
@@ -278,7 +279,13 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
         },
 
         EditorAction::SetSelection { range } => {
-            state.cursor.selection = range;
+            if let Some(r) = range {
+                state.cursor.anchor = r.start;
+                state.cursor.head = r.end;
+            } else {
+                // Clear selection - make anchor == head
+                state.cursor.anchor = state.cursor.head.clone();
+            }
         },
 
         EditorAction::SetMode { mode } => {
@@ -297,7 +304,9 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 
         EditorAction::SetContent { content } => {
             state.buffer = TextBuffer::with_text(&content);
-            state.cursor.position = TextPosition::start();
+            let start = TextPosition::start();
+            state.cursor.anchor = start.clone();
+            state.cursor.head = start;
             state.cursor.desired_column = 0;
         },
 
@@ -536,7 +545,7 @@ fn insert_text_at_position(state: &mut EditorState, position: TextPosition, text
         state.buffer = TextBuffer::with_text(&new_text);
 
         // Apply the pre-calculated cursor position
-        state.cursor.position = new_cursor_position;
+        state.cursor.move_to(new_cursor_position);
         state.cursor.desired_column = new_desired_column;
     }
 }
@@ -626,7 +635,7 @@ fn delete_text_in_range(state: &mut EditorState, range: TextRange) {
 
     // Update cursor position to the start of the deletion range
     // Need to recalculate visual column for proper tab handling
-    state.cursor.position = range.start;
+    state.cursor.move_to(range.start.clone());
 
     // Get the line after deletion to calculate proper visual column
     if let Some(line) = state.line(range.start.line) {
@@ -638,7 +647,7 @@ fn delete_text_in_range(state: &mut EditorState, range: TextRange) {
         };
 
         let visual_col = byte_to_visual(&line, byte_pos);
-        state.cursor.position.visual_column = visual_col;
+        state.cursor.head.visual_column = visual_col;
         state.cursor.desired_column = visual_col;
     } else {
         // Fallback if line not found
@@ -872,8 +881,11 @@ mod tests {
         };
 
         let new_state = apply_action(state, action);
-        assert!(new_state.cursor.selection.is_some());
-        let selection = new_state.cursor.selection.expect("selection should be set");
+        assert!(new_state.cursor.selection().is_some());
+        let selection = new_state
+            .cursor
+            .selection()
+            .expect("selection should be set");
         assert_eq!(selection.start, TextPosition::new(0, 0));
         assert_eq!(selection.end, TextPosition::new(0, 5));
     }
@@ -883,15 +895,13 @@ mod tests {
         // Test clearing a text selection
         let mut state = EditorState::with_text("Hello World");
         // Set initial selection
-        state.cursor.selection = Some(TextRange::new(
-            TextPosition::new(0, 0),
-            TextPosition::new(0, 5),
-        ));
+        state.cursor.anchor = TextPosition::new(0, 0);
+        state.cursor.head = TextPosition::new(0, 5);
 
         let action = EditorAction::SetSelection { range: None };
 
         let new_state = apply_action(state, action);
-        assert!(new_state.cursor.selection.is_none());
+        assert!(new_state.cursor.selection().is_none());
     }
 
     #[test]
@@ -1059,8 +1069,8 @@ mod tests {
         state = apply_action(state, action2);
 
         // The desired_column should be updated to visual column 8
-        assert_eq!(state.cursor.position.line, 1);
-        assert_eq!(state.cursor.position.column, 1);
+        assert_eq!(state.cursor.head.line, 1);
+        assert_eq!(state.cursor.head.column, 1);
         assert_eq!(state.cursor.desired_column, 8);
     }
 }

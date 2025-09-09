@@ -168,12 +168,11 @@ impl Stoat {
 
     /// Returns the current editor mode as a string.
     ///
-    /// Possible values: "normal", "insert", "visual", "command"
+    /// Possible values: "normal", "insert", "command"
     pub fn mode(&self) -> &str {
         match self.engine.mode() {
             EditMode::Normal => "normal",
             EditMode::Insert => "insert",
-            EditMode::Visual { .. } => "visual",
             EditMode::Command => "command",
         }
     }
@@ -651,15 +650,18 @@ mod stoat_tests {
         // a=1, tab aligns to 8, a=9, tab aligns to 16
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 16,
+            state.cursor.position().visual_column,
+            16,
             "Visual column should be 16 after 'a<tab>a<tab>'"
         );
         assert_eq!(
-            state.cursor.position.column, 4,
+            state.cursor.position().column,
+            4,
             "Character column should be 4"
         );
         assert_eq!(
-            state.cursor.position.byte_offset, 4,
+            state.cursor.position().byte_offset,
+            4,
             "Byte offset should be 4"
         );
 
@@ -673,15 +675,18 @@ mod stoat_tests {
         // Check cursor position after backspace
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 9,
+            state.cursor.position().visual_column,
+            9,
             "Visual column should be 9 after backspace"
         );
         assert_eq!(
-            state.cursor.position.column, 3,
+            state.cursor.position().column,
+            3,
             "Character column should be 3 after backspace"
         );
         assert_eq!(
-            state.cursor.position.byte_offset, 3,
+            state.cursor.position().byte_offset,
+            3,
             "Byte offset should be 3 after backspace"
         );
         assert_eq!(
@@ -701,7 +706,8 @@ mod stoat_tests {
         assert_eq!(editor.buffer_contents(), "\t");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 8,
+            state.cursor.position().visual_column,
+            8,
             "Tab should move to column 8"
         );
 
@@ -710,10 +716,11 @@ mod stoat_tests {
         assert_eq!(editor.buffer_contents(), "");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 0,
+            state.cursor.position().visual_column,
+            0,
             "Should be back at column 0"
         );
-        assert_eq!(state.cursor.position.column, 0);
+        assert_eq!(state.cursor.position().column, 0);
     }
 
     #[test]
@@ -729,7 +736,8 @@ mod stoat_tests {
         assert_eq!(editor.buffer_contents(), "\t\t\t");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 24,
+            state.cursor.position().visual_column,
+            24,
             "Three tabs: 8, 16, 24"
         );
 
@@ -740,7 +748,7 @@ mod stoat_tests {
 
         // Should be at position 1 (after first tab)
         let state = editor.engine().state();
-        assert_eq!(state.cursor.position.column, 1);
+        assert_eq!(state.cursor.position().column, 1);
 
         // Enter insert mode and backspace
         editor.keyboard_input("i");
@@ -749,8 +757,8 @@ mod stoat_tests {
         // Should have deleted the first tab
         assert_eq!(editor.buffer_contents(), "\t\t");
         let state = editor.engine().state();
-        assert_eq!(state.cursor.position.column, 0);
-        assert_eq!(state.cursor.position.visual_column, 0);
+        assert_eq!(state.cursor.position().column, 0);
+        assert_eq!(state.cursor.position().visual_column, 0);
     }
 
     #[test]
@@ -777,7 +785,8 @@ mod stoat_tests {
         assert_eq!(editor.buffer_contents(), "abc\tdef");
         let state = editor.engine().state();
         assert_eq!(
-            state.cursor.position.visual_column, 11,
+            state.cursor.position().visual_column,
+            11,
             "abc=3, tab to 8, def=11"
         );
 
@@ -787,6 +796,6 @@ mod stoat_tests {
         editor.keyboard_input("<Backspace>"); // Delete tab
         assert_eq!(editor.buffer_contents(), "abc");
         let state = editor.engine().state();
-        assert_eq!(state.cursor.position.visual_column, 3);
+        assert_eq!(state.cursor.position().visual_column, 3);
     }
 }

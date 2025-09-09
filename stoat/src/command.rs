@@ -29,8 +29,6 @@ pub enum Command {
     EnterInsertMode,
     /// Enter Normal mode
     EnterNormalMode,
-    /// Enter Visual mode
-    EnterVisualMode,
     /// Enter Command mode
     EnterCommandMode,
 
@@ -60,7 +58,6 @@ impl Command {
             Command::MoveCursorDown => "Move cursor down",
             Command::EnterInsertMode => "Enter Insert mode",
             Command::EnterNormalMode => "Enter Normal mode",
-            Command::EnterVisualMode => "Enter Visual mode",
             Command::EnterCommandMode => "Enter Command mode",
             Command::InsertStr(_) => "Insert text",
             Command::InsertNewline => "Insert newline",
@@ -79,7 +76,6 @@ impl Command {
             Command::MoveCursorDown => "Down",
             Command::EnterInsertMode => "Insert",
             Command::EnterNormalMode => "Normal",
-            Command::EnterVisualMode => "Visual",
             Command::EnterCommandMode => "Command",
             Command::InsertStr(_) => "Insert",
             Command::InsertNewline => "Enter",
@@ -121,9 +117,6 @@ impl Command {
             }),
             Command::EnterNormalMode => Some(EditorAction::SetMode {
                 mode: EditMode::Normal,
-            }),
-            Command::EnterVisualMode => Some(EditorAction::SetMode {
-                mode: EditMode::Visual { line_mode: false },
             }),
             Command::EnterCommandMode => Some(EditorAction::SetMode {
                 mode: EditMode::Command,

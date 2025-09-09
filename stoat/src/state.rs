@@ -66,12 +66,12 @@ impl EditorState {
 
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> TextPosition {
-        self.cursor.position
+        self.cursor.position()
     }
 
     /// Returns the current text selection, if any.
     pub fn selection(&self) -> Option<TextRange> {
-        self.cursor.selection
+        self.cursor.selection()
     }
 
     /// Returns the complete text content.
@@ -209,14 +209,17 @@ impl TextBuffer {
     }
 }
 
-/// Cursor state including position and selection.
+/// Cursor state with Helix-style anchor/head model.
+///
+/// In this model, the cursor always represents a selection range.
+/// When anchor == head, it's a single character selection (normal cursor).
 #[derive(Debug, Clone)]
 pub struct Cursor {
-    /// Current cursor position
-    pub position: TextPosition,
+    /// Anchor position (where selection started)
+    pub anchor: TextPosition,
 
-    /// Text selection range, if any
-    pub selection: Option<TextRange>,
+    /// Head position (where cursor currently is)
+    pub head: TextPosition,
 
     /// Desired column for vertical movement (vim's 'virtualedit' concept)
     pub desired_column: usize,
@@ -230,19 +233,52 @@ impl Default for Cursor {
 
 impl Cursor {
     pub fn new() -> Self {
+        let start = TextPosition::start();
         Self {
-            position: TextPosition::start(),
-            selection: None,
+            anchor: start.clone(),
+            head: start,
             desired_column: 0,
         }
     }
 
     pub fn at_position(position: TextPosition) -> Self {
         Self {
-            position,
-            selection: None,
+            anchor: position.clone(),
+            head: position.clone(),
             desired_column: position.column,
         }
+    }
+
+    /// Returns the current cursor position (the head)
+    pub fn position(&self) -> TextPosition {
+        self.head.clone()
+    }
+
+    /// Returns the selection range if anchor != head
+    pub fn selection(&self) -> Option<TextRange> {
+        if self.anchor == self.head {
+            None
+        } else {
+            // Always return range with start <= end
+            if self.anchor < self.head {
+                Some(TextRange::new(self.anchor.clone(), self.head.clone()))
+            } else {
+                Some(TextRange::new(self.head.clone(), self.anchor.clone()))
+            }
+        }
+    }
+
+    /// Move head while keeping anchor fixed (extends selection)
+    pub fn move_head(&mut self, new_head: TextPosition) {
+        self.head = new_head;
+        self.desired_column = self.head.column;
+    }
+
+    /// Move both anchor and head to same position (collapses selection)
+    pub fn move_to(&mut self, position: TextPosition) {
+        self.anchor = position.clone();
+        self.head = position.clone();
+        self.desired_column = self.head.column;
     }
 }
 
@@ -359,7 +395,9 @@ impl EditorStateBuilder {
     }
 
     pub fn with_cursor(mut self, line: usize, column: usize) -> Self {
-        self.state.cursor.position = TextPosition::new(line, column);
+        let pos = TextPosition::new(line, column);
+        self.state.cursor.anchor = pos.clone();
+        self.state.cursor.head = pos;
         self.state.cursor.desired_column = column;
         self
     }
@@ -370,7 +408,8 @@ impl EditorStateBuilder {
     }
 
     pub fn with_selection(mut self, start: TextPosition, end: TextPosition) -> Self {
-        self.state.cursor.selection = Some(TextRange::new(start, end));
+        self.state.cursor.anchor = start;
+        self.state.cursor.head = end;
         self
     }
 

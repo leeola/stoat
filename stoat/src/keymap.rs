@@ -18,7 +18,6 @@ use std::collections::HashMap;
 pub struct Keymap {
     normal: HashMap<KeyBinding, Command>,
     insert: HashMap<KeyBinding, Command>,
-    visual: HashMap<KeyBinding, Command>,
     command: HashMap<KeyBinding, Command>,
 }
 
@@ -28,7 +27,6 @@ impl Keymap {
         let mut keymap = Self {
             normal: HashMap::new(),
             insert: HashMap::new(),
-            visual: HashMap::new(),
             command: HashMap::new(),
         };
 
@@ -43,7 +41,6 @@ impl Keymap {
         match mode {
             EditMode::Normal => self.normal.get(&binding),
             EditMode::Insert => self.insert.get(&binding),
-            EditMode::Visual { .. } => self.visual.get(&binding),
             EditMode::Command => self.command.get(&binding),
         }
         .cloned()
@@ -57,7 +54,6 @@ impl Keymap {
         self.bind_normal("k", Command::MoveCursorUp);
         self.bind_normal("l", Command::MoveCursorRight);
         self.bind_normal("i", Command::EnterInsertMode);
-        self.bind_normal("v", Command::EnterVisualMode);
         self.bind_normal(":", Command::EnterCommandMode);
         self.bind_normal("?", Command::ToggleCommandInfo);
 
@@ -68,9 +64,6 @@ impl Keymap {
         self.bind_insert_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
         self.bind_insert_key(keys::ENTER.to_string(), Command::InsertNewline);
         self.bind_insert_key(keys::BACKSPACE.to_string(), Command::DeleteChar);
-
-        // Visual mode bindings
-        self.bind_visual_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
 
         // Command mode bindings
         self.bind_command_key(keys::ESCAPE.to_string(), Command::EnterNormalMode);
@@ -93,12 +86,6 @@ impl Keymap {
         self.insert.insert(binding, command);
     }
 
-    /// Bind a key to a command in visual mode.
-    fn bind_visual_key(&mut self, key: Key, command: Command) {
-        let binding = KeyBinding::new(key, Modifiers::default());
-        self.visual.insert(binding, command);
-    }
-
     /// Bind a key to a command in command mode.
     fn bind_command_key(&mut self, key: Key, command: Command) {
         let binding = KeyBinding::new(key, Modifiers::default());
@@ -110,7 +97,6 @@ impl Keymap {
         match mode {
             EditMode::Normal => self.normal.values().collect(),
             EditMode::Insert => self.insert.values().collect(),
-            EditMode::Visual { .. } => self.visual.values().collect(),
             EditMode::Command => self.command.values().collect(),
         }
     }
@@ -120,7 +106,6 @@ impl Keymap {
         let map = match mode {
             EditMode::Normal => &self.normal,
             EditMode::Insert => &self.insert,
-            EditMode::Visual { .. } => &self.visual,
             EditMode::Command => &self.command,
         };
 

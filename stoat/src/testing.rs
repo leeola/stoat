@@ -54,8 +54,8 @@ impl StateBuilder {
 
     /// Sets the cursor position.
     pub fn with_cursor(mut self, line: usize, column: usize) -> Self {
-        self.state.cursor.position = TextPosition::new(line, column);
-        self.state.cursor.desired_column = column;
+        let pos = TextPosition::new(line, column);
+        self.state.cursor.move_to(pos);
         self
     }
 
@@ -67,7 +67,8 @@ impl StateBuilder {
 
     /// Sets text selection range.
     pub fn with_selection(mut self, start: TextPosition, end: TextPosition) -> Self {
-        self.state.cursor.selection = Some(TextRange::new(start, end));
+        self.state.cursor.anchor = start;
+        self.state.cursor.head = end;
         self
     }
 
@@ -127,8 +128,8 @@ impl EngineBuilder {
     }
 
     pub fn with_cursor(mut self, line: usize, column: usize) -> Self {
-        self.state.cursor.position = TextPosition::new(line, column);
-        self.state.cursor.desired_column = column;
+        let pos = TextPosition::new(line, column);
+        self.state.cursor.move_to(pos);
         self
     }
 
