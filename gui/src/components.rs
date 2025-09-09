@@ -3,4 +3,4 @@
 //! This module contains self-contained, styled components that follow
 //! GPUI patterns for composability and theming.
 
-pub mod help_small;
+pub mod command_panel;

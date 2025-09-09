@@ -5,7 +5,7 @@
 
 use crate::{
     buffer_view::{BufferView, RenderedLine},
-    components::help_small::HelpSmall,
+    components::command_panel::CommandPanel,
     stoat_bridge::{process_effects, StoatBridge},
     theme::EditorTheme,
 };
@@ -255,7 +255,13 @@ impl Render for EditorView {
         let container = div().relative().size_full().child(main_view);
 
         if self.show_help {
-            container.child(cx.new(|_cx| HelpSmall::new(self.theme.clone())))
+            container.child(cx.new(|_cx| {
+                CommandPanel::new(
+                    self.theme.clone(),
+                    self.help_mode.clone(),
+                    self.help_commands.clone(),
+                )
+            }))
         } else {
             container
         }
