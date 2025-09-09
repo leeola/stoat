@@ -1,0 +1,121 @@
+# Example keymap configuration for Stoat editor
+
+initial_mode = "normal"
+
+# Normal mode - navigation and commands
+[modes.normal]
+display_name = "NORMAL"
+
+[modes.normal.keys]
+# Movement
+h = "move_left"
+j = "move_down"
+k = "move_up"
+l = "move_right"
+
+# Word movement
+w = "move_word_forward"
+b = "move_word_backward"
+e = "move_word_end"
+
+# Line movement
+"0" = "move_line_start"
+"$" = "move_line_end"
+
+# Mode switches
+i = { mode = "insert" }
+v = { mode = "visual" }
+":" = { mode = "command" }
+a = { command = "move_right", mode = "insert" } # append (move right then insert)
+
+# Prefix modes
+d = { mode = "delete" }
+g = { mode = "goto" }
+"C-w" = { mode = "window" }
+
+# Direct commands
+x = "delete_char"
+u = "undo"
+"C-r" = "redo"
+
+# Insert mode - text entry
+[modes.insert]
+display_name = "INSERT"
+fallback = "insert_char" # Unmapped keys insert their character
+
+[modes.insert.keys]
+"Escape" = { mode = "normal" }
+"C-c" = { mode = "normal" }
+"Tab" = "indent"
+"S-Tab" = "dedent"
+"Enter" = "insert_newline"
+"Backspace" = "delete_char_backward"
+
+# Visual mode - selection
+[modes.visual]
+display_name = "VISUAL"
+
+[modes.visual.keys]
+# Movement extends selection
+h = "extend_left"
+j = "extend_down"
+k = "extend_up"
+l = "extend_right"
+
+# Operations on selection
+d = "delete_selection"
+y = "yank_selection"
+c = { command = "delete_selection", mode = "insert" }
+
+# Exit visual mode
+"Escape" = { mode = "normal" }
+
+# Delete prefix mode
+[modes.delete]
+display_name = "DELETE"
+return_to = "normal"    # Auto-return after any command
+
+[modes.delete.keys]
+d = "delete_line"
+w = "delete_word"
+b = "delete_word_backward"
+"$" = "delete_to_line_end"
+"0" = "delete_to_line_start"
+
+# Goto prefix mode
+[modes.goto]
+display_name = "GOTO"
+return_to = "normal"
+
+[modes.goto.keys]
+g = "go_to_start"
+G = "go_to_end"
+d = "go_to_definition"
+r = "go_to_references"
+n = "go_to_next_diagnostic"
+p = "go_to_prev_diagnostic"
+
+# Window management prefix mode
+[modes.window]
+display_name = "WINDOW"
+return_to = "normal"
+
+[modes.window.keys]
+v = "split_vertical"
+s = "split_horizontal"
+h = "focus_left"
+j = "focus_down"
+k = "focus_up"
+l = "focus_right"
+q = "close_window"
+
+# Command mode - ex commands
+[modes.command]
+display_name = "COMMAND"
+fallback = "append_to_command"
+
+[modes.command.keys]
+"Enter" = "execute_command"
+"Escape" = { mode = "normal" }
+"Backspace" = "delete_command_char"
+"Tab" = "complete_command"

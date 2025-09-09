@@ -38,6 +38,7 @@
 pub mod actions;
 pub mod cli;
 pub mod command;
+pub mod config;
 pub mod effects;
 pub mod engine;
 pub mod events;
