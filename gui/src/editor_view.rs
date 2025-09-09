@@ -5,7 +5,7 @@
 
 use crate::{
     buffer_view::{BufferView, RenderedLine},
-    help_dialog::HelpDialog,
+    components::help_small::HelpSmall,
     stoat_bridge::{process_effects, StoatBridge},
     theme::EditorTheme,
 };
@@ -45,7 +45,7 @@ impl EditorView {
             font_family: "JetBrains Mono".into(),
             font_size: 14.0,
             line_height: 20.0,
-            show_help: true,
+            show_help: false,
         }
     }
 
@@ -223,12 +223,12 @@ impl Render for EditorView {
                 self.render_status_bar(window),
             );
 
-        // Always show help dialog for design iteration
+        // Render with the small help popup (always shown for design iteration)
         div()
             .relative()
             .size_full()
             .child(main_view)
-            .child(cx.new(|_cx| HelpDialog::new(self.theme.clone())))
+            .child(cx.new(|_cx| HelpSmall::new(self.theme.clone())))
     }
 }
 

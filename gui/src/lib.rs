@@ -1,4 +1,5 @@
 mod buffer_view;
+mod components;
 mod editor_view;
 mod help_dialog;
 mod stoat_bridge;
