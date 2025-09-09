@@ -51,6 +51,21 @@ pub async fn process_effects(effects: Vec<Effect>) -> anyhow::Result<()> {
                 tracing::info!("Bell effect");
                 // TODO: Ring terminal bell or visual bell
             },
+
+            Effect::ShowHelp {
+                visible,
+                mode,
+                commands,
+            } => {
+                tracing::info!(
+                    "ShowHelp effect: visible={}, mode={}, {} commands",
+                    visible,
+                    mode,
+                    commands.len()
+                );
+                // TODO: Update help dialog visibility and content
+                // This will need to be handled by EditorView since it needs access to UI state
+            },
         }
     }
 

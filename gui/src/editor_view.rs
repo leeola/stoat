@@ -30,6 +30,10 @@ pub struct EditorView {
     line_height: f32,
     /// Whether to show help dialog
     show_help: bool,
+    /// Current mode for help display
+    help_mode: String,
+    /// Available commands for help display
+    help_commands: Vec<(String, String)>,
 }
 
 impl EditorView {
@@ -46,6 +50,8 @@ impl EditorView {
             font_size: 14.0,
             line_height: 20.0,
             show_help: false,
+            help_mode: "Normal".to_string(),
+            help_commands: vec![],
         }
     }
 
@@ -61,7 +67,9 @@ impl EditorView {
             font_family: "JetBrains Mono".into(),
             font_size: 14.0,
             line_height: 20.0,
-            show_help: true,
+            show_help: false,
+            help_mode: "Normal".to_string(),
+            help_commands: vec![],
         }
     }
 
@@ -77,14 +85,34 @@ impl EditorView {
         // Process the keystroke through Stoat
         let effects = self.bridge.handle_keystroke(keystroke);
 
-        // Handle any effects
-        if !effects.is_empty() {
-            cx.spawn(async move |_handle, _cx| {
-                if let Err(e) = process_effects(effects).await {
-                    tracing::error!("Failed to process effects: {}", e);
-                }
-            })
-            .detach();
+        // Handle effects
+        for effect in effects {
+            match effect {
+                stoat::Effect::ShowHelp {
+                    visible,
+                    mode,
+                    commands,
+                } => {
+                    // Update help state from the effect
+                    self.show_help = visible;
+                    self.help_mode = mode;
+                    self.help_commands = commands;
+                    tracing::debug!(
+                        "Updated help state: visible={}, mode={}",
+                        visible,
+                        self.help_mode
+                    );
+                },
+                // Handle other effects asynchronously
+                other_effect => {
+                    cx.spawn(async move |_handle, _cx| {
+                        if let Err(e) = process_effects(vec![other_effect]).await {
+                            tracing::error!("Failed to process effect: {}", e);
+                        }
+                    })
+                    .detach();
+                },
+            }
         }
 
         // Invalidate buffer cache for changed lines (simplified for now)
@@ -223,12 +251,14 @@ impl Render for EditorView {
                 self.render_status_bar(window),
             );
 
-        // Render with the small help popup (always shown for design iteration)
-        div()
-            .relative()
-            .size_full()
-            .child(main_view)
-            .child(cx.new(|_cx| HelpSmall::new(self.theme.clone())))
+        // Conditionally render with the help popup based on state
+        let container = div().relative().size_full().child(main_view);
+
+        if self.show_help {
+            container.child(cx.new(|_cx| HelpSmall::new(self.theme.clone())))
+        } else {
+            container
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //! for stateless rendering and theme integration.
 
 use crate::theme::EditorTheme;
-use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
+use gpui::{div, px, Context, IntoElement, ParentElement, Render, Styled, Window};
 
 /// Position where the help popup should appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -129,7 +129,7 @@ fn process_key_press(
     // First try to look up a command from the keymap
     if let Some(command) = keymap.lookup(&key, &modifiers, state.mode) {
         tracing::debug!("Found command for key: {:?}", command);
-        let result = process_command(state, command);
+        let result = process_command(state, command, keymap);
 
         // Log mode changes
         if result.0.mode != original_mode {
@@ -161,7 +161,7 @@ fn process_key_press(
         if let Some(text) = text_to_insert {
             let command = Command::InsertStr(text.into());
             tracing::debug!("Insert mode text: {:?}", command);
-            let result = process_command(state, command);
+            let result = process_command(state, command, keymap);
 
             if result.0.mode != original_mode {
                 tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
@@ -181,12 +181,40 @@ fn process_key_press(
 }
 
 /// Process a command and return new state plus effects.
-fn process_command(state: EditorState, command: Command) -> (EditorState, Vec<Effect>) {
+fn process_command(
+    state: EditorState,
+    command: Command,
+    keymap: &Keymap,
+) -> (EditorState, Vec<Effect>) {
     tracing::debug!("Processing command: {:?}", command);
 
     // Handle commands that produce effects but no state changes
     if command == Command::Exit {
         return (state, vec![Effect::Exit]);
+    }
+
+    // Handle ToggleCommandInfo specially to generate ShowHelp effect
+    if command == Command::ToggleCommandInfo {
+        // Apply the action to toggle the state
+        if let Some(action) = command.to_action(&state) {
+            let new_state = apply_action(state, action);
+
+            // Generate ShowHelp effect with current mode's commands
+            let mode = new_state.mode;
+            let commands = keymap
+                .get_bindings_for_mode(mode)
+                .into_iter()
+                .map(|(key, cmd)| (key, cmd.description().to_string()))
+                .collect();
+
+            let effect = Effect::ShowHelp {
+                visible: new_state.show_command_info,
+                mode: format!("{:?}", mode),
+                commands,
+            };
+
+            return (new_state, vec![effect]);
+        }
     }
 
     // Convert command to action and apply it

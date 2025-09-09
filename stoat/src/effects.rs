@@ -28,4 +28,14 @@ pub enum Effect {
 
     /// Ring the terminal bell (for error feedback)
     Bell,
+
+    /// Show or hide the help dialog with available commands
+    ShowHelp {
+        /// Whether the help dialog should be visible
+        visible: bool,
+        /// Current editing mode
+        mode: String,
+        /// Available commands as (key_binding, description) pairs
+        commands: Vec<(String, String)>,
+    },
 }
