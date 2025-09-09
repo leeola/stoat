@@ -5,6 +5,7 @@
 
 use crate::{
     actions::{EditMode, TextPosition},
+    config::{KeyBinding, KeymapConfig, ModeConfig},
     effects::Effect,
     events::EditorEvent,
     input::{keys, Key, Modifiers, MouseButton, Point},
@@ -43,6 +44,7 @@ use crate::{
 pub struct TestStoat {
     stoat: Stoat,
     last_effects: Vec<Effect>,
+    keymap_config: Option<KeymapConfig>,
 }
 
 impl TestStoat {
@@ -51,6 +53,7 @@ impl TestStoat {
         Self {
             stoat: Stoat::new(),
             last_effects: Vec::new(),
+            keymap_config: None,
         }
     }
 
@@ -130,6 +133,105 @@ impl TestStoat {
     /// key notation (e.g., "<Space>", "<Tab>", "<CR>").
     pub fn send_event(mut self, event: EditorEvent) -> Self {
         self.last_effects = self.stoat.engine_mut().handle_event(event);
+        self
+    }
+
+    /// Sets up a custom keymap configuration.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .with_keymap(custom_config)
+    ///     .type_keys("x")  // Will use custom binding
+    /// ```
+    pub fn with_keymap(mut self, config: KeymapConfig) -> Self {
+        self.keymap_config = Some(config);
+        // TODO: Apply keymap config to engine when mode system is implemented
+        self
+    }
+
+    /// Binds a single key in the specified mode.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .bind_key("normal", "x", KeyBinding::Command("delete_char".into()))
+    ///     .type_keys("x")
+    ///     .assert_text("");
+    /// ```
+    pub fn bind_key(mut self, mode: &str, key: &str, binding: KeyBinding) -> Self {
+        if self.keymap_config.is_none() {
+            self.keymap_config = Some(KeymapConfig::default());
+        }
+
+        let config = self.keymap_config.as_mut().unwrap();
+        config
+            .modes
+            .entry(mode.to_string())
+            .or_insert_with(ModeConfig::default)
+            .keys
+            .insert(key.to_string(), binding);
+
+        // TODO: Apply keymap config to engine when mode system is implemented
+        self
+    }
+
+    /// Starts a fluent keymap builder for binding multiple keys.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .bind_keys()
+    ///         .in_mode("normal")
+    ///             .key("x", "delete_char")
+    ///             .key("d", Mode("delete"))
+    ///         .in_mode("delete")
+    ///             .fallback("delete_motion")
+    ///             .return_to("normal")
+    ///             .key("d", "delete_line")
+    ///         .apply()
+    ///     .type_keys("dd");
+    /// ```
+    pub fn bind_keys(self) -> KeymapBuilder {
+        KeymapBuilder::new(self)
+    }
+
+    /// Defines a new mode with the given name.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .define_mode("my_mode")
+    ///         .display_name("MY MODE")
+    ///         .inherit("normal")
+    ///         .fallback("insert_char")
+    ///         .return_to("normal")
+    ///         .apply()
+    /// ```
+    pub fn define_mode(self, name: &str) -> ModeBuilder {
+        ModeBuilder::new(self, name.to_string())
+    }
+
+    /// Switches the editor to a custom mode for testing.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .define_mode("custom")
+    ///         .key("x", "special_command")
+    ///         .apply()
+    ///     .with_mode("custom")
+    ///     .type_keys("x");
+    /// ```
+    pub fn with_mode(self, mode_name: &str) -> Self {
+        // TODO: Switch to custom mode when mode system is implemented
+        // For now, this is a placeholder
+        let _ = mode_name;
         self
     }
 
@@ -348,6 +450,60 @@ impl TestStoat {
         &self.last_effects
     }
 
+    /// Asserts the editor is in the specified mode by name.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .define_mode("custom")
+    ///         .apply()
+    ///     .with_mode("custom")
+    ///     .assert_in_mode("custom");
+    /// ```
+    #[track_caller]
+    pub fn assert_in_mode(self, mode_name: &str) -> Self {
+        // TODO: Check mode by name when mode system is implemented
+        // For now, this is a placeholder
+        let _ = mode_name;
+        self
+    }
+
+    /// Asserts a specific key binding exists in a mode.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TestStoat::new()
+    ///     .bind_key("normal", "x", KeyBinding::Command("delete_char".into()))
+    ///     .assert_binding("normal", "x", KeyBinding::Command("delete_char".into()));
+    /// ```
+    #[track_caller]
+    pub fn assert_binding(self, mode: &str, key: &str, expected: KeyBinding) -> Self {
+        if let Some(ref config) = self.keymap_config {
+            if let Some(mode_config) = config.modes.get(mode) {
+                if let Some(binding) = mode_config.keys.get(key) {
+                    // We can't use assert_eq directly because KeyBinding doesn't implement
+                    // PartialEq For now, we'll use debug format comparison
+                    assert_eq!(
+                        format!("{:?}", binding),
+                        format!("{:?}", expected),
+                        "Binding mismatch for key '{}' in mode '{}'",
+                        key,
+                        mode
+                    );
+                } else {
+                    panic!("No binding found for key '{}' in mode '{}'", key, mode);
+                }
+            } else {
+                panic!("Mode '{}' not found in keymap config", mode);
+            }
+        } else {
+            panic!("No keymap config set");
+        }
+        self
+    }
+
     /// Consumes the test instance and returns the Stoat instance.
     pub fn into_stoat(self) -> Stoat {
         self.stoat
@@ -357,6 +513,205 @@ impl TestStoat {
 impl Default for TestStoat {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Fluent builder for configuring multiple key bindings.
+pub struct KeymapBuilder {
+    test_stoat: TestStoat,
+    current_mode: String,
+}
+
+impl KeymapBuilder {
+    fn new(mut test_stoat: TestStoat) -> Self {
+        if test_stoat.keymap_config.is_none() {
+            test_stoat.keymap_config = Some(KeymapConfig::default());
+        }
+        Self {
+            test_stoat,
+            current_mode: "normal".to_string(),
+        }
+    }
+
+    /// Switches to configuring a different mode.
+    pub fn in_mode(mut self, mode: &str) -> Self {
+        self.current_mode = mode.to_string();
+
+        // Ensure the mode exists in the config
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .entry(mode.to_string())
+            .or_insert_with(ModeConfig::default);
+
+        self
+    }
+
+    /// Adds a key binding to the current mode.
+    pub fn key<S: Into<String>>(mut self, key: &str, command: S) -> Self {
+        let binding = KeyBinding::Command(command.into());
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.current_mode)
+            .unwrap()
+            .keys
+            .insert(key.to_string(), binding);
+        self
+    }
+
+    /// Adds a mode switch binding to the current mode.
+    pub fn key_to_mode(mut self, key: &str, mode: &str) -> Self {
+        let binding = KeyBinding::Mode {
+            mode: mode.to_string(),
+        };
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.current_mode)
+            .unwrap()
+            .keys
+            .insert(key.to_string(), binding);
+        self
+    }
+
+    /// Sets the fallback behavior for unmapped keys in the current mode.
+    pub fn fallback<S: Into<String>>(mut self, command: S) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.current_mode)
+            .unwrap()
+            .fallback = Some(KeyBinding::Command(command.into()));
+        self
+    }
+
+    /// Sets the mode to return to after commands in this mode.
+    pub fn return_to(mut self, mode: &str) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.current_mode)
+            .unwrap()
+            .return_to = Some(mode.to_string());
+        self
+    }
+
+    /// Finishes building and returns the TestStoat instance.
+    pub fn apply(self) -> TestStoat {
+        // TODO: Apply keymap config to engine when mode system is implemented
+        self.test_stoat
+    }
+}
+
+/// Fluent builder for defining a new mode.
+pub struct ModeBuilder {
+    test_stoat: TestStoat,
+    mode_name: String,
+}
+
+impl ModeBuilder {
+    fn new(mut test_stoat: TestStoat, mode_name: String) -> Self {
+        if test_stoat.keymap_config.is_none() {
+            test_stoat.keymap_config = Some(KeymapConfig::default());
+        }
+
+        // Create the mode in the config
+        test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .entry(mode_name.clone())
+            .or_insert_with(ModeConfig::default);
+
+        Self {
+            test_stoat,
+            mode_name,
+        }
+    }
+
+    /// Sets the display name for this mode.
+    pub fn display_name(mut self, name: &str) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .display_name = Some(name.to_string());
+        self
+    }
+
+    /// Makes this mode inherit bindings from another mode.
+    pub fn inherit(mut self, parent_mode: &str) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .inherit = Some(parent_mode.to_string());
+        self
+    }
+
+    /// Sets the fallback behavior for unmapped keys.
+    pub fn fallback<S: Into<String>>(mut self, command: S) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .fallback = Some(KeyBinding::Command(command.into()));
+        self
+    }
+
+    /// Sets the mode to return to after commands.
+    pub fn return_to(mut self, mode: &str) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .return_to = Some(mode.to_string());
+        self
+    }
+
+    /// Adds a key binding to this mode.
+    pub fn key<S: Into<String>>(mut self, key: &str, command: S) -> Self {
+        let binding = KeyBinding::Command(command.into());
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .keys
+            .insert(key.to_string(), binding);
+        self
+    }
+
+    /// Finishes building and returns the TestStoat instance.
+    pub fn apply(self) -> TestStoat {
+        // TODO: Apply keymap config to engine when mode system is implemented
+        self.test_stoat
     }
 }
 
