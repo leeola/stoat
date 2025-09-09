@@ -103,6 +103,16 @@ impl EditorView {
                         self.help_mode
                     );
                 },
+                stoat::Effect::CommandContextChanged { mode, commands } => {
+                    // Update command panel content when context changes
+                    self.help_mode = mode;
+                    self.help_commands = commands;
+                    tracing::debug!(
+                        "Updated command context: mode={}, {} commands",
+                        self.help_mode,
+                        self.help_commands.len()
+                    );
+                },
                 // Handle other effects asynchronously
                 other_effect => {
                     cx.spawn(async move |_handle, _cx| {

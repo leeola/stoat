@@ -219,7 +219,26 @@ fn process_command(
 
     // Convert command to action and apply it
     if let Some(action) = command.to_action(&state) {
+        let old_mode = state.mode;
         let new_state = apply_action(state, action);
+
+        // Check if mode changed and help panel is visible
+        if new_state.mode != old_mode && new_state.show_command_info {
+            // Generate CommandContextChanged effect with new mode's commands
+            let commands = keymap
+                .get_bindings_for_mode(new_state.mode)
+                .into_iter()
+                .map(|(key, cmd)| (key, cmd.description().to_string()))
+                .collect();
+
+            let effect = Effect::CommandContextChanged {
+                mode: format!("{:?}", new_state.mode),
+                commands,
+            };
+
+            return (new_state, vec![effect]);
+        }
+
         (new_state, vec![])
     } else {
         // Command didn't produce an action (like Exit or invalid operations)

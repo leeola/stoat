@@ -66,6 +66,16 @@ pub async fn process_effects(effects: Vec<Effect>) -> anyhow::Result<()> {
                 // TODO: Update help dialog visibility and content
                 // This will need to be handled by EditorView since it needs access to UI state
             },
+
+            Effect::CommandContextChanged { mode, commands } => {
+                tracing::info!(
+                    "CommandContextChanged effect: mode={}, {} commands",
+                    mode,
+                    commands.len()
+                );
+                // TODO: Update command panel content
+                // This will need to be handled by EditorView since it needs access to UI state
+            },
         }
     }
 

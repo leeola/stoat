@@ -38,4 +38,14 @@ pub enum Effect {
         /// Available commands as (key_binding, description) pairs
         commands: Vec<(String, String)>,
     },
+
+    /// Command context has changed (mode switch, etc)
+    /// TODO: Optimize this to be very lean since it's emitted frequently on mode changes
+    CommandContextChanged {
+        /// Current editing mode
+        mode: String,
+        /// Available commands as (key_binding, description) pairs
+        /// TODO: Consider using Rc or Arc to avoid cloning command data
+        commands: Vec<(String, String)>,
+    },
 }
