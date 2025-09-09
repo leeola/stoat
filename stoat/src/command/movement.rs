@@ -151,3 +151,65 @@ fn move_cursor_down(state: &EditorState) -> TextPosition {
         pos
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Stoat;
+
+    #[test]
+    fn cursor_movement_in_normal_mode() {
+        Stoat::test()
+            .with_text("Hello World")
+            .assert_cursor(0, 0)
+            .type_keys("l") // Move right
+            .assert_cursor(0, 1)
+            .type_keys("l") // Move right again
+            .assert_cursor(0, 2)
+            .type_keys("h") // Move left
+            .assert_cursor(0, 1)
+            .type_keys("h") // Move left again
+            .assert_cursor(0, 0);
+    }
+
+    #[test]
+    fn keyboard_input_navigation() {
+        Stoat::test()
+            .with_text("Hello World")
+            .type_keys("l") // Move right
+            .assert_cursor(0, 1)
+            .type_keys("l") // Move right again
+            .assert_cursor(0, 2)
+            .type_keys("h") // Move left
+            .assert_cursor(0, 1)
+            .type_keys("h") // Move left again
+            .assert_cursor(0, 0);
+    }
+
+    #[test]
+    fn vertical_movement() {
+        Stoat::test()
+            .with_text("Line 1\nLine 2\nLine 3")
+            .assert_cursor(0, 0)
+            .type_keys("j") // Move down
+            .assert_cursor(1, 0)
+            .type_keys("j") // Move down again
+            .assert_cursor(2, 0)
+            .type_keys("k") // Move up
+            .assert_cursor(1, 0)
+            .type_keys("k") // Move up again
+            .assert_cursor(0, 0);
+    }
+
+    #[test]
+    fn movement_at_boundaries() {
+        Stoat::test()
+            .with_text("ABC")
+            .assert_cursor(0, 0)
+            .type_keys("h") // Try to move left at start - should stay
+            .assert_cursor(0, 0)
+            .type_keys("lll") // Move to end
+            .assert_cursor(0, 3)
+            .type_keys("l") // Try to move right at end - should stay
+            .assert_cursor(0, 3);
+    }
+}

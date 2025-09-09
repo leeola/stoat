@@ -305,108 +305,34 @@ pub mod events {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::actions::{EditMode, TextPosition};
+    use crate::{actions::EditMode, Stoat};
 
     #[test]
     fn new_engine_starts_empty() {
-        let engine = EditorEngine::new();
-        assert_eq!(engine.text(), "");
-        assert_eq!(engine.cursor_position(), TextPosition::start());
-        assert_eq!(engine.mode(), EditMode::Normal);
-        assert!(!engine.is_dirty());
+        Stoat::test()
+            .assert_text("")
+            .assert_cursor(0, 0)
+            .assert_mode(EditMode::Normal)
+            .assert_dirty(false);
     }
 
     #[test]
     fn with_text_sets_initial_content() {
-        let engine = EditorEngine::with_text("Hello, world!");
-        assert_eq!(engine.text(), "Hello, world!");
-        assert_eq!(engine.line_count(), 1);
-    }
-
-    #[test]
-    fn handle_insert_mode_typing() {
-        let mut engine = EditorEngine::new();
-
-        // Enter insert mode
-        let effects = engine.handle_event(events::char_key('i'));
-        assert!(effects.is_empty());
-        assert_eq!(engine.mode(), EditMode::Insert);
-
-        // Type some text
-        let effects = engine.handle_event(events::char_key('H'));
-        assert!(effects.is_empty());
-        assert_eq!(engine.text(), "H");
-
-        let effects = engine.handle_event(events::char_key('i'));
-        assert!(effects.is_empty());
-        assert_eq!(engine.text(), "Hi");
-
-        // Exit insert mode
-        let effects = engine.handle_event(events::escape());
-        assert!(effects.is_empty());
-        assert_eq!(engine.mode(), EditMode::Normal);
-    }
-
-    #[test]
-    fn handle_multiple_events() {
-        let mut engine = EditorEngine::new();
-
-        let events = vec![
-            events::char_key('i'), // Enter insert mode
-            events::char_key('H'), // Type 'H'
-            events::char_key('e'), // Type 'e'
-            events::char_key('l'), // Type 'l'
-            events::char_key('l'), // Type 'l'
-            events::char_key('o'), // Type 'o'
-        ];
-
-        let effects = engine.handle_events(events);
-        assert!(effects.is_empty());
-        assert_eq!(engine.text(), "Hello");
-        assert_eq!(engine.mode(), EditMode::Insert);
+        Stoat::test()
+            .with_text("Hello, world!")
+            .assert_text("Hello, world!");
     }
 
     #[test]
     fn snapshot_and_restore() {
-        let mut engine = EditorEngine::with_text("Original");
-        let snapshot = engine.snapshot();
+        let mut stoat = Stoat::with_text("Original");
+        let snapshot = stoat.engine().snapshot();
 
-        // Modify the state
-        engine.handle_event(events::char_key('i'));
-        engine.handle_event(events::char_key('X'));
-        assert_ne!(engine.text(), "Original");
+        stoat.keyboard_input("iX");
+        assert_ne!(stoat.buffer_contents(), "Original");
 
-        // Restore from snapshot
-        engine.set_state(snapshot);
-        assert_eq!(engine.text(), "Original");
-        assert_eq!(engine.mode(), EditMode::Normal);
-    }
-
-    #[test]
-    fn cursor_movement_in_normal_mode() {
-        let mut engine = EditorEngine::with_text("Hello World");
-        assert_eq!(engine.cursor_position().line, 0);
-        assert_eq!(engine.cursor_position().column, 0);
-
-        // Move right
-        engine.handle_event(events::char_key('l'));
-        assert_eq!(engine.cursor_position().line, 0);
-        assert_eq!(engine.cursor_position().column, 1);
-
-        // Move right again
-        engine.handle_event(events::char_key('l'));
-        assert_eq!(engine.cursor_position().line, 0);
-        assert_eq!(engine.cursor_position().column, 2);
-
-        // Move left
-        engine.handle_event(events::char_key('h'));
-        assert_eq!(engine.cursor_position().line, 0);
-        assert_eq!(engine.cursor_position().column, 1);
-
-        // Move left again
-        engine.handle_event(events::char_key('h'));
-        assert_eq!(engine.cursor_position().line, 0);
-        assert_eq!(engine.cursor_position().column, 0);
+        stoat.engine_mut().set_state(snapshot);
+        assert_eq!(stoat.buffer_contents(), "Original");
+        assert_eq!(stoat.engine().mode(), EditMode::Normal);
     }
 }

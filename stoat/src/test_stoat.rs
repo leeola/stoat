@@ -122,6 +122,17 @@ impl TestStoat {
         self
     }
 
+    /// Sends a raw event to the engine.
+    ///
+    /// This is useful for testing specific events that aren't key presses,
+    /// such as mouse events, resize events, or custom events.
+    /// For key events, prefer using `type_keys()` with the appropriate
+    /// key notation (e.g., "<Space>", "<Tab>", "<CR>").
+    pub fn send_event(mut self, event: EditorEvent) -> Self {
+        self.last_effects = self.stoat.engine_mut().handle_event(event);
+        self
+    }
+
     /// Asserts the current text content.
     #[track_caller]
     pub fn assert_text<S: AsRef<str>>(self, expected: S) -> Self {

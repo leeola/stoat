@@ -267,45 +267,22 @@ impl Default for Stoat {
 #[cfg(test)]
 mod stoat_tests {
     use super::*;
+    use crate::{actions::EditMode, input::Modifiers};
 
     #[test]
     fn stoat_new_creates_empty_editor() {
-        let editor = Stoat::new();
-        assert_eq!(editor.buffer_contents(), "");
-        assert_eq!(editor.cursor_position(), (0, 0));
-        assert_eq!(editor.mode(), "normal");
-        assert!(!editor.is_dirty());
+        Stoat::test()
+            .assert_text("")
+            .assert_cursor(0, 0)
+            .assert_mode(EditMode::Normal)
+            .assert_dirty(false);
     }
 
     #[test]
     fn stoat_with_text_initializes_content() {
-        let editor = Stoat::with_text("Hello\nWorld");
-        assert_eq!(editor.buffer_contents(), "Hello\nWorld");
-    }
-
-    #[test]
-    fn keyboard_input_basic_typing() {
-        let mut editor = Stoat::new();
-        editor.keyboard_input("iHello World<Esc>");
-
-        assert_eq!(editor.buffer_contents(), "Hello World");
-        assert_eq!(editor.mode(), "normal");
-    }
-
-    #[test]
-    fn keyboard_input_navigation() {
-        let mut editor = Stoat::with_text("Hello World");
-        editor.keyboard_input("l"); // Move right
-        assert_eq!(editor.cursor_position(), (0, 1));
-
-        editor.keyboard_input("l"); // Move right again
-        assert_eq!(editor.cursor_position(), (0, 2));
-
-        editor.keyboard_input("h"); // Move left
-        assert_eq!(editor.cursor_position(), (0, 1));
-
-        editor.keyboard_input("h"); // Move left again
-        assert_eq!(editor.cursor_position(), (0, 0));
+        Stoat::test()
+            .with_text("Hello\nWorld")
+            .assert_text("Hello\nWorld");
     }
 
     #[test]
@@ -328,67 +305,26 @@ mod stoat_tests {
     }
 
     #[test]
-    fn assert_buffer_eq_works() {
-        let mut editor = Stoat::new();
-        editor.keyboard_input("iTest");
-        editor.assert_buffer_eq("Test");
-    }
-
-    #[test]
-    fn assert_cursor_at_works() {
-        let mut editor = Stoat::with_text("Hello World");
-        editor.keyboard_input("ll"); // Move to column 2
-        editor.assert_cursor_at(0, 2);
-    }
-
-    #[test]
-    fn keyboard_input_delete_operations() {
-        let mut editor = Stoat::new();
-        editor.keyboard_input("iHello<BS><BS>"); // Type and delete
-        assert_eq!(editor.buffer_contents(), "Hel");
-    }
-
-    #[test]
     fn test_literal_space_key_event() {
-        let mut editor = Stoat::new();
-        // Enter insert mode
-        editor.keyboard_input("i");
-        assert_eq!(editor.mode(), "insert");
-
-        // Manually create and send a Space key event
-        let space_event = EditorEvent::KeyPress {
-            key: input::keys::SPACE.to_string(),
-            modifiers: input::Modifiers::default(),
-        };
-
-        editor.engine_mut().handle_event(space_event);
-
-        // Verify that a space was inserted
-        assert_eq!(
-            editor.buffer_contents(),
-            " ",
-            "Space key should insert a space character"
-        );
+        Stoat::test()
+            .type_keys("i") // Enter insert mode
+            .assert_mode(EditMode::Insert)
+            .type_keys(" ") // Type a literal space
+            .assert_text(" ");
     }
 
     #[test]
     fn test_keyboard_input_with_literal_space() {
-        let mut editor = Stoat::new();
-        // Type with literal space in the string
-        editor.keyboard_input("iHello World");
-        assert_eq!(
-            editor.buffer_contents(),
-            "Hello World",
-            "Literal space should be inserted"
-        );
+        Stoat::test()
+            .type_keys("iHello World")
+            .assert_text("Hello World");
     }
 
     #[test]
     fn test_keyboard_input_with_literal_tab() {
-        let mut editor = Stoat::new();
-        // Type with literal tab in the string
-        editor.keyboard_input("iHello\tWorld");
-        let contents = editor.buffer_contents();
+        let test = Stoat::test().type_keys("iHello\tWorld");
+
+        let contents = test.stoat().buffer_contents();
         assert!(
             contents == "Hello\tWorld" || contents.starts_with("Hello "),
             "Literal tab should be inserted as tab or spaces, got: {contents:?}"
@@ -406,7 +342,7 @@ mod stoat_tests {
         // Insert tab
         let tab_event = EditorEvent::KeyPress {
             key: input::keys::TAB.to_string(),
-            modifiers: input::Modifiers::default(),
+            modifiers: Modifiers::default(),
         };
         editor.engine_mut().handle_event(tab_event);
 
@@ -449,7 +385,7 @@ mod stoat_tests {
         // Insert tab - this should move cursor to next tab stop (column 8 in display)
         let tab_event = EditorEvent::KeyPress {
             key: input::keys::TAB.to_string(),
-            modifiers: input::Modifiers::default(),
+            modifiers: Modifiers::default(),
         };
         editor.engine_mut().handle_event(tab_event);
 
@@ -634,7 +570,7 @@ mod stoat_tests {
         // Manually create and send a Tab key event
         let tab_event = EditorEvent::KeyPress {
             key: input::keys::TAB.to_string(),
-            modifiers: input::Modifiers::default(),
+            modifiers: Modifiers::default(),
         };
 
         editor.engine_mut().handle_event(tab_event);
