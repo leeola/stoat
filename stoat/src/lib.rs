@@ -49,7 +49,7 @@ pub mod processor;
 pub mod state;
 
 #[cfg(test)]
-pub mod testing;
+pub mod test_session;
 
 // Re-export core types for convenient use
 use actions::EditMode;
