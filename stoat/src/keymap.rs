@@ -6,7 +6,7 @@
 use crate::{
     actions::EditMode,
     command::Command,
-    input::{keys, Key, Modifiers},
+    input::{Key, Modifiers, keys},
 };
 use std::collections::HashMap;
 

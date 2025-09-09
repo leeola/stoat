@@ -6,7 +6,7 @@
 
 use crate::{
     events::EditorEvent,
-    input::{keys, Modifiers},
+    input::{Modifiers, keys},
 };
 
 /// Parses a keyboard input string into a sequence of [`EditorEvent`]s.

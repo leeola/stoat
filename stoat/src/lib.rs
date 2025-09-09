@@ -49,7 +49,7 @@ pub mod processor;
 pub mod state;
 
 #[cfg(test)]
-pub mod test_session;
+pub mod test_stoat;
 
 // Re-export core types for convenient use
 use actions::EditMode;
@@ -236,6 +236,25 @@ impl Stoat {
             (line, column),
             "Cursor position mismatch: expected ({line}, {column}), got ({actual_line}, {actual_col})"
         );
+    }
+
+    /// Creates a [`TestStoat`] instance for fluent test writing.
+    ///
+    /// Returns a test wrapper with chainable methods for actions and assertions,
+    /// aimed at concise test code.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// Stoat::test()
+    ///     .with_text("Hello, World!")
+    ///     .type_keys("0dw")
+    ///     .assert_text(", World!")
+    ///     .assert_cursor(0, 0);
+    /// ```
+    #[cfg(test)]
+    pub fn test() -> test_stoat::TestStoat {
+        test_stoat::TestStoat::new()
     }
 }
 
