@@ -4,12 +4,12 @@
 //! utilities to make testing editor functionality easier and more readable.
 
 use crate::{
-    Stoat,
     actions::{EditMode, TextPosition},
     effects::Effect,
     events::EditorEvent,
-    input::{Key, Modifiers, MouseButton, Point, keys},
+    input::{keys, Key, Modifiers, MouseButton, Point},
     state::EditorState,
+    Stoat,
 };
 
 /// Fluent test API for low-LOC test writing.

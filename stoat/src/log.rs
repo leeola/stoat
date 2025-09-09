@@ -41,7 +41,7 @@
 //! multiple times or if logging is already initialized.
 
 use std::env;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 /// Initialize logging for production use.
 ///

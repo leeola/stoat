@@ -232,7 +232,7 @@ impl std::fmt::Debug for EditorEngine {
 pub mod events {
     use crate::{
         events::EditorEvent,
-        input::{Key, Modifiers, MouseButton, keys},
+        input::{keys, Key, Modifiers, MouseButton},
     };
 
     /// Creates a key press event.
