@@ -142,10 +142,18 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::{Stoat, config::{KeymapConfig, ModeConfig, KeyBinding}};
+    /// use std::collections::HashMap;
+    ///
+    /// let mut custom_config = KeymapConfig::default();
+    /// let mut normal_mode = ModeConfig::default();
+    /// normal_mode.keys.insert("x".to_string(), KeyBinding::Command("delete_char".to_string()));
+    /// custom_config.modes.insert("normal".to_string(), normal_mode);
+    ///
+    /// Stoat::test()
     ///     .with_keymap(custom_config)
-    ///     .type_keys("x")  // Will use custom binding
+    ///     .type_keys("x");  // Will use custom binding
     /// ```
     pub fn with_keymap(mut self, config: KeymapConfig) -> Self {
         self.keymap_config = Some(config.clone());
@@ -158,11 +166,13 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::{Stoat, config::KeyBinding};
+    ///
+    /// Stoat::test()
+    ///     .with_text("hello")
     ///     .bind_key("normal", "x", KeyBinding::Command("delete_char".into()))
-    ///     .type_keys("x")
-    ///     .assert_text("");
+    ///     .type_keys("x");
     /// ```
     pub fn bind_key(mut self, mode: &str, key: &str, binding: KeyBinding) -> Self {
         if self.keymap_config.is_none() {
@@ -185,16 +195,17 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::Stoat;
+    ///
+    /// Stoat::test()
     ///     .bind_keys()
     ///         .in_mode("normal")
     ///             .key("x", "delete_char")
-    ///             .key("d", Mode("delete"))
+    ///             .key_to_mode("d", "delete")
     ///         .in_mode("delete")
-    ///             .fallback("delete_motion")
-    ///             .return_to("normal")
     ///             .key("d", "delete_line")
+    ///             .key("w", "delete_word")
     ///         .apply()
     ///     .type_keys("dd");
     /// ```
@@ -206,14 +217,15 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::Stoat;
+    ///
+    /// Stoat::test()
     ///     .define_mode("my_mode")
     ///         .display_name("MY MODE")
-    ///         .inherit("normal")
-    ///         .fallback("insert_char")
-    ///         .return_to("normal")
-    ///         .apply()
+    ///         .key("x", "delete_char")
+    ///         .key("q", "exit")
+    ///         .apply();
     /// ```
     pub fn define_mode(self, name: &str) -> ModeBuilder {
         ModeBuilder::new(self, name.to_string())
@@ -223,10 +235,12 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::Stoat;
+    ///
+    /// Stoat::test()
     ///     .define_mode("custom")
-    ///         .key("x", "special_command")
+    ///         .key("x", "delete_char")
     ///         .apply()
     ///     .with_mode("custom")
     ///     .type_keys("x");
@@ -460,8 +474,10 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::Stoat;
+    ///
+    /// Stoat::test()
     ///     .define_mode("custom")
     ///         .apply()
     ///     .with_mode("custom")
@@ -479,8 +495,10 @@ impl TestStoat {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// TestStoat::new()
+    /// ```rust
+    /// use stoat::{Stoat, config::KeyBinding};
+    ///
+    /// Stoat::test()
     ///     .bind_key("normal", "x", KeyBinding::Command("delete_char".into()))
     ///     .assert_binding("normal", "x", KeyBinding::Command("delete_char".into()));
     /// ```
