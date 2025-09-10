@@ -39,7 +39,6 @@ pub mod actions;
 pub mod cli;
 pub mod command;
 pub mod config;
-pub mod custom_keymap;
 pub mod effects;
 pub mod engine;
 pub mod events;

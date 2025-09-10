@@ -5,8 +5,8 @@
 //! will use to interact with the editor core.
 
 use crate::{
-    config::KeymapConfig, custom_keymap::CustomKeymap, effects::Effect, events::EditorEvent,
-    keymap::Keymap, processor::process_event, state::EditorState,
+    config::keymap::KeymapConfig, effects::Effect, events::EditorEvent, keymap::Keymap,
+    processor::process_event, state::EditorState,
 };
 
 /// Stateful editor engine that manages state and processes events.
@@ -39,7 +39,6 @@ use crate::{
 pub struct EditorEngine {
     state: EditorState,
     keymap: Keymap,
-    custom_keymap: Option<CustomKeymap>,
 }
 
 impl EditorEngine {
@@ -48,8 +47,7 @@ impl EditorEngine {
         tracing::info!("Creating new EditorEngine with empty state");
         Self {
             state: EditorState::new(),
-            keymap: Keymap::new(),
-            custom_keymap: None,
+            keymap: Keymap::default(),
         }
     }
 
@@ -61,8 +59,7 @@ impl EditorEngine {
         );
         Self {
             state: EditorState::with_text(text),
-            keymap: Keymap::new(),
-            custom_keymap: None,
+            keymap: Keymap::default(),
         }
     }
 
@@ -70,19 +67,13 @@ impl EditorEngine {
     pub fn with_state(state: EditorState) -> Self {
         Self {
             state,
-            keymap: Keymap::new(),
-            custom_keymap: None,
+            keymap: Keymap::default(),
         }
     }
 
     /// Sets a custom keymap configuration.
     pub fn set_keymap_config(&mut self, config: KeymapConfig) {
-        self.custom_keymap = Some(CustomKeymap::from_config(config));
-    }
-
-    /// Returns whether a custom keymap is configured.
-    pub fn has_custom_keymap(&self) -> bool {
-        self.custom_keymap.is_some()
+        self.keymap = Keymap::from_config(config);
     }
 
     /// Handles an event and returns any effects that should be executed.
@@ -101,11 +92,7 @@ impl EditorEngine {
     pub fn handle_event(&mut self, event: EditorEvent) -> Vec<Effect> {
         tracing::debug!("Engine handling event: {:?}", event);
 
-        let (new_state, effects) = if let Some(ref custom_keymap) = self.custom_keymap {
-            process_event(self.state.clone(), event, &self.keymap, Some(custom_keymap))
-        } else {
-            process_event(self.state.clone(), event, &self.keymap, None)
-        };
+        let (new_state, effects) = process_event(self.state.clone(), event, &self.keymap);
 
         // Log state changes
         if self.state.is_dirty != new_state.is_dirty {
