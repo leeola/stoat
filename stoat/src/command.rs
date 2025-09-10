@@ -10,6 +10,7 @@ mod mode;
 mod movement;
 
 pub use app::AppCommand;
+use compact_str::CompactString;
 pub use edit::EditCommand;
 pub use mode::ModeCommand;
 pub use movement::MovementCommand;
@@ -39,6 +40,8 @@ pub enum Command {
     EnterNormalMode,
     /// Enter Command mode
     EnterCommandMode,
+    /// Enter a specific mode by name
+    EnterMode(CompactString),
 
     // Text manipulation commands
     /// Insert a string at cursor position
@@ -79,6 +82,7 @@ impl Command {
             Command::EnterInsertMode => ModeCommand::EnterInsert.description(),
             Command::EnterNormalMode => ModeCommand::EnterNormal.description(),
             Command::EnterCommandMode => ModeCommand::EnterCommand.description(),
+            Command::EnterMode(_) => "Enter custom mode",
             Command::InsertStr(_) => "Insert text",
             Command::InsertNewline => EditCommand::InsertNewline.description(),
             Command::DeleteChar => EditCommand::DeleteChar.description(),
@@ -101,6 +105,7 @@ impl Command {
             Command::EnterInsertMode => ModeCommand::EnterInsert.short_name(),
             Command::EnterNormalMode => ModeCommand::EnterNormal.short_name(),
             Command::EnterCommandMode => ModeCommand::EnterCommand.short_name(),
+            Command::EnterMode(_) => "Mode",
             Command::InsertStr(_) => "Insert",
             Command::InsertNewline => EditCommand::InsertNewline.short_name(),
             Command::DeleteChar => EditCommand::DeleteChar.short_name(),
@@ -129,6 +134,9 @@ impl Command {
             Command::EnterInsertMode => Some(ModeCommand::EnterInsert.to_action()),
             Command::EnterNormalMode => Some(ModeCommand::EnterNormal.to_action()),
             Command::EnterCommandMode => Some(ModeCommand::EnterCommand.to_action()),
+            Command::EnterMode(mode_name) => Some(crate::actions::EditorAction::SetMode {
+                mode: crate::actions::EditMode::from_name(mode_name),
+            }),
             Command::InsertStr(text) => EditCommand::InsertStr(text.clone()).to_action(state),
             Command::InsertNewline => EditCommand::InsertNewline.to_action(state),
             Command::DeleteChar => EditCommand::DeleteChar.to_action(state),

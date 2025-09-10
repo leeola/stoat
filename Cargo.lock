@@ -6273,6 +6273,7 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "compact_str 0.9.0",
  "gpui",
  "serde",
  "serde_json",

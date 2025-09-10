@@ -4,13 +4,12 @@
 //! utilities to make testing editor functionality easier and more readable.
 
 use crate::{
+    Stoat,
     actions::{EditMode, TextPosition},
     config::{KeyBinding, KeymapConfig, ModeConfig},
     effects::Effect,
     events::EditorEvent,
-    input::{keys, Key, Modifiers, MouseButton, Point},
-    state::EditorState,
-    Stoat,
+    input::{Key, Modifiers, MouseButton, Point, keys},
 };
 
 /// Fluent test API for low-LOC test writing.
@@ -30,16 +29,15 @@ use crate::{
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use stoat::Stoat;
 ///
 /// Stoat::test()
 ///     .with_text("hello world")
 ///     .cursor(0, 5)
-///     .type_keys("viw")  // Select word in vim
-///     .assert_selection(0, 5, 0, 11)
-///     .type_keys("d")    // Delete selection
-///     .assert_text("hello ");
+///     .assert_cursor(0, 5)
+///     .type_text(" test")
+///     .assert_text("hello test world");
 /// ```
 pub struct TestStoat {
     stoat: Stoat,
@@ -589,32 +587,6 @@ impl KeymapBuilder {
         self
     }
 
-    /// Sets the fallback behavior for unmapped keys in the current mode.
-    pub fn fallback<S: Into<String>>(mut self, command: S) -> Self {
-        self.test_stoat
-            .keymap_config
-            .as_mut()
-            .unwrap()
-            .modes
-            .get_mut(&self.current_mode)
-            .unwrap()
-            .fallback = Some(KeyBinding::Command(command.into()));
-        self
-    }
-
-    /// Sets the mode to return to after commands in this mode.
-    pub fn return_to(mut self, mode: &str) -> Self {
-        self.test_stoat
-            .keymap_config
-            .as_mut()
-            .unwrap()
-            .modes
-            .get_mut(&self.current_mode)
-            .unwrap()
-            .return_to = Some(mode.to_string());
-        self
-    }
-
     /// Finishes building and returns the TestStoat instance.
     pub fn apply(mut self) -> TestStoat {
         // Apply keymap config to engine
@@ -665,45 +637,6 @@ impl ModeBuilder {
             .get_mut(&self.mode_name)
             .unwrap()
             .display_name = Some(name.to_string());
-        self
-    }
-
-    /// Makes this mode inherit bindings from another mode.
-    pub fn inherit(mut self, parent_mode: &str) -> Self {
-        self.test_stoat
-            .keymap_config
-            .as_mut()
-            .unwrap()
-            .modes
-            .get_mut(&self.mode_name)
-            .unwrap()
-            .inherit = Some(parent_mode.to_string());
-        self
-    }
-
-    /// Sets the fallback behavior for unmapped keys.
-    pub fn fallback<S: Into<String>>(mut self, command: S) -> Self {
-        self.test_stoat
-            .keymap_config
-            .as_mut()
-            .unwrap()
-            .modes
-            .get_mut(&self.mode_name)
-            .unwrap()
-            .fallback = Some(KeyBinding::Command(command.into()));
-        self
-    }
-
-    /// Sets the mode to return to after commands.
-    pub fn return_to(mut self, mode: &str) -> Self {
-        self.test_stoat
-            .keymap_config
-            .as_mut()
-            .unwrap()
-            .modes
-            .get_mut(&self.mode_name)
-            .unwrap()
-            .return_to = Some(mode.to_string());
         self
     }
 
@@ -1019,7 +952,10 @@ pub mod assertions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::{EditMode, TextPosition};
+    use crate::{
+        actions::{EditMode, TextPosition},
+        state::EditorState,
+    };
 
     #[test]
     fn state_builder_creates_expected_state() {

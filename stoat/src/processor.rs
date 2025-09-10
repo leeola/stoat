@@ -221,42 +221,6 @@ fn process_keymap_result(
 ) -> (EditorState, Vec<Effect>) {
     match result {
         KeymapResult::Command(command) => process_command(state, command, keymap),
-        KeymapResult::ModeChange(new_mode) => {
-            let action = EditorAction::SetMode { mode: new_mode };
-            let new_state = apply_action(state, action);
-            (new_state, vec![])
-        },
-        KeymapResult::CommandAndMode { command, new_mode } => {
-            // Process command first
-            let (mut new_state, effects) = process_command(state, command, keymap);
-
-            // Then change mode if specified
-            if let Some(mode) = new_mode {
-                let action = EditorAction::SetMode { mode };
-                new_state = apply_action(new_state, action);
-            }
-
-            (new_state, effects)
-        },
-        KeymapResult::Sequence(commands, final_mode) => {
-            let mut current_state = state;
-            let mut all_effects = Vec::new();
-
-            // Execute all commands in sequence
-            for command in commands {
-                let (new_state, effects) = process_command(current_state, command, keymap);
-                current_state = new_state;
-                all_effects.extend(effects);
-            }
-
-            // Change to final mode if specified
-            if let Some(mode) = final_mode {
-                let action = EditorAction::SetMode { mode };
-                current_state = apply_action(current_state, action);
-            }
-
-            (current_state, all_effects)
-        },
     }
 }
 
