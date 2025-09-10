@@ -104,9 +104,37 @@ impl TextRange {
 }
 
 /// Editing modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EditMode {
     Normal,
     Insert,
     Command,
+    Custom(String),
+}
+
+impl EditMode {
+    /// Creates a custom mode with the given name.
+    pub fn custom(name: impl Into<String>) -> Self {
+        EditMode::Custom(name.into())
+    }
+
+    /// Returns the name of the mode.
+    pub fn name(&self) -> &str {
+        match self {
+            EditMode::Normal => "normal",
+            EditMode::Insert => "insert",
+            EditMode::Command => "command",
+            EditMode::Custom(name) => name,
+        }
+    }
+
+    /// Creates a mode from its name.
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "normal" => EditMode::Normal,
+            "insert" => EditMode::Insert,
+            "command" => EditMode::Command,
+            custom => EditMode::Custom(custom.to_string()),
+        }
+    }
 }

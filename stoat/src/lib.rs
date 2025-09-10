@@ -39,6 +39,7 @@ pub mod actions;
 pub mod cli;
 pub mod command;
 pub mod config;
+pub mod custom_keymap;
 pub mod effects;
 pub mod engine;
 pub mod events;
@@ -49,7 +50,6 @@ pub mod log;
 pub mod processor;
 pub mod state;
 
-#[cfg(test)]
 pub mod test_stoat;
 
 // Re-export core types for convenient use
@@ -103,6 +103,25 @@ impl Stoat {
         Self {
             engine: EditorEngine::with_text(text),
         }
+    }
+
+    /// Creates a new test instance for fluent testing.
+    ///
+    /// Returns a [`TestStoat`] wrapper that provides convenient
+    /// methods for writing concise, readable tests.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use stoat::Stoat;
+    ///
+    /// Stoat::test()
+    ///     .with_text("hello")
+    ///     .type_keys("i world")
+    ///     .assert_text(" worldhello");
+    /// ```
+    pub fn test() -> crate::test_stoat::TestStoat {
+        crate::test_stoat::TestStoat::new()
     }
 
     /// Processes keyboard input using vim-like syntax.
@@ -169,12 +188,13 @@ impl Stoat {
 
     /// Returns the current editor mode as a string.
     ///
-    /// Possible values: "normal", "insert", "command"
-    pub fn mode(&self) -> &str {
+    /// Possible values: "normal", "insert", "command", or custom mode names
+    pub fn mode(&self) -> String {
         match self.engine.mode() {
-            EditMode::Normal => "normal",
-            EditMode::Insert => "insert",
-            EditMode::Command => "command",
+            EditMode::Normal => "normal".to_string(),
+            EditMode::Insert => "insert".to_string(),
+            EditMode::Command => "command".to_string(),
+            EditMode::Custom(name) => name,
         }
     }
 
@@ -237,25 +257,6 @@ impl Stoat {
             (line, column),
             "Cursor position mismatch: expected ({line}, {column}), got ({actual_line}, {actual_col})"
         );
-    }
-
-    /// Creates a [`TestStoat`] instance for fluent test writing.
-    ///
-    /// Returns a test wrapper with chainable methods for actions and assertions,
-    /// aimed at concise test code.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// Stoat::test()
-    ///     .with_text("Hello, World!")
-    ///     .type_keys("0dw")
-    ///     .assert_text(", World!")
-    ///     .assert_cursor(0, 0);
-    /// ```
-    #[cfg(test)]
-    pub fn test() -> test_stoat::TestStoat {
-        test_stoat::TestStoat::new()
     }
 }
 

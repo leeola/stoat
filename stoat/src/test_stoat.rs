@@ -82,6 +82,10 @@ impl TestStoat {
             EditMode::Normal => self.type_keys("<Esc>"),
             EditMode::Insert => self.type_keys("i"),
             EditMode::Command => self.type_keys(":"),
+            EditMode::Custom(_) => {
+                // Custom modes need to be switched via with_mode
+                self
+            },
         }
     }
 
@@ -146,8 +150,9 @@ impl TestStoat {
     ///     .type_keys("x")  // Will use custom binding
     /// ```
     pub fn with_keymap(mut self, config: KeymapConfig) -> Self {
-        self.keymap_config = Some(config);
-        // TODO: Apply keymap config to engine when mode system is implemented
+        self.keymap_config = Some(config.clone());
+        // Apply keymap config to engine
+        self.stoat.engine_mut().set_keymap_config(config);
         self
     }
 
@@ -167,14 +172,14 @@ impl TestStoat {
         }
 
         let config = self.keymap_config.as_mut().unwrap();
-        config
+        let config_mut = config
             .modes
             .entry(mode.to_string())
-            .or_insert_with(ModeConfig::default)
-            .keys
-            .insert(key.to_string(), binding);
+            .or_insert_with(ModeConfig::default);
+        config_mut.keys.insert(key.to_string(), binding);
 
-        // TODO: Apply keymap config to engine when mode system is implemented
+        // Apply updated keymap config to engine
+        self.stoat.engine_mut().set_keymap_config(config.clone());
         self
     }
 
@@ -228,10 +233,13 @@ impl TestStoat {
     ///     .with_mode("custom")
     ///     .type_keys("x");
     /// ```
-    pub fn with_mode(self, mode_name: &str) -> Self {
-        // TODO: Switch to custom mode when mode system is implemented
-        // For now, this is a placeholder
-        let _ = mode_name;
+    pub fn with_mode(mut self, mode_name: &str) -> Self {
+        // Switch to custom mode using the SetMode action
+        let mode = EditMode::from_name(mode_name);
+        // Directly modify state to change mode
+        let mut state = self.stoat.engine().snapshot();
+        state.mode = mode;
+        self.stoat.engine_mut().set_state(state);
         self
     }
 
@@ -608,8 +616,14 @@ impl KeymapBuilder {
     }
 
     /// Finishes building and returns the TestStoat instance.
-    pub fn apply(self) -> TestStoat {
-        // TODO: Apply keymap config to engine when mode system is implemented
+    pub fn apply(mut self) -> TestStoat {
+        // Apply keymap config to engine
+        if let Some(ref config) = self.test_stoat.keymap_config {
+            self.test_stoat
+                .stoat
+                .engine_mut()
+                .set_keymap_config(config.clone());
+        }
         self.test_stoat
     }
 }
@@ -708,9 +722,29 @@ impl ModeBuilder {
         self
     }
 
+    /// Adds a key binding with a full KeyBinding enum.
+    pub fn key_binding(mut self, key: &str, binding: KeyBinding) -> Self {
+        self.test_stoat
+            .keymap_config
+            .as_mut()
+            .unwrap()
+            .modes
+            .get_mut(&self.mode_name)
+            .unwrap()
+            .keys
+            .insert(key.to_string(), binding);
+        self
+    }
+
     /// Finishes building and returns the TestStoat instance.
-    pub fn apply(self) -> TestStoat {
-        // TODO: Apply keymap config to engine when mode system is implemented
+    pub fn apply(mut self) -> TestStoat {
+        // Apply keymap config to engine
+        if let Some(ref config) = self.test_stoat.keymap_config {
+            self.test_stoat
+                .stoat
+                .engine_mut()
+                .set_keymap_config(config.clone());
+        }
         self.test_stoat
     }
 }

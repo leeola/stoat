@@ -6,6 +6,7 @@
 use crate::{
     actions::{EditMode, EditorAction, TextPosition, TextRange},
     command::Command,
+    custom_keymap::{CustomKeymap, KeymapResult},
     effects::Effect,
     events::EditorEvent,
     input::{Key, Modifiers},
@@ -32,12 +33,13 @@ pub fn process_event(
     state: EditorState,
     event: EditorEvent,
     keymap: &Keymap,
+    custom_keymap: Option<&CustomKeymap>,
 ) -> (EditorState, Vec<Effect>) {
     tracing::debug!("Processing event: {:?} in mode: {:?}", event, state.mode);
 
     let result = match event {
         EditorEvent::KeyPress { key, modifiers } => {
-            process_key_press(state, key, modifiers, keymap)
+            process_key_press(state, key, modifiers, keymap, custom_keymap)
         },
 
         EditorEvent::TextPasted { content } => {
@@ -121,13 +123,29 @@ fn process_key_press(
     key: Key,
     modifiers: Modifiers,
     keymap: &Keymap,
+    custom_keymap: Option<&CustomKeymap>,
 ) -> (EditorState, Vec<Effect>) {
     tracing::trace!("Processing key in {:?} mode: {:?}", state.mode, key);
 
-    let original_mode = state.mode;
+    let original_mode = state.mode.clone();
 
-    // First try to look up a command from the keymap
-    if let Some(command) = keymap.lookup(&key, &modifiers, state.mode) {
+    // First try custom keymap if available
+    if let Some(custom_km) = custom_keymap {
+        if let Some(keymap_result) = custom_km.lookup(&key, &modifiers, &state.mode) {
+            tracing::debug!("Found custom keymap result for key: {:?}", keymap_result);
+            let result = process_keymap_result(state, keymap_result, keymap, custom_km);
+
+            // Log mode changes
+            if result.0.mode != original_mode {
+                tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+            }
+
+            return result;
+        }
+    }
+
+    // Fall back to standard keymap
+    if let Some(command) = keymap.lookup(&key, &modifiers, &state.mode) {
         tracing::debug!("Found command for key: {:?}", command);
         let result = process_command(state, command, keymap);
 
@@ -159,15 +177,29 @@ fn process_key_press(
         };
 
         if let Some(text) = text_to_insert {
-            let command = Command::InsertStr(text.into());
-            tracing::debug!("Insert mode text: {:?}", command);
-            let result = process_command(state, command, keymap);
+            // Check if custom keymap has InsertChar fallback
+            if let Some(_custom_km) = custom_keymap {
+                // Try to execute InsertChar command with the actual character
+                let command = Command::InsertStr(text.into());
+                tracing::debug!("Insert mode text: {:?}", command);
+                let result = process_command(state, command, keymap);
 
-            if result.0.mode != original_mode {
-                tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                if result.0.mode != original_mode {
+                    tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                }
+
+                return result;
+            } else {
+                let command = Command::InsertStr(text.into());
+                tracing::debug!("Insert mode text: {:?}", command);
+                let result = process_command(state, command, keymap);
+
+                if result.0.mode != original_mode {
+                    tracing::debug!("Mode changed: {:?} -> {:?}", original_mode, result.0.mode);
+                }
+
+                return result;
             }
-
-            return result;
         }
     }
 
@@ -178,6 +210,54 @@ fn process_key_press(
         state.mode
     );
     (state, vec![])
+}
+
+/// Process a keymap result and return new state plus effects.
+fn process_keymap_result(
+    state: EditorState,
+    result: KeymapResult,
+    keymap: &Keymap,
+    _custom_keymap: &CustomKeymap,
+) -> (EditorState, Vec<Effect>) {
+    match result {
+        KeymapResult::Command(command) => process_command(state, command, keymap),
+        KeymapResult::ModeChange(new_mode) => {
+            let action = EditorAction::SetMode { mode: new_mode };
+            let new_state = apply_action(state, action);
+            (new_state, vec![])
+        },
+        KeymapResult::CommandAndMode { command, new_mode } => {
+            // Process command first
+            let (mut new_state, effects) = process_command(state, command, keymap);
+
+            // Then change mode if specified
+            if let Some(mode) = new_mode {
+                let action = EditorAction::SetMode { mode };
+                new_state = apply_action(new_state, action);
+            }
+
+            (new_state, effects)
+        },
+        KeymapResult::Sequence(commands, final_mode) => {
+            let mut current_state = state;
+            let mut all_effects = Vec::new();
+
+            // Execute all commands in sequence
+            for command in commands {
+                let (new_state, effects) = process_command(current_state, command, keymap);
+                current_state = new_state;
+                all_effects.extend(effects);
+            }
+
+            // Change to final mode if specified
+            if let Some(mode) = final_mode {
+                let action = EditorAction::SetMode { mode };
+                current_state = apply_action(current_state, action);
+            }
+
+            (current_state, all_effects)
+        },
+    }
 }
 
 /// Process a command and return new state plus effects.
@@ -200,9 +280,9 @@ fn process_command(
             let new_state = apply_action(state, action);
 
             // Generate ShowHelp effect with current mode's commands
-            let mode = new_state.mode;
+            let mode = new_state.mode.clone();
             let commands = keymap
-                .get_bindings_for_mode(mode)
+                .get_bindings_for_mode(&mode)
                 .into_iter()
                 .map(|(key, cmd)| (key, cmd.description().to_string()))
                 .collect();
@@ -219,14 +299,14 @@ fn process_command(
 
     // Convert command to action and apply it
     if let Some(action) = command.to_action(&state) {
-        let old_mode = state.mode;
+        let old_mode = state.mode.clone();
         let new_state = apply_action(state, action);
 
         // Check if mode changed and help panel is visible
         if new_state.mode != old_mode && new_state.show_command_info {
             // Generate CommandContextChanged effect with new mode's commands
             let commands = keymap
-                .get_bindings_for_mode(new_state.mode)
+                .get_bindings_for_mode(&new_state.mode)
                 .into_iter()
                 .map(|(key, cmd)| (key, cmd.description().to_string()))
                 .collect();
@@ -848,7 +928,7 @@ mod tests {
         let state = EditorState::with_text("Hello World");
         let keymap = Keymap::default();
 
-        let (new_state, effects) = process_event(state.clone(), EditorEvent::Undo, &keymap);
+        let (new_state, effects) = process_event(state.clone(), EditorEvent::Undo, &keymap, None);
 
         // Should return unchanged state (for now)
         assert_eq!(new_state.text(), state.text());
@@ -861,7 +941,7 @@ mod tests {
         let state = EditorState::with_text("Hello World");
         let keymap = Keymap::default();
 
-        let (new_state, effects) = process_event(state.clone(), EditorEvent::Redo, &keymap);
+        let (new_state, effects) = process_event(state.clone(), EditorEvent::Redo, &keymap, None);
 
         // Should return unchanged state (for now)
         assert_eq!(new_state.text(), state.text());
@@ -916,6 +996,7 @@ mod tests {
                 position: crate::input::Point::new(10.0, 20.0),
             },
             &keymap,
+            None,
         );
 
         // Should return unchanged state (for now)

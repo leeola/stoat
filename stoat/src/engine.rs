@@ -5,8 +5,8 @@
 //! will use to interact with the editor core.
 
 use crate::{
-    effects::Effect, events::EditorEvent, keymap::Keymap, processor::process_event,
-    state::EditorState,
+    config::KeymapConfig, custom_keymap::CustomKeymap, effects::Effect, events::EditorEvent,
+    keymap::Keymap, processor::process_event, state::EditorState,
 };
 
 /// Stateful editor engine that manages state and processes events.
@@ -39,6 +39,7 @@ use crate::{
 pub struct EditorEngine {
     state: EditorState,
     keymap: Keymap,
+    custom_keymap: Option<CustomKeymap>,
 }
 
 impl EditorEngine {
@@ -48,6 +49,7 @@ impl EditorEngine {
         Self {
             state: EditorState::new(),
             keymap: Keymap::new(),
+            custom_keymap: None,
         }
     }
 
@@ -60,6 +62,7 @@ impl EditorEngine {
         Self {
             state: EditorState::with_text(text),
             keymap: Keymap::new(),
+            custom_keymap: None,
         }
     }
 
@@ -68,7 +71,18 @@ impl EditorEngine {
         Self {
             state,
             keymap: Keymap::new(),
+            custom_keymap: None,
         }
+    }
+
+    /// Sets a custom keymap configuration.
+    pub fn set_keymap_config(&mut self, config: KeymapConfig) {
+        self.custom_keymap = Some(CustomKeymap::from_config(config));
+    }
+
+    /// Returns whether a custom keymap is configured.
+    pub fn has_custom_keymap(&self) -> bool {
+        self.custom_keymap.is_some()
     }
 
     /// Handles an event and returns any effects that should be executed.
@@ -87,7 +101,11 @@ impl EditorEngine {
     pub fn handle_event(&mut self, event: EditorEvent) -> Vec<Effect> {
         tracing::debug!("Engine handling event: {:?}", event);
 
-        let (new_state, effects) = process_event(self.state.clone(), event, &self.keymap);
+        let (new_state, effects) = if let Some(ref custom_keymap) = self.custom_keymap {
+            process_event(self.state.clone(), event, &self.keymap, Some(custom_keymap))
+        } else {
+            process_event(self.state.clone(), event, &self.keymap, None)
+        };
 
         // Log state changes
         if self.state.is_dirty != new_state.is_dirty {
@@ -132,7 +150,7 @@ impl EditorEngine {
 
     /// Returns the current editing mode.
     pub fn mode(&self) -> crate::actions::EditMode {
-        self.state.mode
+        self.state.mode.clone()
     }
 
     /// Returns the current file path, if any.
@@ -282,7 +300,7 @@ pub mod events {
     /// Creates a mouse click event.
     pub fn mouse_click(x: f32, y: f32) -> EditorEvent {
         EditorEvent::MouseClick {
-            position: gpui::point(x, y),
+            position: crate::input::Point::new(x, y),
             button: MouseButton::Left,
         }
     }

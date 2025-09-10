@@ -35,13 +35,14 @@ impl Keymap {
     }
 
     /// Looks up a command for the given key and mode.
-    pub fn lookup(&self, key: &Key, modifiers: &Modifiers, mode: EditMode) -> Option<Command> {
+    pub fn lookup(&self, key: &Key, modifiers: &Modifiers, mode: &EditMode) -> Option<Command> {
         let binding = KeyBinding::new(key.clone(), *modifiers);
 
         match mode {
             EditMode::Normal => self.normal.get(&binding),
             EditMode::Insert => self.insert.get(&binding),
             EditMode::Command => self.command.get(&binding),
+            EditMode::Custom(_) => None, // Custom modes not supported in basic keymap
         }
         .cloned()
     }
@@ -93,20 +94,22 @@ impl Keymap {
     }
 
     /// Returns all available commands for the given mode.
-    pub fn available_commands(&self, mode: EditMode) -> Vec<&Command> {
+    pub fn available_commands(&self, mode: &EditMode) -> Vec<&Command> {
         match mode {
             EditMode::Normal => self.normal.values().collect(),
             EditMode::Insert => self.insert.values().collect(),
             EditMode::Command => self.command.values().collect(),
+            EditMode::Custom(_) => vec![], // Custom modes not supported in basic keymap
         }
     }
 
     /// Returns key bindings for the given mode as (key_display, command) pairs.
-    pub fn get_bindings_for_mode(&self, mode: EditMode) -> Vec<(String, Command)> {
+    pub fn get_bindings_for_mode(&self, mode: &EditMode) -> Vec<(String, Command)> {
         let map = match mode {
             EditMode::Normal => &self.normal,
             EditMode::Insert => &self.insert,
             EditMode::Command => &self.command,
+            EditMode::Custom(_) => return vec![], // Custom modes not supported in basic keymap
         };
 
         map.iter()
@@ -168,7 +171,7 @@ mod tests {
     #[test]
     fn default_keymap_has_normal_mode_bindings() {
         let keymap = Keymap::new();
-        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), EditMode::Normal);
+        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), &EditMode::Normal);
         assert_eq!(command, Some(Command::MoveCursorLeft));
     }
 
@@ -178,7 +181,7 @@ mod tests {
         let command = keymap.lookup(
             &keys::ESCAPE.to_string(),
             &Modifiers::default(),
-            EditMode::Insert,
+            &EditMode::Insert,
         );
         assert_eq!(command, Some(Command::EnterNormalMode));
     }
@@ -186,14 +189,14 @@ mod tests {
     #[test]
     fn unknown_key_returns_none() {
         let keymap = Keymap::new();
-        let command = keymap.lookup(&"z".to_string(), &Modifiers::default(), EditMode::Normal);
+        let command = keymap.lookup(&"z".to_string(), &Modifiers::default(), &EditMode::Normal);
         assert_eq!(command, None);
     }
 
     #[test]
     fn available_commands_returns_mode_specific_commands() {
         let keymap = Keymap::new();
-        let normal_commands = keymap.available_commands(EditMode::Normal);
+        let normal_commands = keymap.available_commands(&EditMode::Normal);
         assert!(!normal_commands.is_empty());
         assert!(normal_commands.contains(&&Command::MoveCursorLeft));
     }
@@ -204,11 +207,11 @@ mod tests {
         keymap.bind_normal_key("H".to_string(), Command::MoveCursorLeft);
 
         // Should find it with lowercase
-        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), EditMode::Normal);
+        let command = keymap.lookup(&"h".to_string(), &Modifiers::default(), &EditMode::Normal);
         assert_eq!(command, Some(Command::MoveCursorLeft));
 
         // Should also find it with uppercase
-        let command = keymap.lookup(&"H".to_string(), &Modifiers::default(), EditMode::Normal);
+        let command = keymap.lookup(&"H".to_string(), &Modifiers::default(), &EditMode::Normal);
         assert_eq!(command, Some(Command::MoveCursorLeft));
     }
 }

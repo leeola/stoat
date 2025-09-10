@@ -54,6 +54,18 @@ pub enum Command {
 
     /// Toggle command info display
     ToggleCommandInfo,
+
+    /// Delete a line
+    DeleteLine,
+
+    /// Delete a word
+    DeleteWord,
+
+    /// Insert a single character (used for fallback)
+    InsertChar,
+
+    /// Show help information
+    Help,
 }
 
 impl Command {
@@ -72,6 +84,10 @@ impl Command {
             Command::DeleteChar => EditCommand::DeleteChar.description(),
             Command::Exit => AppCommand::Exit.description(),
             Command::ToggleCommandInfo => AppCommand::ToggleCommandInfo.description(),
+            Command::DeleteLine => "Delete line",
+            Command::DeleteWord => "Delete word",
+            Command::InsertChar => "Insert character",
+            Command::Help => "Show help",
         }
     }
 
@@ -90,6 +106,10 @@ impl Command {
             Command::DeleteChar => EditCommand::DeleteChar.short_name(),
             Command::Exit => AppCommand::Exit.short_name(),
             Command::ToggleCommandInfo => AppCommand::ToggleCommandInfo.short_name(),
+            Command::DeleteLine => "DelLine",
+            Command::DeleteWord => "DelWord",
+            Command::InsertChar => "InsChar",
+            Command::Help => "Help",
         }
     }
 
@@ -114,6 +134,22 @@ impl Command {
             Command::DeleteChar => EditCommand::DeleteChar.to_action(state),
             Command::Exit => AppCommand::Exit.to_action(),
             Command::ToggleCommandInfo => AppCommand::ToggleCommandInfo.to_action(),
+            Command::DeleteLine => {
+                // FIXME: Implement delete line action
+                None
+            },
+            Command::DeleteWord => {
+                // FIXME: Implement delete word action
+                None
+            },
+            Command::InsertChar => {
+                // InsertChar is handled specially in processor for fallback
+                None
+            },
+            Command::Help => {
+                // FIXME: Implement help action
+                None
+            },
         }
     }
 }
