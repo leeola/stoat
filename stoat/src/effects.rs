@@ -4,6 +4,9 @@
 //! processing an event. They are pure data and don't perform the actual
 //! side effects - that's left to the effect runner (typically in the GUI layer).
 
+#[cfg(test)]
+mod tests;
+
 /// Side effects that should be executed by the effect runner.
 ///
 /// Effects are pure data describing what should happen outside the core
