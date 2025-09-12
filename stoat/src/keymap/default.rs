@@ -41,6 +41,16 @@ fn default_normal_mode() -> ModeConfig {
         KeyBinding::Command("move_right".to_string()),
     );
 
+    // Paragraph movement (vim-style)
+    keys.insert(
+        "}".to_string(),
+        KeyBinding::Command("next_paragraph".to_string()),
+    );
+    keys.insert(
+        "{".to_string(),
+        KeyBinding::Command("previous_paragraph".to_string()),
+    );
+
     // Mode changes
     keys.insert(
         "i".to_string(),

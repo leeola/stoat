@@ -6279,6 +6279,7 @@ dependencies = [
  "serde_json",
  "smol_str 0.3.2",
  "stoat_rope",
+ "stoat_text",
  "thiserror 1.0.69",
  "toml 0.8.23",
  "tracing",

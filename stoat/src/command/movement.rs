@@ -5,6 +5,7 @@ use crate::{
     processor::{byte_to_char, byte_to_visual, char_to_byte, visual_to_byte},
     state::EditorState,
 };
+use stoat_rope::{kind::SyntaxKind, query::Query};
 
 /// Movement-related commands
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +18,10 @@ pub enum MovementCommand {
     Up,
     /// Move cursor down one line
     Down,
+    /// Move to next paragraph
+    NextParagraph,
+    /// Move to previous paragraph  
+    PreviousParagraph,
 }
 
 impl MovementCommand {
@@ -26,6 +31,8 @@ impl MovementCommand {
             MovementCommand::Right => move_cursor_right(state),
             MovementCommand::Up => move_cursor_up(state),
             MovementCommand::Down => move_cursor_down(state),
+            MovementCommand::NextParagraph => move_to_next_paragraph(state),
+            MovementCommand::PreviousParagraph => move_to_previous_paragraph(state),
         };
         EditorAction::MoveCursor { position }
     }
@@ -36,6 +43,8 @@ impl MovementCommand {
             MovementCommand::Right => "Move cursor right",
             MovementCommand::Up => "Move cursor up",
             MovementCommand::Down => "Move cursor down",
+            MovementCommand::NextParagraph => "Move to next paragraph",
+            MovementCommand::PreviousParagraph => "Move to previous paragraph",
         }
     }
 
@@ -45,6 +54,8 @@ impl MovementCommand {
             MovementCommand::Right => "Right",
             MovementCommand::Up => "Up",
             MovementCommand::Down => "Down",
+            MovementCommand::NextParagraph => "NextPara",
+            MovementCommand::PreviousParagraph => "PrevPara",
         }
     }
 }
@@ -152,6 +163,121 @@ fn move_cursor_down(state: &EditorState) -> TextPosition {
     }
 }
 
+fn move_to_next_paragraph(state: &EditorState) -> TextPosition {
+    let pos = state.cursor_position();
+    let rope = state.buffer.rope();
+
+    // Convert current line/column position to byte offset
+    let current_text = state.text();
+    let lines: Vec<&str> = current_text.lines().collect();
+    let mut byte_offset = 0;
+
+    // Calculate byte offset of current position
+    for (i, line) in lines.iter().enumerate() {
+        if i < pos.line {
+            byte_offset += line.len() + 1; // +1 for newline
+        } else if i == pos.line {
+            byte_offset += char_to_byte(line, pos.column);
+            break;
+        }
+    }
+
+    // Find all paragraph nodes
+    let paragraphs = Query::new(rope.root())
+        .kind(SyntaxKind::Paragraph)
+        .find_all();
+
+    // Find the next paragraph after current position
+    for para in paragraphs {
+        let para_range = para.range();
+        if para_range.start.0 > byte_offset {
+            // Found next paragraph - move to its start
+            // Convert byte offset back to line/column
+            let mut line = 0;
+            let mut remaining = para_range.start.0;
+
+            for (i, line_text) in lines.iter().enumerate() {
+                let line_bytes = line_text.len() + 1;
+                if remaining < line_bytes {
+                    line = i;
+                    break;
+                }
+                remaining -= line_bytes;
+            }
+
+            let column = if line < lines.len() {
+                byte_to_char(lines[line], remaining.min(lines[line].len()))
+            } else {
+                0
+            };
+
+            return TextPosition::new(line, column);
+        }
+    }
+
+    // No next paragraph found, stay at current position
+    pos
+}
+
+fn move_to_previous_paragraph(state: &EditorState) -> TextPosition {
+    let pos = state.cursor_position();
+    let rope = state.buffer.rope();
+
+    // Convert current line/column position to byte offset
+    let current_text = state.text();
+    let lines: Vec<&str> = current_text.lines().collect();
+    let mut byte_offset = 0;
+
+    // Calculate byte offset of current position
+    for (i, line) in lines.iter().enumerate() {
+        if i < pos.line {
+            byte_offset += line.len() + 1; // +1 for newline
+        } else if i == pos.line {
+            byte_offset += char_to_byte(line, pos.column);
+            break;
+        }
+    }
+
+    // Find all paragraph nodes
+    let mut paragraphs = Query::new(rope.root())
+        .kind(SyntaxKind::Paragraph)
+        .find_all();
+
+    // Reverse to find previous paragraph
+    paragraphs.reverse();
+
+    // Find the previous paragraph before current position
+    for para in paragraphs {
+        let para_range = para.range();
+        if para_range.start.0 < byte_offset {
+            // Found previous paragraph - move to its start
+            // Convert byte offset back to line/column
+            let mut line = 0;
+            let mut remaining = para_range.start.0;
+
+            for (i, line_text) in lines.iter().enumerate() {
+                let line_bytes = line_text.len() + 1;
+                if remaining < line_bytes {
+                    line = i;
+                    break;
+                }
+                remaining -= line_bytes;
+            }
+
+            let column = if line < lines.len() {
+                byte_to_char(lines[line], remaining.min(lines[line].len()))
+            } else {
+                0
+            };
+
+            return TextPosition::new(line, column);
+        }
+    }
+
+    // No previous paragraph found, move to document start
+    TextPosition::new(0, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Stoat;
@@ -211,5 +337,68 @@ mod tests {
             .assert_cursor(0, 3)
             .type_keys("l") // Try to move right at end - should stay
             .assert_cursor(0, 3);
+    }
+
+    #[test]
+    fn paragraph_navigation_basic() {
+        // Test with simple paragraphs separated by blank lines
+        let text = "First paragraph\nwith two lines\n\nSecond paragraph\n\nThird paragraph";
+
+        Stoat::test()
+            .with_text(text)
+            .assert_cursor(0, 0)
+            .type_keys("}") // Move to next paragraph
+            .assert_cursor(3, 0) // Should be at "Second paragraph"
+            .type_keys("}") // Move to next paragraph
+            .assert_cursor(5, 0) // Should be at "Third paragraph"
+            .type_keys("}") // Try to move past last paragraph
+            .assert_cursor(5, 0) // Should stay at last paragraph
+            .type_keys("{") // Move to previous paragraph
+            .assert_cursor(3, 0) // Back to "Second paragraph"
+            .type_keys("{") // Move to previous paragraph
+            .assert_cursor(0, 0) // Back to "First paragraph"
+            .type_keys("{") // Try to move before first paragraph
+            .assert_cursor(0, 0); // Should stay at first paragraph
+    }
+
+    #[test]
+    fn paragraph_navigation_single_paragraph() {
+        // Test with text that has no paragraph breaks
+        let text = "This is a single paragraph\nwith multiple lines\nbut no blank lines";
+
+        Stoat::test()
+            .with_text(text)
+            .assert_cursor(0, 0)
+            .type_keys("}") // Try to move to next paragraph
+            .assert_cursor(0, 0) // Should stay at current position
+            .type_keys("{") // Try to move to previous paragraph
+            .assert_cursor(0, 0); // Should stay at current position
+    }
+
+    #[test]
+    fn paragraph_navigation_empty_lines() {
+        // Test with multiple consecutive empty lines
+        let text = "First paragraph\n\n\n\nSecond paragraph";
+
+        Stoat::test()
+            .with_text(text)
+            .assert_cursor(0, 0)
+            .type_keys("}") // Move to next paragraph
+            .assert_cursor(2, 0); // Parser groups empty lines as one paragraph break
+    }
+
+    #[test]
+    fn paragraph_navigation_from_middle() {
+        // Test navigation from middle of a paragraph
+        let text = "First paragraph\nwith two lines\n\nSecond paragraph\n\nThird paragraph";
+
+        Stoat::test()
+            .with_text(text)
+            .cursor(1, 5) // Start in middle of first paragraph
+            .assert_cursor(1, 5)
+            .type_keys("}") // Move to next paragraph
+            .assert_cursor(3, 0) // Should be at "Second paragraph"
+            .type_keys("{") // Move back
+            .assert_cursor(0, 0); // Should be at start of "First paragraph"
     }
 }

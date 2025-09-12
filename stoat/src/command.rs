@@ -32,6 +32,10 @@ pub enum Command {
     MoveCursorUp,
     /// Move cursor down one line
     MoveCursorDown,
+    /// Move to next paragraph
+    NextParagraph,
+    /// Move to previous paragraph
+    PreviousParagraph,
 
     // Mode change commands
     /// Enter Insert mode
@@ -79,6 +83,8 @@ impl Command {
             Command::MoveCursorRight => MovementCommand::Right.description(),
             Command::MoveCursorUp => MovementCommand::Up.description(),
             Command::MoveCursorDown => MovementCommand::Down.description(),
+            Command::NextParagraph => MovementCommand::NextParagraph.description(),
+            Command::PreviousParagraph => MovementCommand::PreviousParagraph.description(),
             Command::EnterInsertMode => ModeCommand::EnterInsert.description(),
             Command::EnterNormalMode => ModeCommand::EnterNormal.description(),
             Command::EnterCommandMode => ModeCommand::EnterCommand.description(),
@@ -102,6 +108,8 @@ impl Command {
             Command::MoveCursorRight => MovementCommand::Right.short_name(),
             Command::MoveCursorUp => MovementCommand::Up.short_name(),
             Command::MoveCursorDown => MovementCommand::Down.short_name(),
+            Command::NextParagraph => MovementCommand::NextParagraph.short_name(),
+            Command::PreviousParagraph => MovementCommand::PreviousParagraph.short_name(),
             Command::EnterInsertMode => ModeCommand::EnterInsert.short_name(),
             Command::EnterNormalMode => ModeCommand::EnterNormal.short_name(),
             Command::EnterCommandMode => ModeCommand::EnterCommand.short_name(),
@@ -131,6 +139,8 @@ impl Command {
             Command::MoveCursorRight => Some(MovementCommand::Right.to_action(state)),
             Command::MoveCursorUp => Some(MovementCommand::Up.to_action(state)),
             Command::MoveCursorDown => Some(MovementCommand::Down.to_action(state)),
+            Command::NextParagraph => Some(MovementCommand::NextParagraph.to_action(state)),
+            Command::PreviousParagraph => Some(MovementCommand::PreviousParagraph.to_action(state)),
             Command::EnterInsertMode => Some(ModeCommand::EnterInsert.to_action()),
             Command::EnterNormalMode => Some(ModeCommand::EnterNormal.to_action()),
             Command::EnterCommandMode => Some(ModeCommand::EnterCommand.to_action()),

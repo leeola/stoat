@@ -18,6 +18,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 stoat_rope = { path = "../rope" }
+stoat_text = { path = "../text" }
 smol_str = "0.3"
 compact_str = { workspace = true }
 

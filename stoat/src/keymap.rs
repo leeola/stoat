@@ -161,6 +161,8 @@ impl Keymap {
             "toggle_command_info" => Command::ToggleCommandInfo,
             "insert_char" => Command::InsertChar,
             "help" => Command::Help,
+            "next_paragraph" => Command::NextParagraph,
+            "previous_paragraph" => Command::PreviousParagraph,
             // Unknown commands are not mapped
             _ => return None,
         })
