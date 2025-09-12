@@ -6,6 +6,7 @@ pub mod builder;
 pub mod edit;
 pub mod iter;
 pub mod kind;
+pub mod language;
 pub mod query;
 pub mod semantic;
 pub mod word_parser;
@@ -15,6 +16,7 @@ pub use batch::{BatchBuilder, BatchedEdit};
 pub use builder::{AstBuilder, NodeBuilder};
 use edit::{EditOp, apply_edit};
 pub use iter::{FilteredNodeIter, LineIter, NodeIter, TextChunkIter, TokenIter, TraversalOrder};
+pub use language::Language;
 pub use query::{PathQuery, Query, QueryResult, QueryUtils};
 pub use semantic::{SemanticId, SemanticInfo, SemanticKind};
 use std::{fmt, sync::Arc};
@@ -124,6 +126,15 @@ impl RopeAst {
         Self::find_node_at_offset_impl(&self.root, TextPos(offset))
     }
 
+    /// Get the language context at the given offset
+    ///
+    /// Finds the node at the given offset and returns its language,
+    /// or walks up the tree to find the nearest parent with a language set.
+    pub fn language_at_offset(&self, offset: usize) -> Option<Language> {
+        let _node = self.find_node_at_offset(offset)?;
+        Self::find_language_in_ancestors(&self.root, TextPos(offset))
+    }
+
     /// Get the token at the given token index (0-based)
     pub fn token_at(&self, token_index: usize) -> Option<&AstNode> {
         Self::token_at_impl(&self.root, token_index).map(|(node, _)| node)
@@ -200,6 +211,28 @@ impl RopeAst {
 
         // Return this node if no child contains the position
         Some(node)
+    }
+
+    /// Find language by walking up the tree from a position
+    fn find_language_in_ancestors(node: &AstNode, pos: TextPos) -> Option<Language> {
+        let range = node.range();
+
+        // Check if position is within this node
+        if pos.0 < range.start.0 || pos.0 >= range.end.0 {
+            return None;
+        }
+
+        // If this is a syntax node, check children first for more specific language
+        if let Some(children) = node.children() {
+            for (child, _) in children {
+                if let Some(lang) = Self::find_language_in_ancestors(child, pos) {
+                    return Some(lang);
+                }
+            }
+        }
+
+        // If no child had a language, check this node
+        node.language().copied()
     }
 
     /// Find the token at the given token index

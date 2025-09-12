@@ -1,6 +1,6 @@
 //! Core AST node structure for the rope AST
 
-use crate::{kind::SyntaxKind, semantic::SemanticInfo};
+use crate::{kind::SyntaxKind, language::Language, semantic::SemanticInfo};
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -101,6 +101,8 @@ pub enum AstNode {
         range: TextRange,
         /// Optional semantic information
         semantic: Option<SemanticInfo>,
+        /// Optional language context for this node
+        language: Option<Language>,
     },
 
     /// Syntax node (internal) with children
@@ -115,6 +117,8 @@ pub enum AstNode {
         range: TextRange,
         /// Optional semantic information
         semantic: Option<SemanticInfo>,
+        /// Optional language context for this node
+        language: Option<Language>,
     },
 }
 
@@ -126,6 +130,7 @@ impl AstNode {
             text,
             range,
             semantic: None,
+            language: None,
         }
     }
 
@@ -137,6 +142,7 @@ impl AstNode {
             info: TextInfo::empty(),
             range,
             semantic: None,
+            language: None,
         }
     }
 
@@ -152,6 +158,7 @@ impl AstNode {
             text,
             range,
             semantic: Some(semantic),
+            language: None,
         }
     }
 
@@ -167,6 +174,35 @@ impl AstNode {
             info: TextInfo::empty(),
             range,
             semantic: Some(semantic),
+            language: None,
+        }
+    }
+
+    /// Create a new token node with language
+    pub fn token_with_language(
+        kind: SyntaxKind,
+        text: CompactString,
+        range: TextRange,
+        language: Language,
+    ) -> Self {
+        AstNode::Token {
+            kind,
+            text,
+            range,
+            semantic: None,
+            language: Some(language),
+        }
+    }
+
+    /// Create a new syntax node with language
+    pub fn syntax_with_language(kind: SyntaxKind, range: TextRange, language: Language) -> Self {
+        AstNode::Syntax {
+            kind,
+            children: SmallVec::new(),
+            info: TextInfo::empty(),
+            range,
+            semantic: None,
+            language: Some(language),
         }
     }
 
@@ -243,22 +279,36 @@ impl AstNode {
         }
     }
 
+    /// Get the language context for this node
+    pub fn language(&self) -> Option<&Language> {
+        match self {
+            AstNode::Token { language, .. } => language.as_ref(),
+            AstNode::Syntax { language, .. } => language.as_ref(),
+        }
+    }
+
     /// Set semantic information for this node
     pub fn with_semantic(self, semantic: SemanticInfo) -> Self {
         match self {
             AstNode::Token {
-                kind, text, range, ..
+                kind,
+                text,
+                range,
+                language,
+                ..
             } => AstNode::Token {
                 kind,
                 text,
                 range,
                 semantic: Some(semantic),
+                language,
             },
             AstNode::Syntax {
                 kind,
                 children,
                 info,
                 range,
+                language,
                 ..
             } => AstNode::Syntax {
                 kind,
@@ -266,6 +316,7 @@ impl AstNode {
                 info,
                 range,
                 semantic: Some(semantic),
+                language,
             },
         }
     }
@@ -274,18 +325,24 @@ impl AstNode {
     pub fn without_semantic(self) -> Self {
         match self {
             AstNode::Token {
-                kind, text, range, ..
+                kind,
+                text,
+                range,
+                language,
+                ..
             } => AstNode::Token {
                 kind,
                 text,
                 range,
                 semantic: None,
+                language,
             },
             AstNode::Syntax {
                 kind,
                 children,
                 info,
                 range,
+                language,
                 ..
             } => AstNode::Syntax {
                 kind,
@@ -293,6 +350,7 @@ impl AstNode {
                 info,
                 range,
                 semantic: None,
+                language,
             },
         }
     }
@@ -334,7 +392,11 @@ impl AstNode {
     pub fn split_token_at(&self, offset: usize) -> Result<(Arc<AstNode>, Arc<AstNode>), AstError> {
         match self {
             AstNode::Token {
-                kind, text, range, ..
+                kind,
+                text,
+                range,
+                language,
+                ..
             } => {
                 if offset == 0 || offset >= text.len() {
                     return Err(AstError::InvalidSplitOffset {
@@ -351,14 +413,16 @@ impl AstNode {
                     kind: *kind,
                     text: left_text.into(),
                     range: TextRange::new(range.start.0, range.start.0 + offset),
-                    semantic: None, // Split tokens lose semantic info
+                    semantic: None,      // Split tokens lose semantic info
+                    language: *language, // Preserve language
                 });
 
                 let right_node = Arc::new(AstNode::Token {
                     kind: *kind,
                     text: right_text.into(),
                     range: TextRange::new(range.start.0 + offset, range.end.0),
-                    semantic: None, // Split tokens lose semantic info
+                    semantic: None,      // Split tokens lose semantic info
+                    language: *language, // Preserve language
                 });
 
                 Ok((left_node, right_node))
@@ -409,6 +473,7 @@ impl AstNode {
                     text: merged_text,
                     range: TextRange::new(r1.start.0, r2.end.0),
                     semantic: None, // Merged nodes lose semantic info
+                    language: None, // Merged nodes lose language info
                 }))
             },
             (
@@ -465,6 +530,7 @@ impl AstNode {
                     info: merged_info,
                     range: TextRange::new(r1.start.0, r2.end.0),
                     semantic: None, // Merged nodes lose semantic info
+                    language: None, // Merged nodes lose language info
                 }))
             },
             _ => Err(AstError::IncompatibleNodeKinds),
@@ -487,6 +553,7 @@ impl AstNode {
                 kind,
                 children,
                 range,
+                language,
                 ..
             } => {
                 if children.len() < 2 {
@@ -523,7 +590,8 @@ impl AstNode {
                     children: left_children.into(),
                     info: left_info,
                     range: TextRange::new(range.start.0, left_end),
-                    semantic: None, // Split nodes lose semantic info
+                    semantic: None,      // Split nodes lose semantic info
+                    language: *language, // Preserve language
                 });
 
                 let right_node = Arc::new(AstNode::Syntax {
@@ -531,7 +599,8 @@ impl AstNode {
                     children: right_children.into(),
                     info: right_info,
                     range: TextRange::new(right_start, range.end.0),
-                    semantic: None, // Split nodes lose semantic info
+                    semantic: None,      // Split nodes lose semantic info
+                    language: *language, // Preserve language
                 });
 
                 Ok((left_node, right_node))

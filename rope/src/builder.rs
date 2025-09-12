@@ -3,6 +3,7 @@
 use crate::{
     ast::{AstNode, TextRange},
     kind::SyntaxKind,
+    language::Language,
     semantic::SemanticInfo,
 };
 use compact_str::CompactString;
@@ -49,6 +50,30 @@ impl AstBuilder {
     ) -> NodeBuilder {
         NodeBuilder::new_with_semantic(kind, range, semantic)
     }
+
+    /// Create a new token node with language
+    pub fn token_with_language(
+        kind: SyntaxKind,
+        text: impl Into<CompactString>,
+        range: TextRange,
+        language: Language,
+    ) -> Arc<AstNode> {
+        Arc::new(AstNode::token_with_language(
+            kind,
+            text.into(),
+            range,
+            language,
+        ))
+    }
+
+    /// Start building a syntax node with language
+    pub fn start_node_with_language(
+        kind: SyntaxKind,
+        range: TextRange,
+        language: Language,
+    ) -> NodeBuilder {
+        NodeBuilder::new_with_language(kind, range, language)
+    }
 }
 
 /// Builder for syntax nodes that allows chaining child additions
@@ -68,6 +93,13 @@ impl NodeBuilder {
     fn new_with_semantic(kind: SyntaxKind, range: TextRange, semantic: SemanticInfo) -> Self {
         Self {
             node: AstNode::syntax_with_semantic(kind, range, semantic),
+        }
+    }
+
+    /// Create a new node builder with language
+    fn new_with_language(kind: SyntaxKind, range: TextRange, language: Language) -> Self {
+        Self {
+            node: AstNode::syntax_with_language(kind, range, language),
         }
     }
 

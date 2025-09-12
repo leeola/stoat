@@ -166,6 +166,7 @@ fn insert_at(
             text: node_text,
             range,
             semantic,
+            language,
         } => {
             // Calculate offset within the token
             let local_offset = offset - range.start.0;
@@ -186,12 +187,14 @@ fn insert_at(
                 text: new_text,
                 range: TextRange::new(range.start.0, range.end.0 + text.len()),
                 semantic: *semantic, // Preserve semantic info
+                language: *language, // Preserve language
             }))
         },
         AstNode::Syntax {
             kind,
             children,
             semantic,
+            language,
             ..
         } => {
             // Find which child contains the offset
@@ -230,6 +233,7 @@ fn insert_at(
                 info: new_info,
                 range: TextRange::new(node_range.start.0, node_range.end.0 + text_shift),
                 semantic: *semantic, // Preserve semantic info
+                language: *language, // Preserve language
             }))
         },
     }
@@ -250,6 +254,7 @@ fn delete_range(node: &Arc<AstNode>, delete_range: TextRange) -> Result<Arc<AstN
             text,
             range,
             semantic,
+            language,
         } => {
             // Calculate overlap with token
             let start = delete_range.start.0.max(range.start.0);
@@ -279,12 +284,14 @@ fn delete_range(node: &Arc<AstNode>, delete_range: TextRange) -> Result<Arc<AstN
                 text: new_text,
                 range: TextRange::new(range.start.0, range.end.0 - (local_end - local_start)),
                 semantic: *semantic, // Preserve semantic info
+                language: *language, // Preserve language
             }))
         },
         AstNode::Syntax {
             kind,
             children,
             semantic,
+            language,
             ..
         } => {
             let mut new_children = SmallVec::new();
@@ -332,6 +339,7 @@ fn delete_range(node: &Arc<AstNode>, delete_range: TextRange) -> Result<Arc<AstN
                 info: new_info,
                 range: TextRange::new(node_range.start.0, node_range.end.0 - total_deleted),
                 semantic: *semantic, // Preserve semantic info
+                language: *language, // Preserve language
             }))
         },
     }
@@ -373,11 +381,13 @@ fn shift_node_range(node: &Arc<AstNode>, shift: isize) -> Arc<AstNode> {
             text,
             range,
             semantic,
+            language,
         } => Arc::new(AstNode::Token {
             kind: *kind,
             text: text.clone(),
             range: TextRange::new(shift_pos(range.start.0), shift_pos(range.end.0)),
             semantic: *semantic, // Preserve semantic info
+            language: *language, // Preserve language
         }),
         AstNode::Syntax {
             kind,
@@ -385,6 +395,7 @@ fn shift_node_range(node: &Arc<AstNode>, shift: isize) -> Arc<AstNode> {
             info,
             range,
             semantic,
+            language,
         } => {
             let new_children = children
                 .iter()
@@ -397,6 +408,7 @@ fn shift_node_range(node: &Arc<AstNode>, shift: isize) -> Arc<AstNode> {
                 info: *info,
                 range: TextRange::new(shift_pos(range.start.0), shift_pos(range.end.0)),
                 semantic: *semantic, // Preserve semantic info
+                language: *language, // Preserve language
             })
         },
     }
@@ -439,6 +451,7 @@ fn merge_underfull_children(node: &Arc<AstNode>) -> Result<Arc<AstNode>, AstErro
             kind,
             children,
             semantic,
+            language,
             ..
         } => {
             if children.len() < MIN_CHILDREN && !children.is_empty() {
@@ -479,6 +492,7 @@ fn merge_underfull_children(node: &Arc<AstNode>) -> Result<Arc<AstNode>, AstErro
                         info: new_info,
                         range,
                         semantic: *semantic, // Preserve semantic info
+                        language: *language, // Preserve language
                     }))
                 } else {
                     Ok(node.clone())
