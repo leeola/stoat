@@ -38,6 +38,11 @@ fn convert_node(
     let kind = map_node_kind(ts_node.kind(), language);
     let range = TextRange::new(ts_node.start_byte(), ts_node.end_byte());
 
+    // Special handling for fenced code blocks to detect language
+    if ts_node.kind() == "fenced_code_block" {
+        return convert_code_block(ts_node, source, language);
+    }
+
     // Special handling for inline nodes - they contain the actual text
     if ts_node.kind() == "inline" {
         // For inline nodes, extract the text directly
@@ -106,6 +111,116 @@ fn convert_node(
     }
 }
 
+/// Convert a fenced code block with language detection
+fn convert_code_block(
+    ts_node: &TsNode<'_>,
+    source: &str,
+    _parent_language: Language,
+) -> Result<Arc<AstNode>, ParseError> {
+    let range = TextRange::new(ts_node.start_byte(), ts_node.end_byte());
+    let mut builder = AstBuilder::start_node(SyntaxKind::CodeBlock, range);
+
+    // Look for info_string to determine the language
+    let mut code_language = None;
+    let mut cursor = ts_node.walk();
+
+    for child in ts_node.children(&mut cursor) {
+        if child.kind() == "info_string" {
+            // Extract the language identifier
+            let lang_text =
+                child
+                    .utf8_text(source.as_bytes())
+                    .map_err(|_| ParseError::ConversionError {
+                        message: "Invalid UTF-8 in info_string".to_string(),
+                    })?;
+
+            // Look for the actual language node inside info_string
+            let mut lang_cursor = child.walk();
+            for lang_child in child.children(&mut lang_cursor) {
+                if lang_child.kind() == "language" {
+                    let lang_name = lang_child.utf8_text(source.as_bytes()).map_err(|_| {
+                        ParseError::ConversionError {
+                            message: "Invalid UTF-8 in language".to_string(),
+                        }
+                    })?;
+
+                    // Map language string to our Language enum
+                    code_language = map_language_string(lang_name);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Now convert all children with the detected language
+    cursor = ts_node.walk();
+    let mut last_end = range.start.0;
+
+    for child in ts_node.children(&mut cursor) {
+        // Skip certain node types that we don't want in the AST
+        if should_skip_node(child.kind()) {
+            continue;
+        }
+
+        // Check for gaps between nodes - preserve ALL text
+        let child_start = child.start_byte();
+        if child_start > last_end {
+            // There's a gap - preserve it as text
+            let gap_text = &source[last_end..child_start];
+            if !gap_text.is_empty() {
+                let gap_range = TextRange::new(last_end, child_start);
+                let gap_node = AstBuilder::token(SyntaxKind::Text, gap_text, gap_range);
+                builder = builder.add_child(gap_node);
+            }
+        }
+
+        // For code_fence_content, apply the detected language
+        let child_node = if child.kind() == "code_fence_content" && code_language.is_some() {
+            // Create the content with the detected language
+            let content_range = TextRange::new(child.start_byte(), child.end_byte());
+            let text =
+                child
+                    .utf8_text(source.as_bytes())
+                    .map_err(|_| ParseError::ConversionError {
+                        message: "Invalid UTF-8 in code content".to_string(),
+                    })?;
+            AstBuilder::token_with_language(
+                SyntaxKind::Text,
+                text,
+                content_range,
+                code_language.unwrap(),
+            )
+        } else {
+            convert_node(&child, source, Language::Markdown)?
+        };
+
+        builder = builder.add_child(child_node);
+        last_end = child.end_byte();
+    }
+
+    // Check for final gap after all children
+    if last_end < range.end.0 {
+        let final_gap_text = &source[last_end..range.end.0];
+        if !final_gap_text.is_empty() {
+            let gap_range = TextRange::new(last_end, range.end.0);
+            let gap_node = AstBuilder::token(SyntaxKind::Text, final_gap_text, gap_range);
+            builder = builder.add_child(gap_node);
+        }
+    }
+
+    Ok(builder.finish())
+}
+
+/// Map a language string from markdown to our Language enum
+fn map_language_string(lang: &str) -> Option<stoat_rope::Language> {
+    match lang.trim().to_lowercase().as_str() {
+        "text" | "txt" | "plain" | "plaintext" => Some(stoat_rope::Language::PlainText),
+        "markdown" | "md" => Some(stoat_rope::Language::Markdown),
+        "rust" | "rs" => Some(stoat_rope::Language::Rust),
+        _ => None, // Unknown language
+    }
+}
+
 /// Map tree-sitter node kind to rope AST SyntaxKind
 fn map_node_kind(ts_kind: &str, language: Language) -> SyntaxKind {
     match language {
@@ -134,6 +249,12 @@ fn map_markdown_kind(ts_kind: &str) -> SyntaxKind {
         "code_span" => SyntaxKind::CodeSpan,
         "emphasis" => SyntaxKind::Emphasis,
         "strong_emphasis" => SyntaxKind::Strong,
+
+        // Code blocks
+        "fenced_code_block" => SyntaxKind::CodeBlock,
+        "code_fence_content" => SyntaxKind::Text, // The actual code content
+        "info_string" => SyntaxKind::Text,        // Language identifier
+        "fenced_code_block_delimiter" => SyntaxKind::Text, // The ``` markers
 
         // Whitespace and breaks
         "line_break" | "hard_line_break" | "soft_line_break" => SyntaxKind::Newline,

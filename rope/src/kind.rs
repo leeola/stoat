@@ -28,6 +28,8 @@ pub enum SyntaxKind {
     Strong,
     /// Code span (`code`)
     CodeSpan,
+    /// Code block (```code```)
+    CodeBlock,
     /// Heading
     Heading,
 
@@ -161,6 +163,7 @@ impl SyntaxKind {
             SyntaxKind::Emphasis => "emphasis",
             SyntaxKind::Strong => "strong",
             SyntaxKind::CodeSpan => "code_span",
+            SyntaxKind::CodeBlock => "code_block",
             SyntaxKind::Heading => "heading",
 
             // Programming Tokens
