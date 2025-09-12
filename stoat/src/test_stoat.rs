@@ -61,6 +61,16 @@ impl TestStoat {
         self
     }
 
+    /// Sets the initial text content with a specific language for parsing.
+    pub fn with_text_and_language<S: AsRef<str>>(
+        mut self,
+        text: S,
+        language: stoat_text::parser::Language,
+    ) -> Self {
+        self.stoat = Stoat::with_text_and_language(text.as_ref(), language);
+        self
+    }
+
     /// Sets the cursor position.
     pub fn cursor(mut self, line: usize, column: usize) -> Self {
         // Use MoveCursor action to set position properly
@@ -429,6 +439,23 @@ impl TestStoat {
     #[track_caller]
     pub fn assert_dirty(self, expected: bool) -> Self {
         assert_eq!(self.stoat.is_dirty(), expected, "Dirty flag mismatch");
+        self
+    }
+
+    /// Asserts the language context at the current cursor position.
+    ///
+    /// This checks what language the AST reports for the cursor's location,
+    /// which is used to determine keymap behavior and syntax highlighting.
+    #[track_caller]
+    pub fn assert_language(self, expected: stoat_rope::Language) -> Self {
+        let actual = self.stoat.engine().state().language_at_cursor();
+        assert_eq!(
+            actual,
+            Some(expected),
+            "Language at cursor: {:?}, expected: {:?}",
+            actual,
+            expected
+        );
         self
     }
 

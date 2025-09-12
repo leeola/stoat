@@ -63,6 +63,19 @@ impl EditorEngine {
         }
     }
 
+    /// Creates a new editor engine with the given initial text and language.
+    pub fn with_text_and_language(text: &str, language: stoat_text::parser::Language) -> Self {
+        tracing::info!(
+            "Creating new EditorEngine with {} characters of text and {:?} language",
+            text.len(),
+            language
+        );
+        Self {
+            state: EditorState::with_text_and_language(text, language),
+            keymap: Keymap::default(),
+        }
+    }
+
     /// Creates a new editor engine with the given initial state.
     pub fn with_state(state: EditorState) -> Self {
         Self {

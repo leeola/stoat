@@ -65,6 +65,19 @@ impl EditorState {
         }
     }
 
+    /// Creates an editor state with the given text content and language.
+    pub fn with_text_and_language(text: &str, language: stoat_text::parser::Language) -> Self {
+        Self {
+            buffer: TextBuffer::with_text_and_language(text, language),
+            cursor: Cursor::new(),
+            mode: EditMode::Normal,
+            viewport: Viewport::new(),
+            file: FileInfo::new(),
+            is_dirty: false,
+            show_command_info: false,
+        }
+    }
+
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> TextPosition {
         self.cursor.position()
@@ -88,6 +101,34 @@ impl EditorState {
     /// Returns a specific line from the buffer.
     pub fn line(&self, index: usize) -> Option<String> {
         self.buffer.lines().nth(index)
+    }
+
+    /// Returns the language context at the current cursor position.
+    ///
+    /// Walks the AST to find the most specific language context
+    /// at the cursor's location.
+    pub fn language_at_cursor(&self) -> Option<stoat_rope::Language> {
+        // Convert cursor position to byte offset
+        let offset = self.position_to_offset(self.cursor.position());
+        self.buffer.rope.language_at_offset(offset)
+    }
+
+    /// Convert a TextPosition to a byte offset in the buffer.
+    pub fn position_to_offset(&self, position: TextPosition) -> usize {
+        let mut offset = 0;
+        let mut current_line = 0;
+
+        for line in self.buffer.lines() {
+            if current_line == position.line {
+                // Found the target line, add column offset
+                return offset + position.column.min(line.len());
+            }
+            current_line += 1;
+            offset += line.len() + 1; // +1 for newline
+        }
+
+        // Position is beyond the end of the buffer
+        offset
     }
 
     /// Builder for creating test states
@@ -128,13 +169,16 @@ impl TextBuffer {
     }
 
     pub fn with_text(text: &str) -> Self {
+        Self::with_text_and_language(text, Language::PlainText)
+    }
+
+    pub fn with_text_and_language(text: &str, language: Language) -> Self {
         if text.is_empty() {
             return Self::new();
         }
 
         // Use the proper parser to create a structured AST with paragraphs
-        let mut parser =
-            Parser::from_language(Language::PlainText).expect("Failed to create plain text parser");
+        let mut parser = Parser::from_language(language).expect("Failed to create parser");
 
         let rope_arc = parser.parse_text(text).expect("Failed to parse text");
 

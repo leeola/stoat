@@ -20,7 +20,13 @@ pub fn convert_tree(
     // If root is not a document node, wrap it
     if root.kind() != "document" {
         let range = TextRange::new(root.start_byte(), root.end_byte());
-        let mut builder = AstBuilder::start_node(SyntaxKind::Document, range);
+        // Use the language-aware builder for the document root
+        let rope_language = match language {
+            Language::Markdown => stoat_rope::Language::Markdown,
+            Language::PlainText => stoat_rope::Language::PlainText,
+        };
+        let mut builder =
+            AstBuilder::start_node_with_language(SyntaxKind::Document, range, rope_language);
         let child = convert_node(&root, source, language)?;
         builder = builder.add_child(child);
         Ok(builder.finish())
@@ -53,11 +59,21 @@ fn convert_node(
                     message: "Invalid UTF-8".to_string(),
                 })?;
 
-        return Ok(AstBuilder::token(SyntaxKind::Text, text, range));
+        // Convert Language enum to rope Language
+        let rope_language = match language {
+            Language::Markdown => stoat_rope::Language::Markdown,
+            Language::PlainText => stoat_rope::Language::PlainText,
+        };
+        return Ok(AstBuilder::token_with_language(
+            SyntaxKind::Text,
+            text,
+            range,
+            rope_language,
+        ));
     }
 
     if ts_node.child_count() == 0 {
-        // Leaf node - create token
+        // Leaf node - create token with language
         let text =
             ts_node
                 .utf8_text(source.as_bytes())
@@ -65,10 +81,24 @@ fn convert_node(
                     message: "Invalid UTF-8".to_string(),
                 })?;
 
-        Ok(AstBuilder::token(kind, text, range))
+        // Convert Language enum to rope Language
+        let rope_language = match language {
+            Language::Markdown => stoat_rope::Language::Markdown,
+            Language::PlainText => stoat_rope::Language::PlainText,
+        };
+        Ok(AstBuilder::token_with_language(
+            kind,
+            text,
+            range,
+            rope_language,
+        ))
     } else {
-        // Internal node - create syntax node with children
-        let mut builder = AstBuilder::start_node(kind, range);
+        // Internal node - create syntax node with children and language
+        let rope_language = match language {
+            Language::Markdown => stoat_rope::Language::Markdown,
+            Language::PlainText => stoat_rope::Language::PlainText,
+        };
+        let mut builder = AstBuilder::start_node_with_language(kind, range, rope_language);
 
         // Convert all children
         let mut cursor = ts_node.walk();
@@ -83,11 +113,16 @@ fn convert_node(
             // Check for gaps between nodes - preserve ALL text
             let child_start = child.start_byte();
             if child_start > last_end {
-                // There's a gap - preserve it as text
+                // There's a gap - preserve it as text with language
                 let gap_text = &source[last_end..child_start];
                 if !gap_text.is_empty() {
                     let gap_range = TextRange::new(last_end, child_start);
-                    let gap_node = AstBuilder::token(SyntaxKind::Text, gap_text, gap_range);
+                    let gap_node = AstBuilder::token_with_language(
+                        SyntaxKind::Text,
+                        gap_text,
+                        gap_range,
+                        rope_language,
+                    );
                     builder = builder.add_child(gap_node);
                 }
             }
@@ -102,7 +137,12 @@ fn convert_node(
             let final_gap_text = &source[last_end..range.end.0];
             if !final_gap_text.is_empty() {
                 let gap_range = TextRange::new(last_end, range.end.0);
-                let gap_node = AstBuilder::token(SyntaxKind::Text, final_gap_text, gap_range);
+                let gap_node = AstBuilder::token_with_language(
+                    SyntaxKind::Text,
+                    final_gap_text,
+                    gap_range,
+                    rope_language,
+                );
                 builder = builder.add_child(gap_node);
             }
         }
@@ -115,10 +155,16 @@ fn convert_node(
 fn convert_code_block(
     ts_node: &TsNode<'_>,
     source: &str,
-    _parent_language: Language,
+    parent_language: Language,
 ) -> Result<Arc<AstNode>, ParseError> {
     let range = TextRange::new(ts_node.start_byte(), ts_node.end_byte());
-    let mut builder = AstBuilder::start_node(SyntaxKind::CodeBlock, range);
+    // Code blocks themselves should have the parent language (markdown)
+    let rope_language = match parent_language {
+        Language::Markdown => stoat_rope::Language::Markdown,
+        Language::PlainText => stoat_rope::Language::PlainText,
+    };
+    let mut builder =
+        AstBuilder::start_node_with_language(SyntaxKind::CodeBlock, range, rope_language);
 
     // Look for info_string to determine the language
     let mut code_language = None;
@@ -165,11 +211,16 @@ fn convert_code_block(
         // Check for gaps between nodes - preserve ALL text
         let child_start = child.start_byte();
         if child_start > last_end {
-            // There's a gap - preserve it as text
+            // There's a gap - preserve it as text with parent language
             let gap_text = &source[last_end..child_start];
             if !gap_text.is_empty() {
                 let gap_range = TextRange::new(last_end, child_start);
-                let gap_node = AstBuilder::token(SyntaxKind::Text, gap_text, gap_range);
+                let gap_node = AstBuilder::token_with_language(
+                    SyntaxKind::Text,
+                    gap_text,
+                    gap_range,
+                    rope_language,
+                );
                 builder = builder.add_child(gap_node);
             }
         }
@@ -191,7 +242,7 @@ fn convert_code_block(
                 code_language.unwrap(),
             )
         } else {
-            convert_node(&child, source, Language::Markdown)?
+            convert_node(&child, source, parent_language)?
         };
 
         builder = builder.add_child(child_node);
@@ -203,7 +254,12 @@ fn convert_code_block(
         let final_gap_text = &source[last_end..range.end.0];
         if !final_gap_text.is_empty() {
             let gap_range = TextRange::new(last_end, range.end.0);
-            let gap_node = AstBuilder::token(SyntaxKind::Text, final_gap_text, gap_range);
+            let gap_node = AstBuilder::token_with_language(
+                SyntaxKind::Text,
+                final_gap_text,
+                gap_range,
+                rope_language,
+            );
             builder = builder.add_child(gap_node);
         }
     }

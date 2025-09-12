@@ -104,6 +104,13 @@ impl Stoat {
         }
     }
 
+    /// Creates a new Stoat editor with initial text content and specified language.
+    pub fn with_text_and_language(text: &str, language: stoat_text::parser::Language) -> Self {
+        Self {
+            engine: EditorEngine::with_text_and_language(text, language),
+        }
+    }
+
     /// Creates a new test instance for fluent testing.
     ///
     /// Returns a [`TestStoat`] wrapper that provides convenient
@@ -302,6 +309,92 @@ mod stoat_tests {
         assert_eq!(events.len(), 1);
         if let EditorEvent::KeyPress { modifiers, .. } = &events[0] {
             assert!(modifiers.alt);
+        }
+    }
+
+    #[test]
+    fn markdown_language_context_detection() {
+        use stoat_text::parser::Language;
+
+        let markdown_text = r#"# Heading
+
+This is markdown text.
+
+```text
+This is plain text in a code block
+It should have Language::PlainText
+```
+
+More markdown after the code block."#;
+
+        let editor = Stoat::with_text_and_language(markdown_text, Language::Markdown);
+
+        // Debug: print the AST structure to see what languages are set where
+        let state = editor.engine().state();
+        let rope = state.buffer.rope();
+        println!("=== AST Structure with Languages ===");
+        debug_print_ast_with_languages(&rope.root(), 0);
+
+        // Debug: Check what language we get at different positions
+        println!("\n=== Language at different positions ===");
+        for line in 0..10 {
+            let pos = crate::actions::TextPosition::new(line, 0);
+            let offset = state.position_to_offset(pos);
+            let lang = rope.language_at_offset(offset);
+            println!("Line {}: {:?}", line, lang);
+        }
+
+        Stoat::test()
+            .with_text_and_language(markdown_text, Language::Markdown)
+            // Cursor starts at beginning - should be markdown
+            .assert_language(stoat_rope::Language::Markdown)
+            // Move to line 5, column 10 (inside the code block text content, not at start)
+            .cursor(5, 10)
+            .assert_language(stoat_rope::Language::PlainText)
+            // Move back to markdown area (line 2)
+            .cursor(2, 0)
+            .assert_language(stoat_rope::Language::Markdown)
+            // Move to the last line (markdown area)
+            .cursor(9, 0)
+            .assert_language(stoat_rope::Language::Markdown);
+    }
+
+    #[cfg(test)]
+    fn debug_print_ast_with_languages(node: &stoat_rope::ast::AstNode, indent: usize) {
+        use stoat_rope::ast::AstNode;
+        let indent_str = "  ".repeat(indent);
+
+        match node {
+            AstNode::Token {
+                kind,
+                text,
+                language,
+                ..
+            } => {
+                let lang_str = language
+                    .map(|l| format!(" [{}]", l.name()))
+                    .unwrap_or_else(|| " [no lang]".to_string());
+                let text_preview = if text.len() > 20 {
+                    format!("{}...", &text[..20])
+                } else {
+                    text.to_string()
+                };
+                println!("{}{:?}: {:?}{}", indent_str, kind, text_preview, lang_str);
+            },
+            AstNode::Syntax {
+                kind,
+                children,
+                language,
+                ..
+            } => {
+                let lang_str = language
+                    .map(|l| format!(" [{}]", l.name()))
+                    .unwrap_or_else(|| " [no lang]".to_string());
+                println!("{}{:?}{}", indent_str, kind, lang_str);
+                for (child, _) in children {
+                    debug_print_ast_with_languages(child, indent + 1);
+                }
+            },
         }
     }
 
