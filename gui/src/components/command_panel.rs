@@ -54,23 +54,16 @@ impl CommandPanel {
             .flex()
             .justify_between()
             .items_center()
-            .pb_1()
-            .mb_2()
+            .mb_0p5()
             .border_b_1()
             .border_color(self.theme.line_number)
             .child(
                 div()
                     .text_xs()
-                    .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(self.theme.status_bar_fg)
-                    .child(format!("{} MODE", self.mode.to_uppercase())),
+                    .child(self.mode.to_uppercase()),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(self.theme.status_bar_fg)
-                    .child("? toggle"),
-            )
+            .child(div().text_xs().text_color(self.theme.comment).child("?"))
     }
 
     /// Renders a key-value command item.
@@ -78,15 +71,15 @@ impl CommandPanel {
         div()
             .flex()
             .flex_row()
-            .gap_3()
+            .gap_2()
             .py_0p5()
             .child(
                 div()
-                    .w(px(35.0))
+                    .w(px(30.0))
                     .flex_shrink_0()
                     .font_family("JetBrains Mono")
                     .text_xs()
-                    .text_color(self.theme.status_bar_fg)
+                    .text_color(self.theme.string)
                     .text_right()
                     .child(key.to_string()),
             )
@@ -101,77 +94,19 @@ impl CommandPanel {
 
     /// Renders the command panel content with dynamic commands.
     fn render_content(&self) -> impl IntoElement {
-        let mut content = div().flex().flex_col().gap_0p5();
-
-        // Display commands with a maximum to keep panel compact
-        const MAX_COMMANDS: usize = 10;
+        let mut content = div().flex().flex_col();
 
         if self.commands.is_empty() {
             content = content.child(
                 div()
                     .text_xs()
                     .text_color(self.theme.comment)
-                    .child("No commands available"),
+                    .child("No commands"),
             );
         } else {
-            // Group commands for better organization
-            let mut movement_cmds = Vec::new();
-            let mut mode_cmds = Vec::new();
-            let mut other_cmds = Vec::new();
-
-            for (key, desc) in &self.commands {
-                if desc.contains("cursor") || desc.contains("Move") {
-                    movement_cmds.push((key.as_str(), desc.as_str()));
-                } else if desc.contains("mode") || desc.contains("Mode") {
-                    mode_cmds.push((key.as_str(), desc.as_str()));
-                } else {
-                    other_cmds.push((key.as_str(), desc.as_str()));
-                }
-            }
-
-            // Display movement commands
-            if !movement_cmds.is_empty() {
-                content = content.child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(self.theme.status_bar_fg)
-                        .mt_1()
-                        .child("Movement"),
-                );
-                for (key, desc) in movement_cmds.iter().take(3) {
-                    content = content.child(self.render_item(key, desc));
-                }
-            }
-
-            // Display mode commands
-            if !mode_cmds.is_empty() {
-                content = content.child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(self.theme.status_bar_fg)
-                        .mt_2()
-                        .child("Modes"),
-                );
-                for (key, desc) in mode_cmds.iter().take(3) {
-                    content = content.child(self.render_item(key, desc));
-                }
-            }
-
-            // Display other commands
-            if !other_cmds.is_empty() {
-                content = content.child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(self.theme.status_bar_fg)
-                        .mt_2()
-                        .child("Commands"),
-                );
-                for (key, desc) in other_cmds.iter().take(4) {
-                    content = content.child(self.render_item(key, desc));
-                }
+            // Display all commands as a simple list, up to 12 items
+            for (key, desc) in self.commands.iter().take(12) {
+                content = content.child(self.render_item(key, desc));
             }
         }
 
@@ -186,21 +121,16 @@ impl Render for CommandPanel {
             .absolute()
             .bottom(px(24.0)) // Height of status bar
             .right_0()
-            .w(px(280.0))
+            .w(px(220.0))
             .bg(self.theme.status_bar_bg) // Match status bar background
             .border_t_1()
             .border_l_1()
             .border_color(self.theme.line_number)
-            .px_3()
-            .py_2()
-            .child(
-                div().flex().flex_col().child(self.render_header()).child(
-                    // Content area with max height and scroll
-                    div()
-                        .max_h(px(200.0))
-                        .overflow_y_hidden()
-                        .child(self.render_content()),
-                ),
-            )
+            .px_2()
+            .py_1()
+            .child(div().flex().flex_col().child(self.render_header()).child(
+                // Content area
+                self.render_content(),
+            ))
     }
 }

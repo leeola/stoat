@@ -23,63 +23,40 @@ impl HelpDialog {
     fn render_header(&self) -> impl IntoElement {
         div()
             .flex()
-            .justify_between()
-            .items_center()
-            .pb_4()
-            .mb_4()
+            .justify_end()
+            .pb_2()
+            .mb_2()
             .border_b_1()
             .border_color(self.theme.line_number)
             .child(
                 div()
-                    .text_xl()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(self.theme.foreground)
-                    .child("Stoat Editor Help"),
-            )
-            .child(
-                div()
                     .text_sm()
                     .text_color(self.theme.comment)
-                    .child("Press Esc to close"),
+                    .child("Esc to close"),
             )
     }
 
-    /// Renders a section of help content.
-    fn render_section(
-        &self,
-        title: &'static str,
-        content: Vec<(&'static str, &'static str)>,
-    ) -> impl IntoElement {
+    /// Renders a key binding row.
+    fn render_binding(&self, key: &'static str, desc: &'static str) -> impl IntoElement {
         div()
-            .mb_6()
+            .flex()
+            .flex_row()
+            .py_0p5()
             .child(
                 div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(self.theme.keyword)
-                    .mb_3()
-                    .child(title),
+                    .w(px(80.0))
+                    .flex_shrink_0()
+                    .font_family("JetBrains Mono")
+                    .text_sm()
+                    .text_color(self.theme.string)
+                    .child(key),
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .children(content.into_iter().map(|(key, desc)| {
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .child(
-                                div()
-                                    .w(px(100.0))
-                                    .flex_shrink_0()
-                                    .font_family("JetBrains Mono")
-                                    .text_color(self.theme.string)
-                                    .child(key),
-                            )
-                            .child(div().flex_1().text_color(self.theme.foreground).child(desc))
-                    })),
+                    .flex_1()
+                    .text_sm()
+                    .text_color(self.theme.foreground)
+                    .child(desc),
             )
     }
 
@@ -88,51 +65,22 @@ impl HelpDialog {
         div()
             .flex()
             .flex_col()
-            .child(self.render_section(
-                "Normal Mode",
-                vec![
-                    ("h, j, k, l", "Move cursor left, down, up, right"),
-                    ("i", "Enter insert mode"),
-                    ("v", "Enter visual mode"),
-                    (":", "Enter command mode"),
-                    ("?", "Toggle this help dialog"),
-                    ("Esc", "Exit to normal mode / Close help"),
-                ],
-            ))
-            .child(self.render_section(
-                "Insert Mode",
-                vec![
-                    ("Esc", "Return to normal mode"),
-                    ("Enter", "Insert newline"),
-                    ("Backspace", "Delete character"),
-                    ("Any text", "Insert at cursor position"),
-                ],
-            ))
-            .child(self.render_section(
-                "Visual Mode",
-                vec![
-                    ("Esc", "Return to normal mode"),
-                    ("h, j, k, l", "Extend selection"),
-                ],
-            ))
-            .child(self.render_section(
-                "Command Mode",
-                vec![
-                    ("Esc", "Return to normal mode"),
-                    (":q", "Quit editor"),
-                    (":w", "Save file (planned)"),
-                    (":wq", "Save and quit (planned)"),
-                ],
-            ))
-            .child(self.render_section(
-                "About Stoat",
-                vec![
-                    ("Version", "0.1.0 (experimental)"),
-                    ("License", "See LICENSE file"),
-                    ("Concept", "Canvas-based, node-oriented text editor"),
-                    ("Status", "Prototype/exploration phase"),
-                ],
-            ))
+            .gap_0p5()
+            // Normal mode
+            .child(self.render_binding("h j k l", "Move cursor"))
+            .child(self.render_binding("i", "Insert mode"))
+            .child(self.render_binding("v", "Visual mode"))
+            .child(self.render_binding(":", "Command mode"))
+            // Insert mode
+            .child(self.render_binding("Esc", "Normal mode"))
+            .child(self.render_binding("Enter", "New line"))
+            .child(self.render_binding("Backspace", "Delete"))
+            // Command mode
+            .child(self.render_binding(":q", "Quit"))
+            .child(self.render_binding(":w", "Save (planned)"))
+            .child(self.render_binding(":wq", "Save & quit (planned)"))
+            // Help
+            .child(self.render_binding("?", "Toggle help"))
     }
 }
 
@@ -151,34 +99,18 @@ impl Render for HelpDialog {
             .child(
                 // Dialog box
                 div()
-                    .w(px(600.0))
-                    .h(px(500.0))
+                    .w(px(350.0))
                     .max_w_full()
-                    .max_h_full()
                     .bg(self.theme.background)
                     .border_1()
                     .border_color(self.theme.line_number)
                     .rounded_lg()
                     .shadow_2xl()
+                    .p_4()
                     .flex()
                     .flex_col()
-                    .child(
-                        // Dialog content with padding and scrolling
-                        div()
-                            .p_6()
-                            .flex()
-                            .flex_col()
-                            .size_full()
-                            .overflow_hidden()
-                            .child(self.render_header())
-                            .child(
-                                // Scrollable content area
-                                div()
-                                    .flex_1()
-                                    .overflow_y_hidden()
-                                    .child(self.render_content()),
-                            ),
-                    ),
+                    .child(self.render_header())
+                    .child(self.render_content()),
             )
     }
 }
