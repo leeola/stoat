@@ -217,16 +217,21 @@ impl RopeAst {
     fn find_language_in_ancestors(node: &AstNode, pos: TextPos) -> Option<Language> {
         let range = node.range();
 
-        // Check if position is within this node
-        if pos.0 < range.start.0 || pos.0 >= range.end.0 {
+        // Check if position is within this node (inclusive of end)
+        if pos.0 < range.start.0 || pos.0 > range.end.0 {
             return None;
         }
 
         // If this is a syntax node, check children first for more specific language
         if let Some(children) = node.children() {
             for (child, _) in children {
-                if let Some(lang) = Self::find_language_in_ancestors(child, pos) {
-                    return Some(lang);
+                // Check if this child contains the position
+                let child_range = child.range();
+                if pos.0 >= child_range.start.0 && pos.0 <= child_range.end.0 {
+                    // Recursively check this child for a more specific language
+                    if let Some(lang) = Self::find_language_in_ancestors(child, pos) {
+                        return Some(lang);
+                    }
                 }
             }
         }

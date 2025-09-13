@@ -126,8 +126,8 @@ impl Stoat {
     ///     .type_keys("i world")
     ///     .assert_text(" worldhello");
     /// ```
-    pub fn test() -> crate::test_stoat::TestStoat {
-        crate::test_stoat::TestStoat::new()
+    pub fn test() -> test_stoat::TestStoat {
+        test_stoat::TestStoat::new()
     }
 
     /// Processes keyboard input using vim-like syntax.
@@ -327,23 +327,6 @@ It should have Language::PlainText
 
 More markdown after the code block."#;
 
-        let editor = Stoat::with_text_and_language(markdown_text, Language::Markdown);
-
-        // Debug: print the AST structure to see what languages are set where
-        let state = editor.engine().state();
-        let rope = state.buffer.rope();
-        println!("=== AST Structure with Languages ===");
-        debug_print_ast_with_languages(&rope.root(), 0);
-
-        // Debug: Check what language we get at different positions
-        println!("\n=== Language at different positions ===");
-        for line in 0..10 {
-            let pos = crate::actions::TextPosition::new(line, 0);
-            let offset = state.position_to_offset(pos);
-            let lang = rope.language_at_offset(offset);
-            println!("Line {}: {:?}", line, lang);
-        }
-
         Stoat::test()
             .with_text_and_language(markdown_text, Language::Markdown)
             // Cursor starts at beginning - should be markdown
@@ -357,45 +340,6 @@ More markdown after the code block."#;
             // Move to the last line (markdown area)
             .cursor(9, 0)
             .assert_language(stoat_rope::Language::Markdown);
-    }
-
-    #[cfg(test)]
-    fn debug_print_ast_with_languages(node: &stoat_rope::ast::AstNode, indent: usize) {
-        use stoat_rope::ast::AstNode;
-        let indent_str = "  ".repeat(indent);
-
-        match node {
-            AstNode::Token {
-                kind,
-                text,
-                language,
-                ..
-            } => {
-                let lang_str = language
-                    .map(|l| format!(" [{}]", l.name()))
-                    .unwrap_or_else(|| " [no lang]".to_string());
-                let text_preview = if text.len() > 20 {
-                    format!("{}...", &text[..20])
-                } else {
-                    text.to_string()
-                };
-                println!("{}{:?}: {:?}{}", indent_str, kind, text_preview, lang_str);
-            },
-            AstNode::Syntax {
-                kind,
-                children,
-                language,
-                ..
-            } => {
-                let lang_str = language
-                    .map(|l| format!(" [{}]", l.name()))
-                    .unwrap_or_else(|| " [no lang]".to_string());
-                println!("{}{:?}{}", indent_str, kind, lang_str);
-                for (child, _) in children {
-                    debug_print_ast_with_languages(child, indent + 1);
-                }
-            },
-        }
     }
 
     #[test]

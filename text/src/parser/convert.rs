@@ -173,7 +173,7 @@ fn convert_code_block(
     for child in ts_node.children(&mut cursor) {
         if child.kind() == "info_string" {
             // Extract the language identifier
-            let lang_text =
+            let _lang_text =
                 child
                     .utf8_text(source.as_bytes())
                     .map_err(|_| ParseError::ConversionError {

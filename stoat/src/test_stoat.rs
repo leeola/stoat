@@ -71,14 +71,26 @@ impl TestStoat {
         self
     }
 
-    /// Sets the cursor position.
+    /// Returns the current cursor position.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        self.stoat.cursor_position()
+    }
+
+    /// Sets the cursor position using vim navigation.
     pub fn cursor(mut self, line: usize, column: usize) -> Self {
-        // Use MoveCursor action to set position properly
-        let event = EditorEvent::MouseClick {
-            position: Point::new(column as f32 * 8.0, line as f32 * 16.0), // Approximate char sizes
-            button: MouseButton::Left,
-        };
-        self.stoat.engine_mut().handle_event(event);
+        // First go to the first line and column
+        self = self.type_keys("gg0");
+
+        // Move down to the target line
+        for _ in 0..line {
+            self = self.type_keys("j");
+        }
+
+        // Move right to the target column
+        for _ in 0..column {
+            self = self.type_keys("l");
+        }
+
         self
     }
 

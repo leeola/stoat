@@ -66,7 +66,7 @@ impl EditorState {
     }
 
     /// Creates an editor state with the given text content and language.
-    pub fn with_text_and_language(text: &str, language: stoat_text::parser::Language) -> Self {
+    pub fn with_text_and_language(text: &str, language: Language) -> Self {
         Self {
             buffer: TextBuffer::with_text_and_language(text, language),
             cursor: Cursor::new(),
@@ -115,10 +115,12 @@ impl EditorState {
 
     /// Convert a TextPosition to a byte offset in the buffer.
     pub fn position_to_offset(&self, position: TextPosition) -> usize {
+        // Get the full text and split it into lines manually
+        let text = self.buffer.text();
         let mut offset = 0;
         let mut current_line = 0;
 
-        for line in self.buffer.lines() {
+        for line in text.lines() {
             if current_line == position.line {
                 // Found the target line, add column offset
                 return offset + position.column.min(line.len());
@@ -128,7 +130,7 @@ impl EditorState {
         }
 
         // Position is beyond the end of the buffer
-        offset
+        offset.saturating_sub(1).min(text.len())
     }
 
     /// Builder for creating test states
@@ -195,8 +197,16 @@ impl TextBuffer {
     }
 
     pub fn lines(&self) -> impl Iterator<Item = String> + use<'_> {
-        // Use rope's native line iterator
-        self.rope.iter_lines()
+        // The rope's line iterator expects explicit Newline tokens, but our
+        // markdown parser includes newlines in text content. So we need to
+        // split the text manually.
+        let text = self.text();
+        let lines: Vec<String> = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.lines().map(|s| s.to_string()).collect()
+        };
+        lines.into_iter()
     }
 
     pub fn is_empty(&self) -> bool {
