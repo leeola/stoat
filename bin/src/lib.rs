@@ -9,7 +9,7 @@ mod tests {
         let engine = EditorEngine::new();
 
         // Basic initialization test
-        assert_eq!(engine.line_count(), 0); // Empty editor has no lines
+        assert_eq!(engine.line_count(), 1); // Empty editor has one empty line
         assert!(engine.text().is_empty());
         assert!(!engine.is_dirty());
     }
