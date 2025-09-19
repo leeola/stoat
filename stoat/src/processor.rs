@@ -147,14 +147,13 @@ fn process_key_press(
             "space" => Some(" ".to_string()),
             "tab" => Some("\t".to_string()),
             // Single characters (but not control characters)
-            s if s.len() == 1 => {
-                let ch = s.chars().next().unwrap();
+            s if s.len() == 1 => s.chars().next().and_then(|ch| {
                 if !ch.is_control() {
                     Some(s.to_string())
                 } else {
                     None
                 }
-            },
+            }),
             _ => None,
         };
 
@@ -220,7 +219,7 @@ fn process_command(
 
             let effect = Effect::ShowHelp {
                 visible: new_state.show_command_info,
-                mode: format!("{:?}", mode),
+                mode: format!("{mode:?}"),
                 commands,
             };
 
@@ -274,7 +273,7 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
 
         EditorAction::MoveCursor { position } => {
             // Move both anchor and head to the new position (collapse selection)
-            state.cursor.move_to(position.clone());
+            state.cursor.move_to(position);
             // Update desired_column to be the visual column for proper tab handling
             if let Some(line) = state.line(position.line) {
                 // Always calculate visual column when moving cursor
@@ -295,7 +294,7 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
                 state.cursor.head = r.end;
             } else {
                 // Clear selection - make anchor == head
-                state.cursor.anchor = state.cursor.head.clone();
+                state.cursor.anchor = state.cursor.head;
             }
         },
 
@@ -316,7 +315,7 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
         EditorAction::SetContent { content } => {
             state.buffer = TextBuffer::with_text(&content);
             let start = TextPosition::start();
-            state.cursor.anchor = start.clone();
+            state.cursor.anchor = start;
             state.cursor.head = start;
             state.cursor.desired_column = 0;
         },
@@ -646,7 +645,7 @@ fn delete_text_in_range(state: &mut EditorState, range: TextRange) {
 
     // Update cursor position to the start of the deletion range
     // Need to recalculate visual column for proper tab handling
-    state.cursor.move_to(range.start.clone());
+    state.cursor.move_to(range.start);
 
     // Get the line after deletion to calculate proper visual column
     if let Some(line) = state.line(range.start.line) {

@@ -15,7 +15,7 @@ pub struct KeymapConfig {
 }
 
 /// Configuration for a single mode
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModeConfig {
     /// Display name for status line
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,15 +46,6 @@ impl Default for KeymapConfig {
         Self {
             modes: HashMap::new(),
             initial_mode: default_initial_mode(),
-        }
-    }
-}
-
-impl Default for ModeConfig {
-    fn default() -> Self {
-        Self {
-            display_name: None,
-            keys: HashMap::new(),
         }
     }
 }

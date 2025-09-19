@@ -165,7 +165,7 @@ fn find_code_block_with_language(node: &stoat_rope::ast::AstNode) -> bool {
     }
 }
 
-fn debug_print_ts_node(node: &tree_sitter::Node, source: &str, indent: usize) {
+fn debug_print_ts_node(node: &tree_sitter::Node<'_>, source: &str, indent: usize) {
     let indent_str = "  ".repeat(indent);
 
     let text = if node.child_count() == 0 {

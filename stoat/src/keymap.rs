@@ -46,6 +46,12 @@ impl KeyBinding {
     }
 }
 
+impl Default for Keymap {
+    fn default() -> Self {
+        Self::from_config(default_config())
+    }
+}
+
 impl Keymap {
     /// Creates a new custom keymap from configuration.
     pub fn from_config(config: KeymapConfig) -> Self {
@@ -58,11 +64,6 @@ impl Keymap {
         }
 
         Self { modes }
-    }
-
-    /// Creates a default keymap with vim-like bindings.
-    pub fn default() -> Self {
-        Self::from_config(default_config())
     }
 
     /// Looks up a binding for the given key and mode.

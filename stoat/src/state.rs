@@ -118,14 +118,12 @@ impl EditorState {
         // Get the full text and split it into lines manually
         let text = self.buffer.text();
         let mut offset = 0;
-        let mut current_line = 0;
 
-        for line in text.lines() {
+        for (current_line, line) in text.lines().enumerate() {
             if current_line == position.line {
                 // Found the target line, add column offset
                 return offset + position.column.min(line.len());
             }
-            current_line += 1;
             offset += line.len() + 1; // +1 for newline
         }
 
@@ -254,7 +252,7 @@ impl Cursor {
     pub fn new() -> Self {
         let start = TextPosition::start();
         Self {
-            anchor: start.clone(),
+            anchor: start,
             head: start,
             desired_column: 0,
         }
@@ -262,15 +260,15 @@ impl Cursor {
 
     pub fn at_position(position: TextPosition) -> Self {
         Self {
-            anchor: position.clone(),
-            head: position.clone(),
+            anchor: position,
+            head: position,
             desired_column: position.column,
         }
     }
 
     /// Returns the current cursor position (the head)
     pub fn position(&self) -> TextPosition {
-        self.head.clone()
+        self.head
     }
 
     /// Returns the selection range if anchor != head
@@ -280,9 +278,9 @@ impl Cursor {
         } else {
             // Always return range with start <= end
             if self.anchor < self.head {
-                Some(TextRange::new(self.anchor.clone(), self.head.clone()))
+                Some(TextRange::new(self.anchor, self.head))
             } else {
-                Some(TextRange::new(self.head.clone(), self.anchor.clone()))
+                Some(TextRange::new(self.head, self.anchor))
             }
         }
     }
@@ -295,8 +293,8 @@ impl Cursor {
 
     /// Move both anchor and head to same position (collapses selection)
     pub fn move_to(&mut self, position: TextPosition) {
-        self.anchor = position.clone();
-        self.head = position.clone();
+        self.anchor = position;
+        self.head = position;
         self.desired_column = self.head.column;
     }
 }
@@ -415,7 +413,7 @@ impl EditorStateBuilder {
 
     pub fn with_cursor(mut self, line: usize, column: usize) -> Self {
         let pos = TextPosition::new(line, column);
-        self.state.cursor.anchor = pos.clone();
+        self.state.cursor.anchor = pos;
         self.state.cursor.head = pos;
         self.state.cursor.desired_column = column;
         self

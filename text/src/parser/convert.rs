@@ -226,24 +226,19 @@ fn convert_code_block(
         }
 
         // For code_fence_content, apply the detected language
-        let child_node = if child.kind() == "code_fence_content" && code_language.is_some() {
-            // Create the content with the detected language
-            let content_range = TextRange::new(child.start_byte(), child.end_byte());
-            let text =
-                child
-                    .utf8_text(source.as_bytes())
-                    .map_err(|_| ParseError::ConversionError {
+        let child_node =
+            if let (true, Some(lang)) = (child.kind() == "code_fence_content", code_language) {
+                // Create the content with the detected language
+                let content_range = TextRange::new(child.start_byte(), child.end_byte());
+                let text = child.utf8_text(source.as_bytes()).map_err(|_| {
+                    ParseError::ConversionError {
                         message: "Invalid UTF-8 in code content".to_string(),
-                    })?;
-            AstBuilder::token_with_language(
-                SyntaxKind::Text,
-                text,
-                content_range,
-                code_language.unwrap(),
-            )
-        } else {
-            convert_node(&child, source, parent_language)?
-        };
+                    }
+                })?;
+                AstBuilder::token_with_language(SyntaxKind::Text, text, content_range, lang)
+            } else {
+                convert_node(&child, source, parent_language)?
+            };
 
         builder = builder.add_child(child_node);
         last_end = child.end_byte();

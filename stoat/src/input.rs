@@ -58,12 +58,18 @@ pub mod key_helpers {
 
     /// Checks if a key is a single printable character.
     pub fn is_char_key(key: &Key) -> bool {
-        key.len() == 1 && !key.chars().next().unwrap().is_control()
+        key.chars()
+            .next()
+            .map_or(false, |c| key.len() == 1 && !c.is_control())
     }
 
     /// Checks if a key is a special named key (not a character).
     pub fn is_named_key(key: &Key) -> bool {
-        key.len() > 1 || (key.len() == 1 && key.chars().next().unwrap().is_control())
+        key.len() > 1
+            || key
+                .chars()
+                .next()
+                .map_or(false, |c| key.len() == 1 && c.is_control())
     }
 
     /// Normalizes a key string to lowercase for consistent matching.

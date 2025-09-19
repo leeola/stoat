@@ -202,10 +202,7 @@ impl TestStoat {
         }
 
         let config = self.keymap_config.as_mut().unwrap();
-        let config_mut = config
-            .modes
-            .entry(mode.to_string())
-            .or_insert_with(ModeConfig::default);
+        let config_mut = config.modes.entry(mode.to_string()).or_default();
         config_mut.keys.insert(key.to_string(), binding);
 
         // Apply updated keymap config to engine
@@ -607,7 +604,7 @@ impl KeymapBuilder {
             .unwrap()
             .modes
             .entry(mode.to_string())
-            .or_insert_with(ModeConfig::default);
+            .or_default();
 
         self
     }
@@ -676,7 +673,7 @@ impl ModeBuilder {
             .unwrap()
             .modes
             .entry(mode_name.clone())
-            .or_insert_with(ModeConfig::default);
+            .or_default();
 
         Self {
             test_stoat,
