@@ -15,6 +15,9 @@ pub mod config {
     pub enum Command {
         /// Launch GUI mode
         Gui {
+            /// Optional file paths to open
+            paths: Vec<std::path::PathBuf>,
+
             /// Optional input sequence for automated testing
             #[arg(short, long)]
             input: Option<String>,

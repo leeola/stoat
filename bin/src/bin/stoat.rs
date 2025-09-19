@@ -15,9 +15,9 @@ fn main() {
     // Handle subcommands
     match cli.command {
         #[cfg(feature = "gui")]
-        Some(Command::Gui { input }) => {
+        Some(Command::Gui { paths, input }) => {
             // Launch GUI directly without any tokio runtime
-            if let Err(e) = stoat_bin::commands::gui::run(input) {
+            if let Err(e) = stoat_bin::commands::gui::run(paths, input) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }
