@@ -60,7 +60,7 @@ pub mod key_helpers {
     pub fn is_char_key(key: &Key) -> bool {
         key.chars()
             .next()
-            .map_or(false, |c| key.len() == 1 && !c.is_control())
+            .is_some_and(|c| key.len() == 1 && !c.is_control())
     }
 
     /// Checks if a key is a special named key (not a character).
@@ -69,7 +69,7 @@ pub mod key_helpers {
             || key
                 .chars()
                 .next()
-                .map_or(false, |c| key.len() == 1 && c.is_control())
+                .is_some_and(|c| key.len() == 1 && c.is_control())
     }
 
     /// Normalizes a key string to lowercase for consistent matching.

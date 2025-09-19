@@ -15,23 +15,27 @@ It should have Language::PlainText
 
 More markdown after the code block."#;
 
-    let mut parser = Parser::from_language(Language::Markdown).unwrap();
-    let rope = parser.parse_text(markdown).unwrap();
+    let mut parser = Parser::from_language(Language::Markdown).expect("Failed to create parser");
+    let rope = parser
+        .parse_text(markdown)
+        .expect("Failed to parse markdown");
 
     // Debug print the tree structure
     println!("=== AST Structure ===");
-    debug_print_node(&rope.root(), 0);
+    debug_print_node(rope.root(), 0);
 
     // Let's also test with tree-sitter directly to see what nodes it produces
     let mut ts_parser = tree_sitter::Parser::new();
-    ts_parser.set_language(tree_sitter_md::language()).unwrap();
-    let tree = ts_parser.parse(markdown, None).unwrap();
+    ts_parser
+        .set_language(tree_sitter_md::language())
+        .expect("test assertion");
+    let tree = ts_parser.parse(markdown, None).expect("test assertion");
 
     println!("\n=== Tree-sitter nodes ===");
     debug_print_ts_node(&tree.root_node(), markdown, 0);
 
     // Verify the structure has a CodeBlock with PlainText language
-    let found_code_block = find_code_block_with_language(&rope.root());
+    let found_code_block = find_code_block_with_language(rope.root());
     assert!(
         found_code_block,
         "Should find a code block with PlainText language"
@@ -64,12 +68,14 @@ Just plain text here
 ```
 "#;
 
-    let mut parser = Parser::from_language(Language::Markdown).unwrap();
-    let rope = parser.parse_text(markdown).unwrap();
+    let mut parser = Parser::from_language(Language::Markdown).expect("Failed to create parser");
+    let rope = parser
+        .parse_text(markdown)
+        .expect("Failed to parse markdown");
 
     // Count languages found
     let mut found_languages = std::collections::HashSet::new();
-    collect_languages(&rope.root(), &mut found_languages);
+    collect_languages(rope.root(), &mut found_languages);
 
     assert!(
         found_languages.contains(&Some(stoat_rope::Language::Rust)),
@@ -115,9 +121,9 @@ fn debug_print_node(node: &stoat_rope::ast::AstNode, indent: usize) {
             ..
         } => {
             let lang_str = language
-                .map(|l| format!(" [{}]", l.name()))
+                .map(|l| format!(" [{name}]", name = l.name()))
                 .unwrap_or_default();
-            println!("{}{:?}: {:?}{}", indent_str, kind, text, lang_str);
+            println!("{indent_str}{kind:?}: {text:?}{lang_str}");
         },
         stoat_rope::ast::AstNode::Syntax {
             kind,
@@ -126,9 +132,9 @@ fn debug_print_node(node: &stoat_rope::ast::AstNode, indent: usize) {
             ..
         } => {
             let lang_str = language
-                .map(|l| format!(" [{}]", l.name()))
+                .map(|l| format!(" [{name}]", name = l.name()))
                 .unwrap_or_default();
-            println!("{}{:?}{}", indent_str, kind, lang_str);
+            println!("{indent_str}{kind:?}{lang_str}");
             for (child, _) in children {
                 debug_print_node(child, indent + 1);
             }
@@ -142,7 +148,7 @@ fn find_code_block_with_language(node: &stoat_rope::ast::AstNode) -> bool {
     match node {
         stoat_rope::ast::AstNode::Token { language, .. } => {
             // Check if this token has PlainText language
-            language.map_or(false, |l| l == stoat_rope::Language::PlainText)
+            language.is_some_and(|l| l == stoat_rope::Language::PlainText)
         },
         stoat_rope::ast::AstNode::Syntax { kind, children, .. } => {
             // Check if this is a code block

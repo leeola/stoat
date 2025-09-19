@@ -5,7 +5,7 @@
 
 use crate::{
     actions::{EditMode, TextPosition},
-    config::{KeyBinding, KeymapConfig, ModeConfig},
+    config::{KeyBinding, KeymapConfig},
     effects::Effect,
     events::EditorEvent,
     input::{keys, Key, Modifiers, MouseButton, Point},
@@ -201,7 +201,10 @@ impl TestStoat {
             self.keymap_config = Some(KeymapConfig::default());
         }
 
-        let config = self.keymap_config.as_mut().unwrap();
+        let config = self
+            .keymap_config
+            .as_mut()
+            .expect("keymap_config should be initialized");
         let config_mut = config.modes.entry(mode.to_string()).or_default();
         config_mut.keys.insert(key.to_string(), binding);
 
@@ -294,11 +297,7 @@ impl TestStoat {
         assert_eq!(
             (actual_line, actual_col),
             (line, column),
-            "Cursor at ({}, {}) but expected ({}, {})",
-            actual_line,
-            actual_col,
-            line,
-            column
+            "Cursor at ({actual_line}, {actual_col}) but expected ({line}, {column})"
         );
         self
     }
@@ -335,10 +334,7 @@ impl TestStoat {
         if index == 0 {
             self.assert_cursor(line, column)
         } else {
-            panic!(
-                "Multi-cursor not yet implemented. Cannot check cursor at index {}",
-                index
-            );
+            panic!("Multi-cursor not yet implemented. Cannot check cursor at index {index}");
         }
     }
 
@@ -351,8 +347,7 @@ impl TestStoat {
         let actual = 1; // Stoat currently has exactly one cursor
         assert_eq!(
             actual, expected,
-            "Expected {} cursor(s) but found {}",
-            expected, actual
+            "Expected {expected} cursor(s) but found {actual}"
         );
         self
     }
@@ -378,7 +373,7 @@ impl TestStoat {
         let selection = self.stoat.engine().state().cursor.selection();
         assert!(selection.is_some(), "Expected selection but none exists");
 
-        let range = selection.unwrap();
+        let range = selection.expect("expected selection to exist");
         let expected_start = TextPosition::new(start_line, start_col);
         let expected_end = TextPosition::new(end_line, end_col);
 
@@ -461,9 +456,7 @@ impl TestStoat {
         assert_eq!(
             actual,
             Some(expected),
-            "Language at cursor: {:?}, expected: {:?}",
-            actual,
-            expected
+            "Language at cursor: {actual:?}, expected: {expected:?}"
         );
         self
     }
@@ -546,17 +539,17 @@ impl TestStoat {
                     // We can't use assert_eq directly because KeyBinding doesn't implement
                     // PartialEq For now, we'll use debug format comparison
                     assert_eq!(
-                        format!("{:?}", binding),
+                        format!("{binding:?}"),
                         format!("{:?}", expected),
                         "Binding mismatch for key '{}' in mode '{}'",
                         key,
                         mode
                     );
                 } else {
-                    panic!("No binding found for key '{}' in mode '{}'", key, mode);
+                    panic!("No binding found for key '{key}' in mode '{mode}'");
                 }
             } else {
-                panic!("Mode '{}' not found in keymap config", mode);
+                panic!("Mode '{mode}' not found in keymap config");
             }
         } else {
             panic!("No keymap config set");
@@ -601,7 +594,7 @@ impl KeymapBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .entry(mode.to_string())
             .or_default();
@@ -615,10 +608,10 @@ impl KeymapBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .get_mut(&self.current_mode)
-            .unwrap()
+            .expect("test precondition")
             .keys
             .insert(key.to_string(), binding);
         self
@@ -632,10 +625,10 @@ impl KeymapBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .get_mut(&self.current_mode)
-            .unwrap()
+            .expect("test precondition")
             .keys
             .insert(key.to_string(), binding);
         self
@@ -670,7 +663,7 @@ impl ModeBuilder {
         test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .entry(mode_name.clone())
             .or_default();
@@ -686,10 +679,10 @@ impl ModeBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .get_mut(&self.mode_name)
-            .unwrap()
+            .expect("test precondition")
             .display_name = Some(name.to_string());
         self
     }
@@ -700,10 +693,10 @@ impl ModeBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .get_mut(&self.mode_name)
-            .unwrap()
+            .expect("test precondition")
             .keys
             .insert(key.to_string(), binding);
         self
@@ -714,10 +707,10 @@ impl ModeBuilder {
         self.test_stoat
             .keymap_config
             .as_mut()
-            .unwrap()
+            .expect("test precondition")
             .modes
             .get_mut(&self.mode_name)
-            .unwrap()
+            .expect("test precondition")
             .keys
             .insert(key.to_string(), binding);
         self
@@ -833,11 +826,7 @@ pub mod assertions {
         assert_eq!(
             (actual_line, actual_col),
             (line, column),
-            "Cursor position mismatch: expected ({}, {}), got ({}, {})",
-            line,
-            column,
-            actual_line,
-            actual_col
+            "Cursor position mismatch: expected ({line}, {column}), got ({actual_line}, {actual_col})"
         );
     }
 
@@ -869,10 +858,7 @@ pub mod assertions {
         if index == 0 {
             assert_cursor(stoat, line, column);
         } else {
-            panic!(
-                "Multi-cursor not yet implemented. Cannot check cursor at index {}",
-                index
-            );
+            panic!("Multi-cursor not yet implemented. Cannot check cursor at index {index}");
         }
     }
 
@@ -883,8 +869,7 @@ pub mod assertions {
         let actual = 1; // Stoat currently has exactly one cursor
         assert_eq!(
             actual, expected,
-            "Expected {} cursor(s) but found {}",
-            expected, actual
+            "Expected {expected} cursor(s) but found {actual}"
         );
     }
 
@@ -914,7 +899,7 @@ pub mod assertions {
         let selection = stoat.engine().state().cursor.selection();
         assert!(selection.is_some(), "Expected selection but none exists");
 
-        let range = selection.unwrap();
+        let range = selection.expect("expected selection to exist");
         let expected_start = TextPosition::new(start_line, start_col);
         let expected_end = TextPosition::new(end_line, end_col);
 

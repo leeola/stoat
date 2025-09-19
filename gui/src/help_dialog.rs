@@ -14,11 +14,6 @@ pub struct HelpDialog {
 }
 
 impl HelpDialog {
-    /// Creates a new help dialog with the given theme.
-    pub fn new(theme: EditorTheme) -> Self {
-        Self { theme }
-    }
-
     /// Renders the dialog header.
     fn render_header(&self) -> impl IntoElement {
         div()
@@ -48,7 +43,7 @@ impl HelpDialog {
                     .flex_shrink_0()
                     .font_family("JetBrains Mono")
                     .text_sm()
-                    .text_color(self.theme.string)
+                    .text_color(self.theme.foreground)
                     .child(key),
             )
             .child(

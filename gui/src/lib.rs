@@ -50,7 +50,7 @@ pub fn run() -> Result<()> {
                 editor
             },
         )
-        .unwrap();
+        .expect("Failed to create window");
     });
 
     Ok(())

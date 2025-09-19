@@ -7,15 +7,6 @@
 use crate::theme::EditorTheme;
 use gpui::{div, px, Context, IntoElement, ParentElement, Render, Styled, Window};
 
-/// Position where the help popup should appear.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PopupPosition {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
 /// Command panel component that displays available commands for the current mode.
 ///
 /// This component shows a dynamic list of commands based on the current
@@ -27,8 +18,6 @@ pub struct CommandPanel {
     mode: String,
     /// Available commands as (key_binding, description) pairs
     commands: Vec<(String, String)>,
-    /// Position of the panel on screen
-    position: PopupPosition,
 }
 
 impl CommandPanel {
@@ -38,14 +27,7 @@ impl CommandPanel {
             theme,
             mode,
             commands,
-            position: PopupPosition::BottomRight,
         }
-    }
-
-    /// Sets the position of the panel.
-    pub fn position(mut self, position: PopupPosition) -> Self {
-        self.position = position;
-        self
     }
 
     /// Renders the panel header.
@@ -79,7 +61,7 @@ impl CommandPanel {
                     .flex_shrink_0()
                     .font_family("JetBrains Mono")
                     .text_xs()
-                    .text_color(self.theme.string)
+                    .text_color(self.theme.foreground)
                     .text_right()
                     .child(key.to_string()),
             )

@@ -4,7 +4,7 @@
 //! allocations and re-rendering by caching rendered lines and only updating
 //! what has changed.
 
-use gpui::{HighlightStyle, SharedString, StyledText};
+use gpui::{HighlightStyle, StyledText};
 use std::{collections::HashMap, ops::Range};
 use stoat::EditorState;
 
@@ -14,8 +14,6 @@ pub struct RenderedLine {
     pub line_number: usize,
     /// The styled text for this line
     pub styled_text: StyledText,
-    /// Hash of the line content for change detection
-    pub content_hash: u64,
 }
 
 /// Efficient buffer view with line caching for performance.
@@ -85,7 +83,6 @@ impl BufferView {
         RenderedLine {
             line_number,
             styled_text,
-            content_hash: hash_string(content),
         }
     }
 
@@ -150,13 +147,6 @@ impl BufferView {
         None
     }
 
-    /// Invalidates cached lines that have changed.
-    pub fn invalidate_lines(&mut self, changed_lines: Range<usize>) {
-        for line_idx in changed_lines {
-            self.line_cache.remove(&line_idx);
-        }
-    }
-
     /// Invalidates the entire cache.
     pub fn invalidate_all(&mut self) {
         self.line_cache.clear();
@@ -170,56 +160,10 @@ impl BufferView {
         self.line_cache
             .retain(|&line_idx, _| keep_range.contains(&line_idx));
     }
-
-    /// Returns the number of cached lines.
-    pub fn cache_size(&self) -> usize {
-        self.line_cache.len()
-    }
 }
 
 impl Default for BufferView {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Simple hash function for string content.
-fn hash_string(s: &str) -> u64 {
-    use std::{
-        collections::hash_map::DefaultHasher,
-        hash::{Hash, Hasher},
-    };
-
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Performance metrics for buffer rendering.
-#[derive(Debug, Default)]
-pub struct BufferMetrics {
-    /// Number of cache hits
-    pub cache_hits: usize,
-    /// Number of cache misses
-    pub cache_misses: usize,
-    /// Total lines rendered
-    pub lines_rendered: usize,
-    /// Average render time per line in microseconds
-    pub avg_render_time_us: f64,
-}
-
-impl BufferMetrics {
-    /// Resets all metrics.
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
-    /// Returns the cache hit rate as a percentage.
-    pub fn cache_hit_rate(&self) -> f64 {
-        if self.lines_rendered == 0 {
-            0.0
-        } else {
-            (self.cache_hits as f64 / self.lines_rendered as f64) * 100.0
-        }
     }
 }

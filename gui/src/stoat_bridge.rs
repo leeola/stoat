@@ -4,8 +4,8 @@
 //! and Stoat's pure functional event processing. Since both now use
 //! the same types, this bridge is greatly simplified.
 
-use gpui::{Keystroke, Point};
-use stoat::{EditorEngine, EditorEvent, Effect, MouseButton};
+use gpui::Keystroke;
+use stoat::{EditorEngine, EditorEvent, Effect};
 
 /// Converts GPUI keystrokes to Stoat editor events.
 pub fn keystroke_to_event(keystroke: &Keystroke) -> Option<EditorEvent> {
@@ -14,11 +14,6 @@ pub fn keystroke_to_event(keystroke: &Keystroke) -> Option<EditorEvent> {
         key: keystroke.key.clone(),
         modifiers: keystroke.modifiers,
     })
-}
-
-/// Converts GPUI mouse click to Stoat editor event.
-pub fn mouse_click_to_event(position: Point<f32>, button: MouseButton) -> EditorEvent {
-    EditorEvent::MouseClick { position, button }
 }
 
 /// Processes effects returned from Stoat engine.
@@ -110,17 +105,6 @@ impl StoatBridge {
         } else {
             vec![]
         }
-    }
-
-    /// Handles a mouse click and returns effects to process.
-    pub fn handle_mouse_click(&mut self, position: Point<f32>, button: MouseButton) -> Vec<Effect> {
-        let event = mouse_click_to_event(position, button);
-        self.engine.handle_event(event)
-    }
-
-    /// Returns the current text content.
-    pub fn text(&self) -> String {
-        self.engine.text()
     }
 
     /// Returns the current cursor position.

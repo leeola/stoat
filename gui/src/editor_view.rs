@@ -37,24 +37,6 @@ pub struct EditorView {
 }
 
 impl EditorView {
-    /// Creates a new editor view.
-    pub fn new(cx: &mut Context<'_, Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-
-        Self {
-            focus_handle,
-            bridge: StoatBridge::new(),
-            buffer_view: BufferView::new(),
-            theme: EditorTheme::default(),
-            font_family: "JetBrains Mono".into(),
-            font_size: 14.0,
-            line_height: 20.0,
-            show_help: false,
-            help_mode: "Normal".to_string(),
-            help_commands: vec![],
-        }
-    }
-
     /// Creates a new editor view with initial text.
     pub fn with_text(text: &str, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
@@ -136,11 +118,6 @@ impl EditorView {
         cx.emit(EditorEvent::StateChanged);
     }
 
-    /// Returns the current text content.
-    pub fn text(&self) -> String {
-        self.bridge.text()
-    }
-
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> (usize, usize) {
         self.bridge.cursor_position()
@@ -217,15 +194,14 @@ impl EditorView {
             .border_color(self.theme.line_number)
             .child(
                 // Left side: mode
-                div().child(SharedString::from(format!("-- {} --", mode))),
+                div().child(SharedString::from(format!("-- {mode} --"))),
             )
             .child(
                 // Right side: position and dirty flag
                 div().child(SharedString::from(format!(
-                    "{}:{}{}",
-                    line + 1,
-                    col + 1,
-                    dirty
+                    "{line}:{col}{dirty}",
+                    line = line + 1,
+                    col = col + 1
                 ))),
             )
     }
@@ -291,12 +267,4 @@ impl Focusable for EditorView {
 pub enum EditorEvent {
     /// Editor state has changed
     StateChanged,
-    /// Text content has changed
-    TextChanged,
-    /// Cursor position has changed
-    CursorMoved,
-    /// Mode has changed
-    ModeChanged,
-    /// File saved
-    FileSaved,
 }

@@ -278,8 +278,10 @@ mod tests {
     fn test_custom_mode() {
         let mut config = KeymapConfig::default();
 
-        let mut delete_mode = ModeConfig::default();
-        delete_mode.display_name = Some("DELETE".to_string());
+        let mut delete_mode = ModeConfig {
+            display_name: Some("DELETE".to_string()),
+            ..Default::default()
+        };
         delete_mode.keys.insert(
             "d".to_string(),
             ConfigKeyBinding::Command("delete_line".to_string()),
@@ -366,7 +368,7 @@ mod tests {
             Escape = { mode = "normal" }
         "#;
 
-        let config: KeymapConfig = toml::from_str(toml).unwrap();
+        let config: KeymapConfig = toml::from_str(toml).expect("Failed to parse config");
         let keymap = Keymap::from_config(config);
 
         // Test normal mode movement

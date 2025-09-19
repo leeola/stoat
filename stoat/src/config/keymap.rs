@@ -68,7 +68,7 @@ mod tests {
             i = { mode = "insert" }
         "#;
 
-        let config: KeymapConfig = toml::from_str(toml).unwrap();
+        let config: KeymapConfig = toml::from_str(toml).expect("Failed to parse");
         assert_eq!(config.initial_mode, "normal");
         assert!(config.modes.contains_key("normal"));
 
@@ -98,7 +98,7 @@ mod tests {
             w = "delete_word"
         "#;
 
-        let config: KeymapConfig = toml::from_str(toml).unwrap();
+        let config: KeymapConfig = toml::from_str(toml).expect("Failed to parse");
         let delete = &config.modes["delete"];
 
         assert_eq!(delete.display_name, Some("DELETE".to_string()));
@@ -109,8 +109,10 @@ mod tests {
     fn round_trip_serialization() {
         let mut config = KeymapConfig::default();
 
-        let mut normal = ModeConfig::default();
-        normal.display_name = Some("NORMAL".to_string());
+        let mut normal = ModeConfig {
+            display_name: Some("NORMAL".to_string()),
+            ..Default::default()
+        };
         normal.keys.insert(
             "h".to_string(),
             KeyBinding::Command("move_left".to_string()),
@@ -125,10 +127,10 @@ mod tests {
         config.modes.insert("normal".to_string(), normal);
 
         // Serialize to JSON
-        let json = serde_json::to_string(&config).unwrap();
+        let json = serde_json::to_string(&config).expect("Failed to parse");
 
         // Deserialize back
-        let config2: KeymapConfig = serde_json::from_str(&json).unwrap();
+        let config2: KeymapConfig = serde_json::from_str(&json).expect("Failed to parse");
 
         assert_eq!(config.initial_mode, config2.initial_mode);
         assert_eq!(config.modes.len(), config2.modes.len());
