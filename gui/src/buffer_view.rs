@@ -32,7 +32,7 @@ impl BufferView {
         Self {
             line_cache: HashMap::new(),
             viewport: 0..30, // Default viewport size
-            overscan: 5,
+            overscan: 0,     // No overscan for immediate scroll feedback
         }
     }
 

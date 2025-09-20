@@ -6,12 +6,12 @@
 use crate::{
     buffer_view::{BufferView, RenderedLine},
     components::command_panel::CommandPanel,
-    stoat_bridge::{StoatBridge, process_effects},
+    stoat_bridge::{process_effects, StoatBridge},
     theme::EditorTheme,
 };
 use gpui::{
-    App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window, div,
+    div, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window,
 };
 
 /// Main editor view Entity for GPUI.
