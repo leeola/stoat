@@ -203,6 +203,18 @@ fn process_command(
         return (state, vec![Effect::Exit]);
     }
 
+    // Handle scroll commands specially to emit ViewportUpdate effect
+    if command == Command::ScrollDown || command == Command::ScrollUp {
+        if let Some(action) = command.to_action(&state) {
+            let new_state = apply_action(state, action);
+            let effect = Effect::ViewportUpdate {
+                scroll_x: new_state.viewport.scroll_x,
+                scroll_y: new_state.viewport.scroll_y,
+            };
+            return (new_state, vec![effect]);
+        }
+    }
+
     // Handle ToggleCommandInfo specially to generate ShowHelp effect
     if command == Command::ToggleCommandInfo {
         // Apply the action to toggle the state

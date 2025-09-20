@@ -73,6 +73,12 @@ pub enum Command {
 
     /// Show help information
     Help,
+
+    /// Scroll viewport down by one line
+    ScrollDown,
+
+    /// Scroll viewport up by one line
+    ScrollUp,
 }
 
 impl Command {
@@ -98,6 +104,8 @@ impl Command {
             Command::DeleteWord => "Delete word",
             Command::InsertChar => "Insert character",
             Command::Help => "Show help",
+            Command::ScrollDown => "Scroll down one line",
+            Command::ScrollUp => "Scroll up one line",
         }
     }
 
@@ -123,6 +131,8 @@ impl Command {
             Command::DeleteWord => "DelWord",
             Command::InsertChar => "InsChar",
             Command::Help => "Help",
+            Command::ScrollDown => "ScrollDn",
+            Command::ScrollUp => "ScrollUp",
         }
     }
 
@@ -168,6 +178,14 @@ impl Command {
                 // FIXME: Implement help action
                 None
             },
+            Command::ScrollDown => Some(crate::actions::EditorAction::ScrollViewport {
+                delta_x: 0.0,
+                delta_y: 1.0,
+            }),
+            Command::ScrollUp => Some(crate::actions::EditorAction::ScrollViewport {
+                delta_x: 0.0,
+                delta_y: -1.0,
+            }),
         }
     }
 }

@@ -71,6 +71,15 @@ pub async fn process_effects(effects: Vec<Effect>) -> anyhow::Result<()> {
                 // TODO: Update command panel content
                 // This will need to be handled by EditorView since it needs access to UI state
             },
+
+            Effect::ViewportUpdate { scroll_x, scroll_y } => {
+                tracing::info!(
+                    "ViewportUpdate effect: scroll_x={}, scroll_y={}",
+                    scroll_x,
+                    scroll_y
+                );
+                // This will be handled by EditorView to update its viewport
+            },
         }
     }
 

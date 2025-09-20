@@ -34,6 +34,10 @@ pub struct EditorView {
     help_mode: String,
     /// Available commands for help display
     help_commands: Vec<(String, String)>,
+    /// Viewport scroll offset in lines
+    scroll_y: f32,
+    /// Viewport scroll offset in characters
+    scroll_x: f32,
 }
 
 impl EditorView {
@@ -52,6 +56,8 @@ impl EditorView {
             show_help: false,
             help_mode: "Normal".to_string(),
             help_commands: vec![],
+            scroll_y: 0.0,
+            scroll_x: 0.0,
         }
     }
 
@@ -93,6 +99,16 @@ impl EditorView {
                         "Updated command context: mode={}, {} commands",
                         self.help_mode,
                         self.help_commands.len()
+                    );
+                },
+                stoat::Effect::ViewportUpdate { scroll_x, scroll_y } => {
+                    // Update viewport scroll offsets
+                    self.scroll_x = scroll_x;
+                    self.scroll_y = scroll_y;
+                    tracing::debug!(
+                        "Updated viewport: scroll_x={}, scroll_y={}",
+                        scroll_x,
+                        scroll_y
                     );
                 },
                 // Handle other effects asynchronously
@@ -138,7 +154,7 @@ impl EditorView {
         // Calculate visible lines based on window size and scroll position
         // For now, use a fixed viewport
         let viewport_height = 30; // TODO: Calculate from actual window height
-        let scroll_line = 0; // TODO: Track scroll position
+        let scroll_line = self.scroll_y.floor() as usize;
 
         self.buffer_view
             .set_viewport(scroll_line, scroll_line + viewport_height);

@@ -51,4 +51,12 @@ pub enum Effect {
         /// TODO: Consider using Rc or Arc to avoid cloning command data
         commands: Vec<(String, String)>,
     },
+
+    /// Viewport has been updated (scrolling, resizing)
+    ViewportUpdate {
+        /// Vertical scroll offset in lines
+        scroll_y: f32,
+        /// Horizontal scroll offset in characters
+        scroll_x: f32,
+    },
 }

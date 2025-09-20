@@ -71,6 +71,16 @@ fn default_normal_mode() -> ModeConfig {
         KeyBinding::Command("exit".to_string()),
     );
 
+    // Scroll commands (vim-style)
+    keys.insert(
+        "C-e".to_string(),
+        KeyBinding::Command("scroll_down".to_string()),
+    );
+    keys.insert(
+        "C-y".to_string(),
+        KeyBinding::Command("scroll_up".to_string()),
+    );
+
     ModeConfig {
         display_name: Some("NORMAL".to_string()),
         keys,

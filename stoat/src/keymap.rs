@@ -164,6 +164,8 @@ impl Keymap {
             "help" => Command::Help,
             "next_paragraph" => Command::NextParagraph,
             "previous_paragraph" => Command::PreviousParagraph,
+            "scroll_down" => Command::ScrollDown,
+            "scroll_up" => Command::ScrollUp,
             // Unknown commands are not mapped
             _ => return None,
         })
