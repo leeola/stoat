@@ -166,6 +166,8 @@ impl Keymap {
             "previous_paragraph" => Command::PreviousParagraph,
             "scroll_down" => Command::ScrollDown,
             "scroll_up" => Command::ScrollUp,
+            "scroll_half_page_down" => Command::ScrollHalfPageDown,
+            "scroll_half_page_up" => Command::ScrollHalfPageUp,
             // Unknown commands are not mapped
             _ => return None,
         })

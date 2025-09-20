@@ -204,7 +204,13 @@ fn process_command(
     }
 
     // Handle scroll commands specially to emit ViewportUpdate effect
-    if command == Command::ScrollDown || command == Command::ScrollUp {
+    if matches!(
+        command,
+        Command::ScrollDown
+            | Command::ScrollUp
+            | Command::ScrollHalfPageDown
+            | Command::ScrollHalfPageUp
+    ) {
         if let Some(action) = command.to_action(&state) {
             let new_state = apply_action(state, action);
             let effect = Effect::ViewportUpdate {

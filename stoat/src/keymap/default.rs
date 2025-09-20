@@ -80,6 +80,14 @@ fn default_normal_mode() -> ModeConfig {
         "C-y".to_string(),
         KeyBinding::Command("scroll_up".to_string()),
     );
+    keys.insert(
+        "C-d".to_string(),
+        KeyBinding::Command("scroll_half_page_down".to_string()),
+    );
+    keys.insert(
+        "C-u".to_string(),
+        KeyBinding::Command("scroll_half_page_up".to_string()),
+    );
 
     ModeConfig {
         display_name: Some("NORMAL".to_string()),

@@ -79,6 +79,12 @@ pub enum Command {
 
     /// Scroll viewport up by one line
     ScrollUp,
+
+    /// Scroll viewport down by half page
+    ScrollHalfPageDown,
+
+    /// Scroll viewport up by half page
+    ScrollHalfPageUp,
 }
 
 impl Command {
@@ -106,6 +112,8 @@ impl Command {
             Command::Help => "Show help",
             Command::ScrollDown => "Scroll down one line",
             Command::ScrollUp => "Scroll up one line",
+            Command::ScrollHalfPageDown => "Scroll down half page",
+            Command::ScrollHalfPageUp => "Scroll up half page",
         }
     }
 
@@ -133,6 +141,8 @@ impl Command {
             Command::Help => "Help",
             Command::ScrollDown => "ScrollDn",
             Command::ScrollUp => "ScrollUp",
+            Command::ScrollHalfPageDown => "HalfPgDn",
+            Command::ScrollHalfPageUp => "HalfPgUp",
         }
     }
 
@@ -186,6 +196,24 @@ impl Command {
                 delta_x: 0.0,
                 delta_y: -1.0,
             }),
+            Command::ScrollHalfPageDown => {
+                // Calculate half page based on viewport height
+                let lines_per_page = (state.viewport.height / state.viewport.line_height).floor();
+                let half_page = (lines_per_page / 2.0).max(1.0);
+                Some(crate::actions::EditorAction::ScrollViewport {
+                    delta_x: 0.0,
+                    delta_y: half_page,
+                })
+            },
+            Command::ScrollHalfPageUp => {
+                // Calculate half page based on viewport height
+                let lines_per_page = (state.viewport.height / state.viewport.line_height).floor();
+                let half_page = (lines_per_page / 2.0).max(1.0);
+                Some(crate::actions::EditorAction::ScrollViewport {
+                    delta_x: 0.0,
+                    delta_y: -half_page,
+                })
+            },
         }
     }
 }
