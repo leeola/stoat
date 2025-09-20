@@ -6,12 +6,12 @@
 use crate::{
     buffer_view::{BufferView, RenderedLine},
     components::command_panel::CommandPanel,
-    stoat_bridge::{process_effects, StoatBridge},
+    stoat_bridge::{StoatBridge, process_effects},
     theme::EditorTheme,
 };
 use gpui::{
-    div, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window,
+    App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window, div,
 };
 
 /// Main editor view Entity for GPUI.
@@ -38,6 +38,10 @@ pub struct EditorView {
     scroll_y: f32,
     /// Viewport scroll offset in characters
     scroll_x: f32,
+    /// Actual viewport height in pixels
+    viewport_height_px: f32,
+    /// Visible line count based on actual viewport
+    visible_lines: f32,
 }
 
 impl EditorView {
@@ -58,6 +62,8 @@ impl EditorView {
             help_commands: vec![],
             scroll_y: 0.0,
             scroll_x: 0.0,
+            viewport_height_px: 776.0, // 800px window - 24px status bar
+            visible_lines: 38.0,       // 776px / 20px line height
         }
     }
 
@@ -151,13 +157,49 @@ impl EditorView {
 
     /// Updates the viewport based on scroll position.
     fn update_viewport(&mut self, _window: &Window) {
-        // Calculate visible lines based on window size and scroll position
-        // For now, use a fixed viewport
-        let viewport_height = 30; // TODO: Calculate from actual window height
+        // Use the dynamically calculated visible lines
+        let viewport_height = self.visible_lines.ceil() as usize;
         let scroll_line = self.scroll_y.floor() as usize;
 
         self.buffer_view
             .set_viewport(scroll_line, scroll_line + viewport_height);
+    }
+
+    /// Updates the visible line count based on actual viewport height.
+    fn update_visible_lines(&mut self, viewport_height_px: f32, cx: &mut Context<'_, Self>) {
+        self.viewport_height_px = viewport_height_px;
+        self.visible_lines = (viewport_height_px / self.line_height).floor();
+        tracing::debug!(
+            "Updated visible lines: height_px={}, line_height={}, visible_lines={}",
+            viewport_height_px,
+            self.line_height,
+            self.visible_lines
+        );
+
+        // Send resize event to Stoat
+        let effects = self.bridge.handle_event(stoat::EditorEvent::Resize {
+            width: 1200.0, // TODO: Get actual width
+            height: viewport_height_px,
+        });
+
+        // Process any effects
+        for effect in effects {
+            match effect {
+                stoat::Effect::ViewportUpdate { scroll_x, scroll_y } => {
+                    self.scroll_x = scroll_x;
+                    self.scroll_y = scroll_y;
+                    tracing::debug!("Viewport updated from resize: scroll_y={}", scroll_y);
+                },
+                other => {
+                    cx.spawn(async move |_handle, _cx| {
+                        if let Err(e) = process_effects(vec![other]).await {
+                            tracing::error!("Failed to process effect: {}", e);
+                        }
+                    })
+                    .detach();
+                },
+            }
+        }
     }
 
     /// Renders the buffer lines.
@@ -225,6 +267,17 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Calculate available height for editor (window height minus status bar)
+        // This is a simplified approach - ideally we'd measure the actual element
+        let status_bar_height = 24.0; // Height of status bar in pixels
+        let window_height = 800.0; // TODO: Get actual window height from GPUI
+        let available_height = window_height - status_bar_height; // 776px
+
+        // Update visible lines if height changed significantly
+        if (available_height - self.viewport_height_px).abs() > 1.0 {
+            self.update_visible_lines(available_height, cx);
+        }
+
         // Update viewport based on current window size
         self.update_viewport(window);
 
@@ -244,6 +297,7 @@ impl Render for EditorView {
             .child(
                 // Main editor area
                 div()
+                    .id("editor_area")
                     .flex_1()
                     .overflow_hidden()
                     .child(self.render_buffer_lines(window)),

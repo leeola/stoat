@@ -116,6 +116,11 @@ impl StoatBridge {
         }
     }
 
+    /// Handles any editor event and returns effects to process.
+    pub fn handle_event(&mut self, event: EditorEvent) -> Vec<Effect> {
+        self.engine.handle_event(event)
+    }
+
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> (usize, usize) {
         let pos = self.engine.cursor_position();
