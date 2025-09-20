@@ -14,10 +14,14 @@ use theme::ThemeSettings;
 use tracing::info;
 
 pub fn run() -> Result<()> {
+    run_with_stoat(None)
+}
+
+pub fn run_with_stoat(stoat: Option<stoat::Stoat>) -> Result<()> {
     info!("Starting Stoat GUI with integrated editor");
 
     // Run the GPUI application
-    Application::new().run(|cx: &mut App| {
+    Application::new().run(move |cx: &mut App| {
         // Initialize global theme settings
         cx.set_global(ThemeSettings::new());
 
@@ -33,16 +37,29 @@ pub fn run() -> Result<()> {
                 focus: true,
                 ..Default::default()
             },
-            |window, cx| {
+            move |window, cx| {
                 // Activate the window to bring it to foreground
                 cx.activate(true);
 
-                // Create the editor view with some sample text
+                // Create the editor view with either loaded content or default text
                 let editor = cx.new(|cx| {
-                    EditorView::with_text(
-                        "Welcome to Stoat Editor!\n\nPress 'i' to enter insert mode.\nPress 'Esc' to return to normal mode.\nPress ':q' to quit.",
-                        cx,
-                    )
+                    if let Some(stoat) = stoat {
+                        let content = stoat.buffer_contents();
+                        if !content.is_empty() {
+                            info!("Creating editor view with {} characters from loaded file", content.len());
+                            EditorView::with_text(&content, cx)
+                        } else {
+                            EditorView::with_text(
+                                "Welcome to Stoat Editor!\n\nPress 'i' to enter insert mode.\nPress 'Esc' to return to normal mode.\nPress ':q' to quit.",
+                                cx,
+                            )
+                        }
+                    } else {
+                        EditorView::with_text(
+                            "Welcome to Stoat Editor!\n\nPress 'i' to enter insert mode.\nPress 'Esc' to return to normal mode.\nPress ':q' to quit.",
+                            cx,
+                        )
+                    }
                 });
 
                 // Focus the editor immediately

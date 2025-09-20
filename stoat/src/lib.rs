@@ -64,6 +64,7 @@ pub use keymap::Keymap;
 // Note: process_event now requires a keymap parameter
 pub use processor::process_event;
 pub use state::EditorState;
+use std::path::Path;
 
 /// High-level API for the Stoat editor with simplified keyboard input.
 ///
@@ -231,6 +232,42 @@ impl Stoat {
     /// This provides mutable access to the full engine API when needed.
     pub fn engine_mut(&mut self) -> &mut EditorEngine {
         &mut self.engine
+    }
+
+    /// Loads files into the editor.
+    ///
+    /// Currently only supports loading a single file. If multiple files are provided,
+    /// this will panic with `unimplemented!()`. The first file in the list will be
+    /// loaded, replacing the current buffer contents.
+    ///
+    /// Any IO errors are logged via tracing rather than returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more than one file path is provided.
+    pub fn load_files(&mut self, paths: &[impl AsRef<Path>]) {
+        if paths.is_empty() {
+            tracing::debug!("No files to load");
+            return;
+        }
+
+        if paths.len() > 1 {
+            unimplemented!("Multiple file loading not yet supported");
+        }
+
+        let path = paths[0].as_ref();
+        tracing::info!("Loading file: {}", path.display());
+
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                let state = EditorState::from_file(path, &content);
+                self.engine = EditorEngine::with_state(state);
+                tracing::info!("Successfully loaded file: {}", path.display());
+            },
+            Err(e) => {
+                tracing::error!("Failed to load file {}: {}", path.display(), e);
+            },
+        }
     }
 
     /// Asserts that the buffer contents match the expected text.

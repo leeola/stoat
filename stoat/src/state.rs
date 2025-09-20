@@ -78,6 +78,20 @@ impl EditorState {
         }
     }
 
+    /// Creates an editor state from a file path and its content.
+    pub fn from_file(path: impl AsRef<std::path::Path>, content: &str) -> Self {
+        let path_buf = path.as_ref().to_path_buf();
+        Self {
+            buffer: TextBuffer::with_text(content),
+            cursor: Cursor::new(),
+            mode: EditMode::Normal,
+            viewport: Viewport::new(),
+            file: FileInfo::with_path(path_buf),
+            is_dirty: false,
+            show_command_info: false,
+        }
+    }
+
     /// Returns the current cursor position.
     pub fn cursor_position(&self) -> TextPosition {
         self.cursor.position()

@@ -16,8 +16,16 @@ fn main() {
     match cli.command {
         #[cfg(feature = "gui")]
         Some(Command::Gui { paths, input }) => {
+            // Create a Stoat instance and load files if provided
+            let mut stoat = stoat::Stoat::new();
+            if !paths.is_empty() {
+                // Convert PathBuf to Path references
+                let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
+                stoat.load_files(&path_refs);
+            }
+
             // Launch GUI directly without any tokio runtime
-            if let Err(e) = stoat_bin::commands::gui::run(paths, input) {
+            if let Err(e) = stoat_bin::commands::gui::run(stoat, input) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }
