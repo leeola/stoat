@@ -211,22 +211,31 @@ impl EditorView {
         let lines = self.buffer_view.visible_lines(state);
 
         // Calculate the pixel offset for scrolling
-        // The BufferView already handles fetching lines with overscan
-        // We just need to offset based on the scroll position
+        // The BufferView fetches lines with overscan, so we need to account for that
+        // when calculating the scroll offset.
 
-        // When scroll_y = 0, we want line 0 at the top (no offset)
-        // When scroll_y = 1, we want to shift up by 1 line
-        // When scroll_y = -1, we want to shift down by 1 line (but clamp to not show before line 0)
+        // The BufferView returns lines starting from (viewport.start - overscan)
+        // So if viewport starts at line 85 and overscan is 10, we get lines 75-105
+        // We need to offset the rendering to show line 85 at the top of the viewport
 
-        // Clamp scroll to not show before the document start
-        // With overscan, we can scroll negative, but only enough to show the overscan lines
         let overscan_lines = self.buffer_view.overscan() as f32;
-        let clamped_scroll = self.scroll_y.max(-overscan_lines);
 
-        // The offset is just the scroll position in pixels
-        // Positive scroll shifts content up (shows later lines)
-        // Negative scroll shifts content down (shows earlier lines/overscan)
-        let scroll_offset_px = clamped_scroll * self.line_height;
+        // Calculate the offset needed to position the viewport correctly
+        // When scroll_y = 85, we want line 85 at the top
+        // But BufferView gives us lines starting from line 75 (85 - 10)
+        // So we need to offset by overscan lines minus the fractional part of scroll
+        let viewport_start = self.scroll_y.floor().max(0.0);
+
+        // The offset accounts for:
+        // 1. The overscan lines that appear before the viewport
+        // 2. The fractional scroll position
+        let offset_lines = if viewport_start >= overscan_lines {
+            overscan_lines + (self.scroll_y - viewport_start)
+        } else {
+            self.scroll_y
+        };
+
+        let scroll_offset_px = offset_lines * self.line_height;
 
         // Container for the lines with scroll offset applied
         div().relative().child(
