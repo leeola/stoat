@@ -32,7 +32,7 @@ impl BufferView {
         Self {
             line_cache: HashMap::new(),
             viewport: 0..30, // Default viewport size
-            overscan: 0,     // No overscan for immediate scroll feedback
+            overscan: 10,    // Generous overscan for smooth scrolling
         }
     }
 
@@ -41,6 +41,11 @@ impl BufferView {
         self.viewport = start_line..end_line;
         // Clean up cache entries far outside the viewport
         self.cleanup_cache();
+    }
+
+    /// Returns the current overscan value.
+    pub fn overscan(&self) -> usize {
+        self.overscan
     }
 
     /// Gets the visible lines for rendering, using cache when possible.

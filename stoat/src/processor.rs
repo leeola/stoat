@@ -326,8 +326,10 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
         },
 
         EditorAction::ScrollViewport { delta_x, delta_y } => {
-            state.viewport.scroll_x = (state.viewport.scroll_x + delta_x).max(0.0);
-            state.viewport.scroll_y = (state.viewport.scroll_y + delta_y).max(0.0);
+            // Allow negative scroll positions to account for overscan in the GUI
+            // The GUI will handle clamping based on actual content bounds
+            state.viewport.scroll_x = state.viewport.scroll_x + delta_x;
+            state.viewport.scroll_y = state.viewport.scroll_y + delta_y;
         },
 
         EditorAction::SetContent { content } => {

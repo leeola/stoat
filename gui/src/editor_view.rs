@@ -159,8 +159,11 @@ impl EditorView {
     fn update_viewport(&mut self, _window: &Window) {
         // Use the dynamically calculated visible lines
         let viewport_height = self.visible_lines.ceil() as usize;
-        let scroll_line = self.scroll_y.floor() as usize;
 
+        // Allow negative scroll positions for overscan, but clamp to 0 for line indexing
+        let scroll_line = self.scroll_y.floor().max(0.0) as usize;
+
+        // Set viewport - BufferView will add its own overscan
         self.buffer_view
             .set_viewport(scroll_line, scroll_line + viewport_height);
     }
@@ -207,11 +210,34 @@ impl EditorView {
         let state = self.bridge.engine.state();
         let lines = self.buffer_view.visible_lines(state);
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_0()
-            .children(lines.into_iter().map(|line| self.render_line(line)))
+        // Calculate the pixel offset for scrolling
+        // The BufferView already handles fetching lines with overscan
+        // We just need to offset based on the scroll position
+
+        // When scroll_y = 0, we want line 0 at the top (no offset)
+        // When scroll_y = 1, we want to shift up by 1 line
+        // When scroll_y = -1, we want to shift down by 1 line (but clamp to not show before line 0)
+
+        // Clamp scroll to not show before the document start
+        // With overscan, we can scroll negative, but only enough to show the overscan lines
+        let overscan_lines = self.buffer_view.overscan() as f32;
+        let clamped_scroll = self.scroll_y.max(-overscan_lines);
+
+        // The offset is just the scroll position in pixels
+        // Positive scroll shifts content up (shows later lines)
+        // Negative scroll shifts content down (shows earlier lines/overscan)
+        let scroll_offset_px = clamped_scroll * self.line_height;
+
+        // Container for the lines with scroll offset applied
+        div().relative().child(
+            div()
+                .absolute()
+                .top(gpui::px(-scroll_offset_px))
+                .flex()
+                .flex_col()
+                .gap_0()
+                .children(lines.into_iter().map(|line| self.render_line(line))),
+        )
     }
 
     /// Renders a single line.
