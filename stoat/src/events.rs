@@ -40,7 +40,11 @@ pub enum EditorEvent {
     Redo,
 
     /// Resize viewport
-    Resize { width: f32, height: f32 },
+    Resize {
+        width: f32,
+        height: f32,
+        line_height: f32,
+    },
 
     /// Scroll viewport
     Scroll { delta_x: f32, delta_y: f32 },

@@ -6,6 +6,7 @@
 use crate::{
     buffer_view::{BufferView, RenderedLine},
     components::command_panel::CommandPanel,
+    easing,
     stoat_bridge::{process_effects, StoatBridge},
     theme::EditorTheme,
 };
@@ -13,6 +14,7 @@ use gpui::{
     div, App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
     IntoElement, Keystroke, ParentElement, Render, SharedString, Styled, Window,
 };
+use std::time::{Duration, Instant};
 
 /// Main editor view Entity for GPUI.
 pub struct EditorView {
@@ -34,10 +36,20 @@ pub struct EditorView {
     help_mode: String,
     /// Available commands for help display
     help_commands: Vec<(String, String)>,
-    /// Viewport scroll offset in lines
+    /// Target viewport scroll offset in lines (where we want to scroll to)
+    target_scroll_y: f32,
+    /// Current animated scroll position in lines
+    animated_scroll_y: f32,
+    /// Logical scroll position (the actual state)
     scroll_y: f32,
     /// Viewport scroll offset in characters
     scroll_x: f32,
+    /// Animation state
+    scroll_animation_start: Option<Instant>,
+    scroll_animation_duration: Duration,
+    scroll_animation_from: f32,
+    /// Whether animation is currently running
+    animation_running: bool,
     /// Actual viewport height in pixels
     viewport_height_px: f32,
     /// Visible line count based on actual viewport
@@ -60,8 +72,14 @@ impl EditorView {
             show_help: false,
             help_mode: "Normal".to_string(),
             help_commands: vec![],
+            target_scroll_y: 0.0,
+            animated_scroll_y: 0.0,
             scroll_y: 0.0,
             scroll_x: 0.0,
+            scroll_animation_start: None,
+            scroll_animation_duration: Duration::from_millis(250),
+            scroll_animation_from: 0.0,
+            animation_running: false,
             viewport_height_px: 776.0, // 800px window - 24px status bar
             visible_lines: 38.0,       // 776px / 20px line height
         }
@@ -108,14 +126,23 @@ impl EditorView {
                     );
                 },
                 stoat::Effect::ViewportUpdate { scroll_x, scroll_y } => {
-                    // Update viewport scroll offsets
+                    // Update viewport scroll offsets (temporarily without animation)
                     self.scroll_x = scroll_x;
                     self.scroll_y = scroll_y;
+
+                    // For now, jump directly to the target position
+                    self.animated_scroll_y = scroll_y;
+                    self.target_scroll_y = scroll_y;
+
                     tracing::debug!(
-                        "Updated viewport: scroll_x={}, scroll_y={}",
+                        "Viewport update: scroll_x={}, scroll_y={}, animated_y={}",
                         scroll_x,
-                        scroll_y
+                        scroll_y,
+                        self.animated_scroll_y
                     );
+
+                    // Request re-render
+                    cx.notify();
                 },
                 // Handle other effects asynchronously
                 other_effect => {
@@ -155,13 +182,56 @@ impl EditorView {
         self.bridge.is_dirty()
     }
 
+    /// Starts the scroll animation loop.
+    fn start_scroll_animation(&mut self, cx: &mut Context<'_, Self>) {
+        // If already animating to the same target, let it continue
+        if self.animation_running && (self.target_scroll_y - self.scroll_y).abs() < 0.01 {
+            return;
+        }
+
+        // Mark as running
+        self.animation_running = true;
+
+        // Request first render frame to start animation
+        cx.notify();
+    }
+
+    /// Advances the animation by one frame.
+    fn tick_animation(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(start_time) = self.scroll_animation_start {
+            let elapsed = Instant::now().duration_since(start_time);
+            let progress = easing::progress(elapsed, self.scroll_animation_duration);
+
+            // Use the stored starting position
+            let from = self.scroll_animation_from;
+            let to = self.target_scroll_y;
+
+            // Apply easing and interpolate
+            let eased_position = easing::interpolate(from, to, progress, easing::ease_out_cubic);
+
+            // Update animated position
+            self.animated_scroll_y = eased_position;
+
+            // Check if animation is complete
+            if progress >= 1.0 {
+                self.animated_scroll_y = self.target_scroll_y;
+                self.scroll_animation_start = None;
+                self.animation_running = false;
+            } else {
+                // Request another render frame to continue animation
+                // This ensures the animation continues at ~60fps
+                cx.notify();
+            }
+        }
+    }
+
     /// Updates the viewport based on scroll position.
     fn update_viewport(&mut self, _window: &Window) {
         // Use the dynamically calculated visible lines
         let viewport_height = self.visible_lines.ceil() as usize;
 
-        // Allow negative scroll positions for overscan, but clamp to 0 for line indexing
-        let scroll_line = self.scroll_y.floor().max(0.0) as usize;
+        // Use animated scroll position for viewport calculation
+        let scroll_line = self.animated_scroll_y.floor().max(0.0) as usize;
 
         // Set viewport - BufferView will add its own overscan
         self.buffer_view
@@ -179,18 +249,22 @@ impl EditorView {
             self.visible_lines
         );
 
-        // Send resize event to Stoat
+        // Send resize event to Stoat with line_height
         let effects = self.bridge.handle_event(stoat::EditorEvent::Resize {
             width: 1200.0, // TODO: Get actual width
             height: viewport_height_px,
+            line_height: self.line_height,
         });
 
         // Process any effects
         for effect in effects {
             match effect {
                 stoat::Effect::ViewportUpdate { scroll_x, scroll_y } => {
+                    // For resize events, jump directly without animation
                     self.scroll_x = scroll_x;
                     self.scroll_y = scroll_y;
+                    self.target_scroll_y = scroll_y;
+                    self.animated_scroll_y = scroll_y;
                     tracing::debug!("Viewport updated from resize: scroll_y={}", scroll_y);
                 },
                 other => {
@@ -221,21 +295,25 @@ impl EditorView {
         let overscan_lines = self.buffer_view.overscan() as f32;
 
         // Calculate the offset needed to position the viewport correctly
-        // When scroll_y = 85, we want line 85 at the top
-        // But BufferView gives us lines starting from line 75 (85 - 10)
-        // So we need to offset by overscan lines minus the fractional part of scroll
-        let viewport_start = self.scroll_y.floor().max(0.0);
+        // Use animated scroll position for smooth transitions
+        let viewport_start = self.animated_scroll_y.floor().max(0.0);
 
-        // The offset accounts for:
-        // 1. The overscan lines that appear before the viewport
-        // 2. The fractional scroll position
-        let offset_lines = if viewport_start >= overscan_lines {
-            overscan_lines + (self.scroll_y - viewport_start)
-        } else {
-            self.scroll_y
-        };
+        // BufferView returns lines starting from (viewport_start - overscan)
+        // We need to offset by the difference between where we want to display
+        // and where BufferView starts
+        let buffer_start_line = (viewport_start - overscan_lines).max(0.0);
+        let offset_lines = self.animated_scroll_y - buffer_start_line;
 
         let scroll_offset_px = offset_lines * self.line_height;
+
+        tracing::trace!(
+            "Scroll render: animated_y={}, viewport_start={}, overscan={}, offset_lines={}, offset_px={}",
+            self.animated_scroll_y,
+            viewport_start,
+            overscan_lines,
+            offset_lines,
+            scroll_offset_px
+        );
 
         // Container for the lines with scroll offset applied
         div().relative().child(
@@ -302,6 +380,11 @@ impl EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Animation temporarily disabled for debugging
+        // if self.animation_running {
+        //     self.tick_animation(cx);
+        // }
+
         // Calculate available height for editor (window height minus status bar)
         // This is a simplified approach - ideally we'd measure the actual element
         let status_bar_height = 24.0; // Height of status bar in pixels

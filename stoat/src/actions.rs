@@ -33,7 +33,11 @@ pub enum EditorAction {
     SetMode { mode: EditMode },
 
     /// Set the viewport size
-    SetViewportSize { width: f32, height: f32 },
+    SetViewportSize {
+        width: f32,
+        height: f32,
+        line_height: f32,
+    },
 
     /// Scroll the viewport by offset
     ScrollViewport { delta_x: f32, delta_y: f32 },

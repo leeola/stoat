@@ -77,8 +77,16 @@ pub fn process_event(
             }
         },
 
-        EditorEvent::Resize { width, height } => {
-            let action = EditorAction::SetViewportSize { width, height };
+        EditorEvent::Resize {
+            width,
+            height,
+            line_height,
+        } => {
+            let action = EditorAction::SetViewportSize {
+                width,
+                height,
+                line_height,
+            };
             let new_state = apply_action(state, action);
             (new_state, vec![])
         },
@@ -320,16 +328,38 @@ fn apply_action(mut state: EditorState, action: EditorAction) -> EditorState {
             state.mode = mode;
         },
 
-        EditorAction::SetViewportSize { width, height } => {
+        EditorAction::SetViewportSize {
+            width,
+            height,
+            line_height,
+        } => {
             state.viewport.width = width;
             state.viewport.height = height;
+            state.viewport.line_height = line_height;
         },
 
         EditorAction::ScrollViewport { delta_x, delta_y } => {
-            // Allow negative scroll positions to account for overscan in the GUI
-            // The GUI will handle clamping based on actual content bounds
-            state.viewport.scroll_x = state.viewport.scroll_x + delta_x;
-            state.viewport.scroll_y = state.viewport.scroll_y + delta_y;
+            // Update scroll position with bounds checking
+            state.viewport.scroll_x = (state.viewport.scroll_x + delta_x).max(0.0);
+
+            // Calculate maximum scroll position (total lines - visible lines)
+            let line_count = state.line_count() as f32;
+            let visible_lines = (state.viewport.height / state.viewport.line_height).floor();
+            let max_scroll_y = (line_count - visible_lines).max(0.0);
+
+            // Clamp scroll_y to valid range
+            state.viewport.scroll_y = (state.viewport.scroll_y + delta_y)
+                .max(0.0)
+                .min(max_scroll_y);
+
+            tracing::debug!(
+                "Scroll: delta_y={}, new_scroll_y={}, max={}, lines={}, visible={}",
+                delta_y,
+                state.viewport.scroll_y,
+                max_scroll_y,
+                line_count,
+                visible_lines
+            );
         },
 
         EditorAction::SetContent { content } => {

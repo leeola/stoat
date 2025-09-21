@@ -316,8 +316,12 @@ pub mod events {
     }
 
     /// Creates a viewport resize event.
-    pub fn resize(width: f32, height: f32) -> EditorEvent {
-        EditorEvent::Resize { width, height }
+    pub fn resize(width: f32, height: f32, line_height: f32) -> EditorEvent {
+        EditorEvent::Resize {
+            width,
+            height,
+            line_height,
+        }
     }
 }
 
