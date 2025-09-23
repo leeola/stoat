@@ -22,6 +22,12 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
             },
         )
         .unwrap();
+
+        cx.on_window_closed(|cx| {
+            cx.quit();
+        })
+        .detach();
+
         cx.activate(true);
     });
 
