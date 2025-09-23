@@ -16,16 +16,12 @@ name = "stoat_bin"
 path = "src/lib.rs"
 
 [features]
-default = ["gui"]
-# Enable GUI support
-gui = ["stoat_gui"]
 
 [lints]
 workspace = true
 
 [dependencies]
 stoat = { path = "../stoat" }
-stoat_gui = { path = "../gui", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap.workspace = true
 tracing.workspace = true
