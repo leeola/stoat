@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "stoat",
+  "stoat_gui",
   "bin",
   "text",
   "rope",

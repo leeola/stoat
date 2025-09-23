@@ -2,6 +2,11 @@
 name = "stoat"
 version = "0.1.0"
 edition = "2021"
-description = "Core text editor library with data-driven architecture"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
+
+[features]
+gui = []
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
