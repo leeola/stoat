@@ -193,4 +193,34 @@ mod tests {
         // Should be positioned near the middle of the text
         assert!(cursor_at_5.item().is_some());
     }
+
+    #[test]
+    fn test_undo_redo() {
+        let mut tree = SyntaxTree::from_text("hello world");
+
+        // Make an edit
+        tree.edit(vec![(0..5, "goodbye")]);
+        assert_eq!(tree.text(), "goodbye world");
+        assert!(tree.can_undo());
+
+        // Undo (should restore "hello")
+        assert!(tree.undo());
+        assert_eq!(tree.text(), "hello world");
+        assert!(tree.can_redo());
+
+        // Redo
+        assert!(tree.redo());
+        assert_eq!(tree.text(), "goodbye world");
+
+        // Make another edit (should clear redo stack)
+        tree.edit(vec![(8..13, "there")]);
+        assert_eq!(tree.text(), "goodbye there");
+        assert!(!tree.can_redo());
+
+        // Undo twice
+        assert!(tree.undo());
+        assert_eq!(tree.text(), "goodbye world");
+        assert!(tree.undo());
+        assert_eq!(tree.text(), "hello world");
+    }
 }

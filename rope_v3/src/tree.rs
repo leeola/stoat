@@ -9,10 +9,18 @@ use crate::{
 };
 use clock::{Global, Lamport};
 use rope::{Point, Rope};
-use std::ops::Range;
+use std::{collections::VecDeque, ops::Range};
 use sum_tree::{Bias, SumTree};
 
 pub type TransactionId = Lamport;
+
+/// Represents an edit operation for undo/redo
+#[derive(Clone, Debug)]
+struct EditOperation {
+    #[allow(dead_code)]
+    transaction_id: TransactionId,
+    edits: Vec<(Range<usize>, String, String)>, // (range, old_text, new_text)
+}
 
 /// A syntax tree with semantic token tracking
 pub struct SyntaxTree {
@@ -28,6 +36,12 @@ pub struct SyntaxTree {
     transaction_id: Option<TransactionId>,
     /// Depth of nested transactions
     transaction_depth: usize,
+    /// Undo stack
+    undo_stack: VecDeque<EditOperation>,
+    /// Redo stack
+    redo_stack: VecDeque<EditOperation>,
+    /// Maximum undo history size
+    max_undo_history: usize,
 }
 
 impl SyntaxTree {
@@ -40,6 +54,9 @@ impl SyntaxTree {
             clock: Lamport::default(),
             transaction_id: None,
             transaction_depth: 0,
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
+            max_undo_history: 100,
         }
     }
 
@@ -56,6 +73,9 @@ impl SyntaxTree {
             clock: Lamport::default(),
             transaction_id: None,
             transaction_depth: 0,
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
+            max_undo_history: 100,
         };
 
         // Simple tokenization for demonstration
@@ -65,6 +85,8 @@ impl SyntaxTree {
 
     /// Simple tokenizer that splits on whitespace and punctuation
     fn tokenize_simple(&mut self, text: &str) {
+        // Use a single timestamp for the entire tokenization batch
+        let batch_timestamp = self.clock.tick();
         let offset = 0;
         let mut chars = text.char_indices().peekable();
 
@@ -128,10 +150,10 @@ impl SyntaxTree {
                 (kind, start_offset + ch.len_utf8())
             };
 
-            // Create token with anchors
+            // Create token with anchors (use batch timestamp)
             let token_text = &text[start_offset..end_offset];
-            let start_anchor = Anchor::new(self.clock.tick(), start_offset, Bias::Left);
-            let end_anchor = Anchor::new(self.clock.tick(), end_offset, Bias::Right);
+            let start_anchor = Anchor::new(batch_timestamp, start_offset, Bias::Left);
+            let end_anchor = Anchor::new(batch_timestamp, end_offset, Bias::Right);
 
             let token = Token::new(start_anchor..end_anchor, token_text, kind);
 
@@ -245,31 +267,67 @@ impl SyntaxTree {
         // Sort edits by start position (ascending)
         edits.sort_by_key(|e| e.0.start);
 
-        // Build a new rope with all edits applied at once
-        let mut new_rope = Rope::new();
-        let mut last_end = 0;
-
-        // Apply edits from start to end
+        // Collect old text for undo before applying edits
+        let mut undo_edits = Vec::new();
         for (range, new_text) in &edits {
-            // Add text before this edit
-            if range.start > last_end {
-                let between = self.text.slice(last_end..range.start);
-                new_rope.push(&between.to_string());
-            }
-            // Add the replacement text
-            if !new_text.is_empty() {
-                new_rope.push(new_text);
-            }
-            last_end = range.end.max(last_end);
+            let old_text = self.text.slice(range.clone()).to_string();
+            undo_edits.push((range.clone(), old_text, new_text.clone()));
         }
 
-        // Add any remaining text after the last edit
-        if last_end < self.text.len() {
-            let suffix = self.text.slice(last_end..self.text.len());
-            new_rope.push(&suffix.to_string());
-        }
+        // Build a new rope efficiently using cursor (like Zed)
+        let mut new_rope = Rope::new();
+        let text_len = self.text.len();
+
+        {
+            let mut cursor = self.text.cursor(0);
+            let mut last_end = 0;
+
+            // Apply edits from start to end using cursor
+            for (range, new_text) in &edits {
+                // Skip overlapping edits
+                if range.start < last_end {
+                    continue;
+                }
+
+                // Append text before this edit (no allocation)
+                if range.start > last_end {
+                    cursor.seek_forward(last_end);
+                    new_rope.append(cursor.slice(range.start));
+                }
+
+                // Add the replacement text
+                if !new_text.is_empty() {
+                    new_rope.push(new_text);
+                }
+
+                last_end = range.end;
+            }
+
+            // Append any remaining text after the last edit (no allocation)
+            if last_end < text_len {
+                cursor.seek_forward(last_end);
+                new_rope.append(cursor.suffix());
+            }
+        } // cursor dropped here
 
         self.text = new_rope;
+
+        // Store operation for undo (only if not in undo/redo operation)
+        if let Some(tx_id) = transaction_id {
+            let operation = EditOperation {
+                transaction_id: tx_id,
+                edits: undo_edits,
+            };
+            self.undo_stack.push_back(operation);
+
+            // Limit undo history size
+            if self.undo_stack.len() > self.max_undo_history {
+                self.undo_stack.pop_front();
+            }
+
+            // Clear redo stack on new edit
+            self.redo_stack.clear();
+        }
 
         // Update version with single timestamp
         let timestamp = self.clock.tick();
@@ -284,15 +342,183 @@ impl SyntaxTree {
 
     /// Update token positions after edits
     fn interpolate_tokens(&mut self, edits: &[(Range<usize>, String)]) {
-        // For now, we'll re-tokenize the affected ranges
-        // In a production system, we'd update anchors more efficiently
+        if edits.is_empty() {
+            return;
+        }
 
-        if !edits.is_empty() {
-            // Clear existing tokens and re-tokenize
-            // This is a simple approach - Zed does incremental updates
-            self.tokens = SumTree::new(&());
-            let text = self.text.to_string();
-            self.tokenize_simple(&text);
+        // Calculate affected range (union of all edit ranges)
+        let mut min_start = usize::MAX;
+        let mut max_end = 0;
+        for (range, _) in edits {
+            min_start = min_start.min(range.start);
+            max_end = max_end.max(range.end);
+        }
+
+        // Extend range to token boundaries
+        let affected_start = self.find_token_boundary_before(min_start);
+        let affected_end = self.find_token_boundary_after(max_end);
+
+        // Collect tokens outside affected range
+        let mut preserved_before = Vec::new();
+        let mut preserved_after = Vec::new();
+
+        {
+            let mut cursor = self.tokens.cursor::<ByteOffset>(&());
+            cursor.next();
+
+            while let Some(token) = cursor.item() {
+                if token.range.end.offset <= affected_start {
+                    preserved_before.push(token.clone());
+                } else if token.range.start.offset >= affected_end {
+                    // Adjust offsets for tokens after the edit
+                    let offset_delta = self.calculate_offset_delta(edits, token.range.start.offset);
+                    let mut adjusted_token = token.clone();
+                    adjusted_token.range.start.offset =
+                        (token.range.start.offset as isize + offset_delta) as usize;
+                    adjusted_token.range.end.offset =
+                        (token.range.end.offset as isize + offset_delta) as usize;
+                    preserved_after.push(adjusted_token);
+                }
+                cursor.next();
+            }
+        } // cursor dropped here
+
+        // Re-tokenize only the affected range
+        let affected_text = self
+            .text
+            .slice(affected_start..affected_end.min(self.text.len()));
+        let affected_str = affected_text.to_string();
+        let mut new_tokens = Vec::new();
+
+        // Tokenize the range (extract timestamp generation)
+        let batch_timestamp = self.clock.tick();
+        Self::tokenize_range_static(
+            &affected_str,
+            affected_start,
+            batch_timestamp,
+            &mut new_tokens,
+        );
+
+        // Rebuild token tree
+        self.tokens = SumTree::new(&());
+        for token in preserved_before {
+            self.tokens.push(token, &());
+        }
+        for token in new_tokens {
+            self.tokens.push(token, &());
+        }
+        for token in preserved_after {
+            self.tokens.push(token, &());
+        }
+    }
+
+    /// Find token boundary before offset
+    fn find_token_boundary_before(&self, offset: usize) -> usize {
+        let mut cursor = self.tokens.cursor::<ByteOffset>(&());
+        cursor.seek(&ByteOffset(offset), Bias::Left);
+        if let Some(token) = cursor.item() {
+            token.range.start.offset
+        } else {
+            0
+        }
+    }
+
+    /// Find token boundary after offset
+    fn find_token_boundary_after(&self, offset: usize) -> usize {
+        let mut cursor = self.tokens.cursor::<ByteOffset>(&());
+        cursor.seek(&ByteOffset(offset), Bias::Right);
+        if let Some(token) = cursor.item() {
+            token.range.end.offset
+        } else {
+            self.text.len()
+        }
+    }
+
+    /// Calculate offset delta for positions after edits
+    fn calculate_offset_delta(&self, edits: &[(Range<usize>, String)], position: usize) -> isize {
+        let mut delta = 0isize;
+        for (range, new_text) in edits {
+            if range.end <= position {
+                delta += new_text.len() as isize - (range.end - range.start) as isize;
+            }
+        }
+        delta
+    }
+
+    /// Tokenize a specific range (static version)
+    fn tokenize_range_static(
+        text: &str,
+        base_offset: usize,
+        batch_timestamp: Lamport,
+        tokens: &mut Vec<Token>,
+    ) {
+        let mut chars = text.char_indices().peekable();
+
+        while let Some((idx, ch)) = chars.next() {
+            let start_offset = base_offset + idx;
+
+            let (kind, local_end) = if ch.is_whitespace() {
+                // Collect whitespace
+                let mut end = idx + ch.len_utf8();
+                while let Some((next_idx, next_ch)) = chars.peek() {
+                    if !next_ch.is_whitespace() {
+                        break;
+                    }
+                    end = next_idx + next_ch.len_utf8();
+                    chars.next();
+                }
+                let kind = if ch == '\n' {
+                    SyntaxKind::Newline
+                } else {
+                    SyntaxKind::Whitespace
+                };
+                (kind, end)
+            } else if ch.is_ascii_digit() {
+                // Collect number
+                let mut end = idx + ch.len_utf8();
+                while let Some((next_idx, next_ch)) = chars.peek() {
+                    if !next_ch.is_ascii_digit() && *next_ch != '.' {
+                        break;
+                    }
+                    end = next_idx + next_ch.len_utf8();
+                    chars.next();
+                }
+                (SyntaxKind::Number, end)
+            } else if ch.is_alphabetic() || ch == '_' {
+                // Collect identifier
+                let mut end = idx + ch.len_utf8();
+                while let Some((next_idx, next_ch)) = chars.peek() {
+                    if !next_ch.is_alphanumeric() && *next_ch != '_' {
+                        break;
+                    }
+                    end = next_idx + next_ch.len_utf8();
+                    chars.next();
+                }
+                (SyntaxKind::Identifier, end)
+            } else {
+                // Single character token
+                let kind = match ch {
+                    '(' => SyntaxKind::OpenParen,
+                    ')' => SyntaxKind::CloseParen,
+                    '[' => SyntaxKind::OpenBracket,
+                    ']' => SyntaxKind::CloseBracket,
+                    '{' => SyntaxKind::OpenBrace,
+                    '}' => SyntaxKind::CloseBrace,
+                    ',' => SyntaxKind::Comma,
+                    ';' => SyntaxKind::Semicolon,
+                    ':' => SyntaxKind::Colon,
+                    '.' => SyntaxKind::Dot,
+                    '+' | '-' | '*' | '/' | '=' | '<' | '>' => SyntaxKind::Operator,
+                    _ => SyntaxKind::Unknown,
+                };
+                (kind, idx + ch.len_utf8())
+            };
+
+            let end_offset = base_offset + local_end;
+            let token_text = &text[idx..local_end];
+            let start_anchor = Anchor::new(batch_timestamp, start_offset, Bias::Left);
+            let end_anchor = Anchor::new(batch_timestamp, end_offset, Bias::Right);
+            tokens.push(Token::new(start_anchor..end_anchor, token_text, kind));
         }
     }
 
@@ -413,6 +639,154 @@ impl SyntaxTree {
     /// Get maximum point in the text
     pub fn max_point(&self) -> Point {
         self.text.max_point()
+    }
+
+    // === Undo/Redo Support ===
+
+    /// Undo the last edit operation
+    pub fn undo(&mut self) -> bool {
+        if let Some(operation) = self.undo_stack.pop_back() {
+            // Apply inverse edits - need to recalculate ranges for current text
+            let mut inverse_edits: Vec<(Range<usize>, String)> = Vec::new();
+
+            // Process edits in forward order to calculate current positions
+            let mut offset_delta = 0isize;
+            for (orig_range, old_text, new_text) in &operation.edits {
+                // Adjust range based on accumulated offset changes
+                let current_start = (orig_range.start as isize + offset_delta) as usize;
+                let current_end = current_start + new_text.len();
+
+                inverse_edits.push((current_start..current_end, old_text.clone()));
+
+                // Update offset for next edit
+                offset_delta += old_text.len() as isize - new_text.len() as isize;
+            }
+
+            // Apply without creating undo entry
+            self.apply_edits_internal(inverse_edits, false);
+
+            // Move to redo stack
+            self.redo_stack.push_back(operation);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Redo the last undone operation
+    pub fn redo(&mut self) -> bool {
+        if let Some(operation) = self.redo_stack.pop_back() {
+            // Re-apply original edits
+            let mut redo_edits = Vec::new();
+            for (range, _old_text, new_text) in &operation.edits {
+                redo_edits.push((range.clone(), new_text.clone()));
+            }
+
+            // Apply without creating undo entry
+            self.apply_edits_internal(redo_edits, false);
+
+            // Move back to undo stack
+            self.undo_stack.push_back(operation);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Internal method to apply edits without undo tracking
+    fn apply_edits_internal(&mut self, edits: Vec<(Range<usize>, String)>, track_undo: bool) {
+        if edits.is_empty() {
+            return;
+        }
+
+        // Store edits for undo if tracking
+        let undo_edits = if track_undo {
+            let mut undo = Vec::new();
+            for (range, new_text) in &edits {
+                let old_text = self.text.slice(range.clone()).to_string();
+                undo.push((range.clone(), old_text, new_text.clone()));
+            }
+            Some(undo)
+        } else {
+            None
+        };
+
+        // Build new rope
+        let mut new_rope = Rope::new();
+        let text_len = self.text.len();
+
+        let mut sorted_edits = edits;
+        sorted_edits.sort_by_key(|e| e.0.start);
+
+        {
+            let mut cursor = self.text.cursor(0);
+            let mut last_end = 0;
+
+            for (range, new_text) in &sorted_edits {
+                if range.start < last_end {
+                    continue;
+                }
+
+                if range.start > last_end {
+                    cursor.seek_forward(last_end);
+                    new_rope.append(cursor.slice(range.start));
+                }
+
+                if !new_text.is_empty() {
+                    new_rope.push(new_text);
+                }
+
+                last_end = range.end;
+            }
+
+            if last_end < text_len {
+                cursor.seek_forward(last_end);
+                new_rope.append(cursor.suffix());
+            }
+        } // cursor dropped here
+
+        self.text = new_rope;
+
+        // Update tokens
+        self.interpolate_tokens(
+            &sorted_edits
+                .iter()
+                .map(|(r, t)| (r.clone(), t.clone()))
+                .collect::<Vec<_>>(),
+        );
+
+        // Store undo operation if tracking
+        if let Some(undo) = undo_edits {
+            let tx_id = self.clock.tick();
+            let operation = EditOperation {
+                transaction_id: tx_id,
+                edits: undo,
+            };
+            self.undo_stack.push_back(operation);
+            if self.undo_stack.len() > self.max_undo_history {
+                self.undo_stack.pop_front();
+            }
+            self.redo_stack.clear();
+        }
+
+        let timestamp = self.clock.tick();
+        self.version.observe(timestamp);
+    }
+
+    /// Check if undo is available
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    /// Check if redo is available
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Clear undo/redo history
+    pub fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 }
 
