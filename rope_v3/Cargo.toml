@@ -9,21 +9,14 @@ license-file = "../LICENSE"
 [dependencies]
 # Core dependencies
 compact_str = { workspace = true }
-smallvec = { workspace = true }
 rustc-hash = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
+# Match Zed's smallvec version
+smallvec = { workspace = true }
 
 # Zed crates from git
 sum_tree = { git = "https://github.com/zed-industries/zed.git" }
-rope = { git = "https://github.com/zed-industries/zed.git" }
 text = { git = "https://github.com/zed-industries/zed.git" }
 clock = { git = "https://github.com/zed-industries/zed.git" }
-collections = { git = "https://github.com/zed-industries/zed.git" }
-util = { git = "https://github.com/zed-industries/zed.git" }
-
-# Standard library extensions
-itertools = "0.13"
 
 [dev-dependencies]
 rand = "0.8"

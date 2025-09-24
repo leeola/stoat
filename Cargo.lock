@@ -6389,19 +6389,13 @@ dependencies = [
 name = "stoat_rope_v3"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clock",
- "collections",
  "compact_str 0.9.0",
- "itertools 0.13.0",
  "rand 0.8.5",
- "rope",
  "rustc-hash 2.1.1",
  "smallvec",
  "sum_tree",
  "text",
- "thiserror 1.0.69",
- "util",
 ]
 
 [[package]]
