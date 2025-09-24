@@ -8,9 +8,11 @@ use crate::{
     token::{Token, TokenSummary},
 };
 use clock::{Global, Lamport};
-use rope::Rope;
+use rope::{Point, Rope};
 use std::ops::Range;
 use sum_tree::{Bias, SumTree};
+
+pub type TransactionId = Lamport;
 
 /// A syntax tree with semantic token tracking
 pub struct SyntaxTree {
@@ -22,6 +24,10 @@ pub struct SyntaxTree {
     version: Global,
     /// Lamport clock for generating anchors
     clock: Lamport,
+    /// Current transaction ID if in a transaction
+    transaction_id: Option<TransactionId>,
+    /// Depth of nested transactions
+    transaction_depth: usize,
 }
 
 impl SyntaxTree {
@@ -32,6 +38,8 @@ impl SyntaxTree {
             tokens: SumTree::new(&()),
             version: Global::new(),
             clock: Lamport::default(),
+            transaction_id: None,
+            transaction_depth: 0,
         }
     }
 
@@ -46,6 +54,8 @@ impl SyntaxTree {
             tokens: SumTree::new(&()),
             version: Global::new(),
             clock: Lamport::default(),
+            transaction_id: None,
+            transaction_depth: 0,
         };
 
         // Simple tokenization for demonstration
@@ -214,36 +224,66 @@ impl SyntaxTree {
 
     /// Edit the text and update token positions
     /// Accepts multiple edits as (range, new_text) pairs
-    pub fn edit<I, T>(&mut self, edits: I)
+    pub fn edit<I, T>(&mut self, edits: I) -> Option<TransactionId>
     where
         I: IntoIterator<Item = (Range<usize>, T)>,
         T: AsRef<str>,
     {
+        let transaction_id = self.start_transaction();
+
         // Collect and sort edits by range start (in reverse to apply from end to start)
         let mut edits: Vec<_> = edits
             .into_iter()
             .map(|(range, text)| (range, text.as_ref().to_string()))
             .collect();
-        edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
 
-        // Track the cumulative offset changes
-        let old_text = self.text.to_string();
-
-        // Apply edits to the rope
-        for (range, new_text) in &edits {
-            self.text.replace(range.clone(), new_text);
+        if edits.is_empty() {
+            self.end_transaction();
+            return None;
         }
 
-        // Update version
+        // Sort edits by start position (ascending)
+        edits.sort_by_key(|e| e.0.start);
+
+        // Build a new rope with all edits applied at once
+        let mut new_rope = Rope::new();
+        let mut last_end = 0;
+
+        // Apply edits from start to end
+        for (range, new_text) in &edits {
+            // Add text before this edit
+            if range.start > last_end {
+                let between = self.text.slice(last_end..range.start);
+                new_rope.push(&between.to_string());
+            }
+            // Add the replacement text
+            if !new_text.is_empty() {
+                new_rope.push(new_text);
+            }
+            last_end = range.end.max(last_end);
+        }
+
+        // Add any remaining text after the last edit
+        if last_end < self.text.len() {
+            let suffix = self.text.slice(last_end..self.text.len());
+            new_rope.push(&suffix.to_string());
+        }
+
+        self.text = new_rope;
+
+        // Update version with single timestamp
         let timestamp = self.clock.tick();
         self.version.observe(timestamp);
 
         // Interpolate token positions based on edits
-        self.interpolate_tokens(&edits, &old_text);
+        self.interpolate_tokens(&edits);
+
+        self.end_transaction();
+        transaction_id
     }
 
     /// Update token positions after edits
-    fn interpolate_tokens(&mut self, edits: &[(Range<usize>, String)], _old_text: &str) {
+    fn interpolate_tokens(&mut self, edits: &[(Range<usize>, String)]) {
         // For now, we'll re-tokenize the affected ranges
         // In a production system, we'd update anchors more efficiently
 
@@ -254,6 +294,30 @@ impl SyntaxTree {
             let text = self.text.to_string();
             self.tokenize_simple(&text);
         }
+    }
+
+    /// Start a new transaction
+    pub fn start_transaction(&mut self) -> Option<TransactionId> {
+        self.transaction_depth += 1;
+        if self.transaction_depth == 1 {
+            let id = self.clock.tick();
+            self.transaction_id = Some(id);
+            Some(id)
+        } else {
+            self.transaction_id
+        }
+    }
+
+    /// End the current transaction
+    pub fn end_transaction(&mut self) -> Option<TransactionId> {
+        if self.transaction_depth > 0 {
+            self.transaction_depth -= 1;
+            if self.transaction_depth == 0 {
+                let id = self.transaction_id.take();
+                return id;
+            }
+        }
+        self.transaction_id
     }
 
     /// Get a cursor for navigating tokens
@@ -269,6 +333,86 @@ impl SyntaxTree {
         let mut cursor = self.tokens.cursor::<ByteOffset>(&());
         cursor.seek(&ByteOffset(offset), Bias::Right);
         cursor
+    }
+
+    // === Coordinate Conversion Methods ===
+
+    /// Convert byte offset to Point (line/column)
+    pub fn offset_to_point(&self, offset: usize) -> Point {
+        self.text.offset_to_point(offset)
+    }
+
+    /// Convert Point (line/column) to byte offset
+    pub fn point_to_offset(&self, point: Point) -> usize {
+        self.text.point_to_offset(point)
+    }
+
+    /// Clip offset to valid position
+    pub fn clip_offset(&self, offset: usize, bias: Bias) -> usize {
+        self.text.clip_offset(offset, bias)
+    }
+
+    /// Get a cursor at a specific point
+    pub fn cursor_at_point(&self, point: Point) -> sum_tree::Cursor<'_, Token, ByteOffset> {
+        let offset = self.point_to_offset(point);
+        self.cursor_at_offset(offset)
+    }
+
+    // === Efficient Text Access ===
+
+    /// Get the total byte length
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Get text slice as a rope (zero-copy)
+    pub fn text_slice(&self, range: Range<usize>) -> Rope {
+        self.text.slice(range)
+    }
+
+    /// Iterate over text chunks (zero-copy)
+    pub fn chunks(&self) -> rope::Chunks<'_> {
+        self.text.chunks()
+    }
+
+    /// Iterate over text chunks in range (zero-copy)
+    pub fn chunks_in_range(&self, range: Range<usize>) -> rope::Chunks<'_> {
+        self.text.chunks_in_range(range)
+    }
+
+    // === Range Queries ===
+
+    /// Get tokens in a byte range
+    pub fn tokens_in_range(&self, range: Range<usize>) -> Vec<Token> {
+        let mut result = Vec::new();
+        let mut cursor = self.cursor_at_offset(range.start);
+
+        while let Some(token) = cursor.item() {
+            if token.range.start.offset >= range.end {
+                break;
+            }
+            if token.range.end.offset > range.start {
+                result.push(token.clone());
+            }
+            cursor.next();
+        }
+
+        result
+    }
+
+    /// Get the line length for a given row
+    pub fn line_len(&self, row: u32) -> u32 {
+        self.text.line_len(row)
+    }
+
+    /// Get maximum point in the text
+    pub fn max_point(&self) -> Point {
+        self.text.max_point()
     }
 }
 

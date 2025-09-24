@@ -43,10 +43,11 @@ pub use dimensions::{
 };
 pub use kinds::SyntaxKind;
 pub use language::Language;
+pub use rope::Point;
 pub use semantic::{SemanticId, SemanticInfo, SemanticKind};
 pub use sum_tree::{Bias, Cursor, SumTree};
 pub use token::{Token, TokenSummary};
-pub use tree::SyntaxTree;
+pub use tree::{SyntaxTree, TransactionId};
 
 // For compatibility with original stoat_rope
 pub type RopeAst = SyntaxTree;
@@ -110,8 +111,9 @@ mod tests {
     fn test_edit_operations() {
         let mut tree = SyntaxTree::from_text("hello world");
 
-        // Test single edit
-        tree.edit(vec![(0..5, "goodbye")]);
+        // Test single edit returns transaction ID
+        let tx_id = tree.edit(vec![(0..5, "goodbye")]);
+        assert!(tx_id.is_some());
         assert_eq!(tree.text(), "goodbye world");
 
         // Test multiple edits (applied in reverse order)
@@ -120,6 +122,54 @@ mod tests {
 
         // Verify tokens are updated
         assert!(tree.token_count() > 0);
+    }
+
+    #[test]
+    fn test_coordinate_conversions() {
+        let tree = SyntaxTree::from_text("line1\nline2\nline3");
+
+        // Test offset to point
+        let point = tree.offset_to_point(6); // Start of line2
+        assert_eq!(point.row, 1);
+        assert_eq!(point.column, 0);
+
+        // Test point to offset
+        let offset = tree.point_to_offset(Point::new(2, 0)); // Start of line3
+        assert_eq!(offset, 12);
+
+        // Test max point
+        let max = tree.max_point();
+        assert_eq!(max.row, 2);
+    }
+
+    #[test]
+    fn test_efficient_text_access() {
+        let tree = SyntaxTree::from_text("hello world");
+
+        // Test length methods
+        assert_eq!(tree.len(), 11);
+        assert!(!tree.is_empty());
+
+        // Test chunks iterator (zero-copy)
+        let chunks: Vec<_> = tree.chunks().collect();
+        assert!(!chunks.is_empty());
+
+        // Test text slice (returns rope, not string)
+        let slice = tree.text_slice(0..5);
+        assert_eq!(slice.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_range_queries() {
+        let tree = SyntaxTree::from_text("let x = 42;");
+
+        // Test tokens in range
+        let tokens = tree.tokens_in_range(4..10);
+        assert!(!tokens.is_empty());
+
+        // Test cursor at point
+        let cursor = tree.cursor_at_point(Point::new(0, 4));
+        assert!(cursor.item().is_some());
     }
 
     #[test]
