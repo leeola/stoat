@@ -1,6 +1,6 @@
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, Render, SharedString, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, IntoElement, Render,
+    SharedString, Window, WindowBounds, WindowOptions,
 };
 use stoat::Stoat;
 

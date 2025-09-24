@@ -8,6 +8,7 @@ members = [
   "rope",
   "stoat_ast",
   "rope_v2",
+  "rope_v3",
   "agent/claude_code",
 ]
 
@@ -40,7 +41,11 @@ tracing-subscriber = { version = "0.3", features = [
 serde = { version = "1.0", features = ["derive"] }
 compact_str = "0.9"
 smol_str = "0.3"
-smallvec = "1.13"
+smallvec = { version = "1.13", features = [
+  "union",
+  "const_generics",
+  "const_new",
+] }
 rustc-hash = "2.0"
 
 # Note: GPUI dependencies will be handled differently
