@@ -8,12 +8,14 @@ use crate::{
     token::{Token, TokenSummary},
 };
 use clock::{Global, Lamport};
+use rope::Rope;
+use std::ops::Range;
 use sum_tree::{Bias, SumTree};
 
 /// A syntax tree with semantic token tracking
 pub struct SyntaxTree {
-    /// The actual text content (could be replaced with Zed's rope)
-    text: String,
+    /// The actual text content using Zed's rope for efficiency
+    text: Rope,
     /// Tokens stored in a SumTree for efficient access
     tokens: SumTree<Token>,
     /// Version tracking for edits
@@ -26,7 +28,7 @@ impl SyntaxTree {
     /// Create a new empty syntax tree
     pub fn new() -> Self {
         Self {
-            text: String::new(),
+            text: Rope::new(),
             tokens: SumTree::new(&()),
             version: Global::new(),
             clock: Lamport::default(),
@@ -34,17 +36,20 @@ impl SyntaxTree {
     }
 
     /// Create a syntax tree from text with a simple tokenizer
-    pub fn from_text(text: impl Into<String>) -> Self {
-        let text = text.into();
+    pub fn from_text(text: impl AsRef<str>) -> Self {
+        let text_str = text.as_ref();
+        let mut rope = Rope::new();
+        rope.push(text_str);
+
         let mut tree = Self {
-            text: text.clone(),
+            text: rope,
             tokens: SumTree::new(&()),
             version: Global::new(),
             clock: Lamport::default(),
         };
 
         // Simple tokenization for demonstration
-        tree.tokenize_simple(&text);
+        tree.tokenize_simple(text_str);
         tree
     }
 
@@ -195,16 +200,75 @@ impl SyntaxTree {
         self.tokens.summary().clone()
     }
 
-    /// Get the text content
-    pub fn text(&self) -> &str {
-        &self.text
+    /// Get the text content as a string
+    pub fn text(&self) -> String {
+        self.text.to_string()
     }
 
     /// Get text for a specific token
-    pub fn token_text(&self, token: &Token) -> &str {
+    pub fn token_text(&self, token: &Token) -> String {
         let start = token.range.start.offset;
         let end = token.range.end.offset;
-        &self.text[start..end]
+        self.text.slice(start..end).to_string()
+    }
+
+    /// Edit the text and update token positions
+    /// Accepts multiple edits as (range, new_text) pairs
+    pub fn edit<I, T>(&mut self, edits: I)
+    where
+        I: IntoIterator<Item = (Range<usize>, T)>,
+        T: AsRef<str>,
+    {
+        // Collect and sort edits by range start (in reverse to apply from end to start)
+        let mut edits: Vec<_> = edits
+            .into_iter()
+            .map(|(range, text)| (range, text.as_ref().to_string()))
+            .collect();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.0.start));
+
+        // Track the cumulative offset changes
+        let old_text = self.text.to_string();
+
+        // Apply edits to the rope
+        for (range, new_text) in &edits {
+            self.text.replace(range.clone(), new_text);
+        }
+
+        // Update version
+        let timestamp = self.clock.tick();
+        self.version.observe(timestamp);
+
+        // Interpolate token positions based on edits
+        self.interpolate_tokens(&edits, &old_text);
+    }
+
+    /// Update token positions after edits
+    fn interpolate_tokens(&mut self, edits: &[(Range<usize>, String)], _old_text: &str) {
+        // For now, we'll re-tokenize the affected ranges
+        // In a production system, we'd update anchors more efficiently
+
+        if !edits.is_empty() {
+            // Clear existing tokens and re-tokenize
+            // This is a simple approach - Zed does incremental updates
+            self.tokens = SumTree::new(&());
+            let text = self.text.to_string();
+            self.tokenize_simple(&text);
+        }
+    }
+
+    /// Get a cursor for navigating tokens
+    pub fn cursor<'a, D>(&'a self) -> sum_tree::Cursor<'a, Token, D>
+    where
+        D: sum_tree::Dimension<'a, TokenSummary>,
+    {
+        self.tokens.cursor(&())
+    }
+
+    /// Get a cursor starting at a specific byte offset
+    pub fn cursor_at_offset(&self, offset: usize) -> sum_tree::Cursor<'_, Token, ByteOffset> {
+        let mut cursor = self.tokens.cursor::<ByteOffset>(&());
+        cursor.seek(&ByteOffset(offset), Bias::Right);
+        cursor
     }
 }
 

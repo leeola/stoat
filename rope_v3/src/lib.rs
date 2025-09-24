@@ -105,4 +105,42 @@ mod tests {
         assert!(summary.byte_count > 0);
         assert!(!summary.kinds.is_empty());
     }
+
+    #[test]
+    fn test_edit_operations() {
+        let mut tree = SyntaxTree::from_text("hello world");
+
+        // Test single edit
+        tree.edit(vec![(0..5, "goodbye")]);
+        assert_eq!(tree.text(), "goodbye world");
+
+        // Test multiple edits (applied in reverse order)
+        tree.edit(vec![(0..7, "hi"), (8..13, "there")]);
+        assert_eq!(tree.text(), "hi there");
+
+        // Verify tokens are updated
+        assert!(tree.token_count() > 0);
+    }
+
+    #[test]
+    fn test_cursor_navigation() {
+        let tree = SyntaxTree::from_text("let x = 42;");
+
+        // Test basic cursor creation
+        let mut cursor = tree.cursor::<ByteOffset>();
+        cursor.next(); // Position cursor at first item
+        assert!(cursor.item().is_some());
+
+        let first_token = cursor.item().unwrap();
+        cursor.next();
+        // After next, should have moved to next token
+        if let Some(second_token) = cursor.item() {
+            assert!(first_token.range.start != second_token.range.start);
+        }
+
+        // Test cursor at offset
+        let cursor_at_5 = tree.cursor_at_offset(5);
+        // Should be positioned near the middle of the text
+        assert!(cursor_at_5.item().is_some());
+    }
 }
