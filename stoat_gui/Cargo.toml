@@ -17,4 +17,5 @@ stoat = { path = "../stoat" }
 stoat_rope_v3 = { path = "../rope_v3" }
 gpui = { git = "https://github.com/zed-industries/zed.git" }
 text = { git = "https://github.com/zed-industries/zed.git" }
+clock = { git = "https://github.com/zed-industries/zed.git" }
 anyhow = "1.0"

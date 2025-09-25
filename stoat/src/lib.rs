@@ -3,6 +3,7 @@ use std::num::NonZeroU64;
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
 use text::{Buffer, BufferId, BufferSnapshot};
 
+#[derive(Clone)]
 pub struct Stoat {
     buffer: Entity<Buffer>,
     token_map: TokenMap,

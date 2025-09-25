@@ -9,6 +9,7 @@ use sum_tree::SumTree;
 use text::{Anchor, BufferSnapshot, ToOffset};
 
 /// Manages AST tokens synchronized with a text buffer (similar to Zed's SyntaxMap)
+#[derive(Clone)]
 pub struct TokenMap {
     snapshot: TokenSnapshot,
 }
