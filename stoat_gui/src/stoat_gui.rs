@@ -1,7 +1,8 @@
 use gpui::{
-    App, Application, Bounds, Context, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels, Render, SharedString,
-    TextRun, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, DispatchPhase, Element, ElementId, Font, FontStyle,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, TextRun, Window,
+    WindowBounds, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use stoat::Stoat;
 
@@ -91,8 +92,14 @@ struct EditorElement {
     cached_lines: Vec<SharedString>,
     // Version of the buffer when cache was built
     cached_buffer_version: Option<clock::Global>,
-    // Visible range (will be used for viewport rendering)
-    visible_range: std::ops::Range<usize>,
+    // Visible range in display rows
+    visible_range: std::ops::Range<u32>,
+    // Scroll position (y = top row as float)
+    scroll_position: Point<f32>,
+    // Number of visible lines (calculated from bounds)
+    visible_line_count: Option<f32>,
+    // Line height in pixels
+    line_height: Pixels,
 }
 
 impl EditorElement {
@@ -101,7 +108,10 @@ impl EditorElement {
             stoat,
             cached_lines: Vec::new(),
             cached_buffer_version: None,
-            visible_range: 0..100, // Default to first 100 lines
+            visible_range: 0..50, // Default visible range
+            scroll_position: point(0.0, 0.0),
+            visible_line_count: None,
+            line_height: px(20.0), // Default line height
         }
     }
 
@@ -113,10 +123,13 @@ impl EditorElement {
         let buffer_snapshot = self.stoat.buffer_snapshot(cx);
         let _text_style = TextStyle::new();
 
-        // For now, process all text - viewport optimization coming next
+        // Calculate byte range for visible lines
+        // For now, we'll process all text but only return visible lines
+        // TODO: Calculate actual byte offsets for start_row and end_row
         let chunks = buffer_snapshot.text_for_range(0..buffer_snapshot.len());
         let mut current_line = String::new();
-        let mut lines = Vec::new();
+        let mut all_lines = Vec::new();
+        let mut line_count = 0u32;
 
         for chunk in chunks {
             let mut last_pos = 0;
@@ -124,14 +137,24 @@ impl EditorElement {
                 if ch == '\n' {
                     current_line.push_str(&chunk[last_pos..pos]);
 
-                    if current_line.is_empty() {
-                        lines.push(SharedString::from(" "));
-                    } else {
-                        lines.push(SharedString::from(current_line.clone()));
+                    // Only store lines in visible range
+                    if line_count >= self.visible_range.start && line_count < self.visible_range.end
+                    {
+                        if current_line.is_empty() {
+                            all_lines.push(SharedString::from(" "));
+                        } else {
+                            all_lines.push(SharedString::from(current_line.clone()));
+                        }
                     }
 
                     current_line.clear();
                     last_pos = pos + 1;
+                    line_count += 1;
+
+                    // Stop processing if we've passed the visible range
+                    if line_count >= self.visible_range.end {
+                        return all_lines;
+                    }
                 }
             }
             if last_pos < chunk.len() {
@@ -139,17 +162,20 @@ impl EditorElement {
             }
         }
 
-        if !current_line.is_empty() || lines.is_empty() {
-            lines.push(SharedString::from(current_line));
+        // Handle last line if in visible range
+        if line_count >= self.visible_range.start && line_count < self.visible_range.end {
+            if !current_line.is_empty() || all_lines.is_empty() {
+                all_lines.push(SharedString::from(current_line));
+            }
         }
 
-        lines
+        all_lines
     }
 }
 
 impl Element for EditorElement {
     type RequestLayoutState = Vec<SharedString>;
-    type PrepaintState = ();
+    type PrepaintState = Vec<SharedString>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -186,12 +212,40 @@ impl Element for EditorElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
         _window: &mut Window,
-        _cx: &mut App,
-    ) {
-        // No prepaint needed for now
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        // Calculate visible lines based on bounds and scroll position
+        let height_in_pixels = bounds.size.height;
+        let visible_lines = (height_in_pixels / self.line_height).floor();
+        self.visible_line_count = Some(visible_lines);
+
+        // Calculate visible range based on scroll position
+        let start_row = self.scroll_position.y.max(0.0) as u32;
+
+        // Get total line count from buffer
+        let buffer_snapshot = self.stoat.buffer_snapshot(cx);
+        let text = buffer_snapshot.text_for_range(0..buffer_snapshot.len());
+        let total_lines = text.fold(0u32, |count, chunk| {
+            count + chunk.matches('\n').count() as u32
+        }) + 1; // +1 for last line if no trailing newline
+
+        let end_row = ((self.scroll_position.y + visible_lines).ceil() as u32).min(total_lines);
+
+        // Update visible range
+        self.visible_range = start_row..end_row;
+
+        // Check if we need to rebuild the cache
+        let buffer_version = buffer_snapshot.version();
+        if self.needs_update(buffer_version) {
+            self.cached_lines = self.build_lines(cx);
+            self.cached_buffer_version = Some(buffer_version.clone());
+        }
+
+        // Return the cached lines for painting
+        self.cached_lines.clone()
     }
 
     fn paint(
@@ -199,8 +253,8 @@ impl Element for EditorElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        request_layout: &mut Self::RequestLayoutState,
-        _: &mut (),
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -213,18 +267,16 @@ impl Element for EditorElement {
             .flex_col();
 
         // Check if buffer is empty
-        if request_layout.is_empty() {
+        if prepaint.is_empty() {
             let empty_msg = div().child(SharedString::from("Empty buffer - ready for input"));
             empty_msg.into_any().paint(window, cx);
             return;
         }
 
-        // Render the cached styled lines
-        let lines_element = request_layout
-            .iter()
-            .fold(container, |container, styled_line| {
-                container.child(div().child(styled_line.clone()))
-            });
+        // Render the cached styled lines from prepaint state
+        let lines_element = prepaint.iter().fold(container, |container, styled_line| {
+            container.child(div().child(styled_line.clone()))
+        });
 
         lines_element.into_any().paint(window, cx);
     }
@@ -276,9 +328,36 @@ impl TextStyle {
 }
 
 impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Simply return the editor element - it handles its own rendering
-        self.editor_element.clone()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Wrap the editor element in a scrollable container
+        let editor_element = self.editor_element.clone();
+
+        div()
+            .size_full()
+            .on_scroll_wheel(cx.listener(
+                move |this: &mut EditorView, event: &ScrollWheelEvent, _window, cx| {
+                    // Calculate scroll delta
+                    let (delta_y, _delta_x) = match event.delta {
+                        ScrollDelta::Pixels(pixels) => (pixels.y.0 as f32, pixels.x.0 as f32),
+                        ScrollDelta::Lines(lines) => {
+                            // Convert lines to pixels (assuming 20px line height)
+                            (
+                                lines.y * this.editor_element.line_height.0 as f32,
+                                lines.x * 20.0,
+                            )
+                        },
+                    };
+
+                    // Update scroll position
+                    this.editor_element.scroll_position.y = (this.editor_element.scroll_position.y
+                        - delta_y / this.editor_element.line_height.0 as f32)
+                        .max(0.0);
+
+                    // Notify to trigger re-render
+                    cx.notify();
+                },
+            ))
+            .child(editor_element)
     }
 }
 
