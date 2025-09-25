@@ -6320,6 +6320,9 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "gpui",
+ "stoat_rope_v3",
+ "text",
 ]
 
 [[package]]
@@ -6366,6 +6369,8 @@ dependencies = [
  "anyhow",
  "gpui",
  "stoat",
+ "stoat_rope_v3",
+ "text",
 ]
 
 [[package]]
