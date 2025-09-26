@@ -1,4 +1,7 @@
-use gpui::{point, App, AppContext, Entity};
+mod scroll;
+
+use gpui::{App, AppContext, Entity};
+pub use scroll::ScrollPosition;
 use std::num::NonZeroU64;
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
 use text::{Buffer, BufferId, BufferSnapshot};
@@ -7,7 +10,7 @@ use text::{Buffer, BufferId, BufferSnapshot};
 pub struct Stoat {
     buffer: Entity<Buffer>,
     token_map: TokenMap,
-    scroll_position: gpui::Point<f32>,
+    scroll: ScrollPosition,
 }
 
 impl Stoat {
@@ -20,7 +23,7 @@ impl Stoat {
         Self {
             buffer,
             token_map,
-            scroll_position: point(0.0, 0.0),
+            scroll: ScrollPosition::new(),
         }
     }
 
@@ -37,7 +40,7 @@ impl Stoat {
     }
 
     pub fn scroll_position(&self) -> gpui::Point<f32> {
-        self.scroll_position
+        self.scroll.position
     }
 
     pub fn load_files(&mut self, paths: &[&std::path::Path], cx: &mut App) {

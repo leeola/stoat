@@ -6,9 +6,6 @@ description = "GUI for the Stoat text editor using GPUI"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[lib]
-path = "src/stoat_gui.rs"
-
 [lints]
 workspace = true
 

@@ -1,140 +1,22 @@
+use super::{
+    layout::{EditorLayout, PositionedLine},
+    style::EditorStyle,
+};
 use gpui::{
-    App, Application, Bounds, Context, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Render,
-    ShapedLine, SharedString, Style, TextRun, Window, WindowBounds, WindowOptions, point,
-    prelude::*, px, relative, rgb, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;
-use text;
 
-pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Error>> {
-    Application::new().run(move |cx: &mut App| {
-        let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
-
-        // Add test content with many lines to test virtualization
-        stoat.buffer().update(cx, |buffer, _| {
-            let mut content = String::new();
-            for i in 1..=100 {
-                content.push_str(&format!("Line {}: Testing virtualization performance\n", i));
-            }
-            buffer.edit([(0..0, content.as_str())]);
-        });
-
-        let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
-
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| cx.new(|_| EditorView { stoat }),
-        )
-        .unwrap();
-
-        cx.on_window_closed(|cx| {
-            cx.quit();
-        })
-        .detach();
-
-        cx.activate(true);
-    });
-
-    Ok(())
-}
-
-pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    Application::new().run(move |cx: &mut App| {
-        let mut stoat = Stoat::new(cx);
-
-        // Load files if provided
-        if !paths.is_empty() {
-            let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
-            stoat.load_files(&path_refs, cx);
-        } else {
-            // Add test content with many lines to test virtualization
-            stoat.buffer().update(cx, |buffer, _| {
-                let mut content = String::new();
-                for i in 1..=100 {
-                    content.push_str(&format!("Line {}: Testing virtualization performance\n", i));
-                }
-                buffer.edit([(0..0, content.as_str())]);
-            });
-        }
-
-        let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
-
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| cx.new(|_| EditorView { stoat }),
-        )
-        .unwrap();
-
-        cx.on_window_closed(|cx| {
-            cx.quit();
-        })
-        .detach();
-
-        cx.activate(true);
-    });
-
-    Ok(())
-}
-
-struct EditorView {
-    stoat: Stoat,
-}
-
-/// Minimal EditorElement following Zed's pattern
-struct EditorElement {
+pub struct EditorElement {
     stoat: Stoat,
     style: EditorStyle,
 }
 
-/// Style configuration for the editor
-struct EditorStyle {
-    text_color: Hsla,
-    background: Hsla,
-    line_height: Pixels,
-    font_size: Pixels,
-    padding: Pixels,
-}
-
-impl Default for EditorStyle {
-    fn default() -> Self {
-        Self {
-            text_color: rgb(0xcccccc).into(),
-            background: rgb(0x1e1e1e).into(),
-            line_height: px(20.0),
-            font_size: px(14.0),
-            padding: px(20.0),
-        }
-    }
-}
-
-/// Layout state computed in prepaint
-struct EditorLayout {
-    /// The shaped lines ready to paint
-    lines: SmallVec<[PositionedLine; 32]>,
-    /// Total bounds of the editor
-    bounds: Bounds<Pixels>,
-    /// Content area (excluding padding)
-    _content_bounds: Bounds<Pixels>,
-    /// Line height for positioning
-    _line_height: Pixels,
-}
-
-/// A shaped line with its rendering position
-struct PositionedLine {
-    shaped: ShapedLine,
-    position: gpui::Point<Pixels>,
-}
-
 impl EditorElement {
-    fn new(stoat: Stoat) -> Self {
+    pub fn new(stoat: Stoat) -> Self {
         Self {
             stoat,
             style: EditorStyle::default(),
@@ -208,14 +90,6 @@ impl Element for EditorElement {
         let start_row = scroll_position.y as u32;
         let max_row = buffer_snapshot.row_count();
         let end_row = ((scroll_position.y + height_in_lines).ceil() as u32).min(max_row);
-
-        // Debug: Log virtualization info (only render visible lines)
-        if max_row > 0 {
-            eprintln!(
-                "Virtualization: viewport fits {:.1} lines, rendering {}-{} of {} total",
-                height_in_lines, start_row, end_row, max_row
-            );
-        }
 
         let mut lines = SmallVec::new();
 
@@ -342,14 +216,3 @@ impl IntoElement for EditorElement {
         self
     }
 }
-
-impl Render for EditorView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Create a fresh element each time, following Zed's pattern
-        EditorElement::new(self.stoat.clone())
-    }
-}
-
-// TODO: Implement zero-allocation tokenized chunks iterator
-// This will combine text chunks from the rope with syntax information from TokenMap
-// For now, we're just rendering plain text until we properly implement the iterator
