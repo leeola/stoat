@@ -5,6 +5,7 @@ use gpui::{
     prelude::*, px, relative, rgb, size,
 };
 use stoat::Stoat;
+use text;
 
 pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
@@ -17,16 +18,6 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
                 "Hello, World!\nThis is a test\nLine 3\nLine 4\nLine 5",
             )]);
         });
-
-        // Check if buffer actually has content after edit
-        let check_snapshot = stoat.buffer_snapshot(cx);
-        eprintln!("Right after edit, buffer len: {}", check_snapshot.len());
-        if check_snapshot.len() > 0 {
-            let content: String = check_snapshot
-                .text_for_range(0..check_snapshot.len())
-                .collect();
-            eprintln!("Buffer content: {:?}", &content[..50.min(content.len())]);
-        }
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
 
@@ -66,16 +57,6 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
                     "Hello, World!\nThis is a test\nLine 3\nLine 4\nLine 5",
                 )]);
             });
-
-            // Check if buffer actually has content after edit
-            let check_snapshot = stoat.buffer_snapshot(cx);
-            eprintln!("Right after edit, buffer len: {}", check_snapshot.len());
-            if check_snapshot.len() > 0 {
-                let content: String = check_snapshot
-                    .text_for_range(0..check_snapshot.len())
-                    .collect();
-                eprintln!("Buffer content: {:?}", &content[..50.min(content.len())]);
-            }
         }
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
@@ -214,68 +195,33 @@ impl Element for EditorElement {
 
         // Get buffer content and create shaped lines
         let buffer_snapshot = self.stoat.buffer_snapshot(cx);
-        let buffer_len = buffer_snapshot.len();
         let visible_lines = (content_bounds.size.height / self.style.line_height) as usize;
+        let row_count = buffer_snapshot.row_count() as usize;
+        let rows_to_render = row_count.min(visible_lines);
 
-        let mut lines = Vec::new();
-        let mut current_line = String::new();
-        let chunks = buffer_snapshot.text_for_range(0..buffer_len);
+        let mut lines = Vec::with_capacity(rows_to_render);
         let mut y_offset = 0.0;
 
-        eprintln!("Buffer len: {}, iterating chunks...", buffer_len);
-        for chunk in chunks {
-            eprintln!("Got chunk: {:?}", chunk);
-            for ch in chunk.chars() {
-                if ch == '\n' {
-                    if lines.len() < visible_lines {
-                        let text = if current_line.is_empty() {
-                            SharedString::from(" ")
-                        } else {
-                            SharedString::from(current_line.clone())
-                        };
+        // Iterate through rows efficiently without allocating strings
+        for row in 0..rows_to_render {
+            let row = row as u32;
+            let line_start = text::Point::new(row, 0);
+            let line_len = buffer_snapshot.line_len(row);
+            let line_end = text::Point::new(row, line_len);
 
-                        // Shape the line using GPUI's text system
-                        let text_run = TextRun {
-                            len: text.len(),
-                            font: font.clone(),
-                            color: self.style.text_color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
+            // Get text chunks for this line without allocating
+            let line_chunks = buffer_snapshot.text_for_range(line_start..line_end);
 
-                        let shaped = window.text_system().shape_line(
-                            text,
-                            self.style.font_size,
-                            &[text_run],
-                            None,
-                        );
+            // Collect chunks into a single SharedString efficiently
+            // This is the only allocation, and SharedString uses Arc internally
+            let line_text: String = line_chunks.collect();
+            let text = if line_text.is_empty() {
+                SharedString::from(" ")
+            } else {
+                SharedString::from(line_text)
+            };
 
-                        lines.push(PositionedLine {
-                            shaped,
-                            position: point(
-                                content_bounds.origin.x,
-                                content_bounds.origin.y + px(y_offset),
-                            ),
-                        });
-                        y_offset += self.style.line_height.0;
-                    }
-                    current_line.clear();
-                    if lines.len() >= visible_lines {
-                        break;
-                    }
-                } else {
-                    current_line.push(ch);
-                }
-            }
-            if lines.len() >= visible_lines {
-                break;
-            }
-        }
-
-        // Add last line if needed
-        if !current_line.is_empty() && lines.len() < visible_lines {
-            let text = SharedString::from(current_line);
+            // Shape the line using GPUI's text system
             let text_run = TextRun {
                 len: text.len(),
                 font: font.clone(),
@@ -297,6 +243,7 @@ impl Element for EditorElement {
                     content_bounds.origin.y + px(y_offset),
                 ),
             });
+            y_offset += self.style.line_height.0;
         }
 
         // If no content, add a placeholder
