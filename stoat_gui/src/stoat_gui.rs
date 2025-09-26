@@ -195,7 +195,7 @@ impl Element for EditorElement {
         };
 
         // Static empty line to avoid repeated allocations
-        static EMPTY_LINE: &str = " ";
+        static EMPTY_LINE: SharedString = SharedString::new_static(" ");
 
         // Get buffer content and create shaped lines
         let buffer_snapshot = self.stoat.buffer_snapshot(cx);
@@ -206,35 +206,30 @@ impl Element for EditorElement {
         let mut lines = SmallVec::new();
         let mut y_offset = 0.0;
 
-        // Iterate through rows efficiently without allocating strings
+        // Reuse a single String allocation for all lines (like Zed does)
+        let mut line_text = String::new();
+
+        // Iterate through rows efficiently
         for row in 0..rows_to_render {
             let row = row as u32;
             let line_start = text::Point::new(row, 0);
             let line_len = buffer_snapshot.line_len(row);
             let line_end = text::Point::new(row, line_len);
 
-            // Get text chunks for this line
-            let mut line_chunks = buffer_snapshot.text_for_range(line_start..line_end);
+            // Clear and reuse the String allocation
+            line_text.clear();
 
-            // Most lines are single chunks, optimize for that case
-            let text = match (line_chunks.next(), line_chunks.next()) {
-                (None, _) | (Some(""), None) => {
-                    // Empty line - use static string
-                    SharedString::from(EMPTY_LINE)
-                },
-                (Some(first), None) => {
-                    // Single chunk (common case) - single allocation
-                    SharedString::from(first.to_string())
-                },
-                (Some(first), Some(second)) => {
-                    // Multiple chunks - collect all
-                    let mut line_text = String::from(first);
-                    line_text.push_str(second);
-                    for chunk in line_chunks {
-                        line_text.push_str(chunk);
-                    }
-                    SharedString::from(line_text)
-                },
+            // Build up the line from chunks
+            let chunks = buffer_snapshot.text_for_range(line_start..line_end);
+            for chunk in chunks {
+                line_text.push_str(chunk);
+            }
+
+            // Create SharedString - empty lines use static string
+            let text = if line_text.is_empty() {
+                EMPTY_LINE.clone()
+            } else {
+                SharedString::from(line_text.clone())
             };
 
             // Shape the line using GPUI's text system
@@ -264,7 +259,9 @@ impl Element for EditorElement {
 
         // If no content, add a placeholder
         if lines.is_empty() {
-            let text = SharedString::from("Empty buffer - ready for input");
+            static PLACEHOLDER: SharedString =
+                SharedString::new_static("Empty buffer - ready for input");
+            let text = PLACEHOLDER.clone();
             let text_run = TextRun {
                 len: text.len(),
                 font,
