@@ -4,12 +4,13 @@ use gpui::{
     ShapedLine, SharedString, Style, TextRun, Window, WindowBounds, WindowOptions, point,
     prelude::*, px, relative, rgb, size,
 };
+use smallvec::SmallVec;
 use stoat::Stoat;
 use text;
 
 pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
-        let mut stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
+        let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
 
         // Add some test content to see if rendering works
         stoat.buffer().update(cx, |buffer, _| {
@@ -115,13 +116,13 @@ impl Default for EditorStyle {
 /// Layout state computed in prepaint
 struct EditorLayout {
     /// The shaped lines ready to paint
-    lines: Vec<PositionedLine>,
+    lines: SmallVec<[PositionedLine; 32]>,
     /// Total bounds of the editor
     bounds: Bounds<Pixels>,
     /// Content area (excluding padding)
-    content_bounds: Bounds<Pixels>,
+    _content_bounds: Bounds<Pixels>,
     /// Line height for positioning
-    line_height: Pixels,
+    _line_height: Pixels,
 }
 
 /// A shaped line with its rendering position
@@ -193,13 +194,16 @@ impl Element for EditorElement {
             fallbacks: None,
         };
 
+        // Static empty line to avoid repeated allocations
+        static EMPTY_LINE: &str = " ";
+
         // Get buffer content and create shaped lines
         let buffer_snapshot = self.stoat.buffer_snapshot(cx);
         let visible_lines = (content_bounds.size.height / self.style.line_height) as usize;
         let row_count = buffer_snapshot.row_count() as usize;
         let rows_to_render = row_count.min(visible_lines);
 
-        let mut lines = Vec::with_capacity(rows_to_render);
+        let mut lines = SmallVec::new();
         let mut y_offset = 0.0;
 
         // Iterate through rows efficiently without allocating strings
@@ -209,16 +213,28 @@ impl Element for EditorElement {
             let line_len = buffer_snapshot.line_len(row);
             let line_end = text::Point::new(row, line_len);
 
-            // Get text chunks for this line without allocating
-            let line_chunks = buffer_snapshot.text_for_range(line_start..line_end);
+            // Get text chunks for this line
+            let mut line_chunks = buffer_snapshot.text_for_range(line_start..line_end);
 
-            // Collect chunks into a single SharedString efficiently
-            // This is the only allocation, and SharedString uses Arc internally
-            let line_text: String = line_chunks.collect();
-            let text = if line_text.is_empty() {
-                SharedString::from(" ")
-            } else {
-                SharedString::from(line_text)
+            // Most lines are single chunks, optimize for that case
+            let text = match (line_chunks.next(), line_chunks.next()) {
+                (None, _) | (Some(""), None) => {
+                    // Empty line - use static string
+                    SharedString::from(EMPTY_LINE)
+                },
+                (Some(first), None) => {
+                    // Single chunk (common case) - single allocation
+                    SharedString::from(first.to_string())
+                },
+                (Some(first), Some(second)) => {
+                    // Multiple chunks - collect all
+                    let mut line_text = String::from(first);
+                    line_text.push_str(second);
+                    for chunk in line_chunks {
+                        line_text.push_str(chunk);
+                    }
+                    SharedString::from(line_text)
+                },
             };
 
             // Shape the line using GPUI's text system
@@ -272,8 +288,8 @@ impl Element for EditorElement {
         EditorLayout {
             lines,
             bounds,
-            content_bounds,
-            line_height: self.style.line_height,
+            _content_bounds: content_bounds,
+            _line_height: self.style.line_height,
         }
     }
 

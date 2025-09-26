@@ -6369,6 +6369,7 @@ dependencies = [
  "anyhow",
  "clock",
  "gpui",
+ "smallvec",
  "stoat",
  "stoat_rope_v3",
  "text",
