@@ -12,12 +12,13 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
     Application::new().run(move |cx: &mut App| {
         let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
 
-        // Add some test content to see if rendering works
+        // Add test content with many lines to test virtualization
         stoat.buffer().update(cx, |buffer, _| {
-            buffer.edit([(
-                0..0,
-                "Hello, World!\nThis is a test\nLine 3\nLine 4\nLine 5",
-            )]);
+            let mut content = String::new();
+            for i in 1..=100 {
+                content.push_str(&format!("Line {}: Testing virtualization performance\n", i));
+            }
+            buffer.edit([(0..0, content.as_str())]);
         });
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
@@ -51,12 +52,13 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
             let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
             stoat.load_files(&path_refs, cx);
         } else {
-            // Add test content if no files provided
+            // Add test content with many lines to test virtualization
             stoat.buffer().update(cx, |buffer, _| {
-                buffer.edit([(
-                    0..0,
-                    "Hello, World!\nThis is a test\nLine 3\nLine 4\nLine 5",
-                )]);
+                let mut content = String::new();
+                for i in 1..=100 {
+                    content.push_str(&format!("Line {}: Testing virtualization performance\n", i));
+                }
+                buffer.edit([(0..0, content.as_str())]);
             });
         }
 
@@ -197,21 +199,31 @@ impl Element for EditorElement {
         // Static empty line to avoid repeated allocations
         static EMPTY_LINE: SharedString = SharedString::new_static(" ");
 
-        // Get buffer content and create shaped lines
+        // Get buffer content and scroll position
         let buffer_snapshot = self.stoat.buffer_snapshot(cx);
-        let visible_lines = (content_bounds.size.height / self.style.line_height) as usize;
-        let row_count = buffer_snapshot.row_count() as usize;
-        let rows_to_render = row_count.min(visible_lines);
+        let scroll_position = self.stoat.scroll_position();
+
+        // Calculate visible row range based on scroll position and viewport height
+        let height_in_lines = content_bounds.size.height / self.style.line_height;
+        let start_row = scroll_position.y as u32;
+        let max_row = buffer_snapshot.row_count();
+        let end_row = ((scroll_position.y + height_in_lines).ceil() as u32).min(max_row);
+
+        // Debug: Log virtualization info (only render visible lines)
+        if max_row > 0 {
+            eprintln!(
+                "Virtualization: viewport fits {:.1} lines, rendering {}-{} of {} total",
+                height_in_lines, start_row, end_row, max_row
+            );
+        }
 
         let mut lines = SmallVec::new();
-        let mut y_offset = 0.0;
 
         // Reuse a single String allocation for all lines (like Zed does)
         let mut line_text = String::new();
 
-        // Iterate through rows efficiently
-        for row in 0..rows_to_render {
-            let row = row as u32;
+        // Only iterate through visible rows
+        for row in start_row..end_row {
             let line_start = text::Point::new(row, 0);
             let line_len = buffer_snapshot.line_len(row);
             let line_end = text::Point::new(row, line_len);
@@ -247,14 +259,15 @@ impl Element for EditorElement {
                     .text_system()
                     .shape_line(text, self.style.font_size, &[text_run], None);
 
+            // Position lines relative to viewport (accounting for scroll offset)
+            let relative_row = row - start_row;
             lines.push(PositionedLine {
                 shaped,
                 position: point(
                     content_bounds.origin.x,
-                    content_bounds.origin.y + px(y_offset),
+                    content_bounds.origin.y + px(relative_row as f32 * self.style.line_height.0),
                 ),
             });
-            y_offset += self.style.line_height.0;
         }
 
         // If no content, add a placeholder
