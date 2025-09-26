@@ -59,14 +59,38 @@ actions!(file, [Save, SaveAs, Quit, ForceQuit]);
 // History actions
 actions!(history, [Undo, Redo]);
 
-// Mode switching actions for modal editing
+// Modal key actions - each key gets its own action
 actions!(
-    mode,
+    modal_keys,
     [
-        EnterInsertMode,
-        EnterNormalMode,
-        EnterVisualMode,
-        EnterCommandMode
+        ModalKeyI,
+        ModalKeyEscape,
+        ModalKeyA,
+        ModalKeyB,
+        ModalKeyC,
+        ModalKeyD,
+        ModalKeyE,
+        ModalKeyF,
+        ModalKeyG,
+        ModalKeyH,
+        ModalKeyJ,
+        ModalKeyK,
+        ModalKeyL,
+        ModalKeyM,
+        ModalKeyN,
+        ModalKeyO,
+        ModalKeyP,
+        ModalKeyQ,
+        ModalKeyR,
+        ModalKeyS,
+        ModalKeyT,
+        ModalKeyU,
+        ModalKeyV,
+        ModalKeyW,
+        ModalKeyX,
+        ModalKeyY,
+        ModalKeyZ,
+        ModalKeySpace
     ]
 );
 

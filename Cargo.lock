@@ -6373,6 +6373,7 @@ dependencies = [
  "stoat",
  "stoat_rope_v3",
  "text",
+ "tracing",
 ]
 
 [[package]]
