@@ -6323,6 +6323,8 @@ dependencies = [
  "gpui",
  "stoat_rope_v3",
  "text",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

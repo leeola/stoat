@@ -1,7 +1,7 @@
 use crate::{actions::*, editor::view::EditorView};
 use gpui::{
-    prelude::*, px, size, App, Application, Bounds, Focusable, KeyBinding, WindowBounds,
-    WindowOptions,
+    App, Application, Bounds, Focusable, KeyBinding, WindowBounds, WindowOptions, prelude::*, px,
+    size,
 };
 use stoat::Stoat;
 

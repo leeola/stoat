@@ -1,3 +1,4 @@
+pub mod log;
 mod scroll;
 
 use gpui::{App, AppContext, Entity};
@@ -102,12 +103,5 @@ pub mod cli {
                 input: Option<String>,
             },
         }
-    }
-}
-
-pub mod log {
-    pub fn init() -> Result<(), Box<dyn std::error::Error>> {
-        // FIXME: Stub implementation - will set up proper logging later
-        Ok(())
     }
 }
