@@ -96,6 +96,8 @@ impl Element for EditorElement {
         // Reuse a single String allocation for all lines (like Zed does)
         let mut line_text = String::new();
 
+        dbg!(buffer_snapshot.text(), start_row, end_row);
+
         // Only iterate through visible rows
         for row in start_row..end_row {
             let line_start = text::Point::new(row, 0);

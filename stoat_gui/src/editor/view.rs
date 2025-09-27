@@ -333,7 +333,14 @@ impl Render for EditorView {
             // Handle keyboard input directly for modal system
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, window: &mut Window, cx| {
-                    let key_string = event.keystroke.key.to_string();
+                    // Use key_char when available (for typed characters including capitals),
+                    // otherwise fall back to key (for control keys like escape, enter, etc.)
+                    let key_string = event
+                        .keystroke
+                        .key_char
+                        .as_ref()
+                        .unwrap_or(&event.keystroke.key)
+                        .clone();
                     editor.handle_key(&key_string, window, cx);
                 },
             ))

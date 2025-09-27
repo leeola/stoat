@@ -94,6 +94,22 @@ impl ModalHandler {
                     self.mode = EditorMode::Normal;
                     ModalResult::Command(Box::new(EnterNormalMode))
                 },
+                "enter" => {
+                    debug!("Inserting newline in Insert mode");
+                    ModalResult::Command(Box::new(InsertText("\n".to_string())))
+                },
+                "tab" => {
+                    debug!("Inserting tab in Insert mode");
+                    ModalResult::Command(Box::new(InsertText("\t".to_string())))
+                },
+                "space" => {
+                    debug!("Inserting space in Insert mode");
+                    ModalResult::Command(Box::new(InsertText(" ".to_string())))
+                },
+                "backspace" => {
+                    debug!("Delete left in Insert mode");
+                    ModalResult::Command(Box::new(DeleteLeft))
+                },
                 _ => {
                     debug!("Inserting text '{}' in Insert mode", key);
                     ModalResult::Command(Box::new(InsertText(key.to_string())))
