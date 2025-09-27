@@ -1,7 +1,6 @@
-use crate::{commands::*, editor::view::EditorView};
+use crate::editor::view::EditorView;
 use gpui::{
-    prelude::*, px, size, App, Application, Bounds, Focusable, KeyBinding, WindowBounds,
-    WindowOptions,
+    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use stoat::Stoat;
 
@@ -43,7 +42,10 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_paths(
+    paths: Vec<std::path::PathBuf>,
+    input_sequence: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
         let mut stoat = Stoat::new(cx);
 
@@ -75,6 +77,23 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
                 window.focus(&view.focus_handle(cx));
             })
             .unwrap();
+
+        // Simulate input sequence if provided
+        // We need to defer this to avoid updating while already updating
+        if let Some(input) = input_sequence {
+            cx.spawn(async move |cx| {
+                // Small delay to ensure window is fully initialized
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+
+                cx.update_window(window.into(), |_, window, cx| {
+                    crate::external_input::simulate_input_sequence(&input, window, cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
 
         cx.on_window_closed(|cx| {
             cx.quit();

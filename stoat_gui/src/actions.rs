@@ -3,8 +3,6 @@
 //! This module contains some legacy action definitions that are not part of the
 //! main command system. Most actions have been moved to the commands module.
 
-use gpui::actions;
-
 /// Action that inserts a specific character
 #[derive(Debug, Clone)]
 pub struct InsertCharacter {
