@@ -1,5 +1,5 @@
-use crate::{actions::Action, context::EditorContext, keymap::Keymap};
-use gpui::{Context, KeyDownEvent, Task, Timer};
+use crate::{context::EditorContext, keymap::Keymap};
+use gpui::{Action, Context, KeyDownEvent, Task, Timer};
 use std::time::Duration;
 
 /// Handles keyboard input and converts keystrokes to actions

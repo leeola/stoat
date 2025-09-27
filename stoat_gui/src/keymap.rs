@@ -1,4 +1,5 @@
-use crate::{actions::Action, context::EditorContext};
+use crate::context::EditorContext;
+use gpui::Action;
 use std::collections::HashMap;
 
 // Define actions using the GPUI actions macro
