@@ -6,8 +6,8 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Window,
+    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, Styled, Window, div,
 };
 use stoat::Stoat;
 use tracing::{debug, info};
@@ -263,8 +263,7 @@ impl Render for EditorView {
             .id("editor") // Give it an ID to make it interactive
             .key_context("EditorView") // Set key context for action dispatch
             .track_focus(&self.focus_handle) // Make the div focusable
-            .w_full() // Take full width
-            .h_full() // Take full height
+            .size_full() // Take full width and height (100%)
             // Register command handlers
             .on_action(cx.listener(Self::handle_insert_text_action))
             .on_action(cx.listener(Self::handle_enter_insert_mode_action))
