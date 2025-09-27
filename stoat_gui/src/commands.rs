@@ -4,7 +4,7 @@
 //! Commands are implemented as GPUI actions, making them discoverable,
 //! bindable to keys, and testable in isolation.
 
-use gpui::{Action, actions};
+use gpui::{actions, Action};
 
 /// Insert text at the current cursor position(s).
 ///

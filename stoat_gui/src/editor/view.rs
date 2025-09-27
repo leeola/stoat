@@ -51,6 +51,34 @@ impl EditorView {
             self.handle_enter_normal_mode(cx);
         } else if command.as_any().downcast_ref::<ExitApp>().is_some() {
             self.handle_exit_app(cx);
+        } else if command.as_any().downcast_ref::<MoveLeft>().is_some() {
+            self.handle_move_left(cx);
+        } else if command.as_any().downcast_ref::<MoveRight>().is_some() {
+            self.handle_move_right(cx);
+        } else if command.as_any().downcast_ref::<MoveUp>().is_some() {
+            self.handle_move_up(cx);
+        } else if command.as_any().downcast_ref::<MoveDown>().is_some() {
+            self.handle_move_down(cx);
+        } else if command.as_any().downcast_ref::<MoveToLineStart>().is_some() {
+            self.handle_move_to_line_start(cx);
+        } else if command.as_any().downcast_ref::<MoveToLineEnd>().is_some() {
+            self.handle_move_to_line_end(cx);
+        } else if command.as_any().downcast_ref::<MoveToFileStart>().is_some() {
+            self.handle_move_to_file_start(cx);
+        } else if command.as_any().downcast_ref::<MoveToFileEnd>().is_some() {
+            self.handle_move_to_file_end(cx);
+        } else if command.as_any().downcast_ref::<DeleteLeft>().is_some() {
+            self.handle_delete_left(cx);
+        } else if command.as_any().downcast_ref::<DeleteRight>().is_some() {
+            self.handle_delete_right(cx);
+        } else if command.as_any().downcast_ref::<DeleteLine>().is_some() {
+            self.handle_delete_line(cx);
+        } else if command
+            .as_any()
+            .downcast_ref::<DeleteToEndOfLine>()
+            .is_some()
+        {
+            self.handle_delete_to_end_of_line(cx);
         } else {
             debug!("Unhandled command");
         }
@@ -59,8 +87,11 @@ impl EditorView {
     /// Handle text insertion
     fn handle_insert_text(&mut self, command: &InsertText, cx: &mut Context<'_, Self>) {
         info!("Inserting text: '{}'", command.0);
-        // TODO: Implement actual text insertion into stoat buffer
-        println!("Inserting text: {}", command.0);
+
+        // Insert text at cursor position using Stoat's optimized method
+        self.stoat.insert_text(&command.0, cx);
+
+        // Notify for re-render
         cx.notify();
     }
 
@@ -152,6 +183,68 @@ impl EditorView {
     ) {
         self.handle_exit_app(cx);
     }
+
+    /// Movement command handlers
+    fn handle_move_left(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_left(cx);
+        cx.notify();
+    }
+
+    fn handle_move_right(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_right(cx);
+        cx.notify();
+    }
+
+    fn handle_move_up(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_up(cx);
+        cx.notify();
+    }
+
+    fn handle_move_down(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_down(cx);
+        cx.notify();
+    }
+
+    fn handle_move_to_line_start(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_to_line_start();
+        cx.notify();
+    }
+
+    fn handle_move_to_line_end(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_to_line_end(cx);
+        cx.notify();
+    }
+
+    fn handle_move_to_file_start(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_to_file_start();
+        cx.notify();
+    }
+
+    fn handle_move_to_file_end(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.move_cursor_to_file_end(cx);
+        cx.notify();
+    }
+
+    /// Deletion command handlers
+    fn handle_delete_left(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.delete_left(cx);
+        cx.notify();
+    }
+
+    fn handle_delete_right(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.delete_right(cx);
+        cx.notify();
+    }
+
+    fn handle_delete_line(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.delete_line(cx);
+        cx.notify();
+    }
+
+    fn handle_delete_to_end_of_line(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.delete_to_end_of_line(cx);
+        cx.notify();
+    }
 }
 
 impl Focusable for EditorView {
@@ -175,6 +268,68 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_insert_mode_action))
             .on_action(cx.listener(Self::handle_enter_normal_mode_action))
             .on_action(cx.listener(Self::handle_exit_app_action))
+            // Movement handlers
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveLeft, _window: &mut Window, cx| {
+                    editor.handle_move_left(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveRight, _window: &mut Window, cx| {
+                    editor.handle_move_right(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveUp, _window: &mut Window, cx| {
+                    editor.handle_move_up(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveDown, _window: &mut Window, cx| {
+                    editor.handle_move_down(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveToLineStart, _window: &mut Window, cx| {
+                    editor.handle_move_to_line_start(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveToLineEnd, _window: &mut Window, cx| {
+                    editor.handle_move_to_line_end(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveToFileStart, _window: &mut Window, cx| {
+                    editor.handle_move_to_file_start(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &MoveToFileEnd, _window: &mut Window, cx| {
+                    editor.handle_move_to_file_end(cx);
+                },
+            ))
+            // Deletion handlers
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &DeleteLeft, _window: &mut Window, cx| {
+                    editor.handle_delete_left(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &DeleteRight, _window: &mut Window, cx| {
+                    editor.handle_delete_right(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &DeleteLine, _window: &mut Window, cx| {
+                    editor.handle_delete_line(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &DeleteToEndOfLine, _window: &mut Window, cx| {
+                    editor.handle_delete_to_end_of_line(cx);
+                },
+            ))
             // Handle keyboard input directly for modal system
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, window: &mut Window, cx| {

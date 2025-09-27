@@ -206,6 +206,95 @@ impl Element for EditorElement {
                     eprintln!("Failed to paint line: {:?}", err);
                 });
         }
+
+        // Paint cursor
+        self.paint_cursor(layout, window, cx);
+    }
+}
+
+impl EditorElement {
+    /// Paint the cursor at the current position
+    fn paint_cursor(&self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
+        let cursor_position = self.stoat.cursor_position();
+        let buffer_snapshot = self.stoat.buffer_snapshot(cx);
+
+        // Only render cursor if it's in the visible range
+        let scroll_position = self.stoat.scroll_position();
+        let start_row = scroll_position.y as u32;
+        let visible_rows = layout.lines.len() as u32;
+        let end_row = start_row + visible_rows;
+
+        if cursor_position.row >= start_row && cursor_position.row < end_row {
+            let relative_row = cursor_position.row - start_row;
+
+            if let Some(line) = layout.lines.get(relative_row as usize) {
+                // Calculate cursor x position within the line
+                let line_start = text::Point::new(cursor_position.row, 0);
+                let cursor_offset_in_line = cursor_position.column;
+
+                // Use GPUI's text measurement to get precise cursor position
+                let text_before_cursor = if cursor_offset_in_line > 0 {
+                    let line_len = buffer_snapshot.line_len(cursor_position.row);
+                    let end_col = cursor_offset_in_line.min(line_len);
+                    let text_range = line_start..text::Point::new(cursor_position.row, end_col);
+
+                    let mut text_before = String::new();
+                    for chunk in buffer_snapshot.text_for_range(text_range) {
+                        text_before.push_str(chunk);
+                    }
+                    text_before
+                } else {
+                    String::new()
+                };
+
+                // Measure the text width to position cursor
+                let text_width = if !text_before_cursor.is_empty() {
+                    let font = Font {
+                        family: SharedString::from("Menlo"),
+                        features: Default::default(),
+                        weight: FontWeight::NORMAL,
+                        style: FontStyle::Normal,
+                        fallbacks: None,
+                    };
+
+                    let text_run = TextRun {
+                        len: text_before_cursor.len(),
+                        font,
+                        color: self.style.text_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(text_before_cursor),
+                        self.style.font_size,
+                        &[text_run],
+                        None,
+                    );
+                    shaped.width
+                } else {
+                    px(0.0)
+                };
+
+                // Paint cursor as a vertical line
+                let cursor_x = line.position.x + text_width;
+                let cursor_y = line.position.y;
+                let cursor_bounds = Bounds {
+                    origin: point(cursor_x, cursor_y),
+                    size: size(px(2.0), self.style.line_height),
+                };
+
+                window.paint_quad(PaintQuad {
+                    bounds: cursor_bounds,
+                    corner_radii: Default::default(),
+                    background: self.style.text_color.into(),
+                    border_color: Default::default(),
+                    border_widths: Default::default(),
+                    border_style: Default::default(),
+                });
+            }
+        }
     }
 }
 
