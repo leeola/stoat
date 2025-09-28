@@ -6,8 +6,8 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, Styled, Window, div,
+    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, Styled, Window,
 };
 use stoat::Stoat;
 use tracing::{debug, info};

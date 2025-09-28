@@ -8,6 +8,8 @@ pub(crate) enum InputEvent {
     Character(char),
     /// A special key like Escape, Enter, etc.
     SpecialKey(SpecialKey),
+    /// A control key combination (e.g., Ctrl+F)
+    ControlKey(char),
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +52,10 @@ pub fn parse_input_sequence(input: &str) -> Vec<InputEvent> {
             }
 
             if found_end {
-                if let Some(special_key) = parse_special_key(&key_name) {
+                // Check if it's a control key combination first
+                if let Some(control_char) = parse_control_key(&key_name) {
+                    events.push(InputEvent::ControlKey(control_char));
+                } else if let Some(special_key) = parse_special_key(&key_name) {
                     events.push(InputEvent::SpecialKey(special_key));
                 } else {
                     // Unknown special key, treat as literal characters
@@ -73,6 +78,27 @@ pub fn parse_input_sequence(input: &str) -> Vec<InputEvent> {
     }
 
     events
+}
+
+/// Parse control key notation like "C-f", "ctrl-f", or "Ctrl-F"
+fn parse_control_key(name: &str) -> Option<char> {
+    let lower = name.to_lowercase();
+
+    // Check for vim-style notation: C-x
+    if lower.starts_with("c-") && lower.len() == 3 {
+        return lower.chars().nth(2);
+    }
+
+    // Check for full notation: ctrl-x or control-x
+    if lower.starts_with("ctrl-") && lower.len() == 6 {
+        return lower.chars().nth(5);
+    }
+
+    if lower.starts_with("control-") && lower.len() == 9 {
+        return lower.chars().nth(8);
+    }
+
+    None
 }
 
 fn parse_special_key(name: &str) -> Option<SpecialKey> {
@@ -120,6 +146,9 @@ pub fn simulate_input_sequence(input: &str, window: &mut Window, cx: &mut App) {
             InputEvent::SpecialKey(key) => {
                 dispatch_special_key(key, window, cx);
             },
+            InputEvent::ControlKey(ch) => {
+                dispatch_control_key(ch, window, cx);
+            },
         }
     }
 }
@@ -131,6 +160,18 @@ fn dispatch_character_as_keystroke(ch: char, window: &mut Window, cx: &mut App) 
     let keystroke = Keystroke {
         modifiers: gpui::Modifiers::none(),
         key,
+        key_char: Some(ch.to_string()),
+    };
+
+    window.dispatch_keystroke(keystroke, cx);
+}
+
+fn dispatch_control_key(ch: char, window: &mut Window, cx: &mut App) {
+    use gpui::{Keystroke, Modifiers};
+
+    let keystroke = Keystroke {
+        modifiers: Modifiers::control(),
+        key: ch.to_string(),
         key_char: Some(ch.to_string()),
     };
 
@@ -221,5 +262,61 @@ mod tests {
             events[3],
             InputEvent::SpecialKey(SpecialKey::Down)
         ));
+    }
+
+    #[test]
+    fn test_parse_control_keys_vim_style() {
+        let events = parse_input_sequence("<C-f><C-b><C-d><C-u>");
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], InputEvent::ControlKey('f')));
+        assert!(matches!(events[1], InputEvent::ControlKey('b')));
+        assert!(matches!(events[2], InputEvent::ControlKey('d')));
+        assert!(matches!(events[3], InputEvent::ControlKey('u')));
+    }
+
+    #[test]
+    fn test_parse_control_keys_full_notation() {
+        let events = parse_input_sequence("<ctrl-f><Ctrl-B><CTRL-d>");
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], InputEvent::ControlKey('f')));
+        assert!(matches!(events[1], InputEvent::ControlKey('b')));
+        assert!(matches!(events[2], InputEvent::ControlKey('d')));
+    }
+
+    #[test]
+    fn test_parse_control_keys_long_notation() {
+        let events = parse_input_sequence("<control-a><Control-Z>");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], InputEvent::ControlKey('a')));
+        assert!(matches!(events[1], InputEvent::ControlKey('z')));
+    }
+
+    #[test]
+    fn test_parse_mixed_with_control_keys() {
+        let events = parse_input_sequence("i<C-f>hello<Esc><ctrl-b>");
+        assert_eq!(events.len(), 9);
+        assert!(matches!(events[0], InputEvent::Character('i')));
+        assert!(matches!(events[1], InputEvent::ControlKey('f')));
+        assert!(matches!(events[2], InputEvent::Character('h')));
+        assert!(matches!(events[3], InputEvent::Character('e')));
+        assert!(matches!(events[4], InputEvent::Character('l')));
+        assert!(matches!(events[5], InputEvent::Character('l')));
+        assert!(matches!(events[6], InputEvent::Character('o')));
+        assert!(matches!(
+            events[7],
+            InputEvent::SpecialKey(SpecialKey::Escape)
+        ));
+        assert!(matches!(events[8], InputEvent::ControlKey('b')));
+    }
+
+    #[test]
+    fn test_parse_unknown_control_notation() {
+        // Test that unknown control notation is treated as literal
+        let events = parse_input_sequence("<C->");
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], InputEvent::Character('<')));
+        assert!(matches!(events[1], InputEvent::Character('C')));
+        assert!(matches!(events[2], InputEvent::Character('-')));
+        assert!(matches!(events[3], InputEvent::Character('>')));
     }
 }
