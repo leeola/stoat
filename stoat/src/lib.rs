@@ -247,6 +247,45 @@ impl Stoat {
         }
     }
 
+    /// Move cursor up by one page (approximately one viewport height)
+    pub fn move_cursor_page_up(&mut self, cx: &App, viewport_height: f32, line_height: f32) {
+        let lines_per_page = (viewport_height / line_height).floor() as u32;
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+
+        if lines_per_page > 0 {
+            let new_row = self.cursor_position.row.saturating_sub(lines_per_page);
+            let line_len = buffer_snapshot.line_len(new_row);
+            let new_column = self.cursor_position.column.min(line_len);
+            self.cursor_position = Point::new(new_row, new_column);
+
+            // Update scroll position to keep cursor visible
+            if (self.scroll.position.y as u32) > new_row {
+                self.scroll.position.y = new_row as f32;
+            }
+        }
+    }
+
+    /// Move cursor down by one page (approximately one viewport height)
+    pub fn move_cursor_page_down(&mut self, cx: &App, viewport_height: f32, line_height: f32) {
+        let lines_per_page = (viewport_height / line_height).floor() as u32;
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let max_row = buffer_snapshot.row_count() - 1;
+
+        if lines_per_page > 0 {
+            let new_row = (self.cursor_position.row + lines_per_page).min(max_row);
+            let line_len = buffer_snapshot.line_len(new_row);
+            let new_column = self.cursor_position.column.min(line_len);
+            self.cursor_position = Point::new(new_row, new_column);
+
+            // Update scroll position to keep cursor visible
+            let viewport_lines = (viewport_height / line_height) as u32;
+            let bottom_visible_row = (self.scroll.position.y as u32) + viewport_lines;
+            if new_row >= bottom_visible_row {
+                self.scroll.position.y = (new_row.saturating_sub(viewport_lines - 1)) as f32;
+            }
+        }
+    }
+
     /// Helper method to delete a range of text
     fn delete_range(&mut self, range: std::ops::Range<Point>, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();

@@ -83,6 +83,60 @@ impl ModalHandler {
                     info!("Exit app requested from Normal mode");
                     ModalResult::Command(Box::new(ExitApp))
                 },
+                "h" => {
+                    debug!("Move left in Normal mode");
+                    ModalResult::Command(Box::new(MoveLeft))
+                },
+                "j" => {
+                    debug!("Move down in Normal mode");
+                    ModalResult::Command(Box::new(MoveDown))
+                },
+                "k" => {
+                    debug!("Move up in Normal mode");
+                    ModalResult::Command(Box::new(MoveUp))
+                },
+                "l" => {
+                    debug!("Move right in Normal mode");
+                    ModalResult::Command(Box::new(MoveRight))
+                },
+                "ctrl-f" | "pagedown" => {
+                    debug!("Page down in Normal mode");
+                    ModalResult::Command(Box::new(PageDown))
+                },
+                "ctrl-b" | "pageup" => {
+                    debug!("Page up in Normal mode");
+                    ModalResult::Command(Box::new(PageUp))
+                },
+                "0" => {
+                    debug!("Move to line start in Normal mode");
+                    ModalResult::Command(Box::new(MoveToLineStart))
+                },
+                "$" => {
+                    debug!("Move to line end in Normal mode");
+                    ModalResult::Command(Box::new(MoveToLineEnd))
+                },
+                "g" => {
+                    // FIXME: Should handle gg for file start
+                    debug!("Move to file start in Normal mode");
+                    ModalResult::Command(Box::new(MoveToFileStart))
+                },
+                "G" => {
+                    debug!("Move to file end in Normal mode");
+                    ModalResult::Command(Box::new(MoveToFileEnd))
+                },
+                "x" => {
+                    debug!("Delete character in Normal mode");
+                    ModalResult::Command(Box::new(DeleteRight))
+                },
+                "d" => {
+                    // FIXME: Should handle dd for delete line
+                    debug!("Delete line in Normal mode");
+                    ModalResult::Command(Box::new(DeleteLine))
+                },
+                "D" => {
+                    debug!("Delete to end of line in Normal mode");
+                    ModalResult::Command(Box::new(DeleteToEndOfLine))
+                },
                 _ => {
                     debug!("Ignoring key '{}' in Normal mode", key);
                     ModalResult::None

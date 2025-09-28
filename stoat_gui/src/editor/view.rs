@@ -6,8 +6,8 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Window,
+    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, Styled, Window, div,
 };
 use stoat::Stoat;
 use tracing::{debug, info};
@@ -67,6 +67,10 @@ impl EditorView {
             self.handle_move_to_file_start(cx);
         } else if command.as_any().downcast_ref::<MoveToFileEnd>().is_some() {
             self.handle_move_to_file_end(cx);
+        } else if command.as_any().downcast_ref::<PageUp>().is_some() {
+            self.handle_page_up(cx);
+        } else if command.as_any().downcast_ref::<PageDown>().is_some() {
+            self.handle_page_down(cx);
         } else if command.as_any().downcast_ref::<DeleteLeft>().is_some() {
             self.handle_delete_left(cx);
         } else if command.as_any().downcast_ref::<DeleteRight>().is_some() {
@@ -225,6 +229,24 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_page_up(&mut self, cx: &mut Context<'_, Self>) {
+        // FIXME: Need to get viewport height from element - using estimated values for now
+        let viewport_height = 600.0; // Approximate viewport height in pixels
+        let line_height = 20.0; // Approximate line height in pixels
+        self.stoat
+            .move_cursor_page_up(cx, viewport_height, line_height);
+        cx.notify();
+    }
+
+    fn handle_page_down(&mut self, cx: &mut Context<'_, Self>) {
+        // FIXME: Need to get viewport height from element - using estimated values for now
+        let viewport_height = 600.0; // Approximate viewport height in pixels
+        let line_height = 20.0; // Approximate line height in pixels
+        self.stoat
+            .move_cursor_page_down(cx, viewport_height, line_height);
+        cx.notify();
+    }
+
     /// Deletion command handlers
     fn handle_delete_left(&mut self, cx: &mut Context<'_, Self>) {
         self.stoat.delete_left(cx);
@@ -310,6 +332,16 @@ impl Render for EditorView {
                     editor.handle_move_to_file_end(cx);
                 },
             ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &PageUp, _window: &mut Window, cx| {
+                    editor.handle_page_up(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &PageDown, _window: &mut Window, cx| {
+                    editor.handle_page_down(cx);
+                },
+            ))
             // Deletion handlers
             .on_action(cx.listener(
                 |editor: &mut EditorView, _: &DeleteLeft, _window: &mut Window, cx| {
@@ -334,14 +366,28 @@ impl Render for EditorView {
             // Handle keyboard input directly for modal system
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, window: &mut Window, cx| {
-                    // Use key_char when available (for typed characters including capitals),
-                    // otherwise fall back to key (for control keys like escape, enter, etc.)
-                    let key_string = event
-                        .keystroke
-                        .key_char
-                        .as_ref()
-                        .unwrap_or(&event.keystroke.key)
-                        .clone();
+                    // Build key string with modifiers
+                    let mut key_string = String::new();
+
+                    // Add modifier prefixes
+                    if event.keystroke.modifiers.control {
+                        key_string.push_str("ctrl-");
+                    }
+                    if event.keystroke.modifiers.alt {
+                        key_string.push_str("alt-");
+                    }
+                    if event.keystroke.modifiers.shift && event.keystroke.key_char.is_none() {
+                        // Only add shift prefix for non-character keys
+                        key_string.push_str("shift-");
+                    }
+
+                    // Add the key itself
+                    if let Some(ref key_char) = event.keystroke.key_char {
+                        key_string.push_str(key_char);
+                    } else {
+                        key_string.push_str(&event.keystroke.key);
+                    }
+
                     editor.handle_key(&key_string, window, cx);
                 },
             ))
