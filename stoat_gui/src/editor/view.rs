@@ -9,11 +9,12 @@ use gpui::{
     div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
     ParentElement, Render, Styled, Window,
 };
+use std::{cell::RefCell, rc::Rc};
 use stoat::Stoat;
 use tracing::{debug, info};
 
 pub struct EditorView {
-    stoat: Stoat,
+    stoat: Rc<RefCell<Stoat>>,
     pub input_handler: InputHandler,
     context: EditorContext,
     focus_handle: FocusHandle,
@@ -25,7 +26,7 @@ impl EditorView {
         let focus_handle = cx.focus_handle();
 
         Self {
-            stoat,
+            stoat: Rc::new(RefCell::new(stoat)),
             input_handler: InputHandler::with_default_keymap(),
             context: EditorContext::new(),
             focus_handle,
@@ -93,7 +94,7 @@ impl EditorView {
         info!("Inserting text: '{}'", command.0);
 
         // Insert text at cursor position using Stoat's optimized method
-        self.stoat.insert_text(&command.0, cx);
+        self.stoat.borrow_mut().insert_text(&command.0, cx);
 
         // Notify for re-render
         cx.notify();
@@ -190,81 +191,73 @@ impl EditorView {
 
     /// Movement command handlers
     fn handle_move_left(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_left(cx);
+        self.stoat.borrow_mut().move_cursor_left(cx);
         cx.notify();
     }
 
     fn handle_move_right(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_right(cx);
+        self.stoat.borrow_mut().move_cursor_right(cx);
         cx.notify();
     }
 
     fn handle_move_up(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_up(cx);
+        self.stoat.borrow_mut().move_cursor_up(cx);
         cx.notify();
     }
 
     fn handle_move_down(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_down(cx);
+        self.stoat.borrow_mut().move_cursor_down(cx);
         cx.notify();
     }
 
     fn handle_move_to_line_start(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_line_start();
+        self.stoat.borrow_mut().move_cursor_to_line_start();
         cx.notify();
     }
 
     fn handle_move_to_line_end(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_line_end(cx);
+        self.stoat.borrow_mut().move_cursor_to_line_end(cx);
         cx.notify();
     }
 
     fn handle_move_to_file_start(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_file_start();
+        self.stoat.borrow_mut().move_cursor_to_file_start();
         cx.notify();
     }
 
     fn handle_move_to_file_end(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_file_end(cx);
+        self.stoat.borrow_mut().move_cursor_to_file_end(cx);
         cx.notify();
     }
 
     fn handle_page_up(&mut self, cx: &mut Context<'_, Self>) {
-        // FIXME: Need to get viewport height from element - using estimated values for now
-        let viewport_height = 600.0; // Approximate viewport height in pixels
-        let line_height = 20.0; // Approximate line height in pixels
-        self.stoat
-            .move_cursor_page_up(cx, viewport_height, line_height);
+        self.stoat.borrow_mut().move_cursor_page_up(cx);
         cx.notify();
     }
 
     fn handle_page_down(&mut self, cx: &mut Context<'_, Self>) {
-        // FIXME: Need to get viewport height from element - using estimated values for now
-        let viewport_height = 600.0; // Approximate viewport height in pixels
-        let line_height = 20.0; // Approximate line height in pixels
-        self.stoat
-            .move_cursor_page_down(cx, viewport_height, line_height);
+        self.stoat.borrow_mut().move_cursor_page_down(cx);
         cx.notify();
     }
 
     /// Deletion command handlers
     fn handle_delete_left(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_left(cx);
+        self.stoat.borrow_mut().delete_left(cx);
         cx.notify();
     }
 
     fn handle_delete_right(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_right(cx);
+        self.stoat.borrow_mut().delete_right(cx);
         cx.notify();
     }
 
     fn handle_delete_line(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_line(cx);
+        self.stoat.borrow_mut().delete_line(cx);
         cx.notify();
     }
 
     fn handle_delete_to_end_of_line(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_to_end_of_line(cx);
+        self.stoat.borrow_mut().delete_to_end_of_line(cx);
         cx.notify();
     }
 }
@@ -391,6 +384,6 @@ impl Render for EditorView {
                     editor.handle_key(&key_string, window, cx);
                 },
             ))
-            .child(EditorElement::new(self.stoat.clone()))
+            .child(EditorElement::new(Rc::clone(&self.stoat)))
     }
 }

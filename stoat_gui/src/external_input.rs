@@ -25,6 +25,8 @@ pub(crate) enum SpecialKey {
     Down,
     Home,
     End,
+    PageUp,
+    PageDown,
 }
 
 /// Parse an input sequence string into a series of input events
@@ -114,6 +116,8 @@ fn parse_special_key(name: &str) -> Option<SpecialKey> {
         "down" => Some(SpecialKey::Down),
         "home" => Some(SpecialKey::Home),
         "end" => Some(SpecialKey::End),
+        "pageup" | "pgup" => Some(SpecialKey::PageUp),
+        "pagedown" | "pgdown" => Some(SpecialKey::PageDown),
         _ => None,
     }
 }
@@ -193,6 +197,8 @@ fn dispatch_special_key(key: SpecialKey, window: &mut Window, cx: &mut App) {
         SpecialKey::Down => ("down", None),
         SpecialKey::Home => ("home", None),
         SpecialKey::End => ("end", None),
+        SpecialKey::PageUp => ("pageup", None),
+        SpecialKey::PageDown => ("pagedown", None),
     };
 
     let keystroke = Keystroke {
