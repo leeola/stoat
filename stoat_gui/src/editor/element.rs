@@ -3,9 +3,9 @@ use super::{
     style::EditorStyle,
 };
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
-    Style, TextRun, Window,
+    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
+    Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;
@@ -111,6 +111,30 @@ impl Element for EditorElement {
                 line_text.push_str(chunk);
             }
 
+            // Expand tabs to spaces before shaping (like Zed does)
+            // This avoids GPUI's internal tab expansion limit
+            if line_text.contains('\t') {
+                let mut expanded = String::with_capacity(line_text.len() * 2);
+                let mut column = 0;
+                for ch in line_text.chars() {
+                    if ch == '\t' {
+                        let tab_stop = 4; // TODO: Make this configurable
+                        let spaces_to_add = tab_stop - (column % tab_stop);
+                        for _ in 0..spaces_to_add {
+                            expanded.push(' ');
+                            column += 1;
+                        }
+                    } else {
+                        expanded.push(ch);
+                        column += 1;
+                        if ch == '\n' {
+                            column = 0;
+                        }
+                    }
+                }
+                line_text = expanded;
+            }
+
             // Create SharedString - empty lines use static string
             let text = if line_text.is_empty() {
                 EMPTY_LINE.clone()
@@ -119,8 +143,9 @@ impl Element for EditorElement {
             };
 
             // Shape the line using GPUI's text system
+            let text_run_len = text.len();
             let text_run = TextRun {
-                len: text.len(),
+                len: text_run_len,
                 font: font.clone(),
                 color: self.style.text_color,
                 background_color: None,
@@ -242,7 +267,28 @@ impl EditorElement {
                     for chunk in buffer_snapshot.text_for_range(text_range) {
                         text_before.push_str(chunk);
                     }
-                    text_before
+
+                    // Expand tabs to spaces for cursor positioning too
+                    if text_before.contains('\t') {
+                        let mut expanded = String::with_capacity(text_before.len() * 2);
+                        let mut column = 0;
+                        for ch in text_before.chars() {
+                            if ch == '\t' {
+                                let tab_stop = 4; // TODO: Make this configurable
+                                let spaces_to_add = tab_stop - (column % tab_stop);
+                                for _ in 0..spaces_to_add {
+                                    expanded.push(' ');
+                                    column += 1;
+                                }
+                            } else {
+                                expanded.push(ch);
+                                column += 1;
+                            }
+                        }
+                        expanded
+                    } else {
+                        text_before
+                    }
                 } else {
                     String::new()
                 };
@@ -257,8 +303,10 @@ impl EditorElement {
                         fallbacks: None,
                     };
 
+                    let text_before_shared = SharedString::from(text_before_cursor.clone());
+                    let text_run_len = text_before_shared.len();
                     let text_run = TextRun {
-                        len: text_before_cursor.len(),
+                        len: text_run_len,
                         font,
                         color: self.style.text_color,
                         background_color: None,
@@ -267,11 +315,12 @@ impl EditorElement {
                     };
 
                     let shaped = window.text_system().shape_line(
-                        SharedString::from(text_before_cursor),
+                        text_before_shared,
                         self.style.font_size,
                         &[text_run],
                         None,
                     );
+
                     shaped.width
                 } else {
                     px(0.0)
