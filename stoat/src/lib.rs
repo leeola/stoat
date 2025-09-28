@@ -13,10 +13,7 @@ pub struct Stoat {
     token_map: TokenMap,
     scroll: ScrollPosition,
     cursor_position: Point,
-    /// Number of visible lines in the viewport (set by the element during layout)
-    visible_line_count: Option<f32>,
-    /// Number of visible columns in the viewport (set by the element during layout)
-    visible_column_count: Option<f32>,
+    viewport_lines: Option<f32>,
 }
 
 impl Stoat {
@@ -31,8 +28,7 @@ impl Stoat {
             token_map,
             scroll: ScrollPosition::new(),
             cursor_position: Point::new(0, 0),
-            visible_line_count: None,
-            visible_column_count: None,
+            viewport_lines: None,
         }
     }
 
@@ -86,6 +82,16 @@ impl Stoat {
     /// Set the cursor position
     pub fn set_cursor_position(&mut self, position: Point) {
         self.cursor_position = position;
+    }
+
+    /// Get the visible line count (viewport height in lines)
+    pub fn visible_line_count(&self) -> Option<f32> {
+        self.viewport_lines
+    }
+
+    /// Set the visible line count based on viewport dimensions
+    pub fn set_visible_line_count(&mut self, lines: f32) {
+        self.viewport_lines = Some(lines);
     }
 
     /// Insert text at the current cursor position
@@ -253,30 +259,9 @@ impl Stoat {
         }
     }
 
-    /// Set the number of visible lines in the viewport.
-    /// This should be called by the element during layout.
-    pub fn set_visible_line_count(&mut self, lines: f32) {
-        self.visible_line_count = Some(lines);
-    }
-
-    /// Set the number of visible columns in the viewport.
-    /// This should be called by the element during layout.
-    pub fn set_visible_column_count(&mut self, columns: f32) {
-        self.visible_column_count = Some(columns);
-    }
-
-    /// Get the number of visible rows (lines - 1 for paging)
-    pub fn visible_row_count(&self) -> Option<u32> {
-        self.visible_line_count
-            .map(|lines| (lines as u32).saturating_sub(1))
-    }
-
     /// Move cursor up by one page (approximately one viewport height)
     pub fn move_cursor_page_up(&mut self, cx: &App) {
-        let Some(lines_per_page) = self.visible_row_count() else {
-            // No viewport dimensions available yet
-            return;
-        };
+        let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
         let buffer_snapshot = self.buffer.read(cx).snapshot();
 
@@ -286,19 +271,14 @@ impl Stoat {
             let new_column = self.cursor_position.column.min(line_len);
             self.cursor_position = Point::new(new_row, new_column);
 
-            // Scroll the viewport to keep the cursor centered or at least visible
-            // When paging up, we want to scroll so the cursor is near the bottom of the viewport
-            self.scroll.position.y =
-                new_row.saturating_sub(lines_per_page.saturating_sub(3)) as f32;
+            // Scroll the viewport to keep the cursor visible
+            self.scroll.position.y = new_row.saturating_sub(3) as f32;
         }
     }
 
     /// Move cursor down by one page (approximately one viewport height)
     pub fn move_cursor_page_down(&mut self, cx: &App) {
-        let Some(lines_per_page) = self.visible_row_count() else {
-            // No viewport dimensions available yet
-            return;
-        };
+        let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
         let buffer_snapshot = self.buffer.read(cx).snapshot();
         let max_row = buffer_snapshot.row_count() - 1;
@@ -310,10 +290,8 @@ impl Stoat {
             let new_column = self.cursor_position.column.min(line_len);
             self.cursor_position = Point::new(new_row, new_column);
 
-            // Scroll the viewport to keep the cursor centered or at least visible
-            // When paging down, we want to scroll so the cursor is near the top of the viewport
-            self.scroll.position.y = new_row.saturating_sub(3) as f32; // Keep a few lines of
-                                                                       // context
+            // Scroll the viewport to keep the cursor visible
+            self.scroll.position.y = new_row.saturating_sub(3) as f32;
         }
     }
 

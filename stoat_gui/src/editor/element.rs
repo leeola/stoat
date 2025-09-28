@@ -3,21 +3,20 @@ use super::{
     style::EditorStyle,
 };
 use gpui::{
-    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
-    Window, point, px, relative, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 use smallvec::SmallVec;
-use std::{cell::RefCell, rc::Rc};
 use stoat::Stoat;
 
 pub struct EditorElement {
-    stoat: Rc<RefCell<Stoat>>,
+    stoat: Stoat,
     style: EditorStyle,
 }
 
 impl EditorElement {
-    pub fn new(stoat: Rc<RefCell<Stoat>>) -> Self {
+    pub fn new(stoat: Stoat) -> Self {
         Self {
             stoat,
             style: EditorStyle::default(),
@@ -83,20 +82,11 @@ impl Element for EditorElement {
         static EMPTY_LINE: SharedString = SharedString::new_static(" ");
 
         // Get buffer content and scroll position
-        let stoat = self.stoat.borrow();
-        let buffer_snapshot = stoat.buffer_snapshot(cx);
-        let _scroll_position = stoat.scroll_position();
+        let buffer_snapshot = self.stoat.buffer_snapshot(cx);
+        let scroll_position = self.stoat.scroll_position();
 
         // Calculate visible row range based on scroll position and viewport height
         let height_in_lines = content_bounds.size.height / self.style.line_height;
-
-        // Update the Stoat with the current viewport dimensions
-        drop(stoat); // Drop the borrow before getting a mutable borrow
-        self.stoat
-            .borrow_mut()
-            .set_visible_line_count(height_in_lines);
-
-        let scroll_position = self.stoat.borrow().scroll_position();
         let start_row = scroll_position.y as u32;
         let max_row = buffer_snapshot.row_count();
         let end_row = ((scroll_position.y + height_in_lines).ceil() as u32).min(max_row);
@@ -250,12 +240,11 @@ impl Element for EditorElement {
 impl EditorElement {
     /// Paint the cursor at the current position
     fn paint_cursor(&self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
-        let stoat = self.stoat.borrow();
-        let cursor_position = stoat.cursor_position();
-        let buffer_snapshot = stoat.buffer_snapshot(cx);
+        let cursor_position = self.stoat.cursor_position();
+        let buffer_snapshot = self.stoat.buffer_snapshot(cx);
 
         // Only render cursor if it's in the visible range
-        let scroll_position = stoat.scroll_position();
+        let scroll_position = self.stoat.scroll_position();
         let start_row = scroll_position.y as u32;
         let visible_rows = layout.lines.len() as u32;
         let end_row = start_row + visible_rows;
