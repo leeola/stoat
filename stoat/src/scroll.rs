@@ -92,15 +92,21 @@ impl ScrollPosition {
         true // No animation in progress
     }
 
-    /// Smooth easing function with quick start and gentle stop
-    /// Uses smootherstep (Ken Perlin's improved version) for ultra-smooth animation
+    /// Smooth easing function with pronounced acceleration and deceleration
+    /// Uses quintic (power of 5) ease-in-out for very noticeable effect
     fn ease_in_out_cubic(t: f32) -> f32 {
         // Clamp t to [0, 1] for safety
         let t = t.clamp(0.0, 1.0);
 
-        // Smootherstep function - zero 1st and 2nd derivatives at endpoints
-        // This creates the smoothest possible animation with no jerky movements
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+        // Quintic ease-in-out for strongly pronounced effect
+        // Starts very slow, accelerates rapidly, then decelerates smoothly
+        if t < 0.5 {
+            // Strong ease in with power of 5
+            16.0 * t * t * t * t * t
+        } else {
+            // Strong ease out with inverted power of 5
+            1.0 - (-2.0 * t + 2.0).powi(5) / 2.0
+        }
     }
 
     /// Check if an animation is currently in progress
