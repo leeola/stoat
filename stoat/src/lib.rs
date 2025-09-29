@@ -271,8 +271,10 @@ impl Stoat {
             let new_column = self.cursor_position.column.min(line_len);
             self.cursor_position = Point::new(new_row, new_column);
 
-            // Scroll the viewport to keep the cursor visible
-            self.scroll.position.y = new_row.saturating_sub(3) as f32;
+            // Start animated scroll to keep the cursor visible
+            let target_scroll_y = new_row.saturating_sub(3) as f32;
+            self.scroll
+                .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }
     }
 
@@ -290,9 +292,21 @@ impl Stoat {
             let new_column = self.cursor_position.column.min(line_len);
             self.cursor_position = Point::new(new_row, new_column);
 
-            // Scroll the viewport to keep the cursor visible
-            self.scroll.position.y = new_row.saturating_sub(3) as f32;
+            // Start animated scroll to keep the cursor visible
+            let target_scroll_y = new_row.saturating_sub(3) as f32;
+            self.scroll
+                .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }
+    }
+
+    /// Update scroll animation and return true if still animating
+    pub fn update_scroll_animation(&mut self) -> bool {
+        !self.scroll.update_animation()
+    }
+
+    /// Check if scroll animation is in progress
+    pub fn is_scroll_animating(&self) -> bool {
+        self.scroll.is_animating()
     }
 
     /// Helper method to delete a range of text

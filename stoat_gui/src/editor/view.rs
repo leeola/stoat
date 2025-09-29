@@ -6,8 +6,8 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, Styled, Window, div,
+    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, Styled, Task, Window,
 };
 use stoat::Stoat;
 use tracing::{debug, info};
@@ -18,6 +18,7 @@ pub struct EditorView {
     context: EditorContext,
     focus_handle: FocusHandle,
     modal_handler: ModalHandler,
+    scroll_animation_task: Option<Task<()>>,
 }
 
 impl EditorView {
@@ -30,6 +31,7 @@ impl EditorView {
             context: EditorContext::new(),
             focus_handle,
             modal_handler: ModalHandler::new(),
+            scroll_animation_task: None,
         }
     }
 
@@ -231,12 +233,46 @@ impl EditorView {
 
     fn handle_page_up(&mut self, cx: &mut Context<'_, Self>) {
         self.stoat.move_cursor_page_up(cx);
+        self.start_scroll_animation(cx);
         cx.notify();
     }
 
     fn handle_page_down(&mut self, cx: &mut Context<'_, Self>) {
         self.stoat.move_cursor_page_down(cx);
+        self.start_scroll_animation(cx);
         cx.notify();
+    }
+
+    /// Start the scroll animation loop
+    fn start_scroll_animation(&mut self, cx: &mut Context<'_, Self>) {
+        // Cancel any existing animation task
+        self.scroll_animation_task.take();
+
+        if self.stoat.is_scroll_animating() {
+            self.scroll_animation_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    // Wait for next frame (approximately 8ms for 120fps)
+                    // Higher frame rate for smoother animation
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(8))
+                        .await;
+
+                    // Update animation and check if complete
+                    let still_animating = this
+                        .update(cx, |editor, cx| {
+                            let still_animating = editor.stoat.update_scroll_animation();
+                            cx.notify(); // Trigger re-render
+                            still_animating
+                        })
+                        .ok()
+                        .unwrap_or(false);
+
+                    if !still_animating {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     /// Deletion command handlers
