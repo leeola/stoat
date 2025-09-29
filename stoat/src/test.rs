@@ -337,11 +337,11 @@ mod tests {
         // Initially at origin
         s.assert_scroll_position(0.0, 0.0);
 
-        // Scroll down 3 lines with mouse wheel
+        // Scroll down 3 lines with mouse wheel (positive delta shows content below)
         s.scroll_lines(0.0, 3.0);
         s.assert_scroll_y(3.0);
 
-        // Scroll up 1 line
+        // Scroll up 1 line (negative delta shows content above)
         s.scroll_lines(0.0, -1.0);
         s.assert_scroll_y(2.0);
 

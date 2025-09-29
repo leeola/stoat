@@ -262,13 +262,7 @@ impl EditorView {
 
     /// Handle scroll events from mouse wheel or trackpad
     fn handle_scroll(&mut self, command: &HandleScroll, cx: &mut Context<'_, Self>) {
-        info!(
-            "Handling scroll at position {:?}, delta: {:?}",
-            command.position, command.delta
-        );
-
         // Pass scroll event to Stoat for processing
-        // TODO: Will be implemented when Stoat has handle_scroll_event method
         self.stoat
             .handle_scroll_event(&command.delta, command.fast_scroll, cx);
 
@@ -417,9 +411,14 @@ impl Render for EditorView {
             .on_scroll_wheel(cx.listener(
                 |editor: &mut EditorView, event: &ScrollWheelEvent, _window: &mut Window, cx| {
                     // Convert GPUI's ScrollWheelEvent to our HandleScroll command
+                    // Invert Y direction to match standard text editor scroll behavior
                     let delta = match event.delta {
-                        gpui::ScrollDelta::Pixels(pixels) => ScrollDelta::Pixels(pixels),
-                        gpui::ScrollDelta::Lines(lines) => ScrollDelta::Lines(lines),
+                        gpui::ScrollDelta::Pixels(pixels) => {
+                            ScrollDelta::Pixels(gpui::point(pixels.x, -pixels.y))
+                        },
+                        gpui::ScrollDelta::Lines(lines) => {
+                            ScrollDelta::Lines(gpui::point(lines.x, -lines.y))
+                        },
                     };
 
                     let scroll_command = HandleScroll {
