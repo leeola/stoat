@@ -1,9 +1,41 @@
+mod cursor;
 pub mod log;
 mod scroll;
 
 #[cfg(test)]
 pub mod test;
 
+/// Editor modes for modal editing
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorMode {
+    /// Normal mode - for navigation and commands
+    Normal,
+    /// Insert mode - for text input
+    Insert,
+    /// Visual mode - for text selection
+    Visual,
+}
+
+impl EditorMode {
+    /// Returns the string representation of the mode for display
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EditorMode::Normal => "NORMAL",
+            EditorMode::Insert => "INSERT",
+            EditorMode::Visual => "VISUAL",
+        }
+    }
+}
+
+impl Default for EditorMode {
+    fn default() -> Self {
+        EditorMode::Normal
+    }
+}
+
+// Re-export types that the GUI layer will need
+use cursor::CursorManager;
+pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
 pub use scroll::ScrollPosition;
 use std::num::NonZeroU64;
@@ -15,8 +47,9 @@ pub struct Stoat {
     buffer: Entity<Buffer>,
     token_map: TokenMap,
     scroll: ScrollPosition,
-    cursor_position: Point,
+    cursor_manager: CursorManager,
     viewport_lines: Option<f32>,
+    mode: EditorMode,
 }
 
 impl Stoat {
@@ -30,8 +63,9 @@ impl Stoat {
             buffer,
             token_map,
             scroll: ScrollPosition::new(),
-            cursor_position: Point::new(0, 0),
+            cursor_manager: CursorManager::new(),
             viewport_lines: None,
+            mode: EditorMode::default(),
         }
     }
 
@@ -79,12 +113,12 @@ impl Stoat {
 
     /// Get the current cursor position
     pub fn cursor_position(&self) -> Point {
-        self.cursor_position
+        self.cursor_manager.position()
     }
 
     /// Set the cursor position
     pub fn set_cursor_position(&mut self, position: Point) {
-        self.cursor_position = position;
+        self.cursor_manager.move_to(position);
     }
 
     /// Get the visible line count (viewport height in lines)
@@ -97,10 +131,30 @@ impl Stoat {
         self.viewport_lines = Some(lines);
     }
 
+    /// Get the current editor mode
+    pub fn mode(&self) -> EditorMode {
+        self.mode
+    }
+
+    /// Set the editor mode
+    pub fn set_mode(&mut self, mode: EditorMode) {
+        self.mode = mode;
+    }
+
+    /// Get the cursor manager
+    pub fn cursor_manager(&self) -> &CursorManager {
+        &self.cursor_manager
+    }
+
+    /// Get the cursor manager mutably
+    pub fn cursor_manager_mut(&mut self) -> &mut CursorManager {
+        &mut self.cursor_manager
+    }
+
     /// Insert text at the current cursor position
     pub fn insert_text(&mut self, text: &str, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let cursor_offset = buffer_snapshot.point_to_offset(self.cursor_position);
+        let cursor_offset = buffer_snapshot.point_to_offset(self.cursor_manager.position());
 
         self.buffer.update(cx, |buffer, _cx| {
             buffer.edit([(cursor_offset..cursor_offset, text)]);
@@ -116,43 +170,51 @@ impl Stoat {
 
         // Move cursor forward by the inserted text length
         let new_cursor_position = buffer_snapshot.offset_to_point(cursor_offset + text.len());
-        self.cursor_position = new_cursor_position;
+        self.cursor_manager.move_to(new_cursor_position);
     }
 
     /// Move cursor left by one character
     pub fn move_cursor_left(&mut self, cx: &App) {
-        if self.cursor_position.column > 0 {
-            self.cursor_position.column -= 1;
-        } else if self.cursor_position.row > 0 {
+        let current_pos = self.cursor_manager.position();
+        if current_pos.column > 0 {
+            let new_pos = Point::new(current_pos.row, current_pos.column - 1);
+            self.cursor_manager.move_to(new_pos);
+        } else if current_pos.row > 0 {
             // Move to end of previous line
             let buffer_snapshot = self.buffer.read(cx).snapshot();
-            let prev_row = self.cursor_position.row - 1;
+            let prev_row = current_pos.row - 1;
             let line_len = buffer_snapshot.line_len(prev_row);
-            self.cursor_position = Point::new(prev_row, line_len);
+            let new_pos = Point::new(prev_row, line_len);
+            self.cursor_manager.move_to(new_pos);
         }
     }
 
     /// Move cursor right by one character
     pub fn move_cursor_right(&mut self, cx: &App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let line_len = buffer_snapshot.line_len(self.cursor_position.row);
+        let current_pos = self.cursor_manager.position();
+        let line_len = buffer_snapshot.line_len(current_pos.row);
 
-        if self.cursor_position.column < line_len {
-            self.cursor_position.column += 1;
-        } else if self.cursor_position.row < buffer_snapshot.row_count() - 1 {
+        if current_pos.column < line_len {
+            let new_pos = Point::new(current_pos.row, current_pos.column + 1);
+            self.cursor_manager.move_to(new_pos);
+        } else if current_pos.row < buffer_snapshot.row_count() - 1 {
             // Move to start of next line
-            self.cursor_position = Point::new(self.cursor_position.row + 1, 0);
+            let new_pos = Point::new(current_pos.row + 1, 0);
+            self.cursor_manager.move_to(new_pos);
         }
     }
 
     /// Move cursor up by one line
     pub fn move_cursor_up(&mut self, cx: &App) {
-        if self.cursor_position.row > 0 {
+        let current_pos = self.cursor_manager.position();
+        if current_pos.row > 0 {
             let buffer_snapshot = self.buffer.read(cx).snapshot();
-            let new_row = self.cursor_position.row - 1;
+            let new_row = current_pos.row - 1;
             let line_len = buffer_snapshot.line_len(new_row);
-            let new_column = self.cursor_position.column.min(line_len);
-            self.cursor_position = Point::new(new_row, new_column);
+            let new_column = self.cursor_manager.goal_column().min(line_len);
+            let new_pos = Point::new(new_row, new_column);
+            self.cursor_manager.move_to_with_goal(new_pos);
         }
     }
 
@@ -160,30 +222,37 @@ impl Stoat {
     pub fn move_cursor_down(&mut self, cx: &App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
         let max_row = buffer_snapshot.row_count() - 1;
+        let current_pos = self.cursor_manager.position();
 
-        if self.cursor_position.row < max_row {
-            let new_row = self.cursor_position.row + 1;
+        if current_pos.row < max_row {
+            let new_row = current_pos.row + 1;
             let line_len = buffer_snapshot.line_len(new_row);
-            let new_column = self.cursor_position.column.min(line_len);
-            self.cursor_position = Point::new(new_row, new_column);
+            let new_column = self.cursor_manager.goal_column().min(line_len);
+            let new_pos = Point::new(new_row, new_column);
+            self.cursor_manager.move_to_with_goal(new_pos);
         }
     }
 
     /// Move cursor to start of current line
     pub fn move_cursor_to_line_start(&mut self) {
-        self.cursor_position.column = 0;
+        let current_pos = self.cursor_manager.position();
+        let new_pos = Point::new(current_pos.row, 0);
+        self.cursor_manager.move_to(new_pos);
     }
 
     /// Move cursor to end of current line
     pub fn move_cursor_to_line_end(&mut self, cx: &App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let line_len = buffer_snapshot.line_len(self.cursor_position.row);
-        self.cursor_position.column = line_len;
+        let current_pos = self.cursor_manager.position();
+        let line_len = buffer_snapshot.line_len(current_pos.row);
+        let new_pos = Point::new(current_pos.row, line_len);
+        self.cursor_manager.move_to(new_pos);
     }
 
     /// Move cursor to start of file
     pub fn move_cursor_to_file_start(&mut self) {
-        self.cursor_position = Point::new(0, 0);
+        let new_pos = Point::new(0, 0);
+        self.cursor_manager.move_to(new_pos);
     }
 
     /// Move cursor to end of file
@@ -191,44 +260,47 @@ impl Stoat {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
         let last_row = buffer_snapshot.row_count().saturating_sub(1);
         let last_line_len = buffer_snapshot.line_len(last_row);
-        self.cursor_position = Point::new(last_row, last_line_len);
+        let new_pos = Point::new(last_row, last_line_len);
+        self.cursor_manager.move_to(new_pos);
     }
 
     /// Delete character to the left of cursor (backspace)
     pub fn delete_left(&mut self, cx: &mut App) {
-        if self.cursor_position.column > 0 {
+        let current_pos = self.cursor_manager.position();
+        if current_pos.column > 0 {
             // Delete character on same line
-            let start = Point::new(self.cursor_position.row, self.cursor_position.column - 1);
-            let end = self.cursor_position;
+            let start = Point::new(current_pos.row, current_pos.column - 1);
+            let end = current_pos;
             self.delete_range(start..end, cx);
-            self.cursor_position = start;
-        } else if self.cursor_position.row > 0 {
+            self.cursor_manager.move_to(start);
+        } else if current_pos.row > 0 {
             // Merge with previous line
             let buffer_snapshot = self.buffer.read(cx).snapshot();
-            let prev_row = self.cursor_position.row - 1;
+            let prev_row = current_pos.row - 1;
             let prev_line_len = buffer_snapshot.line_len(prev_row);
             let start = Point::new(prev_row, prev_line_len);
-            let end = Point::new(self.cursor_position.row, 0);
+            let end = Point::new(current_pos.row, 0);
 
             self.delete_range(start..end, cx);
-            self.cursor_position = start;
+            self.cursor_manager.move_to(start);
         }
     }
 
     /// Delete character to the right of cursor (delete)
     pub fn delete_right(&mut self, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let line_len = buffer_snapshot.line_len(self.cursor_position.row);
+        let current_pos = self.cursor_manager.position();
+        let line_len = buffer_snapshot.line_len(current_pos.row);
 
-        if self.cursor_position.column < line_len {
+        if current_pos.column < line_len {
             // Delete character on same line
-            let start = self.cursor_position;
-            let end = Point::new(self.cursor_position.row, self.cursor_position.column + 1);
+            let start = current_pos;
+            let end = Point::new(current_pos.row, current_pos.column + 1);
             self.delete_range(start..end, cx);
-        } else if self.cursor_position.row < buffer_snapshot.row_count() - 1 {
+        } else if current_pos.row < buffer_snapshot.row_count() - 1 {
             // Merge with next line
-            let start = self.cursor_position;
-            let end = Point::new(self.cursor_position.row + 1, 0);
+            let start = current_pos;
+            let end = Point::new(current_pos.row + 1, 0);
             self.delete_range(start..end, cx);
         }
     }
@@ -236,29 +308,31 @@ impl Stoat {
     /// Delete the current line
     pub fn delete_line(&mut self, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let line_start = Point::new(self.cursor_position.row, 0);
+        let current_pos = self.cursor_manager.position();
+        let line_start = Point::new(current_pos.row, 0);
 
         // Include newline if not last line
-        let line_end = if self.cursor_position.row < buffer_snapshot.row_count() - 1 {
-            Point::new(self.cursor_position.row + 1, 0)
+        let line_end = if current_pos.row < buffer_snapshot.row_count() - 1 {
+            Point::new(current_pos.row + 1, 0)
         } else {
             // Last line - delete to end of line
-            let line_len = buffer_snapshot.line_len(self.cursor_position.row);
-            Point::new(self.cursor_position.row, line_len)
+            let line_len = buffer_snapshot.line_len(current_pos.row);
+            Point::new(current_pos.row, line_len)
         };
 
         self.delete_range(line_start..line_end, cx);
-        self.cursor_position = line_start;
+        self.cursor_manager.move_to(line_start);
     }
 
     /// Delete from cursor to end of line
     pub fn delete_to_end_of_line(&mut self, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let line_len = buffer_snapshot.line_len(self.cursor_position.row);
-        let end = Point::new(self.cursor_position.row, line_len);
+        let current_pos = self.cursor_manager.position();
+        let line_len = buffer_snapshot.line_len(current_pos.row);
+        let end = Point::new(current_pos.row, line_len);
 
-        if self.cursor_position.column < line_len {
-            self.delete_range(self.cursor_position..end, cx);
+        if current_pos.column < line_len {
+            self.delete_range(current_pos..end, cx);
         }
     }
 
@@ -267,12 +341,14 @@ impl Stoat {
         let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
         let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let current_pos = self.cursor_manager.position();
 
         if lines_per_page > 0 {
-            let new_row = self.cursor_position.row.saturating_sub(lines_per_page);
+            let new_row = current_pos.row.saturating_sub(lines_per_page);
             let line_len = buffer_snapshot.line_len(new_row);
-            let new_column = self.cursor_position.column.min(line_len);
-            self.cursor_position = Point::new(new_row, new_column);
+            let new_column = self.cursor_manager.goal_column().min(line_len);
+            let new_pos = Point::new(new_row, new_column);
+            self.cursor_manager.move_to_with_goal(new_pos);
 
             // Start animated scroll to keep the cursor visible
             let target_scroll_y = new_row.saturating_sub(3) as f32;
@@ -287,13 +363,15 @@ impl Stoat {
 
         let buffer_snapshot = self.buffer.read(cx).snapshot();
         let max_row = buffer_snapshot.row_count() - 1;
+        let current_pos = self.cursor_manager.position();
 
         if lines_per_page > 0 && max_row > 0 {
-            let new_row = (self.cursor_position.row + lines_per_page).min(max_row);
+            let new_row = (current_pos.row + lines_per_page).min(max_row);
 
             let line_len = buffer_snapshot.line_len(new_row);
-            let new_column = self.cursor_position.column.min(line_len);
-            self.cursor_position = Point::new(new_row, new_column);
+            let new_column = self.cursor_manager.goal_column().min(line_len);
+            let new_pos = Point::new(new_row, new_column);
+            self.cursor_manager.move_to_with_goal(new_pos);
 
             // Start animated scroll to keep the cursor visible
             let target_scroll_y = new_row.saturating_sub(3) as f32;

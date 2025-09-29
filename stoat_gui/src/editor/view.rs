@@ -102,14 +102,14 @@ impl EditorView {
     /// Handle entering insert mode
     fn handle_enter_insert_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Insert mode");
-        // Mode change is already handled by modal system
+        self.stoat.set_mode(stoat::EditorMode::Insert);
         cx.notify();
     }
 
     /// Handle entering normal mode
     fn handle_enter_normal_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Normal mode");
-        // Mode change is already handled by modal system
+        self.stoat.set_mode(stoat::EditorMode::Normal);
         cx.notify();
     }
 
@@ -145,8 +145,8 @@ impl EditorView {
     }
 
     /// Get the current editor mode for display
-    pub fn current_mode(&self) -> crate::modal::EditorMode {
-        self.modal_handler.current_mode()
+    pub fn current_mode(&self) -> stoat::EditorMode {
+        self.stoat.mode()
     }
 
     /// Command handlers for direct action execution
@@ -165,7 +165,6 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.modal_handler.switch_to_insert();
         self.handle_enter_insert_mode(cx);
     }
 
@@ -175,7 +174,6 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.modal_handler.switch_to_normal();
         self.handle_enter_normal_mode(cx);
     }
 

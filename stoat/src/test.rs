@@ -101,6 +101,63 @@ impl StoatTest {
     pub fn assert_cursor(&self, row: u32, col: u32) {
         assert_eq!(self.cursor(), (row, col));
     }
+
+    /// Get the current editor mode
+    pub fn mode(&self) -> crate::EditorMode {
+        self.stoat.mode()
+    }
+
+    /// Set the editor mode
+    pub fn set_mode(&mut self, mode: crate::EditorMode) {
+        self.stoat.set_mode(mode);
+    }
+
+    /// Get the current selection as (start_row, start_col, end_row, end_col)
+    pub fn selection(&self) -> (u32, u32, u32, u32) {
+        let selection = self.stoat.cursor_manager().selection();
+        (
+            selection.start.row,
+            selection.start.column,
+            selection.end.row,
+            selection.end.column,
+        )
+    }
+
+    /// Check if there is an active selection
+    pub fn has_selection(&self) -> bool {
+        !self.stoat.cursor_manager().selection().is_empty()
+    }
+
+    /// Assert the editor mode matches expected
+    #[track_caller]
+    pub fn assert_mode(&self, expected: crate::EditorMode) {
+        assert_eq!(self.mode(), expected);
+    }
+
+    /// Assert the selection range matches expected
+    #[track_caller]
+    pub fn assert_selection(&self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
+        assert_eq!(self.selection(), (start_row, start_col, end_row, end_col));
+    }
+
+    /// Assert that no text is selected
+    #[track_caller]
+    pub fn assert_no_selection(&self) {
+        assert!(
+            !self.has_selection(),
+            "Expected no selection, but selection exists"
+        );
+    }
+
+    /// Start text selection at current cursor position
+    pub fn start_selection(&mut self) {
+        self.stoat.cursor_manager_mut().start_selection();
+    }
+
+    /// End text selection
+    pub fn end_selection(&mut self) {
+        self.stoat.cursor_manager_mut().end_selection();
+    }
 }
 
 impl Stoat {
@@ -156,5 +213,50 @@ mod tests {
             height: Pixels(480.0), // 480 / 16 = 30 lines
         });
         assert_eq!(s.viewport_lines(), Some(30.0));
+    }
+
+    #[test]
+    fn editor_mode_handling() {
+        let mut s = Stoat::test();
+
+        // Default mode should be Normal
+        s.assert_mode(crate::EditorMode::Normal);
+
+        // Test mode switching
+        s.set_mode(crate::EditorMode::Insert);
+        s.assert_mode(crate::EditorMode::Insert);
+
+        s.set_mode(crate::EditorMode::Visual);
+        s.assert_mode(crate::EditorMode::Visual);
+
+        s.set_mode(crate::EditorMode::Normal);
+        s.assert_mode(crate::EditorMode::Normal);
+    }
+
+    #[test]
+    fn selection_handling() {
+        let mut s = Stoat::test();
+        s.insert("Line 1\nLine 2\nLine 3");
+        s.set_cursor(1, 2); // Position at "Line 2"
+
+        // Initially no selection
+        s.assert_no_selection();
+        assert_eq!(s.has_selection(), false);
+
+        // Start selection
+        s.start_selection();
+
+        // Move cursor to extend selection
+        s.set_cursor(2, 4); // Move to "Line 3"
+
+        // Should now have selection
+        assert_eq!(s.has_selection(), true);
+        s.assert_selection(1, 2, 2, 4);
+
+        // End selection
+        s.end_selection();
+
+        // Selection should still exist but not be actively selecting
+        assert_eq!(s.has_selection(), true);
     }
 }
