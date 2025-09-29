@@ -6409,6 +6409,7 @@ dependencies = [
  "anyhow",
  "clock",
  "gpui",
+ "rustc-hash 2.1.1",
  "smallvec",
  "stoat",
  "stoat_rope_v3",

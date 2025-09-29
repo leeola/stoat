@@ -18,3 +18,4 @@ clock = { git = "https://github.com/zed-industries/zed.git" }
 anyhow = "1.0"
 smallvec = "1.13"
 tracing = "0.1"
+rustc-hash = "2.0"

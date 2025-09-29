@@ -2,24 +2,33 @@ use super::{
     layout::{EditorLayout, PositionedLine},
     style::EditorStyle,
 };
+use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
-    Style, TextRun, Window,
+    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
+    Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;
+use text::ToOffset;
 
 pub struct EditorElement {
     stoat: Stoat,
     style: EditorStyle,
+    syntax_theme: SyntaxTheme,
+    highlight_map: HighlightMap,
 }
 
 impl EditorElement {
     pub fn new(stoat: Stoat) -> Self {
+        let syntax_theme = SyntaxTheme::default();
+        let highlight_map = HighlightMap::new(&syntax_theme);
+
         Self {
             stoat,
             style: EditorStyle::default(),
+            syntax_theme,
+            highlight_map,
         }
     }
 }
@@ -93,8 +102,8 @@ impl Element for EditorElement {
 
         let mut lines = SmallVec::new();
 
-        // Reuse a single String allocation for all lines (like Zed does)
-        let mut line_text = String::new();
+        // Get token snapshot for syntax highlighting
+        let token_snapshot = self.stoat.token_snapshot();
 
         // Only iterate through visible rows
         for row in start_row..end_row {
@@ -102,61 +111,100 @@ impl Element for EditorElement {
             let line_len = buffer_snapshot.line_len(row);
             let line_end = text::Point::new(row, line_len);
 
-            // Clear and reuse the String allocation
-            line_text.clear();
+            // Convert line range to byte offsets for highlighting
+            let line_start_offset = line_start.to_offset(&buffer_snapshot);
+            let line_end_offset = line_end.to_offset(&buffer_snapshot);
 
-            // Build up the line from chunks
-            let chunks = buffer_snapshot.text_for_range(line_start..line_end);
-            for chunk in chunks {
-                line_text.push_str(chunk);
-            }
+            // Create highlighted chunks iterator for this line
+            let highlighted_chunks = HighlightedChunks::new(
+                line_start_offset..line_end_offset,
+                &buffer_snapshot,
+                &token_snapshot,
+                &self.highlight_map,
+            );
 
-            // Expand tabs to spaces before shaping (like Zed does)
-            // This avoids GPUI's internal tab expansion limit
-            if line_text.contains('\t') {
-                let mut expanded = String::with_capacity(line_text.len() * 2);
-                let mut column = 0;
-                for ch in line_text.chars() {
-                    if ch == '\t' {
-                        let tab_stop = 4; // TODO: Make this configurable
-                        let spaces_to_add = tab_stop - (column % tab_stop);
-                        for _ in 0..spaces_to_add {
-                            expanded.push(' ');
+            // Build text runs with proper highlighting
+            let mut text_runs = Vec::new();
+            let mut line_text = String::new();
+            let mut current_offset = 0;
+
+            for chunk in highlighted_chunks {
+                // Expand tabs to spaces before adding to line text
+                let expanded_text = if chunk.text.contains('\t') {
+                    let mut expanded = String::with_capacity(chunk.text.len() * 2);
+                    let mut column = current_offset;
+                    for ch in chunk.text.chars() {
+                        if ch == '\t' {
+                            let tab_stop = 4; // TODO: Make this configurable
+                            let spaces_to_add = tab_stop - (column % tab_stop);
+                            for _ in 0..spaces_to_add {
+                                expanded.push(' ');
+                                column += 1;
+                            }
+                        } else {
+                            expanded.push(ch);
                             column += 1;
-                        }
-                    } else {
-                        expanded.push(ch);
-                        column += 1;
-                        if ch == '\n' {
-                            column = 0;
+                            if ch == '\n' {
+                                column = 0;
+                            }
                         }
                     }
+                    expanded
+                } else {
+                    chunk.text.to_string()
+                };
+
+                // Add text to line
+                line_text.push_str(&expanded_text);
+
+                // Create text run with appropriate styling
+                let text_len = expanded_text.len();
+                if text_len > 0 {
+                    let highlight_style = chunk
+                        .highlight_id
+                        .and_then(|id| id.style(&self.syntax_theme))
+                        .unwrap_or_default();
+
+                    let text_run = TextRun {
+                        len: text_len,
+                        font: font.clone(),
+                        color: highlight_style.color.unwrap_or(self.style.text_color),
+                        background_color: highlight_style.background_color,
+                        underline: None,
+                        strikethrough: None,
+                    };
+
+                    text_runs.push(text_run);
                 }
-                line_text = expanded;
+                current_offset += text_len;
             }
 
             // Create SharedString - empty lines use static string
             let text = if line_text.is_empty() {
                 EMPTY_LINE.clone()
             } else {
-                SharedString::from(line_text.clone())
+                SharedString::from(line_text)
             };
 
-            // Shape the line using GPUI's text system
-            let text_run_len = text.len();
-            let text_run = TextRun {
-                len: text_run_len,
-                font: font.clone(),
-                color: self.style.text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-
-            let shaped =
+            // Shape the line using GPUI's text system with multiple text runs
+            let shaped = if text_runs.is_empty() {
+                // Fallback for empty lines
+                let text_run = TextRun {
+                    len: text.len(),
+                    font: font.clone(),
+                    color: self.style.text_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
                 window
                     .text_system()
-                    .shape_line(text, self.style.font_size, &[text_run], None);
+                    .shape_line(text, self.style.font_size, &[text_run], None)
+            } else {
+                window
+                    .text_system()
+                    .shape_line(text, self.style.font_size, &text_runs, None)
+            };
 
             // Position lines relative to viewport (accounting for scroll offset)
             let relative_row = row - start_row;

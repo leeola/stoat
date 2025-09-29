@@ -17,6 +17,12 @@ pub struct TokenEntry {
     pub semantic: Option<SemanticInfo>,
     /// Optional language context
     pub language: Option<Language>,
+    /// Highlight ID for syntax highlighting (u32 for performance)
+    ///
+    /// This stores a highlight identifier that can be mapped to visual styles
+    /// by the GUI layer. Using u32 instead of a typed HighlightId to avoid
+    /// circular dependencies between rope_v3 and stoat_gui.
+    pub highlight_id: Option<u32>,
 }
 
 impl TokenEntry {
@@ -27,6 +33,7 @@ impl TokenEntry {
             kind,
             semantic: None,
             language: None,
+            highlight_id: None,
         }
     }
 
@@ -37,7 +44,24 @@ impl TokenEntry {
             kind,
             semantic: Some(semantic),
             language: None,
+            highlight_id: None,
         }
+    }
+
+    /// Create a token with highlight ID
+    pub fn with_highlight(range: Range<Anchor>, kind: SyntaxKind, highlight_id: u32) -> Self {
+        Self {
+            range,
+            kind,
+            semantic: None,
+            language: None,
+            highlight_id: Some(highlight_id),
+        }
+    }
+
+    /// Set the highlight ID for this token
+    pub fn set_highlight_id(&mut self, highlight_id: u32) {
+        self.highlight_id = Some(highlight_id);
     }
 }
 
