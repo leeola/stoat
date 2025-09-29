@@ -31,7 +31,7 @@ use rustc_hash::FxHashMap;
 use std::ops::Range;
 use stoat_rope_v3::{SyntaxKind, TokenEntry, TokenSnapshot, TokenSummary};
 use sum_tree::Cursor;
-use text::{Anchor, Bias, BufferSnapshot, Chunks, ToOffset};
+use text::{BufferSnapshot, Chunks, ToOffset};
 
 /// A unique identifier for a syntax highlight style
 ///
@@ -390,8 +390,8 @@ impl<'a> HighlightedChunks<'a> {
     /// Processes text in the given byte range, applying syntax highlighting
     /// based on the token snapshot and highlight map.
     ///
-    /// The cursor is seeked to the start position once during construction (O(log n)),
-    /// then advanced incrementally as we iterate through chunks (O(1) amortized).
+    /// The cursor is initialized once during construction and then advanced
+    /// incrementally as we iterate through chunks (O(1) amortized per chunk).
     pub fn new(
         range: Range<usize>,
         buffer_snapshot: &'a BufferSnapshot,
@@ -400,13 +400,22 @@ impl<'a> HighlightedChunks<'a> {
     ) -> Self {
         let text_chunks = buffer_snapshot.as_rope().chunks_in_range(range.clone());
 
-        // Create cursor and seek to start position
+        // Create cursor and advance to first token
         let mut token_cursor = token_snapshot.cursor(buffer_snapshot);
-        let start_anchor = buffer_snapshot.anchor_before(range.start);
-        token_cursor.seek(&start_anchor, Bias::Left, buffer_snapshot);
+        token_cursor.next();
 
-        // Get initial token at cursor position
-        let current_token = token_cursor.item();
+        // Get initial token and advance cursor to the one at/after our start position
+        let mut current_token = token_cursor.item();
+
+        // Advance cursor until we find a token that overlaps or comes after our start position
+        while let Some(token) = current_token {
+            let token_end = token.range.end.to_offset(buffer_snapshot);
+            if token_end > range.start {
+                break;
+            }
+            token_cursor.next();
+            current_token = token_cursor.item();
+        }
 
         Self {
             text_chunks,
@@ -440,7 +449,7 @@ impl<'a> Iterator for HighlightedChunks<'a> {
         while let Some(token) = self.current_token {
             let token_end = token.range.end.to_offset(self.buffer_snapshot);
             if token_end <= self.current_offset {
-                self.token_cursor.next(self.buffer_snapshot);
+                self.token_cursor.next();
                 self.current_token = self.token_cursor.item();
             } else {
                 break;

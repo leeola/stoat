@@ -6413,6 +6413,7 @@ dependencies = [
  "smallvec",
  "stoat",
  "stoat_rope_v3",
+ "sum_tree",
  "text",
  "tracing",
 ]
