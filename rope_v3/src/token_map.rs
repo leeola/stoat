@@ -94,6 +94,28 @@ impl TokenMap {
 }
 
 impl TokenSnapshot {
+    /// Create a cursor for efficient token tree navigation
+    ///
+    /// Returns a [`sum_tree::Cursor`] that can be seeked to specific positions
+    /// and advanced incrementally. This avoids rescanning from the beginning
+    /// for each query, providing O(log n) seeking and O(1) amortized advancement.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut cursor = token_snapshot.cursor(buffer);
+    /// cursor.seek(&start_anchor, Bias::Left);
+    /// while let Some(token) = cursor.item() {
+    ///     // Process token
+    ///     cursor.next();
+    /// }
+    /// ```
+    pub fn cursor<'a>(
+        &'a self,
+        buffer: &'a BufferSnapshot,
+    ) -> sum_tree::Cursor<'a, TokenEntry, TokenSummary> {
+        self.tokens.cursor(buffer)
+    }
+
     /// Get all tokens of a specific kind
     pub fn tokens_of_kind(&self, kind: SyntaxKind, buffer: &BufferSnapshot) -> Vec<TokenEntry> {
         let mut result = Vec::new();
