@@ -6,10 +6,10 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Window,
+    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollWheelEvent, Styled, Window, div,
 };
-use stoat::Stoat;
+use stoat::{ScrollDelta, Stoat};
 use tracing::{debug, info};
 
 pub struct EditorView {
@@ -83,6 +83,8 @@ impl EditorView {
             .is_some()
         {
             self.handle_delete_to_end_of_line(cx);
+        } else if let Some(scroll) = command.as_any().downcast_ref::<HandleScroll>() {
+            self.handle_scroll(scroll, cx);
         } else {
             debug!("Unhandled command");
         }
@@ -257,6 +259,21 @@ impl EditorView {
         self.stoat.delete_to_end_of_line(cx);
         cx.notify();
     }
+
+    /// Handle scroll events from mouse wheel or trackpad
+    fn handle_scroll(&mut self, command: &HandleScroll, cx: &mut Context<'_, Self>) {
+        info!(
+            "Handling scroll at position {:?}, delta: {:?}",
+            command.position, command.delta
+        );
+
+        // Pass scroll event to Stoat for processing
+        // TODO: Will be implemented when Stoat has handle_scroll_event method
+        self.stoat
+            .handle_scroll_event(&command.delta, command.fast_scroll, cx);
+
+        cx.notify();
+    }
 }
 
 impl Focusable for EditorView {
@@ -394,6 +411,24 @@ impl Render for EditorView {
                     }
 
                     editor.handle_key(&key_string, window, cx);
+                },
+            ))
+            // Handle scroll wheel events
+            .on_scroll_wheel(cx.listener(
+                |editor: &mut EditorView, event: &ScrollWheelEvent, _window: &mut Window, cx| {
+                    // Convert GPUI's ScrollWheelEvent to our HandleScroll command
+                    let delta = match event.delta {
+                        gpui::ScrollDelta::Pixels(pixels) => ScrollDelta::Pixels(pixels),
+                        gpui::ScrollDelta::Lines(lines) => ScrollDelta::Lines(lines),
+                    };
+
+                    let scroll_command = HandleScroll {
+                        position: event.position,
+                        delta,
+                        fast_scroll: event.modifiers.alt,
+                    };
+
+                    editor.handle_scroll(&scroll_command, cx);
                 },
             ))
             .child(EditorElement::new(self.stoat.clone()))

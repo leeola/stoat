@@ -1,5 +1,18 @@
-use gpui::point;
+use gpui::{point, Pixels, Point};
 use std::time::{Duration, Instant};
+
+/// Scroll delta for mouse wheel and trackpad events
+///
+/// Different input devices provide different types of scroll data:
+/// - Mouse wheels typically provide discrete line-based scrolling
+/// - Trackpads provide precise pixel-based scrolling with touch phases
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScrollDelta {
+    /// Precise pixel-based scrolling (trackpads)
+    Pixels(Point<Pixels>),
+    /// Line-based scrolling (mouse wheels)
+    Lines(Point<f32>),
+}
 
 /// Duration for scroll animations in milliseconds
 const SCROLL_ANIMATION_DURATION_MS: u64 = 150; // Fast and responsive scrolling
@@ -110,6 +123,46 @@ impl ScrollPosition {
     /// Check if an animation is currently in progress
     pub fn is_animating(&self) -> bool {
         self.target_position.is_some()
+    }
+
+    /// Apply a scroll delta to the current position
+    ///
+    /// This method converts different delta types to screen coordinates and applies
+    /// sensitivity multipliers for smooth scrolling behavior.
+    pub fn apply_scroll_delta(
+        &mut self,
+        delta: &ScrollDelta,
+        line_height: f32,
+        sensitivity: f32,
+        fast_multiplier: f32,
+        is_fast: bool,
+    ) -> gpui::Point<f32> {
+        let multiplier = if is_fast { fast_multiplier } else { 1.0 };
+
+        let scroll_offset = match delta {
+            ScrollDelta::Pixels(pixel_delta) => {
+                // Convert pixels to lines for consistent behavior
+                gpui::point(
+                    pixel_delta.x.0 / line_height * sensitivity * multiplier,
+                    pixel_delta.y.0 / line_height * sensitivity * multiplier,
+                )
+            },
+            ScrollDelta::Lines(line_delta) => {
+                // Line-based scrolling (mouse wheel)
+                gpui::point(
+                    line_delta.x * sensitivity * multiplier,
+                    line_delta.y * sensitivity * multiplier,
+                )
+            },
+        };
+
+        // Apply the scroll offset to current position
+        let new_position = gpui::point(
+            self.position.x + scroll_offset.x,
+            (self.position.y + scroll_offset.y).max(0.0), // Prevent negative Y scroll
+        );
+
+        new_position
     }
 }
 

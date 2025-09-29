@@ -37,7 +37,7 @@ impl Default for EditorMode {
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
-pub use scroll::ScrollPosition;
+pub use scroll::{ScrollDelta, ScrollPosition};
 use std::num::NonZeroU64;
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
 use text::{Buffer, BufferId, BufferSnapshot, Point};
@@ -409,6 +409,41 @@ impl Stoat {
             };
             self.token_map.sync(&buffer_snapshot, &[edit]);
         }
+    }
+
+    /// Handle scroll events from mouse wheel or trackpad
+    ///
+    /// This method processes scroll deltas and updates the viewport position with
+    /// configurable sensitivity and support for fast scrolling.
+    pub fn handle_scroll_event(&mut self, delta: &ScrollDelta, fast_scroll: bool, cx: &App) {
+        // Default scroll sensitivity values (similar to Zed)
+        let base_sensitivity = 1.0;
+        let fast_multiplier = 3.0;
+
+        // Get line height for delta conversion
+        // FIXME: Use actual line height from style or calculate dynamically
+        let line_height = 20.0;
+
+        // Calculate new scroll position
+        let new_position = self.scroll.apply_scroll_delta(
+            delta,
+            line_height,
+            base_sensitivity,
+            fast_multiplier,
+            fast_scroll,
+        );
+
+        // Apply bounds checking
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let max_scroll_y = (buffer_snapshot.row_count() as f32 - 1.0).max(0.0);
+
+        let bounded_position = gpui::point(
+            new_position.x.max(0.0),                   // No negative horizontal scroll
+            new_position.y.max(0.0).min(max_scroll_y), // Clamp vertical scroll
+        );
+
+        // Update scroll position
+        self.scroll.scroll_to(bounded_position);
     }
 }
 

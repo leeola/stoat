@@ -158,6 +158,73 @@ impl StoatTest {
     pub fn end_selection(&mut self) {
         self.stoat.cursor_manager_mut().end_selection();
     }
+
+    /// Simulate scroll wheel event with line-based scrolling
+    pub fn scroll_lines(&mut self, lines_x: f32, lines_y: f32) {
+        self.scroll_lines_with_fast(lines_x, lines_y, false);
+    }
+
+    /// Simulate scroll wheel event with fast scrolling (Alt key held)
+    pub fn scroll_lines_fast(&mut self, lines_x: f32, lines_y: f32) {
+        self.scroll_lines_with_fast(lines_x, lines_y, true);
+    }
+
+    /// Simulate scroll wheel event with line-based scrolling and optional fast mode
+    pub fn scroll_lines_with_fast(&mut self, lines_x: f32, lines_y: f32, fast_scroll: bool) {
+        let delta = crate::ScrollDelta::Lines(gpui::point(lines_x, lines_y));
+        let app = self.cx.app.borrow();
+        self.stoat.handle_scroll_event(&delta, fast_scroll, &*app);
+    }
+
+    /// Simulate trackpad scroll event with pixel-based scrolling
+    pub fn scroll_pixels(&mut self, pixels_x: f32, pixels_y: f32) {
+        self.scroll_pixels_with_fast(pixels_x, pixels_y, false);
+    }
+
+    /// Simulate trackpad scroll event with fast scrolling (Alt key held)
+    pub fn scroll_pixels_fast(&mut self, pixels_x: f32, pixels_y: f32) {
+        self.scroll_pixels_with_fast(pixels_x, pixels_y, true);
+    }
+
+    /// Simulate trackpad scroll event with pixel-based scrolling and optional fast mode
+    pub fn scroll_pixels_with_fast(&mut self, pixels_x: f32, pixels_y: f32, fast_scroll: bool) {
+        let delta =
+            crate::ScrollDelta::Pixels(gpui::point(gpui::Pixels(pixels_x), gpui::Pixels(pixels_y)));
+        let app = self.cx.app.borrow();
+        self.stoat.handle_scroll_event(&delta, fast_scroll, &*app);
+    }
+
+    /// Get the current scroll position as (x, y) in fractional lines
+    pub fn scroll_position(&self) -> (f32, f32) {
+        let pos = self.stoat.scroll_position();
+        (pos.x, pos.y)
+    }
+
+    /// Assert the scroll position matches expected values
+    #[track_caller]
+    pub fn assert_scroll_position(&self, expected_x: f32, expected_y: f32) {
+        let (actual_x, actual_y) = self.scroll_position();
+        assert_eq!(
+            (actual_x, actual_y),
+            (expected_x, expected_y),
+            "Expected scroll position ({}, {}), got ({}, {})",
+            expected_x,
+            expected_y,
+            actual_x,
+            actual_y
+        );
+    }
+
+    /// Assert the scroll Y position matches expected value (most common for vertical scrolling)
+    #[track_caller]
+    pub fn assert_scroll_y(&self, expected_y: f32) {
+        let (_, actual_y) = self.scroll_position();
+        assert_eq!(
+            actual_y, expected_y,
+            "Expected scroll Y position {}, got {}",
+            expected_y, actual_y
+        );
+    }
 }
 
 impl Stoat {
@@ -258,5 +325,88 @@ mod tests {
 
         // Selection should still exist but not be actively selecting
         assert_eq!(s.has_selection(), true);
+    }
+
+    #[test]
+    fn basic_scroll_handling() {
+        let mut s = Stoat::test();
+
+        // Add content to scroll through
+        s.insert("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10");
+
+        // Initially at origin
+        s.assert_scroll_position(0.0, 0.0);
+
+        // Scroll down 3 lines with mouse wheel
+        s.scroll_lines(0.0, 3.0);
+        s.assert_scroll_y(3.0);
+
+        // Scroll up 1 line
+        s.scroll_lines(0.0, -1.0);
+        s.assert_scroll_y(2.0);
+
+        // Scroll cannot go below 0
+        s.scroll_lines(0.0, -10.0);
+        s.assert_scroll_y(0.0);
+    }
+
+    #[test]
+    fn fast_scroll_handling() {
+        let mut s = Stoat::test();
+
+        // Add content to scroll through
+        s.insert("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10");
+
+        // Regular scroll
+        s.scroll_lines(0.0, 1.0);
+        s.assert_scroll_y(1.0);
+
+        // Reset
+        s.scroll_lines(0.0, -1.0);
+        s.assert_scroll_y(0.0);
+
+        // Fast scroll should move 3x further (3.0 multiplier)
+        s.scroll_lines_fast(0.0, 1.0);
+        s.assert_scroll_y(3.0);
+    }
+
+    #[test]
+    fn pixel_vs_line_scrolling() {
+        let mut s = Stoat::test();
+
+        // Add content to scroll through
+        s.insert("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10");
+
+        // Line-based scrolling
+        s.scroll_lines(0.0, 2.0);
+        let line_scroll_pos = s.scroll_position().1;
+
+        // Reset
+        s.scroll_lines(0.0, -2.0);
+        s.assert_scroll_y(0.0);
+
+        // Pixel-based scrolling - 40 pixels should equal 2 lines (20px line height)
+        s.scroll_pixels(0.0, 40.0);
+        s.assert_scroll_y(line_scroll_pos);
+    }
+
+    #[test]
+    fn scroll_bounds_checking() {
+        let mut s = Stoat::test();
+
+        // Add some content to test upper bound
+        s.insert("Line 1\nLine 2\nLine 3\nLine 4\nLine 5");
+        let buffer_lines = 5;
+
+        // Scroll past end of buffer
+        s.scroll_lines(0.0, (buffer_lines + 10) as f32);
+
+        // Should be clamped to maximum scroll (buffer_lines - 1)
+        let (_, actual_y) = s.scroll_position();
+        assert!(actual_y <= (buffer_lines - 1) as f32);
+
+        // Scroll past beginning
+        s.scroll_lines(0.0, -(buffer_lines + 10) as f32);
+        s.assert_scroll_y(0.0);
     }
 }

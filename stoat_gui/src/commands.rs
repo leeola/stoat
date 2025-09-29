@@ -4,7 +4,8 @@
 //! Commands are implemented as GPUI actions, making them discoverable,
 //! bindable to keys, and testable in isolation.
 
-use gpui::{actions, Action};
+use gpui::{actions, Action, Pixels, Point};
+use stoat::ScrollDelta;
 
 /// Insert text at the current cursor position(s).
 ///
@@ -13,6 +14,21 @@ use gpui::{actions, Action};
 #[derive(Clone, PartialEq, Action)]
 #[action(no_json)]
 pub struct InsertText(pub String);
+
+/// Handle scroll events from mouse wheel or trackpad
+///
+/// This command processes scroll input and updates the viewport position.
+/// It supports both discrete wheel scrolling and smooth trackpad gestures.
+#[derive(Clone, PartialEq, Action)]
+#[action(no_json)]
+pub struct HandleScroll {
+    /// Mouse position when scroll occurred
+    pub position: Point<Pixels>,
+    /// Scroll amount and direction
+    pub delta: ScrollDelta,
+    /// Whether Alt key was held (for fast scrolling)
+    pub fast_scroll: bool,
+}
 
 // Movement commands - basic cursor navigation
 actions!(
