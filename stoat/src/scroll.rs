@@ -2,7 +2,7 @@ use gpui::point;
 use std::time::{Duration, Instant};
 
 /// Duration for scroll animations in milliseconds
-const SCROLL_ANIMATION_DURATION_MS: u64 = 120;
+const SCROLL_ANIMATION_DURATION_MS: u64 = 100;
 
 /// Manages scroll position for the editor with animation support
 #[derive(Clone, Debug)]
