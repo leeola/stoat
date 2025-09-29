@@ -1,6 +1,9 @@
 pub mod log;
 mod scroll;
 
+#[cfg(test)]
+pub mod test;
+
 use gpui::{App, AppContext, Entity};
 pub use scroll::ScrollPosition;
 use std::num::NonZeroU64;
