@@ -2,7 +2,7 @@ use gpui::point;
 use std::time::{Duration, Instant};
 
 /// Duration for scroll animations in milliseconds
-const SCROLL_ANIMATION_DURATION_MS: u64 = 100;
+const SCROLL_ANIMATION_DURATION_MS: u64 = 150; // Fast and responsive scrolling
 
 /// Manages scroll position for the editor with animation support
 #[derive(Clone, Debug)]
@@ -92,20 +92,18 @@ impl ScrollPosition {
         true // No animation in progress
     }
 
-    /// Smooth easing function with pronounced acceleration and deceleration
-    /// Uses quintic (power of 5) ease-in-out for very noticeable effect
+    /// Cubic ease-in-out function - the industry standard for smooth animations
+    /// Provides natural acceleration and deceleration
     fn ease_in_out_cubic(t: f32) -> f32 {
         // Clamp t to [0, 1] for safety
         let t = t.clamp(0.0, 1.0);
 
-        // Quintic ease-in-out for strongly pronounced effect
-        // Starts very slow, accelerates rapidly, then decelerates smoothly
+        // Cubic ease-in-out: smooth acceleration and deceleration
+        // Used by CSS transitions, iOS, Android, and most modern apps
         if t < 0.5 {
-            // Strong ease in with power of 5
-            16.0 * t * t * t * t * t
+            4.0 * t * t * t
         } else {
-            // Strong ease out with inverted power of 5
-            1.0 - (-2.0 * t + 2.0).powi(5) / 2.0
+            1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
         }
     }
 
