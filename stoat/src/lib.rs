@@ -1,9 +1,10 @@
 mod cursor;
 pub mod log;
 mod scroll;
+mod selection;
 
 #[cfg(test)]
-pub mod test;
+pub mod stoat_test;
 
 /// Editor modes for modal editing
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -6346,6 +6346,7 @@ dependencies = [
  "stoat_rope_v3",
  "stoat_text_v3",
  "text",
+ "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
 ]

@@ -88,20 +88,12 @@ impl Selection {
 
     /// Get the cursor position (active end of selection)
     pub fn cursor_position(&self) -> Point {
-        if self.reversed {
-            self.start
-        } else {
-            self.end
-        }
+        if self.reversed { self.start } else { self.end }
     }
 
     /// Get the anchor position (inactive end of selection)
     pub fn anchor_position(&self) -> Point {
-        if self.reversed {
-            self.end
-        } else {
-            self.start
-        }
+        if self.reversed { self.end } else { self.start }
     }
 
     /// Get the selection range as start..end
@@ -233,6 +225,13 @@ impl CursorManager {
     /// Set goal column explicitly
     pub fn set_goal_column(&mut self, column: u32) {
         self.cursor.set_goal_column(column);
+    }
+
+    /// Set selection directly (used for testing)
+    pub fn set_selection(&mut self, selection: Selection) {
+        let cursor_pos = selection.cursor_position();
+        self.selection = selection;
+        self.cursor.move_to(cursor_pos, false);
     }
 }
 

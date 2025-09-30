@@ -1,5 +1,7 @@
 //! Test utilities for Stoat editor
 
+pub mod markers;
+
 use crate::Stoat;
 use gpui::{Pixels, Size, TestAppContext};
 use text::Point;
@@ -157,6 +159,120 @@ impl StoatTest {
     /// End text selection
     pub fn end_selection(&mut self) {
         self.stoat.cursor_manager_mut().end_selection();
+    }
+
+    /// Select the next token from cursor and return selected text
+    pub fn select_next_token(&self) -> Option<String> {
+        let app = self.cx.app.borrow();
+        self.stoat.select_next_token(&*app).map(|range| {
+            let snapshot = self.stoat.buffer_snapshot(&*app);
+            snapshot.text_for_range(range).collect()
+        })
+    }
+
+    /// Set buffer text and state from marked string
+    ///
+    /// Parses markers like `|` (cursor) and `<|text||>` (selection).
+    /// Clears existing buffer and sets up cursor/selection from markers.
+    ///
+    /// # Example
+    /// ```ignore
+    /// s.set_text_marked("hello |world");  // Sets text "hello world", cursor at 6
+    /// s.set_text_marked("<|foo||>");      // Sets text "foo", selects it
+    /// ```
+    pub fn set_text_marked(&mut self, marked: &str) {
+        let parsed = markers::parse(marked).expect("Invalid marker syntax");
+
+        // Clear buffer and insert new text
+        self.stoat.buffer.update(&mut self.cx, |buf, _| {
+            let len = buf.len();
+            buf.edit([(0..len, parsed.text.as_str())]);
+        });
+
+        let app = self.cx.app.borrow();
+        let snapshot = self.stoat.buffer_snapshot(&*app);
+
+        // Set cursor (use first cursor, or derive from selection)
+        if let Some(&cursor_offset) = parsed.cursors.first() {
+            let point = snapshot.offset_to_point(cursor_offset);
+            self.stoat.set_cursor_position(point);
+        } else if let Some(sel) = parsed.selections.first() {
+            // Set cursor from selection
+            let cursor_offset = if sel.cursor_at_start {
+                sel.range.start
+            } else {
+                sel.range.end
+            };
+            let cursor_point = snapshot.offset_to_point(cursor_offset);
+            self.stoat.set_cursor_position(cursor_point);
+
+            // Set selection range
+            let anchor_offset = if sel.cursor_at_start {
+                sel.range.end
+            } else {
+                sel.range.start
+            };
+            let anchor_point = snapshot.offset_to_point(anchor_offset);
+
+            // Update cursor manager with selection
+            let cursor_mgr = self.stoat.cursor_manager_mut();
+            cursor_mgr.set_selection(crate::cursor::Selection::new(anchor_point, cursor_point));
+        }
+    }
+
+    /// Assert current state matches marked string
+    ///
+    /// Compares current buffer text, cursor, and selection against
+    /// the marked string representation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// s.assert_marked("hello |world");
+    /// ```
+    #[track_caller]
+    pub fn assert_marked(&self, expected: &str) {
+        let actual = self.marked_text();
+        assert_eq!(
+            actual, expected,
+            "\nExpected: {}\nActual:   {}",
+            expected, actual
+        );
+    }
+
+    /// Get current state as marked string
+    ///
+    /// Returns the buffer text with markers showing cursor and selection.
+    /// Useful for debugging test failures.
+    pub fn marked_text(&self) -> String {
+        let app = self.cx.app.borrow();
+        let snapshot = self.stoat.buffer_snapshot(&*app);
+        let text = snapshot.text();
+
+        let cursor_mgr = self.stoat.cursor_manager();
+        let cursor_point = cursor_mgr.position();
+        let cursor_offset = snapshot.point_to_offset(cursor_point);
+
+        let selection = cursor_mgr.selection();
+        let selections = if !selection.is_empty() {
+            let start_offset = snapshot.point_to_offset(selection.start);
+            let end_offset = snapshot.point_to_offset(selection.end);
+            let cursor_at_start = cursor_point == selection.start;
+
+            vec![markers::Selection {
+                range: start_offset..end_offset,
+                cursor_at_start,
+            }]
+        } else {
+            vec![]
+        };
+
+        let cursors = if selections.is_empty() {
+            vec![cursor_offset]
+        } else {
+            vec![]
+        };
+
+        markers::format(&text, &cursors, &selections)
     }
 
     /// Simulate scroll wheel event with line-based scrolling
