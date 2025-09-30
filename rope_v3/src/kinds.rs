@@ -38,6 +38,10 @@ pub enum SyntaxKind {
     Identifier,
     /// Type name (struct, enum, trait names)
     Type,
+    /// Builtin type (i32, u64, bool, str, etc.)
+    TypeBuiltin,
+    /// Interface/trait type
+    TypeInterface,
     /// Word part within an identifier or text
     Word,
     /// Separator within identifiers (underscore, dash)
@@ -46,14 +50,44 @@ pub enum SyntaxKind {
     Number,
     /// String literal
     String,
+    /// String escape sequence (\n, \t, etc.)
+    StringEscape,
     /// Character literal
     Char,
     /// Boolean literal
     Boolean,
+    /// Constant (ALL_CAPS identifier)
+    Constant,
     /// Language keyword
     Keyword,
     /// Operator (+, -, *, /, etc.)
     Operator,
+
+    // === Functions ===
+    /// Function name
+    Function,
+    /// Method name
+    FunctionMethod,
+    /// Function definition
+    FunctionDefinition,
+    /// Special function (macro)
+    FunctionSpecial,
+
+    // === Variables ===
+    /// Special variable (self)
+    VariableSpecial,
+    /// Function parameter
+    VariableParameter,
+
+    // === Properties ===
+    /// Struct field or property
+    Property,
+
+    // === Attributes and Lifetimes ===
+    /// Attribute (#[...])
+    Attribute,
+    /// Lifetime ('a, 'static)
+    Lifetime,
 
     // === Punctuation ===
     /// Left parenthesis (
@@ -78,6 +112,12 @@ pub enum SyntaxKind {
     Dot,
     /// Arrow ->
     Arrow,
+    /// Punctuation bracket (grouped)
+    PunctuationBracket,
+    /// Punctuation delimiter (grouped)
+    PunctuationDelimiter,
+    /// Special punctuation (#)
+    PunctuationSpecial,
 
     // === Comments ===
     /// Single-line comment
@@ -108,14 +148,27 @@ impl SyntaxKind {
             SyntaxKind::Text
                 | SyntaxKind::Identifier
                 | SyntaxKind::Type
+                | SyntaxKind::TypeBuiltin
+                | SyntaxKind::TypeInterface
                 | SyntaxKind::Word
                 | SyntaxKind::Separator
                 | SyntaxKind::Number
                 | SyntaxKind::String
+                | SyntaxKind::StringEscape
                 | SyntaxKind::Char
                 | SyntaxKind::Boolean
+                | SyntaxKind::Constant
                 | SyntaxKind::Keyword
                 | SyntaxKind::Operator
+                | SyntaxKind::Function
+                | SyntaxKind::FunctionMethod
+                | SyntaxKind::FunctionDefinition
+                | SyntaxKind::FunctionSpecial
+                | SyntaxKind::VariableSpecial
+                | SyntaxKind::VariableParameter
+                | SyntaxKind::Property
+                | SyntaxKind::Attribute
+                | SyntaxKind::Lifetime
                 | SyntaxKind::OpenParen
                 | SyntaxKind::CloseParen
                 | SyntaxKind::OpenBracket
@@ -127,6 +180,9 @@ impl SyntaxKind {
                 | SyntaxKind::Colon
                 | SyntaxKind::Dot
                 | SyntaxKind::Arrow
+                | SyntaxKind::PunctuationBracket
+                | SyntaxKind::PunctuationDelimiter
+                | SyntaxKind::PunctuationSpecial
                 | SyntaxKind::LineComment
                 | SyntaxKind::BlockComment
                 | SyntaxKind::DocComment
@@ -172,14 +228,35 @@ impl SyntaxKind {
             // Programming Tokens
             SyntaxKind::Identifier => "identifier",
             SyntaxKind::Type => "type",
+            SyntaxKind::TypeBuiltin => "type.builtin",
+            SyntaxKind::TypeInterface => "type.interface",
             SyntaxKind::Word => "word",
             SyntaxKind::Separator => "separator",
             SyntaxKind::Number => "number",
             SyntaxKind::String => "string",
+            SyntaxKind::StringEscape => "string.escape",
             SyntaxKind::Char => "char",
             SyntaxKind::Boolean => "boolean",
+            SyntaxKind::Constant => "constant",
             SyntaxKind::Keyword => "keyword",
             SyntaxKind::Operator => "operator",
+
+            // Functions
+            SyntaxKind::Function => "function",
+            SyntaxKind::FunctionMethod => "function.method",
+            SyntaxKind::FunctionDefinition => "function.definition",
+            SyntaxKind::FunctionSpecial => "function.special",
+
+            // Variables
+            SyntaxKind::VariableSpecial => "variable.special",
+            SyntaxKind::VariableParameter => "variable.parameter",
+
+            // Properties
+            SyntaxKind::Property => "property",
+
+            // Attributes and Lifetimes
+            SyntaxKind::Attribute => "attribute",
+            SyntaxKind::Lifetime => "lifetime",
 
             // Punctuation
             SyntaxKind::OpenParen => "open_paren",
@@ -193,6 +270,9 @@ impl SyntaxKind {
             SyntaxKind::Colon => "colon",
             SyntaxKind::Dot => "dot",
             SyntaxKind::Arrow => "arrow",
+            SyntaxKind::PunctuationBracket => "punctuation.bracket",
+            SyntaxKind::PunctuationDelimiter => "punctuation.delimiter",
+            SyntaxKind::PunctuationSpecial => "punctuation.special",
 
             // Comments
             SyntaxKind::LineComment => "line_comment",

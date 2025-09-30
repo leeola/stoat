@@ -75,19 +75,44 @@ impl HighlightMap {
                     mappings.insert(SyntaxKind::String, highlight_id);
                     mappings.insert(SyntaxKind::Char, highlight_id)
                 },
+                "string.escape" => mappings.insert(SyntaxKind::StringEscape, highlight_id),
                 "number" => mappings.insert(SyntaxKind::Number, highlight_id),
                 "boolean" => mappings.insert(SyntaxKind::Boolean, highlight_id),
+                "constant" => mappings.insert(SyntaxKind::Constant, highlight_id),
 
                 // Comments
                 "comment" => {
                     mappings.insert(SyntaxKind::LineComment, highlight_id);
-                    mappings.insert(SyntaxKind::BlockComment, highlight_id);
-                    mappings.insert(SyntaxKind::DocComment, highlight_id)
+                    mappings.insert(SyntaxKind::BlockComment, highlight_id)
+                },
+                "comment.doc" => mappings.insert(SyntaxKind::DocComment, highlight_id),
+
+                // Functions
+                "function" => mappings.insert(SyntaxKind::Function, highlight_id),
+                "function.method" => mappings.insert(SyntaxKind::FunctionMethod, highlight_id),
+                "function.definition" => {
+                    mappings.insert(SyntaxKind::FunctionDefinition, highlight_id)
+                },
+                "function.special" => mappings.insert(SyntaxKind::FunctionSpecial, highlight_id),
+
+                // Variables
+                "variable" | "identifier" => mappings.insert(SyntaxKind::Identifier, highlight_id),
+                "variable.special" => mappings.insert(SyntaxKind::VariableSpecial, highlight_id),
+                "variable.parameter" => {
+                    mappings.insert(SyntaxKind::VariableParameter, highlight_id)
                 },
 
-                // Identifiers and names
-                "variable" | "identifier" => mappings.insert(SyntaxKind::Identifier, highlight_id),
+                // Properties
+                "property" => mappings.insert(SyntaxKind::Property, highlight_id),
+
+                // Types
                 "type" => mappings.insert(SyntaxKind::Type, highlight_id),
+                "type.builtin" => mappings.insert(SyntaxKind::TypeBuiltin, highlight_id),
+                "type.interface" => mappings.insert(SyntaxKind::TypeInterface, highlight_id),
+
+                // Attributes and lifetimes
+                "attribute" => mappings.insert(SyntaxKind::Attribute, highlight_id),
+                "lifetime" => mappings.insert(SyntaxKind::Lifetime, highlight_id),
 
                 // Operators and punctuation
                 "operator" => mappings.insert(SyntaxKind::Operator, highlight_id),
@@ -95,7 +120,20 @@ impl HighlightMap {
                     mappings.insert(SyntaxKind::Comma, highlight_id);
                     mappings.insert(SyntaxKind::Semicolon, highlight_id);
                     mappings.insert(SyntaxKind::Colon, highlight_id);
-                    mappings.insert(SyntaxKind::Dot, highlight_id)
+                    mappings.insert(SyntaxKind::Dot, highlight_id);
+                    mappings.insert(SyntaxKind::PunctuationDelimiter, highlight_id)
+                },
+                "punctuation.bracket" => {
+                    mappings.insert(SyntaxKind::OpenParen, highlight_id);
+                    mappings.insert(SyntaxKind::CloseParen, highlight_id);
+                    mappings.insert(SyntaxKind::OpenBracket, highlight_id);
+                    mappings.insert(SyntaxKind::CloseBracket, highlight_id);
+                    mappings.insert(SyntaxKind::OpenBrace, highlight_id);
+                    mappings.insert(SyntaxKind::CloseBrace, highlight_id);
+                    mappings.insert(SyntaxKind::PunctuationBracket, highlight_id)
+                },
+                "punctuation.special" => {
+                    mappings.insert(SyntaxKind::PunctuationSpecial, highlight_id)
                 },
                 "bracket" => {
                     mappings.insert(SyntaxKind::OpenParen, highlight_id);
@@ -278,6 +316,137 @@ impl SyntaxTheme {
             },
         );
 
+        // Builtin types - lighter blue
+        theme.add_highlight(
+            "type.builtin",
+            HighlightStyle {
+                color: Some(rgba(0x82aaff).into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Interface/trait types - cyan
+        theme.add_highlight(
+            "type.interface",
+            HighlightStyle {
+                color: Some(rgba(0x89ddff).into()),
+                ..Default::default()
+            },
+        );
+
+        // Functions - yellow/gold
+        theme.add_highlight(
+            "function",
+            HighlightStyle {
+                color: Some(rgba(0xffcb6b).into()),
+                ..Default::default()
+            },
+        );
+
+        // Method calls - same as functions
+        theme.add_highlight(
+            "function.method",
+            HighlightStyle {
+                color: Some(rgba(0xffcb6b).into()),
+                ..Default::default()
+            },
+        );
+
+        // Function definitions - yellow with bold
+        theme.add_highlight(
+            "function.definition",
+            HighlightStyle {
+                color: Some(rgba(0xffcb6b).into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Special functions (macros) - magenta
+        theme.add_highlight(
+            "function.special",
+            HighlightStyle {
+                color: Some(rgba(0xc792ea).into()),
+                ..Default::default()
+            },
+        );
+
+        // Special variables (self) - red/orange
+        theme.add_highlight(
+            "variable.special",
+            HighlightStyle {
+                color: Some(rgba(0xf78c6c).into()),
+                ..Default::default()
+            },
+        );
+
+        // Function parameters - lighter color
+        theme.add_highlight(
+            "variable.parameter",
+            HighlightStyle {
+                color: Some(rgba(0xf78c6c).into()),
+                ..Default::default()
+            },
+        );
+
+        // Properties/fields - cyan
+        theme.add_highlight(
+            "property",
+            HighlightStyle {
+                color: Some(rgba(0x89ddff).into()),
+                ..Default::default()
+            },
+        );
+
+        // Constants - orange
+        theme.add_highlight(
+            "constant",
+            HighlightStyle {
+                color: Some(rgba(0xff9a85).into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Lifetimes - purple
+        theme.add_highlight(
+            "lifetime",
+            HighlightStyle {
+                color: Some(rgba(0xc792ea).into()),
+                ..Default::default()
+            },
+        );
+
+        // Attributes - purple
+        theme.add_highlight(
+            "attribute",
+            HighlightStyle {
+                color: Some(rgba(0xc792ea).into()),
+                ..Default::default()
+            },
+        );
+
+        // String escapes - cyan/bright
+        theme.add_highlight(
+            "string.escape",
+            HighlightStyle {
+                color: Some(rgba(0x89ddff).into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Doc comments - lighter gray with italic
+        theme.add_highlight(
+            "comment.doc",
+            HighlightStyle {
+                color: Some(rgba(0x8090b0).into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
         // Operators - cyan
         theme.add_highlight(
             "operator",
@@ -301,6 +470,24 @@ impl SyntaxTheme {
             "bracket",
             HighlightStyle {
                 color: Some(rgba(0xffcb6b).into()),
+                ..Default::default()
+            },
+        );
+
+        // Punctuation brackets - same as brackets
+        theme.add_highlight(
+            "punctuation.bracket",
+            HighlightStyle {
+                color: Some(rgba(0xffcb6b).into()),
+                ..Default::default()
+            },
+        );
+
+        // Special punctuation - purple
+        theme.add_highlight(
+            "punctuation.special",
+            HighlightStyle {
+                color: Some(rgba(0xc792ea).into()),
                 ..Default::default()
             },
         );
