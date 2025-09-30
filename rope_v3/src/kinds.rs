@@ -34,8 +34,10 @@ pub enum SyntaxKind {
     Heading,
 
     // === Programming Tokens ===
-    /// Identifier (variable, function, type names)
+    /// Identifier (variable, function names)
     Identifier,
+    /// Type name (struct, enum, trait names)
+    Type,
     /// Word part within an identifier or text
     Word,
     /// Separator within identifiers (underscore, dash)
@@ -105,6 +107,7 @@ impl SyntaxKind {
             self,
             SyntaxKind::Text
                 | SyntaxKind::Identifier
+                | SyntaxKind::Type
                 | SyntaxKind::Word
                 | SyntaxKind::Separator
                 | SyntaxKind::Number
@@ -168,6 +171,7 @@ impl SyntaxKind {
 
             // Programming Tokens
             SyntaxKind::Identifier => "identifier",
+            SyntaxKind::Type => "type",
             SyntaxKind::Word => "word",
             SyntaxKind::Separator => "separator",
             SyntaxKind::Number => "number",

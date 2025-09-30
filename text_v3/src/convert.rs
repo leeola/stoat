@@ -80,8 +80,11 @@ fn map_rust_kind(ts_kind: &str) -> SyntaxKind {
         | "struct" | "super" | "trait" | "type" | "union" | "unsafe" | "use" | "where"
         | "while" => SyntaxKind::Keyword,
 
-        // Literals
+        // Identifiers and types
         "identifier" => SyntaxKind::Identifier,
+        "type_identifier" => SyntaxKind::Type,
+
+        // Literals
         "integer_literal" | "float_literal" => SyntaxKind::Number,
         "string_literal" | "raw_string_literal" => SyntaxKind::String,
         "char_literal" => SyntaxKind::Char,
@@ -147,4 +150,83 @@ pub fn tokenize_plain_text(text: &str, buffer: &BufferSnapshot) -> Vec<TokenEntr
         semantic: None,
         highlight_id: None,
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use text::{Buffer, BufferId, ToOffset};
+
+    #[test]
+    fn type_identifier_is_single_token() {
+        let source = "use gpui::{actions, Action, Pixels, Point};";
+        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let snapshot = buffer.snapshot();
+
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(tree_sitter_rust::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+
+        // Debug: print tree structure
+        println!("\nTree-sitter AST:");
+        print_tree(tree.root_node(), source, 0);
+
+        let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
+
+        // Debug: print all tokens
+        println!("\nAll tokens:");
+        for token in &tokens {
+            let start = token.range.start.to_offset(&snapshot);
+            let end = token.range.end.to_offset(&snapshot);
+            let text = &source[start..end];
+            println!("  {:?} '{}' ({}-{})", token.kind, text, start, end);
+        }
+
+        // Find the "Action" token
+        let action_tokens: Vec<_> = tokens
+            .iter()
+            .filter(|t| {
+                let start = t.range.start.to_offset(&snapshot);
+                let end = t.range.end.to_offset(&snapshot);
+                &source[start..end] == "Action"
+            })
+            .collect();
+
+        // Should be exactly one token for "Action", not split into multiple
+        assert_eq!(
+            action_tokens.len(),
+            1,
+            "Action should be a single token, not split. Found {} tokens",
+            action_tokens.len()
+        );
+
+        // It should be recognized as an Identifier (not Type, because in use statements
+        // tree-sitter doesn't mark them as type_identifier)
+        let token = action_tokens[0];
+        println!("Action token kind: {:?}", token.kind);
+    }
+
+    fn print_tree(node: tree_sitter::Node, source: &str, indent: usize) {
+        let text = &source[node.start_byte()..node.end_byte()];
+        let text_preview = if text.len() > 20 {
+            format!("{}...", &text[..20])
+        } else {
+            text.to_string()
+        };
+
+        println!(
+            "{:indent$}{} [{}..{}] {:?}",
+            "",
+            node.kind(),
+            node.start_byte(),
+            node.end_byte(),
+            text_preview,
+            indent = indent
+        );
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            print_tree(child, source, indent + 2);
+        }
+    }
 }

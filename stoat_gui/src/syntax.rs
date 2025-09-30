@@ -87,6 +87,7 @@ impl HighlightMap {
 
                 // Identifiers and names
                 "variable" | "identifier" => mappings.insert(SyntaxKind::Identifier, highlight_id),
+                "type" => mappings.insert(SyntaxKind::Type, highlight_id),
 
                 // Operators and punctuation
                 "operator" => mappings.insert(SyntaxKind::Operator, highlight_id),
@@ -268,6 +269,15 @@ impl SyntaxTheme {
             },
         );
 
+        // Types - cyan/blue
+        theme.add_highlight(
+            "type",
+            HighlightStyle {
+                color: Some(rgba(0x82aaff).into()),
+                ..Default::default()
+            },
+        );
+
         // Operators - cyan
         theme.add_highlight(
             "operator",
@@ -340,6 +350,92 @@ impl SyntaxTheme {
 impl Default for SyntaxTheme {
     fn default() -> Self {
         Self::default_dark()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use text::{Buffer, BufferId, ToOffset};
+
+    #[test]
+    fn test_action_highlighting() {
+        let source = "use gpui::{actions, Action, Pixels, Point};";
+
+        // Create buffer and parse
+        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let snapshot = buffer.snapshot();
+
+        // Parse using stoat_text_v3
+        let mut parser = stoat_text_v3::Parser::new(stoat_text_v3::Language::Rust).unwrap();
+        let tokens = parser.parse(source, &snapshot).unwrap();
+
+        println!("\nTokens:");
+        for token in &tokens {
+            let start = token.range.start.to_offset(&snapshot);
+            let end = token.range.end.to_offset(&snapshot);
+            let text = &source[start..end];
+            println!("  [{:2}..{:2}] {:?} '{}'", start, end, token.kind, text);
+        }
+
+        // Create token map
+        let mut token_map = stoat_rope_v3::TokenMap::new(&snapshot);
+        token_map.replace_tokens(tokens, &snapshot);
+        let token_snapshot = token_map.snapshot();
+
+        // Create highlight map
+        let theme = SyntaxTheme::default_dark();
+        let highlight_map = HighlightMap::new(&theme);
+
+        // Test highlighting chunks for the ENTIRE LINE (like GUI does)
+        let line_range = 0..source.len();
+        let all_chunks: Vec<_> =
+            HighlightedChunks::new(line_range, &snapshot, &token_snapshot, &highlight_map)
+                .collect();
+
+        println!("\nAll chunks for entire line:");
+        for (i, chunk) in all_chunks.iter().enumerate() {
+            println!(
+                "  Chunk {}: {:?} (highlight: {:?})",
+                i, chunk.text, chunk.highlight_id
+            );
+        }
+
+        // Find chunks that make up "Action"
+        let action_chunks: Vec<_> = all_chunks
+            .iter()
+            .filter(|c| c.text.contains('A') || source[20..26].contains(c.text))
+            .collect();
+
+        println!("\nChunks containing parts of 'Action':");
+        for chunk in &action_chunks {
+            println!("  {:?} (highlight: {:?})", chunk.text, chunk.highlight_id);
+        }
+
+        // Check if Action appears in multiple chunks with different highlights
+        let action_highlight_ids: std::collections::HashSet<_> = all_chunks
+            .iter()
+            .filter_map(|c| {
+                if c.text == "Action" || (c.text.len() < 6 && "Action".contains(c.text)) {
+                    Some(c.highlight_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        println!(
+            "\nUnique highlight IDs for Action parts: {:?}",
+            action_highlight_ids
+        );
+
+        // Action should have consistent highlighting
+        assert_eq!(
+            action_highlight_ids.len(),
+            1,
+            "Action should have only one highlight ID, found: {:?}",
+            action_highlight_ids
+        );
     }
 }
 
@@ -456,7 +552,8 @@ impl<'a> Iterator for HighlightedChunks<'a> {
             }
         }
 
-        // Get highlight ID from current token (O(1) lookup - no rescanning!)
+        // Get highlight ID from current token
+        // Check if we're inside a token's range
         let highlight_id = self
             .current_token
             .and_then(|token| {
@@ -476,10 +573,17 @@ impl<'a> Iterator for HighlightedChunks<'a> {
         let mut chunk_end = self.current_offset + self.current_text_remaining.len();
         chunk_end = chunk_end.min(self.end_offset);
 
-        // If we have a current token, clip chunk to token boundary
+        // If we have a current token, clip chunk to BOTH start and end token boundaries
         if let Some(token) = self.current_token {
+            let token_start = token.range.start.to_offset(self.buffer_snapshot);
             let token_end = token.range.end.to_offset(self.buffer_snapshot);
-            if token_end < chunk_end {
+
+            // If we're before the token starts, clip to the token start
+            if self.current_offset < token_start && chunk_end > token_start {
+                chunk_end = token_start;
+            }
+            // If we're inside the token, clip to the token end
+            else if self.current_offset >= token_start && token_end < chunk_end {
                 chunk_end = token_end;
             }
         }
