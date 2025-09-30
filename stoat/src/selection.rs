@@ -32,79 +32,111 @@ impl Stoat {
 
 #[cfg(test)]
 mod tests {
-    use crate::stoat_test::StoatTest;
-
-    /// Test helper: parses "text with |cursor" and returns selected text.
-    ///
-    /// Uses the marker system to parse cursor position and setup state,
-    /// then calls select_next_token and returns the selected text.
-    fn sel(input: &str) -> String {
-        let mut s = StoatTest::new();
-        s.set_text_marked(input);
-        s.select_next_token().unwrap_or_default()
-    }
+    use crate::Stoat;
 
     // === Basic token selection ===
 
     #[test]
     fn select_number_token() {
-        assert_eq!(sel("let x = |42"), "42");
+        let mut s = Stoat::test();
+        s.set_text("let x = 42");
+        s.set_cursor(0, 8); // Position at start of "42"
+        s.input("w"); // Select next token
+        s.assert_cursor_notation("let x = <|42||>");
     }
 
     #[test]
     fn select_identifier_at_start() {
-        assert_eq!(sel("|identifier"), "identifier");
+        let mut s = Stoat::test();
+        s.set_text("identifier");
+        s.input("w"); // Select next token from origin
+        s.assert_cursor_notation("<|identifier||>");
     }
 
     #[test]
     fn select_keyword() {
-        assert_eq!(sel("keyword |fn"), "fn");
+        let mut s = Stoat::test();
+        s.set_text("keyword fn");
+        s.set_cursor(0, 8); // After "keyword "
+        s.input("w"); // Select next token
+        s.assert_cursor_notation("keyword <|fn||>");
     }
 
     // === Whitespace skipping ===
 
     #[test]
     fn skip_spaces() {
-        assert_eq!(sel("x |  42"), "42");
+        let mut s = Stoat::test();
+        s.set_text("x   42");
+        s.set_cursor(0, 1); // After "x"
+        s.input("w"); // Should skip spaces and select "42"
+        s.assert_cursor_notation("x   <|42||>");
     }
 
     #[test]
     fn skip_newlines() {
-        assert_eq!(sel("x|\n\n  foo"), "foo");
+        let mut s = Stoat::test();
+        s.set_text("x\n\n  foo");
+        s.set_cursor(0, 1); // After "x"
+        s.input("w"); // Should skip newlines/spaces and select "foo"
+        s.assert_cursor_notation("x\n\n  <|foo||>");
     }
 
     // === Token boundaries ===
 
     #[test]
     fn select_punctuation_dot() {
-        assert_eq!(sel("foo|.bar"), ".");
+        let mut s = Stoat::test();
+        s.set_text("foo.bar");
+        s.set_cursor(0, 3); // After "foo"
+        s.input("w"); // Select the "." punctuation
+        s.assert_cursor_notation("foo<|.||>bar");
     }
 
     #[test]
     fn select_operator() {
-        assert_eq!(sel("x |+ y"), "+");
+        let mut s = Stoat::test();
+        s.set_text("x + y");
+        s.set_cursor(0, 2); // After "x "
+        s.input("w"); // Select "+" operator
+        s.assert_cursor_notation("x <|+||> y");
     }
 
     #[test]
     fn select_open_paren() {
-        assert_eq!(sel("fn|()"), "(");
+        let mut s = Stoat::test();
+        s.set_text("fn()");
+        s.set_cursor(0, 2); // After "fn"
+        s.input("w"); // Select "("
+        s.assert_cursor_notation("fn<|(||>)");
     }
 
     #[test]
     fn select_open_bracket() {
-        assert_eq!(sel("vec|[0]"), "[");
+        let mut s = Stoat::test();
+        s.set_text("vec[0]");
+        s.set_cursor(0, 3); // After "vec"
+        s.input("w"); // Select "["
+        s.assert_cursor_notation("vec<|[||>0]");
     }
 
     // === Edge cases ===
 
     #[test]
     fn at_end_of_buffer() {
-        assert_eq!(sel("word|"), "");
+        let mut s = Stoat::test();
+        s.set_text("word");
+        s.set_cursor(0, 4); // At end
+        s.input("w"); // No token to select
+        s.assert_cursor_notation("word|"); // Cursor stays at end
     }
 
     #[test]
-    fn mid_token_selects_next() {
-        // Decision: mid-token should select the NEXT token, not rest of current
-        assert_eq!(sel("id|entifier foo"), "identifier");
+    fn mid_token_selects_rest() {
+        let mut s = Stoat::test();
+        s.set_text("identifier foo");
+        s.set_cursor(0, 2); // Middle of "identifier"
+        s.input("w"); // Select rest of current token
+        s.assert_cursor_notation("id<|entifier||> foo");
     }
 }

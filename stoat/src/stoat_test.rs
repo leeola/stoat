@@ -1,6 +1,6 @@
 //! Test utilities for Stoat editor
 
-pub mod markers;
+pub mod cursor_notation;
 
 use crate::Stoat;
 use gpui::{Pixels, Size, TestAppContext};
@@ -170,68 +170,53 @@ impl StoatTest {
         })
     }
 
-    /// Set buffer text and state from marked string
+    /// Set buffer text (plain, cursor at origin)
     ///
-    /// Parses markers like `|` (cursor) and `<|text||>` (selection).
-    /// Clears existing buffer and sets up cursor/selection from markers.
+    /// Replaces entire buffer with the given text and resets cursor to (0, 0).
+    /// Use this for initial test setup when you don't need specific cursor placement.
     ///
     /// # Example
     /// ```ignore
-    /// s.set_text_marked("hello |world");  // Sets text "hello world", cursor at 6
-    /// s.set_text_marked("<|foo||>");      // Sets text "foo", selects it
+    /// s.set_text("hello world");  // Text set, cursor at start
     /// ```
-    pub fn set_text_marked(&mut self, marked: &str) {
-        let parsed = markers::parse(marked).expect("Invalid marker syntax");
-
+    pub fn set_text(&mut self, text: &str) {
         // Clear buffer and insert new text
         self.stoat.buffer.update(&mut self.cx, |buf, _| {
             let len = buf.len();
-            buf.edit([(0..len, parsed.text.as_str())]);
+            buf.edit([(0..len, text)]);
         });
 
-        let app = self.cx.app.borrow();
-        let snapshot = self.stoat.buffer_snapshot(&*app);
-
-        // Set cursor (use first cursor, or derive from selection)
-        if let Some(&cursor_offset) = parsed.cursors.first() {
-            let point = snapshot.offset_to_point(cursor_offset);
-            self.stoat.set_cursor_position(point);
-        } else if let Some(sel) = parsed.selections.first() {
-            // Set cursor from selection
-            let cursor_offset = if sel.cursor_at_start {
-                sel.range.start
-            } else {
-                sel.range.end
-            };
-            let cursor_point = snapshot.offset_to_point(cursor_offset);
-            self.stoat.set_cursor_position(cursor_point);
-
-            // Set selection range
-            let anchor_offset = if sel.cursor_at_start {
-                sel.range.end
-            } else {
-                sel.range.start
-            };
-            let anchor_point = snapshot.offset_to_point(anchor_offset);
-
-            // Update cursor manager with selection
-            let cursor_mgr = self.stoat.cursor_manager_mut();
-            cursor_mgr.set_selection(crate::cursor::Selection::new(anchor_point, cursor_point));
-        }
+        // Reset cursor to origin
+        self.stoat.set_cursor_position(Point::new(0, 0));
     }
 
-    /// Assert current state matches marked string
+    /// Process input through the editor (stub)
     ///
-    /// Compares current buffer text, cursor, and selection against
-    /// the marked string representation.
+    /// Simulates key input to the editor. Will be connected to the modal
+    /// system and command processing when implemented.
     ///
     /// # Example
     /// ```ignore
-    /// s.assert_marked("hello |world");
+    /// s.input("w");   // Move forward one word
+    /// s.input("dw");  // Delete word
+    /// ```
+    pub fn input(&mut self, _keys: &str) {
+        // TODO: Implement modal/command system integration
+        // For now, this is a placeholder for tests to use
+    }
+
+    /// Assert current state matches cursor notation
+    ///
+    /// Compares current buffer text, cursor, and selection against
+    /// the notation string representation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// s.assert_cursor_notation("hello |world");
     /// ```
     #[track_caller]
-    pub fn assert_marked(&self, expected: &str) {
-        let actual = self.marked_text();
+    pub fn assert_cursor_notation(&self, expected: &str) {
+        let actual = self.cursor_notation();
         assert_eq!(
             actual, expected,
             "\nExpected: {}\nActual:   {}",
@@ -239,11 +224,11 @@ impl StoatTest {
         );
     }
 
-    /// Get current state as marked string
+    /// Get current state as cursor notation string
     ///
-    /// Returns the buffer text with markers showing cursor and selection.
+    /// Returns the buffer text with notation showing cursor and selection.
     /// Useful for debugging test failures.
-    pub fn marked_text(&self) -> String {
+    pub fn cursor_notation(&self) -> String {
         let app = self.cx.app.borrow();
         let snapshot = self.stoat.buffer_snapshot(&*app);
         let text = snapshot.text();
@@ -258,7 +243,7 @@ impl StoatTest {
             let end_offset = snapshot.point_to_offset(selection.end);
             let cursor_at_start = cursor_point == selection.start;
 
-            vec![markers::Selection {
+            vec![cursor_notation::Selection {
                 range: start_offset..end_offset,
                 cursor_at_start,
             }]
@@ -272,7 +257,7 @@ impl StoatTest {
             vec![]
         };
 
-        markers::format(&text, &cursors, &selections)
+        cursor_notation::format(&text, &cursors, &selections)
     }
 
     /// Simulate scroll wheel event with line-based scrolling
