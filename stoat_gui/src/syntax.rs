@@ -465,7 +465,7 @@ impl<'a> Iterator for HighlightedChunks<'a> {
 
                 // Only use this token's highlight if we're inside its range
                 if token_start <= self.current_offset && self.current_offset < token_end {
-                    token.highlight_id.map(HighlightId)
+                    Some(self.highlight_map.get(token.kind))
                 } else {
                     None
                 }
