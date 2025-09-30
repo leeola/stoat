@@ -208,7 +208,7 @@ impl SyntaxTheme {
     /// This provides reasonable defaults for syntax highlighting that work well
     /// with most programming languages and markdown content.
     pub fn default_dark() -> Self {
-        use gpui::{FontWeight, rgba};
+        use gpui::{rgba, FontWeight};
 
         let mut theme = Self::new();
 

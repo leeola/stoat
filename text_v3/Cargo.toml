@@ -1,0 +1,27 @@
+[package]
+name = "stoat_text_v3"
+version = "0.1.0"
+edition = "2021"
+readme = "../README.md"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[dependencies]
+# Rope v3 for token types
+stoat_rope_v3 = { path = "../rope_v3" }
+
+# Tree-sitter core
+tree-sitter = "0.20"
+
+# Language grammars
+tree-sitter-rust = "0.20"
+tree-sitter-md = "0.1"
+
+# Zed's text infrastructure (for BufferSnapshot, Anchor)
+text = { git = "https://github.com/zed-industries/zed.git" }
+
+# Error handling
+anyhow = "1.0"
+
+[lints]
+workspace = true

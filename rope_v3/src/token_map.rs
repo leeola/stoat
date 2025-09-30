@@ -56,7 +56,7 @@ impl TokenMap {
 
             // Re-tokenize the edited text
             let new_text = buffer.text_for_range(edit.new.clone()).collect::<String>();
-            let new_tokens = tokenize_text(&new_text, range.clone());
+            let new_tokens = tokenize_text(&new_text, range.clone(), buffer);
 
             // Insert new tokens
             for token in new_tokens {
@@ -195,83 +195,12 @@ impl TokenSnapshot {
     }
 }
 
-/// Simple tokenizer that splits on whitespace and punctuation
-fn tokenize_text(text: &str, range: Range<Anchor>) -> Vec<TokenEntry> {
-    let mut tokens = Vec::new();
-    let mut chars = text.char_indices().peekable();
-
-    while let Some((idx, ch)) = chars.next() {
-        let start_idx = idx;
-
-        let kind = if ch.is_whitespace() {
-            // Skip whitespace tokens for now
-            while chars.peek().map_or(false, |(_, c)| c.is_whitespace()) {
-                chars.next();
-            }
-            continue;
-        } else if ch.is_alphanumeric() || ch == '_' {
-            let mut _end_idx = start_idx + ch.len_utf8();
-            while let Some((next_idx, next_ch)) = chars.peek() {
-                if next_ch.is_alphanumeric() || *next_ch == '_' {
-                    _end_idx = *next_idx + next_ch.len_utf8();
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-
-            let word = &text[start_idx.._end_idx];
-            match word {
-                "let" | "mut" | "fn" | "if" | "else" | "while" | "for" | "return" | "pub"
-                | "struct" | "enum" | "impl" | "trait" | "use" | "mod" => SyntaxKind::Keyword,
-                _ if word.chars().all(|c| c.is_numeric()) => SyntaxKind::Number,
-                _ => SyntaxKind::Identifier,
-            }
-        } else if ch == '(' {
-            SyntaxKind::OpenParen
-        } else if ch == ')' {
-            SyntaxKind::CloseParen
-        } else if ch == '[' {
-            SyntaxKind::OpenBracket
-        } else if ch == ']' {
-            SyntaxKind::CloseBracket
-        } else if ch == '{' {
-            SyntaxKind::OpenBrace
-        } else if ch == '}' {
-            SyntaxKind::CloseBrace
-        } else if "+-*/%".contains(ch) {
-            SyntaxKind::Operator
-        } else if ch == '.' {
-            SyntaxKind::Dot
-        } else if ch == ',' {
-            SyntaxKind::Comma
-        } else if ch == ':' {
-            SyntaxKind::Colon
-        } else if ch == ';' {
-            SyntaxKind::Semicolon
-        } else if ch == '"' || ch == '\'' {
-            let quote = ch;
-            let mut _end_idx = start_idx + ch.len_utf8();
-            let mut escaped = false;
-            while let Some((next_idx, next_ch)) = chars.next() {
-                _end_idx = next_idx + next_ch.len_utf8();
-                if escaped {
-                    escaped = false;
-                } else if next_ch == '\\' {
-                    escaped = true;
-                } else if next_ch == quote {
-                    break;
-                }
-            }
-            SyntaxKind::String
-        } else {
-            SyntaxKind::Unknown
-        };
-
-        // Note: In a real implementation, we'd calculate proper anchors based on
-        // the actual position in the buffer. For now, we reuse the provided range.
-        tokens.push(TokenEntry::new(range.clone(), kind));
-    }
-
-    tokens
+/// Simple fallback tokenizer (stub - should be replaced with proper parsing)
+///
+/// This is a placeholder. The actual parsing should be done by stoat_text_v3
+/// at a higher level (in stoat core or GUI), and the resulting tokens should
+/// be inserted directly into the TokenMap.
+fn tokenize_text(_text: &str, _range: Range<Anchor>, _buffer: &BufferSnapshot) -> Vec<TokenEntry> {
+    // TODO: This should not be called - parsing should happen externally
+    Vec::new()
 }
