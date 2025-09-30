@@ -4,9 +4,9 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
-    Style, TextRun, Window,
+    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
+    Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;
@@ -165,10 +165,14 @@ impl Element for EditorElement {
                         .and_then(|id| id.style(&self.syntax_theme))
                         .unwrap_or_default();
 
+                    let color = highlight_style
+                        .color
+                        .unwrap_or(self.syntax_theme.default_text_color);
+
                     let text_run = TextRun {
                         len: text_len,
                         font: font.clone(),
-                        color: highlight_style.color.unwrap_or(self.style.text_color),
+                        color,
                         background_color: highlight_style.background_color,
                         underline: None,
                         strikethrough: None,
@@ -192,7 +196,7 @@ impl Element for EditorElement {
                 let text_run = TextRun {
                     len: text.len(),
                     font: font.clone(),
-                    color: self.style.text_color,
+                    color: self.syntax_theme.default_text_color,
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -225,7 +229,7 @@ impl Element for EditorElement {
             let text_run = TextRun {
                 len: text.len(),
                 font,
-                color: self.style.text_color,
+                color: self.syntax_theme.default_text_color,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -260,11 +264,11 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Paint background
+        // Paint background using theme color
         window.paint_quad(PaintQuad {
             bounds: layout.bounds,
             corner_radii: Default::default(),
-            background: self.style.background.into(),
+            background: self.syntax_theme.background_color.into(),
             border_color: Default::default(),
             border_widths: Default::default(),
             border_style: Default::default(),
@@ -356,7 +360,7 @@ impl EditorElement {
                     let text_run = TextRun {
                         len: text_run_len,
                         font,
-                        color: self.style.text_color,
+                        color: self.syntax_theme.default_text_color,
                         background_color: None,
                         underline: None,
                         strikethrough: None,
@@ -385,7 +389,7 @@ impl EditorElement {
                 window.paint_quad(PaintQuad {
                     bounds: cursor_bounds,
                     corner_radii: Default::default(),
-                    background: self.style.text_color.into(),
+                    background: self.syntax_theme.default_text_color.into(),
                     border_color: Default::default(),
                     border_widths: Default::default(),
                     border_style: Default::default(),

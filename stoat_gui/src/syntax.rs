@@ -18,6 +18,11 @@
 //! Rather than parsing the entire document on each change, it leverages the token-based
 //! approach for fast incremental updates.
 //!
+//! ## Available Themes
+//!
+//! - [`SyntaxTheme::monokai_dark()`] - Classic Monokai dark theme from Sublime Text (default)
+//! - [`SyntaxTheme::monokai_light()`] - Monokai colors adapted for light backgrounds
+//!
 //! ## Performance
 //!
 //! The implementation follows Zed's performance patterns:
@@ -224,6 +229,12 @@ pub struct SyntaxTheme {
     /// The index in this vector corresponds to the [`HighlightId`] value,
     /// allowing fast lookup during rendering.
     pub highlights: Vec<(String, HighlightStyle)>,
+
+    /// Background color for the editor
+    pub background_color: gpui::Hsla,
+
+    /// Default text color for unhighlighted text
+    pub default_text_color: gpui::Hsla,
 }
 
 impl SyntaxTheme {
@@ -231,6 +242,8 @@ impl SyntaxTheme {
     pub fn new() -> Self {
         Self {
             highlights: Vec::new(),
+            background_color: gpui::rgb(0x1e1e1e).into(),
+            default_text_color: gpui::rgb(0xcccccc).into(),
         }
     }
 
@@ -242,159 +255,70 @@ impl SyntaxTheme {
         self.highlights.push((name.into(), style));
     }
 
-    /// Create a default syntax theme with common programming language highlights
+    /// Monokai Dark theme - the classic Monokai color scheme
     ///
-    /// This provides reasonable defaults for syntax highlighting that work well
-    /// with most programming languages and markdown content.
-    pub fn default_dark() -> Self {
+    /// Based on the original Sublime Text Monokai theme
+    pub fn monokai_dark() -> Self {
         use gpui::{rgba, FontWeight};
 
         let mut theme = Self::new();
 
-        // Keywords - purple/violet
+        // Classic Monokai palette (GPUI rgba() expects 0xRRGGBBAA format!)
+        let background = rgba(0x272822ff);
+        let foreground = rgba(0xf8f8f2ff);
+        let comment = rgba(0x75715eff);
+        let red = rgba(0xf92672ff); // Pink/Red for keywords
+        let orange = rgba(0xfd971fff); // Orange for numbers/constants
+        let yellow = rgba(0xe6db74ff); // Yellow for strings
+        let green = rgba(0xa6e22eff); // Green for functions
+        let cyan = rgba(0x66d9efff); // Cyan/Blue for types
+        let purple = rgba(0xae81ffff); // Purple for special
+
+        // Set theme colors
+        theme.background_color = background.into();
+        theme.default_text_color = foreground.into();
+
+        // Keywords - pink/red
         theme.add_highlight(
             "keyword",
             HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
-                font_weight: Some(FontWeight::BOLD),
+                color: Some(red.into()),
                 ..Default::default()
             },
         );
 
-        // Strings - green
+        // Strings - yellow
         theme.add_highlight(
             "string",
             HighlightStyle {
-                color: Some(rgba(0xc3e88d).into()),
+                color: Some(yellow.into()),
                 ..Default::default()
             },
         );
 
-        // Numbers - orange
+        // String escapes - purple
+        theme.add_highlight(
+            "string.escape",
+            HighlightStyle {
+                color: Some(purple.into()),
+                ..Default::default()
+            },
+        );
+
+        // Numbers - purple
         theme.add_highlight(
             "number",
             HighlightStyle {
-                color: Some(rgba(0xff9a85).into()),
+                color: Some(purple.into()),
                 ..Default::default()
             },
         );
 
-        // Booleans - cyan
+        // Booleans - purple
         theme.add_highlight(
             "boolean",
             HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
-                ..Default::default()
-            },
-        );
-
-        // Comments - gray/muted
-        theme.add_highlight(
-            "comment",
-            HighlightStyle {
-                color: Some(rgba(0x717cb4).into()),
-                font_style: Some(gpui::FontStyle::Italic),
-                ..Default::default()
-            },
-        );
-
-        // Variables/Identifiers - white/default
-        theme.add_highlight(
-            "variable",
-            HighlightStyle {
-                color: Some(rgba(0xeeffff).into()),
-                ..Default::default()
-            },
-        );
-
-        // Types - cyan/blue
-        theme.add_highlight(
-            "type",
-            HighlightStyle {
-                color: Some(rgba(0x82aaff).into()),
-                ..Default::default()
-            },
-        );
-
-        // Builtin types - lighter blue
-        theme.add_highlight(
-            "type.builtin",
-            HighlightStyle {
-                color: Some(rgba(0x82aaff).into()),
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        );
-
-        // Interface/trait types - cyan
-        theme.add_highlight(
-            "type.interface",
-            HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
-                ..Default::default()
-            },
-        );
-
-        // Functions - yellow/gold
-        theme.add_highlight(
-            "function",
-            HighlightStyle {
-                color: Some(rgba(0xffcb6b).into()),
-                ..Default::default()
-            },
-        );
-
-        // Method calls - same as functions
-        theme.add_highlight(
-            "function.method",
-            HighlightStyle {
-                color: Some(rgba(0xffcb6b).into()),
-                ..Default::default()
-            },
-        );
-
-        // Function definitions - yellow with bold
-        theme.add_highlight(
-            "function.definition",
-            HighlightStyle {
-                color: Some(rgba(0xffcb6b).into()),
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        );
-
-        // Special functions (macros) - magenta
-        theme.add_highlight(
-            "function.special",
-            HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
-                ..Default::default()
-            },
-        );
-
-        // Special variables (self) - red/orange
-        theme.add_highlight(
-            "variable.special",
-            HighlightStyle {
-                color: Some(rgba(0xf78c6c).into()),
-                ..Default::default()
-            },
-        );
-
-        // Function parameters - lighter color
-        theme.add_highlight(
-            "variable.parameter",
-            HighlightStyle {
-                color: Some(rgba(0xf78c6c).into()),
-                ..Default::default()
-            },
-        );
-
-        // Properties/fields - cyan
-        theme.add_highlight(
-            "property",
-            HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
+                color: Some(purple.into()),
                 ..Default::default()
             },
         );
@@ -403,8 +327,127 @@ impl SyntaxTheme {
         theme.add_highlight(
             "constant",
             HighlightStyle {
-                color: Some(rgba(0xff9a85).into()),
-                font_weight: Some(FontWeight::BOLD),
+                color: Some(orange.into()),
+                ..Default::default()
+            },
+        );
+
+        // Comments - gray/brown
+        theme.add_highlight(
+            "comment",
+            HighlightStyle {
+                color: Some(comment.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Doc comments - same as comments
+        theme.add_highlight(
+            "comment.doc",
+            HighlightStyle {
+                color: Some(comment.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Functions - green
+        theme.add_highlight(
+            "function",
+            HighlightStyle {
+                color: Some(green.into()),
+                ..Default::default()
+            },
+        );
+
+        // Method calls - green
+        theme.add_highlight(
+            "function.method",
+            HighlightStyle {
+                color: Some(green.into()),
+                ..Default::default()
+            },
+        );
+
+        // Function definitions - green
+        theme.add_highlight(
+            "function.definition",
+            HighlightStyle {
+                color: Some(green.into()),
+                ..Default::default()
+            },
+        );
+
+        // Special functions (macros) - cyan
+        theme.add_highlight(
+            "function.special",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Variables/Identifiers - foreground
+        theme.add_highlight(
+            "variable",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Special variables (self) - purple/italic
+        theme.add_highlight(
+            "variable.special",
+            HighlightStyle {
+                color: Some(purple.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Function parameters - orange
+        theme.add_highlight(
+            "variable.parameter",
+            HighlightStyle {
+                color: Some(orange.into()),
+                ..Default::default()
+            },
+        );
+
+        // Properties/fields - foreground
+        theme.add_highlight(
+            "property",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Types - cyan
+        theme.add_highlight(
+            "type",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Builtin types - cyan
+        theme.add_highlight(
+            "type.builtin",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Interface/trait types - cyan
+        theme.add_highlight(
+            "type.interface",
+            HighlightStyle {
+                color: Some(cyan.into()),
                 ..Default::default()
             },
         );
@@ -413,96 +456,76 @@ impl SyntaxTheme {
         theme.add_highlight(
             "lifetime",
             HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
+                color: Some(purple.into()),
                 ..Default::default()
             },
         );
 
-        // Attributes - purple
+        // Attributes - cyan
         theme.add_highlight(
             "attribute",
             HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
+                color: Some(cyan.into()),
                 ..Default::default()
             },
         );
 
-        // String escapes - cyan/bright
-        theme.add_highlight(
-            "string.escape",
-            HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
-                font_weight: Some(FontWeight::BOLD),
-                ..Default::default()
-            },
-        );
-
-        // Doc comments - lighter gray with italic
-        theme.add_highlight(
-            "comment.doc",
-            HighlightStyle {
-                color: Some(rgba(0x8090b0).into()),
-                font_style: Some(gpui::FontStyle::Italic),
-                ..Default::default()
-            },
-        );
-
-        // Operators - cyan
+        // Operators - red
         theme.add_highlight(
             "operator",
             HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
+                color: Some(red.into()),
                 ..Default::default()
             },
         );
 
-        // Punctuation - light gray
+        // Punctuation - foreground
         theme.add_highlight(
             "punctuation",
             HighlightStyle {
-                color: Some(rgba(0x89ddff).into()),
+                color: Some(foreground.into()),
                 ..Default::default()
             },
         );
 
-        // Brackets - yellow
+        // Brackets - foreground
         theme.add_highlight(
             "bracket",
             HighlightStyle {
-                color: Some(rgba(0xffcb6b).into()),
+                color: Some(foreground.into()),
                 ..Default::default()
             },
         );
 
-        // Punctuation brackets - same as brackets
+        // Punctuation brackets
         theme.add_highlight(
             "punctuation.bracket",
             HighlightStyle {
-                color: Some(rgba(0xffcb6b).into()),
+                color: Some(foreground.into()),
                 ..Default::default()
             },
         );
 
-        // Special punctuation - purple
+        // Special punctuation
         theme.add_highlight(
             "punctuation.special",
             HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
+                color: Some(red.into()),
                 ..Default::default()
             },
         );
 
-        // Markdown headings - blue, bold
+        // Markdown headings
         theme.add_highlight(
             "markup.heading",
             HighlightStyle {
-                color: Some(rgba(0x82aaff).into()),
+                color: Some(green.into()),
                 font_weight: Some(FontWeight::BOLD),
                 ..Default::default()
             },
         );
 
-        // Markdown bold - keep color, add weight
+        // Markdown bold
         theme.add_highlight(
             "markup.bold",
             HighlightStyle {
@@ -511,7 +534,7 @@ impl SyntaxTheme {
             },
         );
 
-        // Markdown italic - keep color, add style
+        // Markdown italic
         theme.add_highlight(
             "markup.italic",
             HighlightStyle {
@@ -520,12 +543,312 @@ impl SyntaxTheme {
             },
         );
 
-        // Markdown code - darker background
+        // Markdown code
         theme.add_highlight(
             "markup.code",
             HighlightStyle {
-                color: Some(rgba(0xc792ea).into()),
-                background_color: Some(rgba(0x2a2139).into()),
+                color: Some(yellow.into()),
+                ..Default::default()
+            },
+        );
+
+        theme
+    }
+
+    /// Monokai Light theme - Monokai colors on a light background
+    ///
+    /// Uses the classic Monokai syntax colors with adjusted brightness for light backgrounds
+    pub fn monokai_light() -> Self {
+        use gpui::{rgba, FontWeight};
+
+        let mut theme = Self::new();
+
+        // Monokai Light palette (darker versions for light background)
+        let background = rgba(0xfafafaff);
+        let foreground = rgba(0x272822ff);
+        let comment = rgba(0x75715eff);
+        let red = rgba(0xd9006cff); // Darker pink/red for keywords
+        let orange = rgba(0xe67f00ff); // Darker orange
+        let yellow = rgba(0xc9a500ff); // Darker yellow
+        let green = rgba(0x6d9d00ff); // Darker green
+        let cyan = rgba(0x0099ccff); // Darker cyan
+        let purple = rgba(0x9933ffff); // Darker purple
+
+        // Set theme colors
+        theme.background_color = background.into();
+        theme.default_text_color = foreground.into();
+
+        // Keywords - red
+        theme.add_highlight(
+            "keyword",
+            HighlightStyle {
+                color: Some(red.into()),
+                ..Default::default()
+            },
+        );
+
+        // Strings - yellow
+        theme.add_highlight(
+            "string",
+            HighlightStyle {
+                color: Some(yellow.into()),
+                ..Default::default()
+            },
+        );
+
+        // String escapes - purple
+        theme.add_highlight(
+            "string.escape",
+            HighlightStyle {
+                color: Some(purple.into()),
+                ..Default::default()
+            },
+        );
+
+        // Numbers - purple
+        theme.add_highlight(
+            "number",
+            HighlightStyle {
+                color: Some(purple.into()),
+                ..Default::default()
+            },
+        );
+
+        // Booleans - purple
+        theme.add_highlight(
+            "boolean",
+            HighlightStyle {
+                color: Some(purple.into()),
+                ..Default::default()
+            },
+        );
+
+        // Constants - orange
+        theme.add_highlight(
+            "constant",
+            HighlightStyle {
+                color: Some(orange.into()),
+                ..Default::default()
+            },
+        );
+
+        // Comments - brown/gray
+        theme.add_highlight(
+            "comment",
+            HighlightStyle {
+                color: Some(comment.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Doc comments
+        theme.add_highlight(
+            "comment.doc",
+            HighlightStyle {
+                color: Some(comment.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Functions - green
+        theme.add_highlight(
+            "function",
+            HighlightStyle {
+                color: Some(green.into()),
+                ..Default::default()
+            },
+        );
+
+        // Method calls - green
+        theme.add_highlight(
+            "function.method",
+            HighlightStyle {
+                color: Some(green.into()),
+                ..Default::default()
+            },
+        );
+
+        // Function definitions - green with bold
+        theme.add_highlight(
+            "function.definition",
+            HighlightStyle {
+                color: Some(green.into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Special functions (macros) - cyan
+        theme.add_highlight(
+            "function.special",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Variables/Identifiers - foreground
+        theme.add_highlight(
+            "variable",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Special variables (self) - purple/italic
+        theme.add_highlight(
+            "variable.special",
+            HighlightStyle {
+                color: Some(purple.into()),
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Function parameters - orange
+        theme.add_highlight(
+            "variable.parameter",
+            HighlightStyle {
+                color: Some(orange.into()),
+                ..Default::default()
+            },
+        );
+
+        // Properties/fields - foreground
+        theme.add_highlight(
+            "property",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Types - cyan
+        theme.add_highlight(
+            "type",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Builtin types - cyan
+        theme.add_highlight(
+            "type.builtin",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Interface/trait types - cyan
+        theme.add_highlight(
+            "type.interface",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Lifetimes - purple
+        theme.add_highlight(
+            "lifetime",
+            HighlightStyle {
+                color: Some(purple.into()),
+                ..Default::default()
+            },
+        );
+
+        // Attributes - cyan
+        theme.add_highlight(
+            "attribute",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+
+        // Operators - red
+        theme.add_highlight(
+            "operator",
+            HighlightStyle {
+                color: Some(red.into()),
+                ..Default::default()
+            },
+        );
+
+        // Punctuation - foreground
+        theme.add_highlight(
+            "punctuation",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Brackets - foreground
+        theme.add_highlight(
+            "bracket",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Punctuation brackets
+        theme.add_highlight(
+            "punctuation.bracket",
+            HighlightStyle {
+                color: Some(foreground.into()),
+                ..Default::default()
+            },
+        );
+
+        // Special punctuation
+        theme.add_highlight(
+            "punctuation.special",
+            HighlightStyle {
+                color: Some(red.into()),
+                ..Default::default()
+            },
+        );
+
+        // Markdown headings
+        theme.add_highlight(
+            "markup.heading",
+            HighlightStyle {
+                color: Some(green.into()),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Markdown bold
+        theme.add_highlight(
+            "markup.bold",
+            HighlightStyle {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+
+        // Markdown italic
+        theme.add_highlight(
+            "markup.italic",
+            HighlightStyle {
+                font_style: Some(gpui::FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+
+        // Markdown code
+        theme.add_highlight(
+            "markup.code",
+            HighlightStyle {
+                color: Some(yellow.into()),
                 ..Default::default()
             },
         );
@@ -536,7 +859,7 @@ impl SyntaxTheme {
 
 impl Default for SyntaxTheme {
     fn default() -> Self {
-        Self::default_dark()
+        Self::monokai_dark()
     }
 }
 
