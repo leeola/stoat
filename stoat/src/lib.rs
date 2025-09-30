@@ -40,12 +40,15 @@ use gpui::{App, AppContext, Entity};
 pub use scroll::{ScrollDelta, ScrollPosition};
 use std::num::NonZeroU64;
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
+use stoat_text_v3::{Language, Parser};
 use text::{Buffer, BufferId, BufferSnapshot, Point};
 
 #[derive(Clone)]
 pub struct Stoat {
     buffer: Entity<Buffer>,
     token_map: TokenMap,
+    parser: Parser,
+    current_language: Language,
     scroll: ScrollPosition,
     cursor_manager: CursorManager,
     viewport_lines: Option<f32>,
@@ -59,9 +62,14 @@ impl Stoat {
         let buffer_snapshot = buffer.read(cx).snapshot();
         let token_map = TokenMap::new(&buffer_snapshot);
 
+        let current_language = Language::PlainText;
+        let parser = Parser::new(current_language).expect("Failed to create parser");
+
         Self {
             buffer,
             token_map,
+            parser,
+            current_language,
             scroll: ScrollPosition::new(),
             cursor_manager: CursorManager::new(),
             viewport_lines: None,
@@ -89,20 +97,35 @@ impl Stoat {
         // Load first file into buffer
         if let Some(first_path) = paths.first() {
             if let Ok(contents) = std::fs::read_to_string(first_path) {
+                // Detect language from file extension
+                let language = first_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(Language::from_extension)
+                    .unwrap_or(Language::PlainText);
+
+                // Update parser if language changed
+                if language != self.current_language {
+                    self.current_language = language;
+                    self.parser = Parser::new(language).expect("Failed to create parser");
+                }
+
+                // Update buffer
                 self.buffer.update(cx, |buffer, _| {
-                    // Clear existing content and insert new
                     let len = buffer.len();
                     buffer.edit([(0..len, contents.as_str())]);
                 });
 
-                // Sync token map with new buffer content
+                // Parse and update tokens
                 let buffer_snapshot = self.buffer.read(cx).snapshot();
-                // For initial load, we can simulate an edit of the entire buffer
-                let edit = text::Edit {
-                    old: 0..0,
-                    new: 0..buffer_snapshot.len(),
-                };
-                self.token_map.sync(&buffer_snapshot, &[edit]);
+                match self.parser.parse(&contents, &buffer_snapshot) {
+                    Ok(tokens) => {
+                        self.token_map.replace_tokens(tokens, &buffer_snapshot);
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to parse file: {}", e);
+                    },
+                }
             }
         }
     }
@@ -160,13 +183,17 @@ impl Stoat {
             buffer.edit([(cursor_offset..cursor_offset, text)]);
         });
 
-        // Sync token map with the edit
+        // Re-parse entire buffer after edit
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let edit = text::Edit {
-            old: cursor_offset..cursor_offset,
-            new: cursor_offset..(cursor_offset + text.len()),
-        };
-        self.token_map.sync(&buffer_snapshot, &[edit]);
+        let contents = buffer_snapshot.text();
+        match self.parser.parse(&contents, &buffer_snapshot) {
+            Ok(tokens) => {
+                self.token_map.replace_tokens(tokens, &buffer_snapshot);
+            },
+            Err(e) => {
+                tracing::error!("Failed to parse after insert: {}", e);
+            },
+        }
 
         // Move cursor forward by the inserted text length
         let new_cursor_position = buffer_snapshot.offset_to_point(cursor_offset + text.len());
@@ -401,13 +428,17 @@ impl Stoat {
                 buffer.edit([(start_offset..end_offset, "")]);
             });
 
-            // Sync token map with the deletion
+            // Re-parse entire buffer after deletion
             let buffer_snapshot = self.buffer.read(cx).snapshot();
-            let edit = text::Edit {
-                old: start_offset..end_offset,
-                new: start_offset..start_offset,
-            };
-            self.token_map.sync(&buffer_snapshot, &[edit]);
+            let contents = buffer_snapshot.text();
+            match self.parser.parse(&contents, &buffer_snapshot) {
+                Ok(tokens) => {
+                    self.token_map.replace_tokens(tokens, &buffer_snapshot);
+                },
+                Err(e) => {
+                    tracing::error!("Failed to parse after delete: {}", e);
+                },
+            }
         }
     }
 

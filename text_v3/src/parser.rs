@@ -11,6 +11,13 @@ pub struct Parser {
     ts_parser: Option<TsParser>,
 }
 
+impl Clone for Parser {
+    fn clone(&self) -> Self {
+        // Recreate parser since tree-sitter Parser doesn't implement Clone
+        Self::new(self.language).expect("Failed to clone parser")
+    }
+}
+
 impl Parser {
     /// Create a new parser for the given language
     pub fn new(language: Language) -> anyhow::Result<Self> {

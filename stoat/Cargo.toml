@@ -11,6 +11,7 @@ gui = []
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 stoat_rope_v3 = { path = "../rope_v3" }
+stoat_text_v3 = { path = "../text_v3" }
 text = { git = "https://github.com/zed-industries/zed.git" }
 gpui = { git = "https://github.com/zed-industries/zed.git" }
 tracing = "0.1"

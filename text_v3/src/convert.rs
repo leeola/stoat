@@ -2,7 +2,7 @@
 
 use crate::language::Language;
 use stoat_rope_v3::{Language as RopeLanguage, SyntaxKind, TokenEntry};
-use text::{Anchor, BufferSnapshot};
+use text::BufferSnapshot;
 use tree_sitter::{Node, Tree};
 
 /// Convert tree-sitter tree to flat token list
@@ -19,7 +19,7 @@ pub fn tree_to_tokens(
 
 /// Walk tree-sitter tree and extract leaf tokens
 fn walk_tree(
-    node: Node,
+    node: Node<'_>,
     source: &str,
     buffer: &BufferSnapshot,
     language: Language,
@@ -43,7 +43,7 @@ fn walk_tree(
 }
 
 fn create_token(
-    node: Node,
+    node: Node<'_>,
     _source: &str,
     buffer: &BufferSnapshot,
     language: Language,

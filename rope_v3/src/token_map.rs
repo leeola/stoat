@@ -39,6 +39,18 @@ impl TokenMap {
         self.snapshot.clone()
     }
 
+    /// Replace all tokens with a new set
+    ///
+    /// Used when re-parsing the entire buffer or loading a new file.
+    /// This clears existing tokens and inserts the new ones.
+    pub fn replace_tokens(&mut self, tokens: Vec<TokenEntry>, buffer: &BufferSnapshot) {
+        self.snapshot.tokens = SumTree::new(buffer);
+        for token in tokens {
+            self.snapshot.tokens.push(token, buffer);
+        }
+        self.snapshot.version = buffer.version().clone();
+    }
+
     /// Synchronize tokens with buffer changes
     pub fn sync(&mut self, buffer: &BufferSnapshot, edits: &[text::Edit<usize>]) {
         if edits.is_empty() {
