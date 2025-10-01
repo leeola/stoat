@@ -2,32 +2,172 @@
 
 pub mod cursor_notation;
 
-use crate::Stoat;
-use gpui::{Pixels, Size, TestAppContext};
+use crate::{actions::*, Stoat};
+use gpui::{
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Render, Size, Styled, TestAppContext, Window,
+};
 use text::Point;
 
 /// Default line height in pixels for test calculations
 const DEFAULT_LINE_HEIGHT: f32 = 20.0;
 
+/// Test-only view wrapper for Stoat that implements Render and registers action handlers.
+///
+/// This wrapper enables Stoat to be used in GPUI's windowed test environment,
+/// allowing keystroke simulation through the full action dispatch pipeline.
+struct StoatView {
+    stoat: Stoat,
+    focus_handle: FocusHandle,
+}
+
+impl StoatView {
+    fn new(stoat: Stoat, cx: &mut Context<Self>) -> Self {
+        Self {
+            stoat,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn stoat(&self) -> &Stoat {
+        &self.stoat
+    }
+
+    fn stoat_mut(&mut self) -> &mut Stoat {
+        &mut self.stoat
+    }
+}
+
+impl Focusable for StoatView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for StoatView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("stoat-test-view")
+            .key_context("Stoat")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            // Movement actions
+            .on_action(cx.listener(|view: &mut Self, _: &MoveLeft, _, cx| {
+                view.stoat.move_cursor_left(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveRight, _, cx| {
+                view.stoat.move_cursor_right(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveUp, _, cx| {
+                view.stoat.move_cursor_up(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveDown, _, cx| {
+                view.stoat.move_cursor_down(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveToLineStart, _, cx| {
+                view.stoat.move_cursor_to_line_start();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveToLineEnd, _, cx| {
+                view.stoat.move_cursor_to_line_end(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveToFileStart, _, cx| {
+                view.stoat.move_cursor_to_file_start();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &MoveToFileEnd, _, cx| {
+                view.stoat.move_cursor_to_file_end(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &PageUp, _, cx| {
+                view.stoat.move_cursor_page_up(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &PageDown, _, cx| {
+                view.stoat.move_cursor_page_down(cx);
+                cx.notify();
+            }))
+            // Edit actions
+            .on_action(cx.listener(|view: &mut Self, action: &InsertText, _, cx| {
+                view.stoat.insert_text(&action.0, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &DeleteLeft, _, cx| {
+                view.stoat.delete_left(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &DeleteRight, _, cx| {
+                view.stoat.delete_right(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &DeleteLine, _, cx| {
+                view.stoat.delete_line(cx);
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|view: &mut Self, _: &DeleteToEndOfLine, _, cx| {
+                    view.stoat.delete_to_end_of_line(cx);
+                    cx.notify();
+                }),
+            )
+            // Modal actions
+            .on_action(cx.listener(|view: &mut Self, _: &EnterInsertMode, _, cx| {
+                view.stoat.set_mode(crate::EditorMode::Insert);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &EnterNormalMode, _, cx| {
+                view.stoat.set_mode(crate::EditorMode::Normal);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &EnterVisualMode, _, cx| {
+                view.stoat.set_mode(crate::EditorMode::Visual);
+                cx.notify();
+            }))
+    }
+}
+
 /// Test wrapper for Stoat that provides convenient testing methods
 pub struct StoatTest {
-    stoat: Stoat,
-    cx: TestAppContext,
+    view: gpui::Entity<StoatView>,
+    window: gpui::AnyWindowHandle,
+    cx: gpui::VisualTestContext,
     line_height: f32,
 }
 
 impl StoatTest {
     /// Create a new StoatTest instance with default settings
     pub fn new() -> Self {
-        let cx = TestAppContext::single();
-        let stoat = {
-            let mut app = cx.app.borrow_mut();
-            Stoat::new(&mut app)
-        };
+        use std::ops::Deref;
+
+        let mut cx = TestAppContext::single();
+
+        // Bind default keys
+        cx.update(|cx| {
+            cx.bind_keys(crate::keymap::create_default_keymap().bindings());
+        });
+
+        // Create window with StoatView
+        let window = cx.add_window(|window, cx| {
+            let stoat = Stoat::new(cx);
+            let view = cx.new_entity(|cx| StoatView::new(stoat, cx));
+
+            // Focus the view
+            window.focus(&view.focus_handle(cx));
+
+            view
+        });
+
+        let view = window.root(&cx).unwrap();
 
         let mut test = Self {
-            stoat,
-            cx,
+            view,
+            window: window.into(),
+            cx: gpui::VisualTestContext::from_window(*window.deref(), &cx),
             line_height: DEFAULT_LINE_HEIGHT,
         };
 
@@ -39,20 +179,26 @@ impl StoatTest {
 
     /// Get the current buffer contents as a string
     pub fn text(&self) -> String {
-        let app = self.cx.app.borrow();
-        self.stoat.buffer_contents(&app)
+        self.view
+            .read_with(&self.cx, |view, cx| view.stoat().buffer_contents(cx))
+            .unwrap()
     }
 
     /// Get the current cursor position as (row, column)
     pub fn cursor(&self) -> (u32, u32) {
-        let pos = self.stoat.cursor_position();
-        (pos.row, pos.column)
+        self.view
+            .read_with(&self.cx, |view, _| {
+                let pos = view.stoat().cursor_position();
+                (pos.row, pos.column)
+            })
+            .unwrap()
     }
 
     /// Insert text at the current cursor position
     pub fn insert(&mut self, text: &str) {
-        let mut app = self.cx.app.borrow_mut();
-        self.stoat.insert_text(text, &mut app);
+        self.view.update(&mut self.cx, |view, cx| {
+            view.stoat_mut().insert_text(text, cx);
+        });
     }
 
     /// Set the window size in pixels
@@ -64,7 +210,9 @@ impl StoatTest {
 
     /// Set the viewport height in lines
     pub fn set_viewport_lines(&mut self, lines: f32) {
-        self.stoat.set_visible_line_count(lines);
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().set_visible_line_count(lines);
+        });
     }
 
     /// Resize the viewport to the specified number of lines
@@ -84,12 +232,16 @@ impl StoatTest {
 
     /// Get the current viewport size in lines
     pub fn viewport_lines(&self) -> Option<f32> {
-        self.stoat.visible_line_count()
+        self.view
+            .read_with(&self.cx, |view, _| view.stoat().visible_line_count())
+            .unwrap()
     }
 
     /// Move cursor to specific position
     pub fn set_cursor(&mut self, row: u32, col: u32) {
-        self.stoat.set_cursor_position(Point::new(row, col));
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().set_cursor_position(Point::new(row, col));
+        });
     }
 
     /// Assert the text content matches expected
@@ -106,17 +258,20 @@ impl StoatTest {
 
     /// Get the current editor mode
     pub fn mode(&self) -> crate::EditorMode {
-        self.stoat.mode()
+        self.view.read(&self.cx).stoat().mode()
     }
 
     /// Set the editor mode
     pub fn set_mode(&mut self, mode: crate::EditorMode) {
-        self.stoat.set_mode(mode);
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().set_mode(mode);
+        });
     }
 
     /// Get the current selection as (start_row, start_col, end_row, end_col)
     pub fn selection(&self) -> (u32, u32, u32, u32) {
-        let selection = self.stoat.cursor_manager().selection();
+        let stoat = self.view.read(&self.cx).stoat();
+        let selection = stoat.cursor_manager().selection();
         (
             selection.start.row,
             selection.start.column,
@@ -127,7 +282,8 @@ impl StoatTest {
 
     /// Check if there is an active selection
     pub fn has_selection(&self) -> bool {
-        !self.stoat.cursor_manager().selection().is_empty()
+        let stoat = self.view.read(&self.cx).stoat();
+        !stoat.cursor_manager().selection().is_empty()
     }
 
     /// Assert the editor mode matches expected
@@ -153,19 +309,23 @@ impl StoatTest {
 
     /// Start text selection at current cursor position
     pub fn start_selection(&mut self) {
-        self.stoat.cursor_manager_mut().start_selection();
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().cursor_manager_mut().start_selection();
+        });
     }
 
     /// End text selection
     pub fn end_selection(&mut self) {
-        self.stoat.cursor_manager_mut().end_selection();
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().cursor_manager_mut().end_selection();
+        });
     }
 
     /// Select the next token from cursor and return selected text
     pub fn select_next_token(&self) -> Option<String> {
-        let app = self.cx.app.borrow();
-        self.stoat.select_next_token(&*app).map(|range| {
-            let snapshot = self.stoat.buffer_snapshot(&*app);
+        let stoat = self.view.read(&self.cx).stoat();
+        stoat.select_next_token(&self.cx).map(|range| {
+            let snapshot = stoat.buffer_snapshot(&self.cx);
             snapshot.text_for_range(range).collect()
         })
     }
@@ -180,29 +340,32 @@ impl StoatTest {
     /// s.set_text("hello world");  // Text set, cursor at start
     /// ```
     pub fn set_text(&mut self, text: &str) {
-        // Clear buffer and insert new text
-        self.stoat.buffer.update(&mut self.cx, |buf, _| {
-            let len = buf.len();
-            buf.edit([(0..len, text)]);
-        });
+        self.view.update(&mut self.cx, |view, cx| {
+            // Clear buffer and insert new text
+            view.stoat_mut().buffer.update(cx, |buf, _| {
+                let len = buf.len();
+                buf.edit([(0..len, text)]);
+            });
 
-        // Reset cursor to origin
-        self.stoat.set_cursor_position(Point::new(0, 0));
+            // Reset cursor to origin
+            view.stoat_mut().set_cursor_position(Point::new(0, 0));
+        });
     }
 
-    /// Process input through the editor (stub)
+    /// Process input through the editor via GPUI's keystroke dispatch.
     ///
-    /// Simulates key input to the editor. Will be connected to the modal
-    /// system and command processing when implemented.
+    /// Simulates key input to the editor using GPUI's full action dispatch pipeline.
+    /// Keystrokes are parsed, matched against the keymap, and dispatched as actions
+    /// to the focused element's handlers.
     ///
     /// # Example
     /// ```ignore
-    /// s.input("w");   // Move forward one word
-    /// s.input("dw");  // Delete word
+    /// s.input("h");   // Move left (dispatches MoveLeft action)
+    /// s.input("i");   // Enter insert mode (dispatches EnterInsertMode)
+    /// s.input("w");   // In normal mode: move forward one word
     /// ```
-    pub fn input(&mut self, _keys: &str) {
-        // TODO: Implement modal/command system integration
-        // For now, this is a placeholder for tests to use
+    pub fn input(&mut self, keys: &str) {
+        self.cx.simulate_keystrokes(keys);
     }
 
     /// Assert current state matches cursor notation
@@ -229,11 +392,11 @@ impl StoatTest {
     /// Returns the buffer text with notation showing cursor and selection.
     /// Useful for debugging test failures.
     pub fn cursor_notation(&self) -> String {
-        let app = self.cx.app.borrow();
-        let snapshot = self.stoat.buffer_snapshot(&*app);
+        let stoat = self.view.read(&self.cx).stoat();
+        let snapshot = stoat.buffer_snapshot(&self.cx);
         let text = snapshot.text();
 
-        let cursor_mgr = self.stoat.cursor_manager();
+        let cursor_mgr = stoat.cursor_manager();
         let cursor_point = cursor_mgr.position();
         let cursor_offset = snapshot.point_to_offset(cursor_point);
 
@@ -273,8 +436,10 @@ impl StoatTest {
     /// Simulate scroll wheel event with line-based scrolling and optional fast mode
     pub fn scroll_lines_with_fast(&mut self, lines_x: f32, lines_y: f32, fast_scroll: bool) {
         let delta = crate::ScrollDelta::Lines(gpui::point(lines_x, lines_y));
-        let app = self.cx.app.borrow();
-        self.stoat.handle_scroll_event(&delta, fast_scroll, &*app);
+        self.view.update(&mut self.cx, |view, cx| {
+            view.stoat_mut()
+                .handle_scroll_event(&delta, fast_scroll, cx);
+        });
     }
 
     /// Simulate trackpad scroll event with pixel-based scrolling
@@ -291,13 +456,15 @@ impl StoatTest {
     pub fn scroll_pixels_with_fast(&mut self, pixels_x: f32, pixels_y: f32, fast_scroll: bool) {
         let delta =
             crate::ScrollDelta::Pixels(gpui::point(gpui::Pixels(pixels_x), gpui::Pixels(pixels_y)));
-        let app = self.cx.app.borrow();
-        self.stoat.handle_scroll_event(&delta, fast_scroll, &*app);
+        self.view.update(&mut self.cx, |view, cx| {
+            view.stoat_mut()
+                .handle_scroll_event(&delta, fast_scroll, cx);
+        });
     }
 
     /// Get the current scroll position as (x, y) in fractional lines
     pub fn scroll_position(&self) -> (f32, f32) {
-        let pos = self.stoat.scroll_position();
+        let pos = self.view.read(&self.cx).stoat().scroll_position();
         (pos.x, pos.y)
     }
 

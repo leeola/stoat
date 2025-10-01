@@ -5,10 +5,10 @@ use crate::{
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollWheelEvent, Styled, Window, div,
+    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
-use stoat::{ScrollDelta, Stoat, actions::*};
+use stoat::{actions::*, ScrollDelta, Stoat};
 use tracing::{debug, info};
 
 pub struct EditorView {

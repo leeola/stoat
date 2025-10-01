@@ -4,9 +4,9 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
-    Window, point, px, relative, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;

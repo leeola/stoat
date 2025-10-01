@@ -1,6 +1,5 @@
 pub mod actions;
 mod cursor;
-pub mod dispatch;
 pub mod keymap;
 pub mod log;
 mod scroll;
