@@ -1,4 +1,7 @@
+pub mod actions;
 mod cursor;
+pub mod dispatch;
+pub mod keymap;
 pub mod log;
 mod scroll;
 mod selection;
@@ -18,8 +21,17 @@ pub enum EditorMode {
 }
 
 impl EditorMode {
-    /// Returns the string representation of the mode for display
+    /// Returns the string representation of the mode for key binding predicates
     pub fn as_str(&self) -> &'static str {
+        match self {
+            EditorMode::Normal => "normal",
+            EditorMode::Insert => "insert",
+            EditorMode::Visual => "visual",
+        }
+    }
+
+    /// Returns the string representation of the mode for display
+    pub fn as_display_str(&self) -> &'static str {
         match self {
             EditorMode::Normal => "NORMAL",
             EditorMode::Insert => "INSERT",

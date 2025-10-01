@@ -10,6 +10,7 @@ gui = []
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
+smallvec = { workspace = true }
 stoat_rope_v3 = { path = "../rope_v3" }
 stoat_text_v3 = { path = "../text_v3" }
 text = { git = "https://github.com/zed-industries/zed.git" }

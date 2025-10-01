@@ -6343,6 +6343,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "gpui",
+ "smallvec",
  "stoat_rope_v3",
  "stoat_text_v3",
  "text",
