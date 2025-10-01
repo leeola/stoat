@@ -1,6 +1,5 @@
 pub mod actions;
 pub mod app;
-pub mod commands;
 pub mod context;
 pub mod cursor;
 pub mod editor;

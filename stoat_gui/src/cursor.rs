@@ -88,20 +88,12 @@ impl Selection {
 
     /// Get the cursor position (active end of selection)
     pub fn cursor_position(&self) -> Point {
-        if self.reversed {
-            self.start
-        } else {
-            self.end
-        }
+        if self.reversed { self.start } else { self.end }
     }
 
     /// Get the anchor position (inactive end of selection)
     pub fn anchor_position(&self) -> Point {
-        if self.reversed {
-            self.end
-        } else {
-            self.start
-        }
+        if self.reversed { self.end } else { self.start }
     }
 
     /// Get the selection range as start..end

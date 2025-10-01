@@ -6,8 +6,8 @@
 //! The modal system transforms key input into editor commands that can be
 //! executed by the command system.
 
-use crate::commands::*;
 use gpui::Action;
+use stoat::actions::*;
 use tracing::{debug, info};
 
 /// The editor modes supported by the modal system.

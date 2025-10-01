@@ -1,4 +1,4 @@
-use gpui::{px, rgb, Hsla, Pixels};
+use gpui::{Hsla, Pixels, px, rgb};
 
 /// Style configuration for the editor
 pub struct EditorStyle {

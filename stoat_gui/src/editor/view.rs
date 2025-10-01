@@ -1,15 +1,14 @@
 use super::{element::EditorElement, style::EditorStyle};
 use crate::{
-    commands::*,
     context::EditorContext,
     input::InputHandler,
     modal::{ModalHandler, ModalResult},
 };
 use gpui::{
-    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollWheelEvent, Styled, Window, div,
 };
-use stoat::{ScrollDelta, Stoat};
+use stoat::{ScrollDelta, Stoat, actions::*};
 use tracing::{debug, info};
 
 pub struct EditorView {
