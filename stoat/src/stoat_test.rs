@@ -139,6 +139,11 @@ impl Render for StoatView {
                 view.stoat.set_mode(crate::EditorMode::Visual);
                 cx.notify();
             }))
+            // Selection actions
+            .on_action(cx.listener(|view: &mut Self, _: &SelectNextSymbol, _, cx| {
+                view.stoat.select_next_symbol(cx);
+                cx.notify();
+            }))
             // Handle text input in insert mode as fallback (when no action matched)
             .on_key_down(
                 cx.listener(|view: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
@@ -372,20 +377,56 @@ impl StoatTest {
     /// Replaces entire buffer with the given text and resets cursor to (0, 0).
     /// Use this for initial test setup when you don't need specific cursor placement.
     ///
+    /// The text is parsed as Rust code by default for tokenization. Use [`set_text_with_language`]
+    /// if you need a different language.
+    ///
     /// # Example
     /// ```ignore
-    /// s.set_text("hello world");  // Text set, cursor at start
+    /// s.set_text("fn foo() {}");  // Text set, cursor at start, parsed as Rust
     /// ```
     pub fn set_text(&mut self, text: &str) {
+        self.set_text_with_language(text, stoat_text_v3::Language::Rust);
+    }
+
+    /// Set buffer text with a specific language for parsing
+    ///
+    /// Replaces entire buffer with the given text, parses it with the specified language,
+    /// and resets cursor to (0, 0).
+    ///
+    /// # Example
+    /// ```ignore
+    /// s.set_text_with_language("# Hello", stoat_text_v3::Language::Markdown);
+    /// ```
+    pub fn set_text_with_language(&mut self, text: &str, language: stoat_text_v3::Language) {
         self.view.update(&mut self.cx, |view, cx| {
+            let stoat = view.stoat_mut();
+
+            // Update language and parser if needed
+            if stoat.current_language != language {
+                stoat.current_language = language;
+                stoat.parser =
+                    stoat_text_v3::Parser::new(language).expect("Failed to create parser");
+            }
+
             // Clear buffer and insert new text
-            view.stoat_mut().buffer.update(cx, |buf, _| {
+            stoat.buffer.update(cx, |buf, _| {
                 let len = buf.len();
                 buf.edit([(0..len, text)]);
             });
 
+            // Re-parse entire buffer after edit
+            let buffer_snapshot = stoat.buffer.read(cx).snapshot();
+            match stoat.parser.parse(text, &buffer_snapshot) {
+                Ok(tokens) => {
+                    stoat.token_map.replace_tokens(tokens, &buffer_snapshot);
+                },
+                Err(e) => {
+                    eprintln!("Failed to parse in set_text: {}", e);
+                },
+            }
+
             // Reset cursor to origin
-            view.stoat_mut().set_cursor_position(Point::new(0, 0));
+            stoat.set_cursor_position(Point::new(0, 0));
         });
     }
 

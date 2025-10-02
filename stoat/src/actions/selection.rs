@@ -56,14 +56,75 @@ impl Stoat {
     ///
     /// See also [`crate::selection::select_next_token`] for token-level selection that
     /// includes punctuation and operators.
-    pub fn select_next_symbol(&self, cx: &App) -> Option<Range<usize>> {
-        // TODO: Implement symbol selection
-        // 1. Get current cursor position
-        // 2. Skip whitespace and non-alphanumeric chars
-        // 3. Find next alphanumeric token boundary
-        // 4. Return range of symbol
-        let _ = cx;
-        None
+    pub fn select_next_symbol(&mut self, cx: &App) -> Option<Range<usize>> {
+        use text::ToOffset;
+
+        let buffer_snapshot = self.buffer_snapshot(cx);
+        let token_snapshot = self.token_snapshot();
+        let cursor_pos = self.cursor_manager.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        // Create a cursor to iterate through tokens
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut found_symbol = None;
+
+        // Track the first symbol we encounter at cursor position (fallback)
+        let mut symbol_at_cursor = None;
+
+        // Iterate through tokens to find the next symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // Skip tokens that are entirely before the cursor
+            if token_end <= cursor_offset {
+                token_cursor.next();
+                continue;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // If we're at the start of a symbol, remember it as fallback
+                // but try to find the next symbol first
+                if token_start == cursor_offset && symbol_at_cursor.is_none() {
+                    symbol_at_cursor = Some((token_start, token_end));
+                    token_cursor.next();
+                    continue;
+                }
+
+                // Found a symbol after the cursor position
+                let selection_start = cursor_offset.max(token_start);
+                found_symbol = Some(selection_start..token_end);
+                break;
+            }
+
+            // Not a symbol, keep looking
+            token_cursor.next();
+        }
+
+        // If we didn't find a symbol after the cursor, use the one at cursor (if any)
+        if found_symbol.is_none() {
+            if let Some((start, end)) = symbol_at_cursor {
+                found_symbol = Some(start..end);
+            }
+        }
+
+        // If we found a symbol, update the cursor and selection
+        if let Some(ref range) = found_symbol {
+            let selection_start = buffer_snapshot.offset_to_point(range.start);
+            let selection_end = buffer_snapshot.offset_to_point(range.end);
+
+            // Enter visual mode and create selection
+            self.set_mode(crate::EditorMode::Visual);
+
+            // Create the selection
+            let selection = crate::cursor::Selection::new(selection_start, selection_end);
+            self.cursor_manager.set_selection(selection);
+        }
+
+        found_symbol
     }
 }
 

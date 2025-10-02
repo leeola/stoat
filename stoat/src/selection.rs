@@ -34,23 +34,8 @@ impl Stoat {
 
 #[cfg(test)]
 mod tests {
-    use crate::Stoat;
-
-    #[test]
-    fn select_punctuation_dot() {
-        let mut s = Stoat::test();
-        s.set_text("foo.bar");
-        s.set_cursor(0, 3); // After "foo"
-        s.input("w"); // Select the "." punctuation
-        s.assert_cursor_notation("foo<|.||>bar");
-    }
-
-    #[test]
-    fn select_operator() {
-        let mut s = Stoat::test();
-        s.set_text("x + y");
-        s.set_cursor(0, 2); // After "x "
-        s.input("w"); // Select "+" operator
-        s.assert_cursor_notation("x <|+||> y");
-    }
+    // Note: Token-level selection tests have been removed since the `w` key
+    // now performs symbol-based selection (see actions::selection module).
+    // If token-level selection is needed in the future, it should be bound
+    // to a different key.
 }

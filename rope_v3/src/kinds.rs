@@ -205,6 +205,34 @@ impl SyntaxKind {
         )
     }
 
+    /// Returns true if this kind represents a symbol (identifier, keyword, number, etc.)
+    ///
+    /// Symbols are meaningful named entities or literals in code, excluding punctuation
+    /// and operators. This is used for semantic navigation that skips syntactic noise.
+    pub fn is_symbol(&self) -> bool {
+        matches!(
+            self,
+            SyntaxKind::Identifier
+                | SyntaxKind::Type
+                | SyntaxKind::TypeBuiltin
+                | SyntaxKind::TypeInterface
+                | SyntaxKind::Word
+                | SyntaxKind::Number
+                | SyntaxKind::String
+                | SyntaxKind::Char
+                | SyntaxKind::Boolean
+                | SyntaxKind::Constant
+                | SyntaxKind::Keyword
+                | SyntaxKind::Function
+                | SyntaxKind::FunctionMethod
+                | SyntaxKind::FunctionDefinition
+                | SyntaxKind::FunctionSpecial
+                | SyntaxKind::VariableSpecial
+                | SyntaxKind::VariableParameter
+                | SyntaxKind::Property
+        )
+    }
+
     /// Get a human-readable name for this syntax kind
     pub fn as_str(&self) -> &'static str {
         match self {

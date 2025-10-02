@@ -296,5 +296,13 @@ actions!(
         ///
         /// Extends the selection to the end of the current line.
         SelectToLineEnd,
+        /// Select the next symbol from the cursor position.
+        ///
+        /// Finds and selects the next identifier, keyword, or literal, skipping whitespace,
+        /// punctuation, and operators. This enables semantic navigation through code by
+        /// jumping between meaningful named entities.
+        ///
+        /// Implemented by [`crate::actions::selection::select_next_symbol`].
+        SelectNextSymbol,
     ]
 );
