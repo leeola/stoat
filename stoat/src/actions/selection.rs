@@ -1,23 +1,31 @@
-//! Symbol-based selection operations
+//! Selection operations
 //!
-//! This module provides commands for selecting symbols - identifiers, keywords, and literals -
-//! while skipping punctuation and operators. This enables semantic navigation through code,
-//! jumping between meaningful named entities rather than every syntactic token.
+//! This module provides commands for selecting text based on both semantic (symbol) and
+//! syntactic (token) boundaries.
 //!
 //! # Symbol Selection
 //!
-//! The primary commands are:
+//! Symbol selection (`w`/`b`) selects meaningful named entities while skipping punctuation:
 //! - [`select_next_symbol`] - finds the next symbol from the cursor position
 //! - [`select_prev_symbol`] - finds the previous symbol from the cursor position
 //!
-//! Both automatically skip:
+//! Automatically skips:
 //! - Whitespace and newlines
 //! - Punctuation (`.`, `,`, `;`, etc.)
 //! - Operators (`+`, `-`, `->`, etc.)
 //! - Brackets and delimiters (`()`, `<>`, `{}`, etc.)
 //!
-//! This differs from token-based selection (see [`crate::selection`]) which selects any
-//! syntactic token including punctuation.
+//! # Token Selection
+//!
+//! Token selection (`W`/`B`) selects ANY syntactic token including punctuation:
+//! - [`select_next_token`] - finds the next token from the cursor position
+//! - [`select_prev_token`] - finds the previous token from the cursor position
+//!
+//! Selects ALL tokens:
+//! - Identifiers, keywords, literals (same as symbols)
+//! - Punctuation (`.`, `,`, `;`, etc.)
+//! - Operators (`+`, `-`, `->`, etc.)
+//! - Brackets and delimiters (`()`, `<>`, `{}`, etc.)
 //!
 //! # Integration
 //!
@@ -27,4 +35,6 @@
 //! - [`crate::actions::editor_selection`] - the action namespace for selection commands
 
 mod select_next_symbol;
+mod select_next_token;
 mod select_prev_symbol;
+mod select_prev_token;

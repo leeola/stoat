@@ -62,6 +62,9 @@ pub fn create_default_keymap() -> Keymap {
         // Symbol selection
         KeyBinding::new("w", SelectNextSymbol, Some("Editor && mode == normal")),
         KeyBinding::new("b", SelectPrevSymbol, Some("Editor && mode == normal")),
+        // Token selection
+        KeyBinding::new("W", SelectNextToken, Some("Editor && mode == normal")),
+        KeyBinding::new("B", SelectPrevToken, Some("Editor && mode == normal")),
         // Line start/end
         KeyBinding::new("0", MoveToLineStart, Some("Editor && mode == normal")),
         KeyBinding::new("$", MoveToLineEnd, Some("Editor && mode == normal")),
@@ -151,6 +154,9 @@ pub fn create_default_keymap() -> Keymap {
         // Symbol selection
         KeyBinding::new("w", SelectNextSymbol, Some("Editor && mode == visual")),
         KeyBinding::new("b", SelectPrevSymbol, Some("Editor && mode == visual")),
+        // Token selection
+        KeyBinding::new("W", SelectNextToken, Some("Editor && mode == visual")),
+        KeyBinding::new("B", SelectPrevToken, Some("Editor && mode == visual")),
         // Line start/end extends selection
         KeyBinding::new("0", SelectToLineStart, Some("Editor && mode == visual")),
         KeyBinding::new("$", SelectToLineEnd, Some("Editor && mode == visual")),

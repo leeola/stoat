@@ -148,6 +148,14 @@ impl Render for StoatView {
                 view.stoat.select_prev_symbol(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|view: &mut Self, _: &SelectNextToken, _, cx| {
+                view.stoat.select_next_token(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view: &mut Self, _: &SelectPrevToken, _, cx| {
+                view.stoat.select_prev_token(cx);
+                cx.notify();
+            }))
             // Handle text input in insert mode as fallback (when no action matched)
             .on_key_down(
                 cx.listener(|view: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
@@ -369,7 +377,7 @@ impl StoatTest {
     /// Select the next token from cursor and return selected text
     pub fn select_next_token(&mut self) -> Option<String> {
         self.view.update_in(&mut self.cx, |view, _, cx| {
-            view.stoat().select_next_token(cx).map(|range| {
+            view.stoat_mut().select_next_token(cx).map(|range| {
                 let snapshot = view.stoat().buffer_snapshot(cx);
                 snapshot.text_for_range(range).collect()
             })

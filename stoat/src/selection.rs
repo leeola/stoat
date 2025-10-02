@@ -1,33 +1,16 @@
-//! Token-based selection operations
+//! Legacy selection module
 //!
-//! This module provides low-level commands for selecting text based on token boundaries,
-//! selecting ANY syntactic token including punctuation, operators, and delimiters.
+//! This module previously contained token selection stubs. Token and symbol selection
+//! have been moved to [`crate::actions::selection`].
 //!
-//! For higher-level symbol selection that skips punctuation to select identifiers,
-//! keywords, and literals, see [`crate::actions::selection`].
-
-use crate::Stoat;
-use gpui::App;
-use std::ops::Range;
-
-impl Stoat {
-    /// Select the next token from the current cursor position.
-    ///
-    /// This command skips whitespace and selects the next syntactic token.
-    /// Similar to Helix's word selection but token-aware. The selection is
-    /// created in visual mode, anchored at the current cursor position.
-    ///
-    /// # Behavior
-    /// - Skips whitespace and newlines to find the next token
-    /// - Selects the entire token (respects token boundaries)
-    /// - If cursor is mid-token, behavior TBD
-    /// - If no next token exists, returns None
-    ///
-    /// # Returns
-    /// The byte range of the selected token, or None if no token found.
-    pub fn select_next_token(&self, cx: &App) -> Option<Range<usize>> {
-        // TODO: Implement
-        let _ = cx;
-        None
-    }
-}
+//! # Token Selection
+//!
+//! For token-based selection operations, see:
+//! - [`crate::actions::selection::select_next_token`]
+//! - [`crate::actions::selection::select_prev_token`]
+//!
+//! # Symbol Selection
+//!
+//! For symbol-based selection operations, see:
+//! - [`crate::actions::selection::select_next_symbol`]
+//! - [`crate::actions::selection::select_prev_symbol`]

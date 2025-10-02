@@ -312,5 +312,19 @@ actions!(
         ///
         /// Implemented by [`crate::actions::selection::select_prev_symbol`].
         SelectPrevSymbol,
+        /// Select the next token from the cursor position.
+        ///
+        /// Finds and selects the next syntactic token including punctuation, operators,
+        /// and brackets. This enables low-level navigation through code structure.
+        ///
+        /// Implemented by [`crate::actions::selection::select_next_token`].
+        SelectNextToken,
+        /// Select the previous token from the cursor position.
+        ///
+        /// Finds and selects the previous syntactic token including punctuation, operators,
+        /// and brackets. This enables low-level backward navigation through code structure.
+        ///
+        /// Implemented by [`crate::actions::selection::select_prev_token`].
+        SelectPrevToken,
     ]
 );

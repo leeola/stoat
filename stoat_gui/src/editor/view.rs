@@ -171,6 +171,16 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_select_next_token(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.select_next_token(cx);
+        cx.notify();
+    }
+
+    fn handle_select_prev_token(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.select_prev_token(cx);
+        cx.notify();
+    }
+
     /// Deletion command handlers
     fn handle_delete_left(&mut self, cx: &mut Context<'_, Self>) {
         self.stoat.delete_left(cx);
@@ -308,6 +318,16 @@ impl Render for EditorView {
             .on_action(cx.listener(
                 |editor: &mut EditorView, _: &SelectPrevSymbol, _window: &mut Window, cx| {
                     editor.handle_select_prev_symbol(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &SelectNextToken, _window: &mut Window, cx| {
+                    editor.handle_select_next_token(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &SelectPrevToken, _window: &mut Window, cx| {
+                    editor.handle_select_prev_token(cx);
                 },
             ))
             // Deletion handlers
