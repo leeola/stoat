@@ -12,8 +12,16 @@
 //!
 //! # Submodules
 //!
-//! - [`selection`]: Symbol-based selection operations
+//! - [`selection`]: Text selection operations (symbol and token-based)
+//! - [`movement`]: Cursor navigation and movement commands
+//! - [`edit`]: Text modification and deletion commands
+//! - [`modal`]: Mode transition commands (Normal, Insert, Visual)
+//! - [`scroll`]: Viewport scrolling operations
 
+mod edit;
+mod modal;
+mod movement;
+mod scroll;
 mod selection;
 
 use crate::ScrollDelta;
