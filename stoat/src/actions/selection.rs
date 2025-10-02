@@ -116,9 +116,6 @@ impl Stoat {
             let selection_start = buffer_snapshot.offset_to_point(range.start);
             let selection_end = buffer_snapshot.offset_to_point(range.end);
 
-            // Enter visual mode and create selection
-            self.set_mode(crate::EditorMode::Visual);
-
             // Create the selection
             let selection = crate::cursor::Selection::new(selection_start, selection_end);
             self.cursor_manager.set_selection(selection);

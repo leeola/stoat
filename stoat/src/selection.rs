@@ -31,11 +31,3 @@ impl Stoat {
         None
     }
 }
-
-#[cfg(test)]
-mod tests {
-    // Note: Token-level selection tests have been removed since the `w` key
-    // now performs symbol-based selection (see actions::selection module).
-    // If token-level selection is needed in the future, it should be bound
-    // to a different key.
-}

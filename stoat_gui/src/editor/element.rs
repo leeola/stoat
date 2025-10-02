@@ -4,9 +4,9 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString,
-    Style, TextRun, Window,
+    App, Bounds, Element, ElementId, Font, FontStyle, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, SharedString, Style, TextRun,
+    Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use stoat::Stoat;
@@ -274,6 +274,9 @@ impl Element for EditorElement {
             border_style: Default::default(),
         });
 
+        // Paint selection (behind text)
+        self.paint_selection(layout, window, cx);
+
         // Paint each shaped line
         for line in &layout.lines {
             // Paint the shaped text - this is how Zed does it
@@ -390,6 +393,159 @@ impl EditorElement {
                     bounds: cursor_bounds,
                     corner_radii: Default::default(),
                     background: self.syntax_theme.default_text_color.into(),
+                    border_color: Default::default(),
+                    border_widths: Default::default(),
+                    border_style: Default::default(),
+                });
+            }
+        }
+    }
+
+    /// Paint the selection highlight
+    fn paint_selection(&self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
+        let selection = self.stoat.cursor_manager().selection();
+
+        // Only paint if there's an actual selection (not just a cursor)
+        if selection.is_empty() {
+            return;
+        }
+
+        let buffer_snapshot = self.stoat.buffer_snapshot(cx);
+        let scroll_position = self.stoat.scroll_position();
+        let start_row = scroll_position.y as u32;
+        let visible_rows = layout.lines.len() as u32;
+        let end_row = start_row + visible_rows;
+
+        // Selection color - light blue with 30% transparency (0xRRGGBBAA format)
+        let selection_color = gpui::rgba(0x3366FF4D);
+
+        // Convert selection points to offsets for easier comparison
+        let selection_start_offset = selection.start.to_offset(&buffer_snapshot);
+        let selection_end_offset = selection.end.to_offset(&buffer_snapshot);
+
+        // Paint selection for each visible line that intersects the selection
+        for row in start_row..end_row {
+            let line_start = text::Point::new(row, 0);
+            let line_len = buffer_snapshot.line_len(row);
+            let line_end = text::Point::new(row, line_len);
+
+            let line_start_offset = line_start.to_offset(&buffer_snapshot);
+            let line_end_offset = line_end.to_offset(&buffer_snapshot);
+
+            // Skip lines that don't intersect the selection
+            if line_end_offset <= selection_start_offset
+                || line_start_offset >= selection_end_offset
+            {
+                continue;
+            }
+
+            // Calculate selection range within this line
+            let sel_start_in_line = if selection_start_offset > line_start_offset {
+                buffer_snapshot
+                    .offset_to_point(selection_start_offset)
+                    .column
+            } else {
+                0
+            };
+
+            let sel_end_in_line = if selection_end_offset < line_end_offset {
+                buffer_snapshot.offset_to_point(selection_end_offset).column
+            } else {
+                line_len
+            };
+
+            if sel_start_in_line >= sel_end_in_line {
+                continue;
+            }
+
+            let relative_row = row - start_row;
+            if let Some(line) = layout.lines.get(relative_row as usize) {
+                // Measure text width before selection
+                let font = Font {
+                    family: SharedString::from("Menlo"),
+                    features: Default::default(),
+                    weight: FontWeight::NORMAL,
+                    style: FontStyle::Normal,
+                    fallbacks: None,
+                };
+
+                // Get text before selection start
+                let text_before_range = line_start..text::Point::new(row, sel_start_in_line);
+                let mut text_before = String::new();
+                for chunk in buffer_snapshot.text_for_range(text_before_range) {
+                    text_before.push_str(chunk);
+                }
+
+                // Get selected text
+                let selected_text_range = text::Point::new(row, sel_start_in_line)
+                    ..text::Point::new(row, sel_end_in_line);
+                let mut selected_text = String::new();
+                for chunk in buffer_snapshot.text_for_range(selected_text_range) {
+                    selected_text.push_str(chunk);
+                }
+
+                // Expand tabs for both
+                let expand_tabs = |text: &str| -> String {
+                    if !text.contains('\t') {
+                        return text.to_string();
+                    }
+                    let mut expanded = String::with_capacity(text.len() * 2);
+                    let mut column = 0;
+                    for ch in text.chars() {
+                        if ch == '\t' {
+                            let tab_stop = 4;
+                            let spaces_to_add = tab_stop - (column % tab_stop);
+                            for _ in 0..spaces_to_add {
+                                expanded.push(' ');
+                                column += 1;
+                            }
+                        } else {
+                            expanded.push(ch);
+                            column += 1;
+                        }
+                    }
+                    expanded
+                };
+
+                let text_before_expanded = expand_tabs(&text_before);
+                let selected_text_expanded = expand_tabs(&selected_text);
+
+                // Measure widths
+                let measure_width = |text: &str| -> Pixels {
+                    if text.is_empty() {
+                        return px(0.0);
+                    }
+                    let shared_text = SharedString::from(text.to_string());
+                    let text_run = TextRun {
+                        len: shared_text.len(),
+                        font: font.clone(),
+                        color: self.syntax_theme.default_text_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(
+                        shared_text,
+                        self.style.font_size,
+                        &[text_run],
+                        None,
+                    );
+                    shaped.width
+                };
+
+                let offset_x = measure_width(&text_before_expanded);
+                let selection_width = measure_width(&selected_text_expanded);
+
+                // Paint selection background
+                let selection_bounds = Bounds {
+                    origin: point(line.position.x + offset_x, line.position.y),
+                    size: size(selection_width, self.style.line_height),
+                };
+
+                window.paint_quad(PaintQuad {
+                    bounds: selection_bounds,
+                    corner_radii: Default::default(),
+                    background: selection_color.into(),
                     border_color: Default::default(),
                     border_widths: Default::default(),
                     border_style: Default::default(),
