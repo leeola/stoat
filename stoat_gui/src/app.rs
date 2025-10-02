@@ -8,9 +8,12 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
     Application::new().run(move |cx: &mut App| {
         let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
 
-        // For the simple modal system, we'll handle keys directly through the editor view
-        // rather than registering individual keybindings for each character.
-        // Future enhancement: add customizable keybindings here.
+        // Register Stoat keybindings
+        let bindings = stoat::keymap::create_default_keymap()
+            .bindings()
+            .cloned()
+            .collect::<Vec<_>>();
+        cx.bind_keys(bindings);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
 
@@ -55,9 +58,12 @@ pub fn run_with_paths(
             stoat.load_files(&path_refs, cx);
         }
 
-        // For the simple modal system, we'll handle keys directly through the editor view
-        // rather than registering individual keybindings for each character.
-        // Future enhancement: add customizable keybindings here.
+        // Register Stoat keybindings
+        let bindings = stoat::keymap::create_default_keymap()
+            .bindings()
+            .cloned()
+            .collect::<Vec<_>>();
+        cx.bind_keys(bindings);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
 

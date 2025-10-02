@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{actions::*, Stoat};
+use crate::{Stoat, actions::*};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Render, Size, Styled, TestAppContext, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
+    Styled, TestAppContext, Window, div,
 };
 use text::Point;
 
@@ -46,9 +46,20 @@ impl Focusable for StoatView {
 
 impl Render for StoatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode_str = match self.stoat.mode() {
+            crate::EditorMode::Normal => "normal",
+            crate::EditorMode::Insert => "insert",
+            crate::EditorMode::Visual => "visual",
+        };
+
         div()
             .id("stoat-test-view")
-            .key_context("Stoat")
+            .key_context({
+                let mut ctx = gpui::KeyContext::new_with_defaults();
+                ctx.add("Editor");
+                ctx.set("mode", mode_str);
+                ctx
+            })
             .track_focus(&self.focus_handle)
             .size_full()
             // Movement actions
@@ -128,6 +139,22 @@ impl Render for StoatView {
                 view.stoat.set_mode(crate::EditorMode::Visual);
                 cx.notify();
             }))
+            // Handle text input in insert mode as fallback (when no action matched)
+            .on_key_down(
+                cx.listener(|view: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
+                    // Only insert text in insert mode when no action matched
+                    if view.stoat.mode() == crate::EditorMode::Insert {
+                        if let Some(ref key_char) = event.keystroke.key_char {
+                            // Only insert if no control/alt modifiers
+                            if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt
+                            {
+                                view.stoat.insert_text(key_char, cx);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }),
+            )
     }
 }
 
@@ -148,21 +175,25 @@ impl StoatTest {
 
         // Bind default keys
         cx.update(|cx| {
-            cx.bind_keys(crate::keymap::create_default_keymap().bindings());
+            let bindings = crate::keymap::create_default_keymap()
+                .bindings()
+                .cloned()
+                .collect::<Vec<_>>();
+            cx.bind_keys(bindings);
         });
 
         // Create window with StoatView
         let window = cx.add_window(|window, cx| {
             let stoat = Stoat::new(cx);
-            let view = cx.new_entity(|cx| StoatView::new(stoat, cx));
+            let view = StoatView::new(stoat, cx);
 
             // Focus the view
-            window.focus(&view.focus_handle(cx));
+            window.focus(&view.focus_handle);
 
             view
         });
 
-        let view = window.root(&cx).unwrap();
+        let view = window.root(&mut cx).unwrap();
 
         let mut test = Self {
             view,
@@ -178,20 +209,17 @@ impl StoatTest {
     }
 
     /// Get the current buffer contents as a string
-    pub fn text(&self) -> String {
+    pub fn text(&mut self) -> String {
         self.view
-            .read_with(&self.cx, |view, cx| view.stoat().buffer_contents(cx))
-            .unwrap()
+            .update_in(&mut self.cx, |view, _, cx| view.stoat().buffer_contents(cx))
     }
 
     /// Get the current cursor position as (row, column)
-    pub fn cursor(&self) -> (u32, u32) {
-        self.view
-            .read_with(&self.cx, |view, _| {
-                let pos = view.stoat().cursor_position();
-                (pos.row, pos.column)
-            })
-            .unwrap()
+    pub fn cursor(&mut self) -> (u32, u32) {
+        self.view.update_in(&mut self.cx, |view, _, _| {
+            let pos = view.stoat().cursor_position();
+            (pos.row, pos.column)
+        })
     }
 
     /// Insert text at the current cursor position
@@ -231,10 +259,9 @@ impl StoatTest {
     }
 
     /// Get the current viewport size in lines
-    pub fn viewport_lines(&self) -> Option<f32> {
+    pub fn viewport_lines(&mut self) -> Option<f32> {
         self.view
-            .read_with(&self.cx, |view, _| view.stoat().visible_line_count())
-            .unwrap()
+            .update_in(&mut self.cx, |view, _, _| view.stoat().visible_line_count())
     }
 
     /// Move cursor to specific position
@@ -246,19 +273,20 @@ impl StoatTest {
 
     /// Assert the text content matches expected
     #[track_caller]
-    pub fn assert_text(&self, expected: &str) {
+    pub fn assert_text(&mut self, expected: &str) {
         assert_eq!(self.text(), expected);
     }
 
     /// Assert the cursor position matches expected
     #[track_caller]
-    pub fn assert_cursor(&self, row: u32, col: u32) {
+    pub fn assert_cursor(&mut self, row: u32, col: u32) {
         assert_eq!(self.cursor(), (row, col));
     }
 
     /// Get the current editor mode
-    pub fn mode(&self) -> crate::EditorMode {
-        self.view.read(&self.cx).stoat().mode()
+    pub fn mode(&mut self) -> crate::EditorMode {
+        self.view
+            .update_in(&mut self.cx, |view, _, _| view.stoat().mode())
     }
 
     /// Set the editor mode
@@ -269,38 +297,40 @@ impl StoatTest {
     }
 
     /// Get the current selection as (start_row, start_col, end_row, end_col)
-    pub fn selection(&self) -> (u32, u32, u32, u32) {
-        let stoat = self.view.read(&self.cx).stoat();
-        let selection = stoat.cursor_manager().selection();
-        (
-            selection.start.row,
-            selection.start.column,
-            selection.end.row,
-            selection.end.column,
-        )
+    pub fn selection(&mut self) -> (u32, u32, u32, u32) {
+        self.view.update_in(&mut self.cx, |view, _, _| {
+            let selection = view.stoat().cursor_manager().selection();
+            (
+                selection.start.row,
+                selection.start.column,
+                selection.end.row,
+                selection.end.column,
+            )
+        })
     }
 
     /// Check if there is an active selection
-    pub fn has_selection(&self) -> bool {
-        let stoat = self.view.read(&self.cx).stoat();
-        !stoat.cursor_manager().selection().is_empty()
+    pub fn has_selection(&mut self) -> bool {
+        self.view.update_in(&mut self.cx, |view, _, _| {
+            !view.stoat().cursor_manager().selection().is_empty()
+        })
     }
 
     /// Assert the editor mode matches expected
     #[track_caller]
-    pub fn assert_mode(&self, expected: crate::EditorMode) {
+    pub fn assert_mode(&mut self, expected: crate::EditorMode) {
         assert_eq!(self.mode(), expected);
     }
 
     /// Assert the selection range matches expected
     #[track_caller]
-    pub fn assert_selection(&self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
+    pub fn assert_selection(&mut self, start_row: u32, start_col: u32, end_row: u32, end_col: u32) {
         assert_eq!(self.selection(), (start_row, start_col, end_row, end_col));
     }
 
     /// Assert that no text is selected
     #[track_caller]
-    pub fn assert_no_selection(&self) {
+    pub fn assert_no_selection(&mut self) {
         assert!(
             !self.has_selection(),
             "Expected no selection, but selection exists"
@@ -322,11 +352,12 @@ impl StoatTest {
     }
 
     /// Select the next token from cursor and return selected text
-    pub fn select_next_token(&self) -> Option<String> {
-        let stoat = self.view.read(&self.cx).stoat();
-        stoat.select_next_token(&self.cx).map(|range| {
-            let snapshot = stoat.buffer_snapshot(&self.cx);
-            snapshot.text_for_range(range).collect()
+    pub fn select_next_token(&mut self) -> Option<String> {
+        self.view.update_in(&mut self.cx, |view, _, cx| {
+            view.stoat().select_next_token(cx).map(|range| {
+                let snapshot = view.stoat().buffer_snapshot(cx);
+                snapshot.text_for_range(range).collect()
+            })
         })
     }
 
@@ -366,6 +397,7 @@ impl StoatTest {
     /// ```
     pub fn input(&mut self, keys: &str) {
         self.cx.simulate_keystrokes(keys);
+        self.cx.run_until_parked();
     }
 
     /// Assert current state matches cursor notation
@@ -378,7 +410,7 @@ impl StoatTest {
     /// s.assert_cursor_notation("hello |world");
     /// ```
     #[track_caller]
-    pub fn assert_cursor_notation(&self, expected: &str) {
+    pub fn assert_cursor_notation(&mut self, expected: &str) {
         let actual = self.cursor_notation();
         assert_eq!(
             actual, expected,
@@ -391,36 +423,38 @@ impl StoatTest {
     ///
     /// Returns the buffer text with notation showing cursor and selection.
     /// Useful for debugging test failures.
-    pub fn cursor_notation(&self) -> String {
-        let stoat = self.view.read(&self.cx).stoat();
-        let snapshot = stoat.buffer_snapshot(&self.cx);
-        let text = snapshot.text();
+    pub fn cursor_notation(&mut self) -> String {
+        self.view.update_in(&mut self.cx, |view, _, cx| {
+            let stoat = view.stoat();
+            let snapshot = stoat.buffer_snapshot(cx);
+            let text = snapshot.text();
 
-        let cursor_mgr = stoat.cursor_manager();
-        let cursor_point = cursor_mgr.position();
-        let cursor_offset = snapshot.point_to_offset(cursor_point);
+            let cursor_mgr = stoat.cursor_manager();
+            let cursor_point = cursor_mgr.position();
+            let cursor_offset = snapshot.point_to_offset(cursor_point);
 
-        let selection = cursor_mgr.selection();
-        let selections = if !selection.is_empty() {
-            let start_offset = snapshot.point_to_offset(selection.start);
-            let end_offset = snapshot.point_to_offset(selection.end);
-            let cursor_at_start = cursor_point == selection.start;
+            let selection = cursor_mgr.selection();
+            let selections = if !selection.is_empty() {
+                let start_offset = snapshot.point_to_offset(selection.start);
+                let end_offset = snapshot.point_to_offset(selection.end);
+                let cursor_at_start = cursor_point == selection.start;
 
-            vec![cursor_notation::Selection {
-                range: start_offset..end_offset,
-                cursor_at_start,
-            }]
-        } else {
-            vec![]
-        };
+                vec![cursor_notation::Selection {
+                    range: start_offset..end_offset,
+                    cursor_at_start,
+                }]
+            } else {
+                vec![]
+            };
 
-        let cursors = if selections.is_empty() {
-            vec![cursor_offset]
-        } else {
-            vec![]
-        };
+            let cursors = if selections.is_empty() {
+                vec![cursor_offset]
+            } else {
+                vec![]
+            };
 
-        cursor_notation::format(&text, &cursors, &selections)
+            cursor_notation::format(&text, &cursors, &selections)
+        })
     }
 
     /// Simulate scroll wheel event with line-based scrolling
@@ -463,14 +497,16 @@ impl StoatTest {
     }
 
     /// Get the current scroll position as (x, y) in fractional lines
-    pub fn scroll_position(&self) -> (f32, f32) {
-        let pos = self.view.read(&self.cx).stoat().scroll_position();
-        (pos.x, pos.y)
+    pub fn scroll_position(&mut self) -> (f32, f32) {
+        self.view.update_in(&mut self.cx, |view, _, _| {
+            let pos = view.stoat().scroll_position();
+            (pos.x, pos.y)
+        })
     }
 
     /// Assert the scroll position matches expected values
     #[track_caller]
-    pub fn assert_scroll_position(&self, expected_x: f32, expected_y: f32) {
+    pub fn assert_scroll_position(&mut self, expected_x: f32, expected_y: f32) {
         let (actual_x, actual_y) = self.scroll_position();
         assert_eq!(
             (actual_x, actual_y),
@@ -485,7 +521,7 @@ impl StoatTest {
 
     /// Assert the scroll Y position matches expected value (most common for vertical scrolling)
     #[track_caller]
-    pub fn assert_scroll_y(&self, expected_y: f32) {
+    pub fn assert_scroll_y(&mut self, expected_y: f32) {
         let (_, actual_y) = self.scroll_position();
         assert_eq!(
             actual_y, expected_y,
@@ -520,6 +556,44 @@ mod tests {
         s.insert("Line 1\nLine 2\nLine 3");
         s.set_cursor(1, 3);
         s.assert_cursor(1, 3);
+    }
+
+    #[test]
+    fn input_insert_mode() {
+        let mut s = Stoat::test();
+        s.input("i");
+        s.input("h e l l o");
+        s.assert_text("hello");
+    }
+
+    #[test]
+    fn escape_exits_insert() {
+        let mut s = Stoat::test();
+        s.assert_mode(crate::EditorMode::Normal);
+        s.input("i");
+        s.assert_mode(crate::EditorMode::Insert);
+        s.input("escape");
+        s.assert_mode(crate::EditorMode::Normal);
+    }
+
+    #[test]
+    fn page_down_moves_cursor() {
+        let mut s = Stoat::test();
+        s.set_text("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10\nLine 11\nLine 12\nLine 13\nLine 14\nLine 15\nLine 16\nLine 17\nLine 18\nLine 19\nLine 20\nLine 21\nLine 22\nLine 23\nLine 24\nLine 25\nLine 26\nLine 27\nLine 28\nLine 29\nLine 30");
+        s.assert_cursor(0, 0);
+        s.input("ctrl-d");
+        let (row, _) = s.cursor();
+        assert!(row > 0, "Cursor should have moved down");
+    }
+
+    #[test]
+    fn pagedown_key_works() {
+        let mut s = Stoat::test();
+        s.set_text("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10\nLine 11\nLine 12\nLine 13\nLine 14\nLine 15\nLine 16\nLine 17\nLine 18\nLine 19\nLine 20\nLine 21\nLine 22\nLine 23\nLine 24\nLine 25\nLine 26\nLine 27\nLine 28\nLine 29\nLine 30");
+        s.assert_cursor(0, 0);
+        s.input("pagedown");
+        let (row, _) = s.cursor();
+        assert!(row > 0, "PageDown key should move cursor down");
     }
 
     #[test]

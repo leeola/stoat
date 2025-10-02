@@ -6,7 +6,6 @@ pub mod editor;
 pub mod external_input;
 pub mod input;
 pub mod keymap;
-pub mod modal;
 pub mod syntax;
 
 // Re-export the main entry points for convenience

@@ -1,22 +1,17 @@
 use super::{element::EditorElement, style::EditorStyle};
-use crate::{
-    context::EditorContext,
-    input::InputHandler,
-    modal::{ModalHandler, ModalResult},
-};
+use crate::{context::EditorContext, input::InputHandler};
 use gpui::{
-    div, Action, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollWheelEvent, Styled, Window,
 };
 use stoat::{actions::*, ScrollDelta, Stoat};
-use tracing::{debug, info};
+use tracing::info;
 
 pub struct EditorView {
     stoat: Stoat,
     pub input_handler: InputHandler,
     context: EditorContext,
     focus_handle: FocusHandle,
-    modal_handler: ModalHandler,
 }
 
 impl EditorView {
@@ -28,64 +23,6 @@ impl EditorView {
             input_handler: InputHandler::with_default_keymap(),
             context: EditorContext::new(),
             focus_handle,
-            modal_handler: ModalHandler::new(),
-        }
-    }
-
-    /// Handle command execution from the modal system or keybindings
-    fn execute_command(
-        &mut self,
-        command: Box<dyn Action>,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        info!("Executing command");
-
-        // Handle specific command types
-        if let Some(insert_text) = command.as_any().downcast_ref::<InsertText>() {
-            self.handle_insert_text(insert_text, cx);
-        } else if command.as_any().downcast_ref::<EnterInsertMode>().is_some() {
-            self.handle_enter_insert_mode(cx);
-        } else if command.as_any().downcast_ref::<EnterNormalMode>().is_some() {
-            self.handle_enter_normal_mode(cx);
-        } else if command.as_any().downcast_ref::<ExitApp>().is_some() {
-            self.handle_exit_app(cx);
-        } else if command.as_any().downcast_ref::<MoveLeft>().is_some() {
-            self.handle_move_left(cx);
-        } else if command.as_any().downcast_ref::<MoveRight>().is_some() {
-            self.handle_move_right(cx);
-        } else if command.as_any().downcast_ref::<MoveUp>().is_some() {
-            self.handle_move_up(cx);
-        } else if command.as_any().downcast_ref::<MoveDown>().is_some() {
-            self.handle_move_down(cx);
-        } else if command.as_any().downcast_ref::<MoveToLineStart>().is_some() {
-            self.handle_move_to_line_start(cx);
-        } else if command.as_any().downcast_ref::<MoveToLineEnd>().is_some() {
-            self.handle_move_to_line_end(cx);
-        } else if command.as_any().downcast_ref::<MoveToFileStart>().is_some() {
-            self.handle_move_to_file_start(cx);
-        } else if command.as_any().downcast_ref::<MoveToFileEnd>().is_some() {
-            self.handle_move_to_file_end(cx);
-        } else if command.as_any().downcast_ref::<PageUp>().is_some() {
-            self.handle_page_up(cx);
-        } else if command.as_any().downcast_ref::<PageDown>().is_some() {
-            self.handle_page_down(cx);
-        } else if command.as_any().downcast_ref::<DeleteLeft>().is_some() {
-            self.handle_delete_left(cx);
-        } else if command.as_any().downcast_ref::<DeleteRight>().is_some() {
-            self.handle_delete_right(cx);
-        } else if command.as_any().downcast_ref::<DeleteLine>().is_some() {
-            self.handle_delete_line(cx);
-        } else if command
-            .as_any()
-            .downcast_ref::<DeleteToEndOfLine>()
-            .is_some()
-        {
-            self.handle_delete_to_end_of_line(cx);
-        } else if let Some(scroll) = command.as_any().downcast_ref::<HandleScroll>() {
-            self.handle_scroll(scroll, cx);
-        } else {
-            debug!("Unhandled command");
         }
     }
 
@@ -128,21 +65,6 @@ impl EditorView {
     /// Get the current context
     pub fn context(&self) -> &EditorContext {
         &self.context
-    }
-
-    /// Handle a key press through the modal system
-    pub fn handle_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<'_, Self>) {
-        info!("EditorView received key: '{}'", key);
-        let result = self.modal_handler.handle_key(key);
-
-        match result {
-            ModalResult::Command(command) => {
-                self.execute_command(command, window, cx);
-            },
-            ModalResult::None => {
-                debug!("No command generated for key '{}'", key);
-            },
-        }
     }
 
     /// Get the current editor mode for display
@@ -277,9 +199,6 @@ impl Focusable for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Focus the editor handle
-        window.focus(&self.focus_handle);
-
         // Update viewport dimensions in Stoat
         let viewport_size = window.viewport_size();
         let style = EditorStyle::default();
@@ -295,10 +214,22 @@ impl Render for EditorView {
             }
         }
 
+        // Determine mode string for key context
+        let mode_str = match self.stoat.mode() {
+            stoat::EditorMode::Normal => "normal",
+            stoat::EditorMode::Insert => "insert",
+            stoat::EditorMode::Visual => "visual",
+        };
+
         // Wrap the editor element in a div that can handle keyboard input
         div()
             .id("editor") // Give it an ID to make it interactive
-            .key_context("EditorView") // Set key context for action dispatch
+            .key_context({
+                let mut ctx = gpui::KeyContext::new_with_defaults();
+                ctx.add("Editor");
+                ctx.set("mode", mode_str);
+                ctx
+            })
             .track_focus(&self.focus_handle) // Make the div focusable
             .size_full() // Take full width and height (100%)
             // Register command handlers
@@ -378,32 +309,20 @@ impl Render for EditorView {
                     editor.handle_delete_to_end_of_line(cx);
                 },
             ))
-            // Handle keyboard input directly for modal system
+            // Handle text input in insert mode as fallback (when no action matched)
             .on_key_down(cx.listener(
-                |editor: &mut EditorView, event: &gpui::KeyDownEvent, window: &mut Window, cx| {
-                    // Build key string with modifiers
-                    let mut key_string = String::new();
-
-                    // Add modifier prefixes
-                    if event.keystroke.modifiers.control {
-                        key_string.push_str("ctrl-");
+                |editor: &mut EditorView, event: &gpui::KeyDownEvent, _, cx| {
+                    // Only insert text in insert mode when no action matched
+                    if editor.stoat.mode() == stoat::EditorMode::Insert {
+                        if let Some(ref key_char) = event.keystroke.key_char {
+                            // Only insert if no control/alt modifiers
+                            if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt
+                            {
+                                editor.stoat.insert_text(key_char, cx);
+                                cx.notify();
+                            }
+                        }
                     }
-                    if event.keystroke.modifiers.alt {
-                        key_string.push_str("alt-");
-                    }
-                    if event.keystroke.modifiers.shift && event.keystroke.key_char.is_none() {
-                        // Only add shift prefix for non-character keys
-                        key_string.push_str("shift-");
-                    }
-
-                    // Add the key itself
-                    if let Some(ref key_char) = event.keystroke.key_char {
-                        key_string.push_str(key_char);
-                    } else {
-                        key_string.push_str(&event.keystroke.key);
-                    }
-
-                    editor.handle_key(&key_string, window, cx);
                 },
             ))
             // Handle scroll wheel events

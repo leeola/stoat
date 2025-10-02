@@ -71,11 +71,16 @@ pub fn create_default_keymap() -> Keymap {
         // Page up/down
         KeyBinding::new("ctrl-u", PageUp, Some("Editor && mode == normal")),
         KeyBinding::new("ctrl-d", PageDown, Some("Editor && mode == normal")),
+        KeyBinding::new("ctrl-b", PageUp, Some("Editor && mode == normal")),
+        KeyBinding::new("ctrl-f", PageDown, Some("Editor && mode == normal")),
+        KeyBinding::new("pageup", PageUp, Some("Editor && mode == normal")),
+        KeyBinding::new("pagedown", PageDown, Some("Editor && mode == normal")),
         // Mode transitions
         KeyBinding::new("i", EnterInsertMode, Some("Editor && mode == normal")),
         KeyBinding::new("v", EnterVisualMode, Some("Editor && mode == normal")),
         KeyBinding::new("escape", EnterNormalMode, Some("Editor && mode == insert")),
         KeyBinding::new("escape", EnterNormalMode, Some("Editor && mode == visual")),
+        KeyBinding::new("escape", ExitApp, Some("Editor && mode == normal")),
         // Editing in normal mode
         KeyBinding::new("x", DeleteRight, Some("Editor && mode == normal")),
         KeyBinding::new("d d", DeleteLine, Some("Editor && mode == normal")),
