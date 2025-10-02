@@ -9,6 +9,12 @@
 //! - [`editor_modal`]: Mode transitions and modal operations
 //! - [`editor_file`]: File operations
 //! - [`editor_selection`]: Text selection actions
+//!
+//! # Submodules
+//!
+//! - [`selection`]: Symbol-based selection operations
+
+mod selection;
 
 use crate::ScrollDelta;
 use gpui::{actions, Action, Pixels, Point};
