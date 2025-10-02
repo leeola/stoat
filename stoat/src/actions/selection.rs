@@ -6,8 +6,11 @@
 //!
 //! # Symbol Selection
 //!
-//! The primary command, [`select_next_symbol`], finds the next alphanumeric token (identifier,
-//! keyword, or number literal) from the cursor position, automatically skipping:
+//! The primary commands are:
+//! - [`select_next_symbol`] - finds the next symbol from the cursor position
+//! - [`select_prev_symbol`] - finds the previous symbol from the cursor position
+//!
+//! Both automatically skip:
 //! - Whitespace and newlines
 //! - Punctuation (`.`, `,`, `;`, etc.)
 //! - Operators (`+`, `-`, `->`, etc.)
@@ -24,3 +27,4 @@
 //! - [`crate::actions::editor_selection`] - the action namespace for selection commands
 
 mod select_next_symbol;
+mod select_prev_symbol;

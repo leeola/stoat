@@ -144,6 +144,10 @@ impl Render for StoatView {
                 view.stoat.select_next_symbol(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|view: &mut Self, _: &SelectPrevSymbol, _, cx| {
+                view.stoat.select_prev_symbol(cx);
+                cx.notify();
+            }))
             // Handle text input in insert mode as fallback (when no action matched)
             .on_key_down(
                 cx.listener(|view: &mut Self, event: &gpui::KeyDownEvent, _, cx| {

@@ -304,5 +304,13 @@ actions!(
         ///
         /// Implemented by [`crate::actions::selection::select_next_symbol`].
         SelectNextSymbol,
+        /// Select the previous symbol from the cursor position.
+        ///
+        /// Finds and selects the previous identifier, keyword, or literal, skipping whitespace,
+        /// punctuation, and operators. This enables semantic backward navigation through code by
+        /// jumping between meaningful named entities.
+        ///
+        /// Implemented by [`crate::actions::selection::select_prev_symbol`].
+        SelectPrevSymbol,
     ]
 );

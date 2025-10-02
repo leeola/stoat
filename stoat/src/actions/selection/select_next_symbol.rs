@@ -40,6 +40,23 @@ impl Stoat {
         use text::ToOffset;
 
         let buffer_snapshot = self.buffer_snapshot(cx);
+
+        // If there's already a non-empty selection with cursor on left, flip cursor to right
+        let current_selection = self.cursor_manager.selection();
+        if !current_selection.is_empty() && current_selection.reversed {
+            // Cursor is on the left side, flip it to the right
+            let start = current_selection.start;
+            let end = current_selection.end;
+            let start_offset = buffer_snapshot.point_to_offset(start);
+            let end_offset = buffer_snapshot.point_to_offset(end);
+
+            // Flip cursor to the right (end) side
+            let selection = crate::cursor::Selection::new(start, end);
+            self.cursor_manager.set_selection(selection);
+
+            return Some(start_offset..end_offset);
+        }
+
         let token_snapshot = self.token_snapshot();
         let cursor_pos = self.cursor_manager.position();
         let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
@@ -96,7 +113,7 @@ impl Stoat {
             let selection_start = buffer_snapshot.offset_to_point(range.start);
             let selection_end = buffer_snapshot.offset_to_point(range.end);
 
-            // Create the selection
+            // Create the selection (cursor on right/end side by default)
             let selection = crate::cursor::Selection::new(selection_start, selection_end);
             self.cursor_manager.set_selection(selection);
         }
