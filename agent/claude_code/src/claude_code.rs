@@ -235,7 +235,7 @@ impl ClaudeCode {
             let new_process = match process_builder.resume_session().await {
                 Ok(process) => process,
                 Err((_channels, e)) => {
-                    anyhow::bail!("Failed to resume session with new model: {:?}", e);
+                    anyhow::bail!("Failed to resume session with new model: {e:?}");
                 },
             };
 

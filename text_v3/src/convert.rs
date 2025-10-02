@@ -145,7 +145,7 @@ fn map_rust_kind_with_context(
             }
 
             // Heuristic: CamelCase identifiers starting with uppercase are types
-            if text.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if text.chars().next().is_some_and(|c| c.is_uppercase()) {
                 return SyntaxKind::Type;
             }
 
@@ -223,7 +223,7 @@ fn map_rust_kind_with_context(
         "]" => SyntaxKind::CloseBracket,
         "{" => SyntaxKind::OpenBrace,
         "}" => SyntaxKind::CloseBrace,
-        "<" | ">" if parent.map_or(false, |p| p.kind().contains("generic")) => {
+        "<" | ">" if parent.is_some_and(|p| p.kind().contains("generic")) => {
             SyntaxKind::PunctuationBracket
         },
         "," => SyntaxKind::Comma,
@@ -297,12 +297,18 @@ mod tests {
     #[test]
     fn type_identifier_is_single_token() {
         let source = "use gpui::{actions, Action, Pixels, Point};";
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(tree_sitter_rust::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser
+            .set_language(tree_sitter_rust::language())
+            .expect("valid rust language");
+        let tree = parser.parse(source, None).expect("valid parse");
 
         let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
 
@@ -341,12 +347,18 @@ fn calculate(x: i32) -> i32 {
     x + 1
 }
 "#;
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(tree_sitter_rust::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser
+            .set_language(tree_sitter_rust::language())
+            .expect("valid rust language");
+        let tree = parser.parse(source, None).expect("valid parse");
 
         let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
 
@@ -395,7 +407,7 @@ fn calculate(x: i32) -> i32 {
             .collect();
 
         // x appears multiple times, but first should be parameter
-        assert!(x_tokens.len() >= 1);
+        assert!(!x_tokens.is_empty());
         assert_eq!(
             x_tokens[0].kind,
             SyntaxKind::VariableParameter,
@@ -425,12 +437,18 @@ fn calculate(x: i32) -> i32 {
     #[test]
     fn heuristic_constant_detection() {
         let source = "const MAX_SIZE: usize = 100;";
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(tree_sitter_rust::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser
+            .set_language(tree_sitter_rust::language())
+            .expect("valid rust language");
+        let tree = parser.parse(source, None).expect("valid parse");
 
         let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
 
@@ -462,12 +480,18 @@ impl Point {
     }
 }
 "#;
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(tree_sitter_rust::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser
+            .set_language(tree_sitter_rust::language())
+            .expect("valid rust language");
+        let tree = parser.parse(source, None).expect("valid parse");
 
         let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
 
@@ -498,7 +522,7 @@ impl Point {
             })
             .collect();
 
-        assert!(self_tokens.len() > 0);
+        assert!(!self_tokens.is_empty());
         for token in &self_tokens {
             assert_eq!(
                 token.kind,
@@ -517,12 +541,18 @@ fn add<'a>(x: &'a i32, y: &'a i32) -> i32 {
     x + y
 }
 "#;
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(tree_sitter_rust::language()).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+        parser
+            .set_language(tree_sitter_rust::language())
+            .expect("valid rust language");
+        let tree = parser.parse(source, None).expect("valid parse");
 
         let tokens = tree_to_tokens(&tree, source, &snapshot, Language::Rust);
 
@@ -536,7 +566,7 @@ fn add<'a>(x: &'a i32, y: &'a i32) -> i32 {
             })
             .collect();
 
-        assert!(doc_tokens.len() > 0, "Should have doc comments");
+        assert!(!doc_tokens.is_empty(), "Should have doc comments");
         for token in &doc_tokens {
             assert_eq!(
                 token.kind,
@@ -566,30 +596,6 @@ fn add<'a>(x: &'a i32, y: &'a i32) -> i32 {
                     "Lifetime should be Lifetime"
                 );
             }
-        }
-    }
-
-    fn print_tree(node: tree_sitter::Node, source: &str, indent: usize) {
-        let text = &source[node.start_byte()..node.end_byte()];
-        let text_preview = if text.len() > 20 {
-            format!("{}...", &text[..20])
-        } else {
-            text.to_string()
-        };
-
-        println!(
-            "{:indent$}{} [{}..{}] {:?}",
-            "",
-            node.kind(),
-            node.start_byte(),
-            node.end_byte(),
-            text_preview,
-            indent = indent
-        );
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            print_tree(child, source, indent + 2);
         }
     }
 }

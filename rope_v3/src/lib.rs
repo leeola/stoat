@@ -46,7 +46,11 @@ mod tests {
     use text::{Buffer, BufferId, BufferSnapshot};
 
     fn create_test_buffer(text: &str) -> BufferSnapshot {
-        let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
+        let buffer = Buffer::new(
+            0,
+            BufferId::from(NonZeroU64::new(1).expect("valid buffer id")),
+            text,
+        );
         buffer.snapshot()
     }
 

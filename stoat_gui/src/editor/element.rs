@@ -280,7 +280,7 @@ impl Element for EditorElement {
             line.shaped
                 .paint(line.position, self.style.line_height, window, cx)
                 .unwrap_or_else(|err| {
-                    eprintln!("Failed to paint line: {:?}", err);
+                    eprintln!("Failed to paint line: {err:?}");
                 });
         }
 

@@ -35,7 +35,7 @@ pub(crate) enum SpecialKey {
 /// - Special keys in angle brackets: "<Esc>", "<Enter>", "<Tab>"
 /// - Arrow keys: "<Left>", "<Right>", "<Up>", "<Down>"
 /// - Combined: "iHello<Esc>" -> 'i', 'H', 'e', 'l', 'l', 'o', then Escape
-pub fn parse_input_sequence(input: &str) -> Vec<InputEvent> {
+pub(crate) fn parse_input_sequence(input: &str) -> Vec<InputEvent> {
     let mut events = Vec::new();
     let mut chars = input.chars().peekable();
 
@@ -45,7 +45,7 @@ pub fn parse_input_sequence(input: &str) -> Vec<InputEvent> {
             let mut key_name = String::new();
             let mut found_end = false;
 
-            while let Some(inner) = chars.next() {
+            for inner in chars.by_ref() {
                 if inner == '>' {
                     found_end = true;
                     break;

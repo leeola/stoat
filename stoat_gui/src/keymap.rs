@@ -31,7 +31,7 @@ impl Keymap {
         if let Some(first_key) = binding.keystrokes.first() {
             self.binding_index
                 .entry(first_key.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(self.bindings.len());
         }
 
@@ -115,12 +115,10 @@ impl Keymap {
 
     /// Load bindings from a configuration
     pub fn load_default() -> Self {
-        let keymap = Self::new();
-
         // For now, return empty keymap since we're using GPUI's action system directly
         // Key bindings are now registered at the app level
 
-        keymap
+        Self::new()
     }
 
     /// Get all bindings

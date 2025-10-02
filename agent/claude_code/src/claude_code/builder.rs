@@ -96,7 +96,7 @@ impl ClaudeCodeBuilder {
                 let process = match process_builder.new_session().await {
                     Ok(process) => process,
                     Err((_channels, e)) => {
-                        return Err(anyhow::anyhow!("Failed to create new session: {:?}", e));
+                        return Err(anyhow::anyhow!("Failed to create new session: {e:?}"));
                     },
                 };
 
@@ -140,7 +140,7 @@ impl ClaudeCodeBuilder {
                 let process = match process_builder.resume_session().await {
                     Ok(process) => process,
                     Err((_channels, e)) => {
-                        return Err(anyhow::anyhow!("Failed to resume session: {:?}", e));
+                        return Err(anyhow::anyhow!("Failed to resume session: {e:?}"));
                     },
                 };
 
@@ -191,7 +191,7 @@ impl ClaudeCodeBuilder {
         let process = match process_builder.new_session().await {
             Ok(process) => process,
             Err((_channels, e)) => {
-                return Err(anyhow::anyhow!("Failed to create new session: {:?}", e));
+                return Err(anyhow::anyhow!("Failed to create new session: {e:?}"));
             },
         };
 
@@ -239,7 +239,7 @@ impl ClaudeCodeBuilder {
         let process = match process_builder.resume_session().await {
             Ok(process) => process,
             Err((_channels, e)) => {
-                return Err(anyhow::anyhow!("Failed to resume session: {:?}", e));
+                return Err(anyhow::anyhow!("Failed to resume session: {e:?}"));
             },
         };
 

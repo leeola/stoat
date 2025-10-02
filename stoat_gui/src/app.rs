@@ -25,14 +25,14 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
                 },
                 |_, cx| cx.new(|cx| EditorView::new(stoat, cx)),
             )
-            .unwrap();
+            .expect("failed to open/update window");
 
         // Focus the editor after window creation
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx));
             })
-            .unwrap();
+            .expect("failed to open/update window");
 
         cx.on_window_closed(|cx| {
             cx.quit();
@@ -75,14 +75,14 @@ pub fn run_with_paths(
                 },
                 |_, cx| cx.new(|cx| EditorView::new(stoat, cx)),
             )
-            .unwrap();
+            .expect("failed to open/update window");
 
         // Focus the editor after window creation
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx));
             })
-            .unwrap();
+            .expect("failed to open/update window");
 
         // Simulate input sequence if provided
         // We need to defer this to avoid updating while already updating

@@ -157,12 +157,10 @@ impl ScrollPosition {
         };
 
         // Apply the scroll offset to current position
-        let new_position = gpui::point(
+        gpui::point(
             self.position.x + scroll_offset.x,
             (self.position.y + scroll_offset.y).max(0.0), // Prevent negative Y scroll
-        );
-
-        new_position
+        )
     }
 }
 

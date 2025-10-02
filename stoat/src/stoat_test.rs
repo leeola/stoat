@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{Stoat, actions::*};
+use crate::{actions::*, Stoat};
 use gpui::{
-    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
-    Styled, TestAppContext, Window, div,
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
+    Size, Styled, TestAppContext, Window,
 };
 use text::Point;
 
@@ -161,9 +161,15 @@ impl Render for StoatView {
 /// Test wrapper for Stoat that provides convenient testing methods
 pub struct StoatTest {
     view: gpui::Entity<StoatView>,
-    window: gpui::AnyWindowHandle,
+    _window: gpui::AnyWindowHandle,
     cx: gpui::VisualTestContext,
     line_height: f32,
+}
+
+impl Default for StoatTest {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StoatTest {
@@ -197,7 +203,7 @@ impl StoatTest {
 
         let mut test = Self {
             view,
-            window: window.into(),
+            _window: window.into(),
             cx: gpui::VisualTestContext::from_window(*window.deref(), &cx),
             line_height: DEFAULT_LINE_HEIGHT,
         };
@@ -414,8 +420,7 @@ impl StoatTest {
         let actual = self.cursor_notation();
         assert_eq!(
             actual, expected,
-            "\nExpected: {}\nActual:   {}",
-            expected, actual
+            "\nExpected: {expected}\nActual:   {actual}"
         );
     }
 
@@ -511,11 +516,7 @@ impl StoatTest {
         assert_eq!(
             (actual_x, actual_y),
             (expected_x, expected_y),
-            "Expected scroll position ({}, {}), got ({}, {})",
-            expected_x,
-            expected_y,
-            actual_x,
-            actual_y
+            "Expected scroll position ({expected_x}, {expected_y}), got ({actual_x}, {actual_y})"
         );
     }
 
@@ -525,8 +526,7 @@ impl StoatTest {
         let (_, actual_y) = self.scroll_position();
         assert_eq!(
             actual_y, expected_y,
-            "Expected scroll Y position {}, got {}",
-            expected_y, actual_y
+            "Expected scroll Y position {expected_y}, got {actual_y}"
         );
     }
 }
@@ -650,7 +650,7 @@ mod tests {
 
         // Initially no selection
         s.assert_no_selection();
-        assert_eq!(s.has_selection(), false);
+        assert!(!s.has_selection());
 
         // Start selection
         s.start_selection();
@@ -659,14 +659,14 @@ mod tests {
         s.set_cursor(2, 4); // Move to "Line 3"
 
         // Should now have selection
-        assert_eq!(s.has_selection(), true);
+        assert!(s.has_selection());
         s.assert_selection(1, 2, 2, 4);
 
         // End selection
         s.end_selection();
 
         // Selection should still exist but not be actively selecting
-        assert_eq!(s.has_selection(), true);
+        assert!(s.has_selection());
     }
 
     #[test]

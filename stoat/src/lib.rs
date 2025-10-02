@@ -9,9 +9,10 @@ mod selection;
 pub mod stoat_test;
 
 /// Editor modes for modal editing
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EditorMode {
     /// Normal mode - for navigation and commands
+    #[default]
     Normal,
     /// Insert mode - for text input
     Insert,
@@ -36,12 +37,6 @@ impl EditorMode {
             EditorMode::Insert => "INSERT",
             EditorMode::Visual => "VISUAL",
         }
-    }
-}
-
-impl Default for EditorMode {
-    fn default() -> Self {
-        EditorMode::Normal
     }
 }
 
@@ -487,14 +482,6 @@ impl Stoat {
 
         // Update scroll position
         self.scroll.scroll_to(bounded_position);
-    }
-}
-
-pub struct EditorEngine;
-
-impl EditorEngine {
-    pub fn new() -> Self {
-        EditorEngine
     }
 }
 

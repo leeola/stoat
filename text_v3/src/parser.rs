@@ -26,14 +26,14 @@ impl Parser {
                 let mut parser = TsParser::new();
                 parser
                     .set_language(tree_sitter_rust::language())
-                    .map_err(|e| anyhow::anyhow!("Failed to set Rust language: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to set Rust language: {e}"))?;
                 Some(parser)
             },
             Language::Markdown => {
                 let mut parser = TsParser::new();
                 parser
                     .set_language(tree_sitter_md::language())
-                    .map_err(|e| anyhow::anyhow!("Failed to set Markdown language: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to set Markdown language: {e}"))?;
                 Some(parser)
             },
             Language::PlainText => None, // No tree-sitter for plain text

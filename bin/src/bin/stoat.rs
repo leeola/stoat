@@ -26,9 +26,6 @@ fn main() {
             }
         },
         None => {
-            // For CLI mode, just create a simple editor engine
-            let _engine = stoat::EditorEngine::new();
-
             // No commands implemented yet - just print a message
             eprintln!(
                 "Stoat editor initialized. Use 'stoat gui' to launch the graphical interface."

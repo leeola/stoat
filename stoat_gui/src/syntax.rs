@@ -52,7 +52,7 @@ const DEFAULT_SYNTAX_HIGHLIGHT_ID: HighlightId = HighlightId(u32::MAX);
 ///
 /// This provides fast lookup from Stoat's token types to GPUI highlight styles.
 /// The mapping is built once per theme and cached for performance.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HighlightMap {
     /// Maps each SyntaxKind to its corresponding HighlightId
     mappings: FxHashMap<SyntaxKind, HighlightId>,
@@ -209,14 +209,6 @@ impl Default for HighlightId {
     }
 }
 
-impl Default for HighlightMap {
-    fn default() -> Self {
-        Self {
-            mappings: FxHashMap::default(),
-        }
-    }
-}
-
 /// A syntax theme defining colors and styles for different highlight categories
 ///
 /// This stores the mapping from highlight category names (like "keyword", "string")
@@ -259,7 +251,7 @@ impl SyntaxTheme {
     ///
     /// Based on the original Sublime Text Monokai theme
     pub fn monokai_dark() -> Self {
-        use gpui::{rgba, FontWeight};
+        use gpui::{FontWeight, rgba};
 
         let mut theme = Self::new();
 
@@ -559,7 +551,7 @@ impl SyntaxTheme {
     ///
     /// Uses the classic Monokai syntax colors with adjusted brightness for light backgrounds
     pub fn monokai_light() -> Self {
-        use gpui::{rgba, FontWeight};
+        use gpui::{FontWeight, rgba};
 
         let mut theme = Self::new();
 
@@ -873,12 +865,17 @@ mod tests {
         let source = "use gpui::{actions, Action, Pixels, Point};";
 
         // Create buffer and parse
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
+        let buffer = Buffer::new(
+            0,
+            BufferId::new(1).expect("valid buffer id"),
+            source.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         // Parse using stoat_text_v3
-        let mut parser = stoat_text_v3::Parser::new(stoat_text_v3::Language::Rust).unwrap();
-        let tokens = parser.parse(source, &snapshot).unwrap();
+        let mut parser =
+            stoat_text_v3::Parser::new(stoat_text_v3::Language::Rust).expect("valid rust parser");
+        let tokens = parser.parse(source, &snapshot).expect("valid parse");
 
         println!("\nTokens:");
         for token in &tokens {
@@ -894,7 +891,7 @@ mod tests {
         let token_snapshot = token_map.snapshot();
 
         // Create highlight map
-        let theme = SyntaxTheme::default_dark();
+        let theme = SyntaxTheme::monokai_dark();
         let highlight_map = HighlightMap::new(&theme);
 
         // Test highlighting chunks for the ENTIRE LINE (like GUI does)
@@ -934,17 +931,13 @@ mod tests {
             })
             .collect();
 
-        println!(
-            "\nUnique highlight IDs for Action parts: {:?}",
-            action_highlight_ids
-        );
+        println!("\nUnique highlight IDs for Action parts: {action_highlight_ids:?}");
 
         // Action should have consistent highlighting
         assert_eq!(
             action_highlight_ids.len(),
             1,
-            "Action should have only one highlight ID, found: {:?}",
-            action_highlight_ids
+            "Action should have only one highlight ID, found: {action_highlight_ids:?}"
         );
     }
 }

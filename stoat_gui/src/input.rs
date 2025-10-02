@@ -26,7 +26,7 @@ impl InputHandler {
         cx: &mut Context<'_, crate::editor::view::EditorView>,
     ) -> Option<Box<dyn Action>> {
         let keystroke = self.event_to_keystroke(event);
-        println!("Converted keystroke: {}", keystroke);
+        println!("Converted keystroke: {keystroke}");
         self.pending_keystrokes.push(keystroke.clone());
 
         // Try to find a matching binding
