@@ -1,4 +1,5 @@
-use gpui::{KeyBinding, Keymap};
+use gpui::{KeyBinding, KeyContext, Keymap};
+use std::collections::HashSet;
 use stoat::EditorMode;
 
 /// Query keybindings for a specific editor mode.
@@ -13,23 +14,55 @@ use stoat::EditorMode;
 ///
 /// # Returns
 /// A vector of (keystroke_string, description) tuples
-pub fn bindings_for_mode(keymap: &Keymap, _mode: EditorMode) -> Vec<(String, String)> {
-    // FIXME: Context filtering disabled - KeyContext::parse causes stack overflow
-    // For now, show all bindings regardless of mode
+pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, String)> {
+    // Build context for the given mode
+    let mode_str = match mode {
+        EditorMode::Normal => "normal",
+        EditorMode::Insert => "insert",
+        EditorMode::Visual => "visual",
+    };
 
-    keymap
-        .bindings()
-        .filter_map(|binding| {
-            // Format keystrokes for display
-            let keystroke = format_keystrokes(binding);
+    // Use format matching GPUI's tests: "Editor mode=normal" not "Editor && mode == normal"
+    let context_str = format!("Editor mode={}", mode_str);
+    let contexts = vec![
+        KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
+        KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
+    ];
 
-            // Get description from action
-            let desc = stoat::actions::short_desc(binding.action())?;
+    let mut results = Vec::new();
+    let mut seen_actions = HashSet::new();
 
-            Some((keystroke, desc.to_string()))
-        })
-        .take(10) // FIXME: Limit to 10 bindings for now to keep overlay manageable
-        .collect()
+    // Iterate through all single-key bindings first
+    for binding in keymap.bindings() {
+        // Skip if no short description
+        let Some(desc) = stoat::actions::short_desc(binding.action()) else {
+            continue;
+        };
+
+        // Skip duplicates (same action)
+        let action_id = binding.action().type_id();
+        if seen_actions.contains(&action_id) {
+            continue;
+        }
+
+        // Check if binding is active in current context
+        let keystrokes = binding.keystrokes();
+        if keystrokes.is_empty() {
+            continue;
+        }
+
+        let (matches, _pending) = keymap.bindings_for_input(keystrokes, &contexts);
+        if matches.is_empty() {
+            continue;
+        }
+
+        // Format and add binding
+        let keystroke = format_keystrokes(binding);
+        results.push((keystroke, desc.to_string()));
+        seen_actions.insert(action_id);
+    }
+
+    results
 }
 
 /// Format keystrokes for display.
