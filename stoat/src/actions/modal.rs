@@ -53,4 +53,5 @@
 
 mod enter_insert_mode;
 mod enter_normal_mode;
+mod enter_pane_mode;
 mod enter_visual_mode;

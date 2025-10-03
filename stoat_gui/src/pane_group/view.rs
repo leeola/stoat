@@ -58,6 +58,20 @@ impl PaneGroupView {
         self.pane_editors.get(&self.active_pane)
     }
 
+    /// Exit Pane mode if currently in it, returning to Normal mode.
+    ///
+    /// This is called after pane commands execute to make Pane mode a one-shot mode.
+    fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(editor) = self.pane_editors.get_mut(&self.active_pane) {
+            editor.update(cx, |editor, cx| {
+                if editor.stoat().mode() == stoat::EditorMode::Pane {
+                    editor.stoat_mut().set_mode(stoat::EditorMode::Normal);
+                    cx.notify();
+                }
+            });
+        }
+    }
+
     /// Split the active pane in the given direction.
     ///
     /// This is public so it can be called from actions with access to Window context.
@@ -96,6 +110,10 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Exit Pane mode after command
+        self.exit_pane_mode(cx);
+
         cx.notify();
     }
 
@@ -128,6 +146,10 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Exit Pane mode after command
+        self.exit_pane_mode(cx);
+
         cx.notify();
     }
 
@@ -160,6 +182,10 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Exit Pane mode after command
+        self.exit_pane_mode(cx);
+
         cx.notify();
     }
 
@@ -192,6 +218,10 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Exit Pane mode after command
+        self.exit_pane_mode(cx);
+
         cx.notify();
     }
 
@@ -242,6 +272,10 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Exit Pane mode after command
+            self.exit_pane_mode(cx);
+
             cx.notify();
         } else {
             debug!(
@@ -270,6 +304,10 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Exit Pane mode after command
+            self.exit_pane_mode(cx);
+
             cx.notify();
         } else {
             debug!(
@@ -298,6 +336,10 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Exit Pane mode after command
+            self.exit_pane_mode(cx);
+
             cx.notify();
         } else {
             debug!(
@@ -326,6 +368,10 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Exit Pane mode after command
+            self.exit_pane_mode(cx);
+
             cx.notify();
         } else {
             debug!(
@@ -367,6 +413,10 @@ impl PaneGroupView {
                     if let Some(editor) = self.pane_editors.get(&new_active_pane) {
                         window.focus(&editor.read(cx).focus_handle(cx));
                     }
+
+                    // Exit Pane mode after command
+                    self.exit_pane_mode(cx);
+
                     cx.notify();
                 }
             },

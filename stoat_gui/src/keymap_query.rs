@@ -5,34 +5,35 @@ use stoat::EditorMode;
 /// Query keybindings for a specific editor mode.
 ///
 /// Returns a list of (keystroke, description) pairs for all bindings that match
-/// the given mode's context. The keystrokes are formatted for display and the
-/// descriptions come from the action's registered short description.
+/// the given mode's context. Prioritizes mode-specific bindings over global ones
+/// and limits the total number shown to keep the overlay manageable.
 ///
 /// # Arguments
 /// * `keymap` - The keymap to query
 /// * `mode` - The editor mode to get bindings for
 ///
 /// # Returns
-/// A vector of (keystroke_string, description) tuples
+/// A vector of (keystroke_string, description) tuples, limited to ~15 entries
 pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, String)> {
     // Build context for the given mode
     let mode_str = match mode {
         EditorMode::Normal => "normal",
         EditorMode::Insert => "insert",
         EditorMode::Visual => "visual",
+        EditorMode::Pane => "pane",
     };
 
-    // Use format matching GPUI's tests: "Editor mode=normal" not "Editor && mode == normal"
     let context_str = format!("Editor mode={}", mode_str);
-    let contexts = vec![
+    let this_contexts = vec![
         KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
         KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
     ];
 
-    let mut results = Vec::new();
+    let mut mode_specific = Vec::new();
+    let mut global = Vec::new();
     let mut seen_actions = HashSet::new();
 
-    // Iterate through all single-key bindings first
+    // Separate mode-specific and global bindings
     for binding in keymap.bindings() {
         // Skip if no short description
         let Some(desc) = stoat::actions::short_desc(binding.action()) else {
@@ -51,18 +52,77 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, Stri
             continue;
         }
 
-        let (matches, _pending) = keymap.bindings_for_input(keystrokes, &contexts);
-        if matches.is_empty() {
+        let (matches_list, _pending) = keymap.bindings_for_input(keystrokes, &this_contexts);
+        if matches_list.is_empty() {
             continue;
         }
 
-        // Format and add binding
-        let keystroke = format_keystrokes(binding);
-        results.push((keystroke, desc.to_string()));
         seen_actions.insert(action_id);
+
+        // Check if this binding is mode-specific by testing it against all modes
+        let is_mode_specific = is_binding_mode_specific(keymap, binding, mode);
+
+        let keystroke = format_keystrokes(binding);
+        let entry = (keystroke, desc.to_string());
+
+        if is_mode_specific {
+            mode_specific.push(entry);
+        } else {
+            global.push(entry);
+        }
     }
 
+    // Prioritize mode-specific bindings, then add globals up to limit
+    let mut results = Vec::new();
+    results.extend(mode_specific.into_iter().take(12)); // Show up to 12 mode-specific
+
+    let remaining = 15usize.saturating_sub(results.len());
+    results.extend(global.into_iter().take(remaining)); // Fill to 15 total with globals
+
+    tracing::debug!("Mode {:?}: returning {} bindings", mode, results.len());
+
     results
+}
+
+/// Check if a binding is specific to the given mode (vs available in all modes)
+fn is_binding_mode_specific(
+    keymap: &Keymap,
+    binding: &KeyBinding,
+    _current_mode: EditorMode,
+) -> bool {
+    let keystrokes = binding.keystrokes();
+
+    // Test against all four modes
+    let modes = [
+        EditorMode::Normal,
+        EditorMode::Insert,
+        EditorMode::Visual,
+        EditorMode::Pane,
+    ];
+    let mut active_in_count = 0;
+
+    for mode in modes {
+        let mode_str = match mode {
+            EditorMode::Normal => "normal",
+            EditorMode::Insert => "insert",
+            EditorMode::Visual => "visual",
+            EditorMode::Pane => "pane",
+        };
+
+        let context_str = format!("Editor mode={}", mode_str);
+        let contexts = vec![
+            KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
+            KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
+        ];
+
+        let (matches, _) = keymap.bindings_for_input(keystrokes, &contexts);
+        if !matches.is_empty() {
+            active_in_count += 1;
+        }
+    }
+
+    // If active in only 1 mode, it's mode-specific
+    active_in_count == 1
 }
 
 /// Format keystrokes for display.
@@ -74,7 +134,7 @@ fn format_keystrokes(binding: &KeyBinding) -> String {
         .keystrokes()
         .iter()
         .map(|k| {
-            // FIXME: Use GPUI's Display impl for now, refine formatting later
+            // Use GPUI's Display impl
             format!("{}", k)
         })
         .collect::<Vec<_>>()

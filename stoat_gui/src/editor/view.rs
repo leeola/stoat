@@ -51,6 +51,13 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Handle entering pane mode
+    fn handle_enter_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
+        info!("Entering Pane mode");
+        self.stoat.set_mode(stoat::EditorMode::Pane);
+        cx.notify();
+    }
+
     /// Handle app exit
     fn handle_exit_app(&mut self, cx: &mut Context<'_, Self>) {
         info!("Exiting application");
@@ -75,6 +82,11 @@ impl EditorView {
     /// Get a reference to the Stoat editor state
     pub fn stoat(&self) -> &Stoat {
         &self.stoat
+    }
+
+    /// Get a mutable reference to the Stoat editor state
+    pub fn stoat_mut(&mut self) -> &mut Stoat {
+        &mut self.stoat
     }
 
     /// Set the cursor position
@@ -128,6 +140,15 @@ impl EditorView {
         cx: &mut Context<'_, Self>,
     ) {
         self.handle_enter_normal_mode(cx);
+    }
+
+    fn handle_enter_pane_mode_action(
+        &mut self,
+        _: &EnterPaneMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.handle_enter_pane_mode(cx);
     }
 
     fn handle_exit_app_action(
@@ -270,6 +291,7 @@ impl Render for EditorView {
             stoat::EditorMode::Normal => "normal",
             stoat::EditorMode::Insert => "insert",
             stoat::EditorMode::Visual => "visual",
+            stoat::EditorMode::Pane => "pane",
         };
 
         // Wrap the editor element in a div that can handle keyboard input
@@ -287,6 +309,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_insert_text_action))
             .on_action(cx.listener(Self::handle_enter_insert_mode_action))
             .on_action(cx.listener(Self::handle_enter_normal_mode_action))
+            .on_action(cx.listener(Self::handle_enter_pane_mode_action))
             .on_action(cx.listener(Self::handle_exit_app_action))
             // Movement handlers
             .on_action(cx.listener(

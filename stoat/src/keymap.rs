@@ -81,8 +81,10 @@ pub fn create_default_keymap() -> Keymap {
         // Mode transitions
         KeyBinding::new("i", EnterInsertMode, Some("Editor && mode == normal")),
         KeyBinding::new("v", EnterVisualMode, Some("Editor && mode == normal")),
+        KeyBinding::new("ctrl-w", EnterPaneMode, Some("Editor && mode == normal")),
         KeyBinding::new("escape", EnterNormalMode, Some("Editor && mode == insert")),
         KeyBinding::new("escape", EnterNormalMode, Some("Editor && mode == visual")),
+        KeyBinding::new("escape", EnterNormalMode, Some("Editor && mode == pane")),
         KeyBinding::new("escape", ExitApp, Some("Editor && mode == normal")),
         // Editing in normal mode
         KeyBinding::new("x", DeleteRight, Some("Editor && mode == normal")),
@@ -177,23 +179,23 @@ pub fn create_default_keymap() -> Keymap {
         // Indentation
         KeyBinding::new("tab", Indent, Some("Editor")),
         KeyBinding::new("shift-tab", Outdent, Some("Editor")),
-        // ===== WORKSPACE PANE MANAGEMENT =====
-        // Split panes - ctrl-w prefix (vim-style)
-        KeyBinding::new("ctrl-w v", SplitRight, Some("Editor")),
-        KeyBinding::new("ctrl-w s", SplitDown, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-v", SplitRight, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-s", SplitDown, Some("Editor")),
-        // Close pane - ctrl-w q (vim-style quit)
-        KeyBinding::new("ctrl-w q", ClosePane, Some("Editor")),
-        // Navigate panes - ctrl-w + hjkl
-        KeyBinding::new("ctrl-w h", FocusPaneLeft, Some("Editor")),
-        KeyBinding::new("ctrl-w j", FocusPaneDown, Some("Editor")),
-        KeyBinding::new("ctrl-w k", FocusPaneUp, Some("Editor")),
-        KeyBinding::new("ctrl-w l", FocusPaneRight, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-h", FocusPaneLeft, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-j", FocusPaneDown, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-k", FocusPaneUp, Some("Editor")),
-        KeyBinding::new("ctrl-w ctrl-l", FocusPaneRight, Some("Editor")),
+        // ===== PANE MODE BINDINGS =====
+        // Split panes - simple keys in pane mode
+        KeyBinding::new("v", SplitRight, Some("Editor && mode == pane")),
+        KeyBinding::new("s", SplitDown, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-v", SplitRight, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-s", SplitDown, Some("Editor && mode == pane")),
+        // Close pane
+        KeyBinding::new("q", ClosePane, Some("Editor && mode == pane")),
+        // Navigate panes - hjkl in pane mode
+        KeyBinding::new("h", FocusPaneLeft, Some("Editor && mode == pane")),
+        KeyBinding::new("j", FocusPaneDown, Some("Editor && mode == pane")),
+        KeyBinding::new("k", FocusPaneUp, Some("Editor && mode == pane")),
+        KeyBinding::new("l", FocusPaneRight, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-h", FocusPaneLeft, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-j", FocusPaneDown, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-k", FocusPaneUp, Some("Editor && mode == pane")),
+        KeyBinding::new("ctrl-l", FocusPaneRight, Some("Editor && mode == pane")),
     ];
 
     Keymap::new(bindings)

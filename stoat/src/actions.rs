@@ -25,7 +25,7 @@ mod scroll;
 mod selection;
 
 use crate::ScrollDelta;
-use gpui::{actions, Action, Pixels, Point};
+use gpui::{Action, Pixels, Point, actions};
 
 /// Insert text at the current cursor position(s).
 ///
@@ -217,6 +217,11 @@ actions!(
         /// Transitions to Visual mode for selecting text. Movement commands extend the
         /// selection rather than moving the cursor.
         EnterVisualMode,
+        /// Enter Pane mode for pane management.
+        ///
+        /// Transitions to Pane mode for window/pane operations like splitting and navigation.
+        /// In Pane mode, simple keys trigger pane commands, then returns to Normal mode.
+        EnterPaneMode,
         /// Exit the application.
         ///
         /// Closes the editor. If there are unsaved changes, a confirmation prompt may be
@@ -400,13 +405,11 @@ use std::{any::TypeId, collections::HashMap};
 pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     let mut help = HashMap::new();
 
-    // Movement actions
+    // Movement actions (only implemented ones)
     help.insert(TypeId::of::<MoveLeft>(), "move left");
     help.insert(TypeId::of::<MoveRight>(), "move right");
     help.insert(TypeId::of::<MoveUp>(), "move up");
     help.insert(TypeId::of::<MoveDown>(), "move down");
-    help.insert(TypeId::of::<MoveWordLeft>(), "word left");
-    help.insert(TypeId::of::<MoveWordRight>(), "word right");
     help.insert(TypeId::of::<MoveToLineStart>(), "line start");
     help.insert(TypeId::of::<MoveToLineEnd>(), "line end");
     help.insert(TypeId::of::<MoveToFileStart>(), "file start");
@@ -414,62 +417,32 @@ pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     help.insert(TypeId::of::<PageUp>(), "page up");
     help.insert(TypeId::of::<PageDown>(), "page down");
 
-    // Editing actions
+    // Editing actions (only implemented ones)
     help.insert(TypeId::of::<DeleteLeft>(), "delete left");
     help.insert(TypeId::of::<DeleteRight>(), "delete right");
-    help.insert(TypeId::of::<DeleteWordLeft>(), "delete word left");
-    help.insert(TypeId::of::<DeleteWordRight>(), "delete word right");
     help.insert(TypeId::of::<DeleteLine>(), "delete line");
     help.insert(TypeId::of::<DeleteToEndOfLine>(), "delete to end");
-    help.insert(TypeId::of::<NewLine>(), "new line");
-    help.insert(TypeId::of::<Undo>(), "undo");
-    help.insert(TypeId::of::<Redo>(), "redo");
-    help.insert(TypeId::of::<Copy>(), "copy");
-    help.insert(TypeId::of::<Cut>(), "cut");
-    help.insert(TypeId::of::<Paste>(), "paste");
-    help.insert(TypeId::of::<Indent>(), "indent");
-    help.insert(TypeId::of::<Outdent>(), "outdent");
 
     // Modal actions
     help.insert(TypeId::of::<EnterInsertMode>(), "insert mode");
     help.insert(TypeId::of::<EnterNormalMode>(), "normal mode");
     help.insert(TypeId::of::<EnterVisualMode>(), "visual mode");
-    help.insert(TypeId::of::<ExitApp>(), "exit");
+    help.insert(TypeId::of::<EnterPaneMode>(), "pane mode");
 
-    // File actions
-    help.insert(TypeId::of::<Save>(), "save");
-    help.insert(TypeId::of::<SaveAs>(), "save as");
-    help.insert(TypeId::of::<Open>(), "open");
-    help.insert(TypeId::of::<Quit>(), "quit");
-    help.insert(TypeId::of::<ForceQuit>(), "force quit");
-
-    // Selection actions
-    help.insert(TypeId::of::<SelectAll>(), "select all");
-    help.insert(TypeId::of::<ClearSelection>(), "clear selection");
-    help.insert(TypeId::of::<SelectLine>(), "select line");
-    help.insert(TypeId::of::<SelectLeft>(), "select left");
-    help.insert(TypeId::of::<SelectRight>(), "select right");
-    help.insert(TypeId::of::<SelectUp>(), "select up");
-    help.insert(TypeId::of::<SelectDown>(), "select down");
-    help.insert(TypeId::of::<SelectWordLeft>(), "select word left");
-    help.insert(TypeId::of::<SelectWordRight>(), "select word right");
-    help.insert(TypeId::of::<SelectToLineStart>(), "select to start");
-    help.insert(TypeId::of::<SelectToLineEnd>(), "select to end");
+    // Selection actions (only implemented ones)
     help.insert(TypeId::of::<SelectNextSymbol>(), "next symbol");
     help.insert(TypeId::of::<SelectPrevSymbol>(), "prev symbol");
     help.insert(TypeId::of::<SelectNextToken>(), "next token");
     help.insert(TypeId::of::<SelectPrevToken>(), "prev token");
 
-    // Workspace actions
-    help.insert(TypeId::of::<SplitUp>(), "split up");
-    help.insert(TypeId::of::<SplitDown>(), "split down");
-    help.insert(TypeId::of::<SplitLeft>(), "split left");
+    // Pane management actions (implemented in GUI layer)
     help.insert(TypeId::of::<SplitRight>(), "split right");
+    help.insert(TypeId::of::<SplitDown>(), "split down");
     help.insert(TypeId::of::<ClosePane>(), "close pane");
-    help.insert(TypeId::of::<FocusPaneUp>(), "focus up");
-    help.insert(TypeId::of::<FocusPaneDown>(), "focus down");
     help.insert(TypeId::of::<FocusPaneLeft>(), "focus left");
     help.insert(TypeId::of::<FocusPaneRight>(), "focus right");
+    help.insert(TypeId::of::<FocusPaneUp>(), "focus up");
+    help.insert(TypeId::of::<FocusPaneDown>(), "focus down");
 
     help
 });

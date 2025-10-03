@@ -19,6 +19,8 @@ pub enum EditorMode {
     Insert,
     /// Visual mode - for text selection
     Visual,
+    /// Pane mode - for pane management commands
+    Pane,
 }
 
 impl EditorMode {
@@ -28,6 +30,7 @@ impl EditorMode {
             EditorMode::Normal => "normal",
             EditorMode::Insert => "insert",
             EditorMode::Visual => "visual",
+            EditorMode::Pane => "pane",
         }
     }
 
@@ -37,6 +40,7 @@ impl EditorMode {
             EditorMode::Normal => "NORMAL",
             EditorMode::Insert => "INSERT",
             EditorMode::Visual => "VISUAL",
+            EditorMode::Pane => "PANE",
         }
     }
 }
