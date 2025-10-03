@@ -1,4 +1,4 @@
-use crate::editor::view::EditorView;
+use crate::{editor::view::EditorView, pane_group::PaneGroupView};
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
 };
@@ -23,11 +23,14 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| cx.new(|cx| EditorView::new(stoat, cx)),
+                |_, cx| {
+                    let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
+                    cx.new(|cx| PaneGroupView::new(initial_editor, cx))
+                },
             )
             .expect("failed to open/update window");
 
-        // Focus the editor after window creation
+        // Focus the pane group after window creation
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx));
@@ -73,11 +76,14 @@ pub fn run_with_paths(
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| cx.new(|cx| EditorView::new(stoat, cx)),
+                |_, cx| {
+                    let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
+                    cx.new(|cx| PaneGroupView::new(initial_editor, cx))
+                },
             )
             .expect("failed to open/update window");
 
-        // Focus the editor after window creation
+        // Focus the pane group after window creation
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx));

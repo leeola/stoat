@@ -2,6 +2,7 @@ pub mod actions;
 mod cursor;
 pub mod keymap;
 pub mod log;
+pub mod pane;
 mod scroll;
 mod selection;
 

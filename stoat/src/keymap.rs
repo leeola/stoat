@@ -177,6 +177,21 @@ pub fn create_default_keymap() -> Keymap {
         // Indentation
         KeyBinding::new("tab", Indent, Some("Editor")),
         KeyBinding::new("shift-tab", Outdent, Some("Editor")),
+        // ===== WORKSPACE PANE MANAGEMENT =====
+        // Split panes - ctrl-w prefix (vim-style)
+        KeyBinding::new("ctrl-w v", SplitRight, Some("Editor")),
+        KeyBinding::new("ctrl-w s", SplitDown, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-v", SplitRight, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-s", SplitDown, Some("Editor")),
+        // Navigate panes - ctrl-w + hjkl
+        KeyBinding::new("ctrl-w h", FocusPaneLeft, Some("Editor")),
+        KeyBinding::new("ctrl-w j", FocusPaneDown, Some("Editor")),
+        KeyBinding::new("ctrl-w k", FocusPaneUp, Some("Editor")),
+        KeyBinding::new("ctrl-w l", FocusPaneRight, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-h", FocusPaneLeft, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-j", FocusPaneDown, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-k", FocusPaneUp, Some("Editor")),
+        KeyBinding::new("ctrl-w ctrl-l", FocusPaneRight, Some("Editor")),
     ];
 
     Keymap::new(bindings)

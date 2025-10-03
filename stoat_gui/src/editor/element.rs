@@ -5,10 +5,10 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    App, Bounds, DispatchPhase, Element, ElementId, Entity, Font, FontStyle, FontWeight,
-    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun, Window, point,
-    px, relative, size,
+    point, px, relative, size, App, Bounds, DispatchPhase, Element, ElementId, Entity, Font,
+    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun,
+    Window,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;

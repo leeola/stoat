@@ -336,3 +336,50 @@ actions!(
         SelectPrevToken,
     ]
 );
+
+// Workspace actions - pane management
+actions!(
+    workspace,
+    [
+        /// Split the active pane upward.
+        ///
+        /// Creates a new pane above the active pane with a vertical layout (tall panes
+        /// stacked vertically). The new pane becomes active.
+        SplitUp,
+        /// Split the active pane downward.
+        ///
+        /// Creates a new pane below the active pane with a vertical layout (tall panes
+        /// stacked vertically). The new pane becomes active.
+        SplitDown,
+        /// Split the active pane to the left.
+        ///
+        /// Creates a new pane to the left of the active pane with a horizontal layout
+        /// (wide panes side-by-side). The new pane becomes active.
+        SplitLeft,
+        /// Split the active pane to the right.
+        ///
+        /// Creates a new pane to the right of the active pane with a horizontal layout
+        /// (wide panes side-by-side). The new pane becomes active.
+        SplitRight,
+        /// Focus the pane above the current one.
+        ///
+        /// Moves focus to the pane directly above the active pane. Has no effect if there
+        /// is no pane above.
+        FocusPaneUp,
+        /// Focus the pane below the current one.
+        ///
+        /// Moves focus to the pane directly below the active pane. Has no effect if there
+        /// is no pane below.
+        FocusPaneDown,
+        /// Focus the pane to the left of the current one.
+        ///
+        /// Moves focus to the pane directly to the left of the active pane. Has no effect
+        /// if there is no pane to the left.
+        FocusPaneLeft,
+        /// Focus the pane to the right of the current one.
+        ///
+        /// Moves focus to the pane directly to the right of the active pane. Has no effect
+        /// if there is no pane to the right.
+        FocusPaneRight,
+    ]
+);
