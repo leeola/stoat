@@ -315,7 +315,7 @@ impl Element for PaneAxisElement {
                     let dragged_handle = layout.dragged_handle.clone();
                     let flexes = self.flexes.clone();
                     let handle_hitbox = handle.hitbox.clone();
-                    move |e: &MouseDownEvent, phase, window, _cx| {
+                    move |e: &MouseDownEvent, phase, window, cx| {
                         if phase.bubble() && handle_hitbox.is_hovered(window) {
                             dragged_handle.replace(Some(ix));
                             // Double-click resets to equal sizes
@@ -324,6 +324,7 @@ impl Element for PaneAxisElement {
                                 *borrow = vec![1.0; borrow.len()];
                                 window.refresh();
                             }
+                            cx.stop_propagation();
                         }
                     }
                 });
@@ -346,7 +347,8 @@ impl Element for PaneAxisElement {
                                 bounds.size,
                                 window,
                                 cx,
-                            )
+                            );
+                            cx.stop_propagation();
                         }
                     }
                 });
