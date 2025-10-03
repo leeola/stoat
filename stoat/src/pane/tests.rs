@@ -18,7 +18,7 @@ fn split_right_creates_horizontal_axis() {
         Member::Axis(axis) => {
             assert_eq!(axis.axis, Axis::Horizontal);
             assert_eq!(axis.members.len(), 2);
-            assert_eq!(axis.flexes, vec![1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }
@@ -83,7 +83,7 @@ fn split_same_axis_inserts_adjacent() {
         Member::Axis(axis) => {
             assert_eq!(axis.axis, Axis::Horizontal);
             assert_eq!(axis.members.len(), 3);
-            assert_eq!(axis.flexes, vec![1.0, 1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }
@@ -146,7 +146,7 @@ fn remove_pane_from_three_pane_axis() {
     match &group.root {
         Member::Axis(axis) => {
             assert_eq!(axis.members.len(), 2);
-            assert_eq!(axis.flexes, vec![1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }
@@ -211,7 +211,7 @@ fn flexes_reset_after_split() {
 
     match &group.root {
         Member::Axis(axis) => {
-            assert_eq!(axis.flexes, vec![1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }
@@ -220,7 +220,7 @@ fn flexes_reset_after_split() {
 
     match &group.root {
         Member::Axis(axis) => {
-            assert_eq!(axis.flexes, vec![1.0, 1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }
@@ -237,7 +237,7 @@ fn flexes_reset_after_remove() {
 
     match &group.root {
         Member::Axis(axis) => {
-            assert_eq!(axis.flexes, vec![1.0, 1.0]);
+            assert_eq!(*axis.flexes.lock(), vec![1.0, 1.0]);
         },
         _ => panic!("Expected axis"),
     }

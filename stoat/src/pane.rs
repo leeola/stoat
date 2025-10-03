@@ -1,4 +1,7 @@
 use anyhow::{bail, Result};
+use gpui::{Axis, Bounds, Pixels};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 pub type PaneId = usize;
 
@@ -132,7 +135,8 @@ impl Member {
 pub struct PaneAxis {
     pub axis: Axis,
     pub members: Vec<Member>,
-    pub flexes: Vec<f32>,
+    pub flexes: Arc<Mutex<Vec<f32>>>,
+    pub bounding_boxes: Arc<Mutex<Vec<Option<Bounds<Pixels>>>>>,
 }
 
 impl PaneAxis {
@@ -140,11 +144,13 @@ impl PaneAxis {
     ///
     /// Flexes are initialized to 1.0 for each member.
     pub fn new(axis: Axis, members: Vec<Member>) -> Self {
-        let flexes = vec![1.0; members.len()];
+        let flexes = Arc::new(Mutex::new(vec![1.0; members.len()]));
+        let bounding_boxes = Arc::new(Mutex::new(vec![None; members.len()]));
         Self {
             axis,
             members,
             flexes,
+            bounding_boxes,
         }
     }
 
@@ -169,7 +175,7 @@ impl PaneAxis {
                             idx += 1;
                         }
                         self.members.insert(idx, Member::Pane(new_pane));
-                        self.flexes = vec![1.0; self.members.len()];
+                        *self.flexes.lock() = vec![1.0; self.members.len()];
                     } else {
                         // Different axis - create nested axis
                         *member = Member::new_axis(old_pane, new_pane, direction);
@@ -213,7 +219,7 @@ impl PaneAxis {
         if found_pane {
             if let Some(idx) = remove_member {
                 self.members.remove(idx);
-                self.flexes = vec![1.0; self.members.len()];
+                *self.flexes.lock() = vec![1.0; self.members.len()];
             }
 
             if self.members.len() == 1 {
@@ -254,23 +260,6 @@ impl SplitDirection {
         match self {
             SplitDirection::Left | SplitDirection::Up => false,
             SplitDirection::Down | SplitDirection::Right => true,
-        }
-    }
-}
-
-/// Layout axis for pane arrangement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Axis {
-    Horizontal,
-    Vertical,
-}
-
-impl Axis {
-    /// Invert the axis.
-    pub fn invert(&self) -> Self {
-        match self {
-            Axis::Horizontal => Axis::Vertical,
-            Axis::Vertical => Axis::Horizontal,
         }
     }
 }

@@ -1,16 +1,16 @@
-use crate::editor::view::EditorView;
+use crate::{editor::view::EditorView, pane_group::element::pane_axis};
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window, div, rgb,
+    div, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, Styled, Window,
 };
 use std::collections::HashMap;
 use stoat::{
-    Stoat,
     actions::{
         FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
         SplitRight, SplitUp,
     },
-    pane::{Axis, Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    Stoat,
 };
 
 /// Main view that manages multiple editor panes in a tree layout.
@@ -232,7 +232,7 @@ impl PaneGroupView {
     }
 
     /// Recursively render a member of the pane tree.
-    fn render_member(&self, member: &Member) -> AnyElement {
+    fn render_member(&self, member: &Member, basis: usize) -> AnyElement {
         match member {
             Member::Pane(pane_id) => {
                 if let Some(editor) = self.pane_editors.get(pane_id) {
@@ -249,42 +249,24 @@ impl PaneGroupView {
                         .into_any_element()
                 }
             },
-            Member::Axis(axis) => self.render_axis(axis),
+            Member::Axis(axis) => self.render_axis(axis, basis),
         }
     }
 
-    /// Render an axis with its children.
-    fn render_axis(&self, axis: &PaneAxis) -> AnyElement {
-        let mut container = div().size_full();
+    /// Render an axis with its children using PaneAxisElement for interactive resize.
+    fn render_axis(&self, axis: &PaneAxis, basis: usize) -> AnyElement {
+        let mut element = pane_axis(
+            axis.axis,
+            basis,
+            axis.flexes.clone(),
+            axis.bounding_boxes.clone(),
+        );
 
-        container = match axis.axis {
-            Axis::Horizontal => container.flex().flex_row(),
-            Axis::Vertical => container.flex().flex_col(),
-        };
-
-        for (idx, member) in axis.members.iter().enumerate() {
-            // Add divider before each child except the first
-            if idx > 0 {
-                let divider = match axis.axis {
-                    Axis::Horizontal => {
-                        // Vertical divider for side-by-side panes
-                        div().w_px().h_full().bg(rgb(0x3c3c3c))
-                    },
-                    Axis::Vertical => {
-                        // Horizontal divider for stacked panes
-                        div().w_full().h_px().bg(rgb(0x3c3c3c))
-                    },
-                };
-                container = container.child(divider);
-            }
-
-            // TODO: Use axis.flexes[idx] for custom sizing when PaneAxisElement is implemented
-            let child = self.render_member(member);
-
-            container = container.child(div().flex_1().size_full().child(child));
+        for member in &axis.members {
+            element = element.child(self.render_member(member, basis + 1));
         }
 
-        container.into_any_element()
+        element.into_any_element()
     }
 }
 
@@ -307,6 +289,6 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_down))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
-            .child(self.render_member(self.pane_group.root()))
+            .child(self.render_member(self.pane_group.root(), 0))
     }
 }
