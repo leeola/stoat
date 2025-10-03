@@ -183,6 +183,8 @@ pub fn create_default_keymap() -> Keymap {
         KeyBinding::new("ctrl-w s", SplitDown, Some("Editor")),
         KeyBinding::new("ctrl-w ctrl-v", SplitRight, Some("Editor")),
         KeyBinding::new("ctrl-w ctrl-s", SplitDown, Some("Editor")),
+        // Close pane - ctrl-w q (vim-style quit)
+        KeyBinding::new("ctrl-w q", ClosePane, Some("Editor")),
         // Navigate panes - ctrl-w + hjkl
         KeyBinding::new("ctrl-w h", FocusPaneLeft, Some("Editor")),
         KeyBinding::new("ctrl-w j", FocusPaneDown, Some("Editor")),

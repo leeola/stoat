@@ -6,7 +6,7 @@ use gpui::{
 use std::collections::HashMap;
 use stoat::{
     actions::{
-        FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
+        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
         SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
@@ -328,6 +328,50 @@ impl PaneGroupView {
         }
     }
 
+    /// Handle close pane action
+    fn handle_close_pane(
+        &mut self,
+        _: &ClosePane,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let pane_to_close = self.active_pane;
+
+        debug!(pane_id = pane_to_close, "Attempting to close pane");
+
+        // Try to remove the pane from the group
+        match self.pane_group.remove(pane_to_close) {
+            Ok(()) => {
+                // Successfully removed - clean up editor and switch focus
+                self.pane_editors.remove(&pane_to_close);
+
+                // Get remaining panes and focus the first one
+                let remaining_panes = self.pane_group.panes();
+                if let Some(&new_active_pane) = remaining_panes.first() {
+                    debug!(
+                        closed_pane = pane_to_close,
+                        new_active_pane,
+                        remaining_count = remaining_panes.len(),
+                        "Pane closed, switching focus"
+                    );
+
+                    self.active_pane = new_active_pane;
+                    if let Some(editor) = self.pane_editors.get(&new_active_pane) {
+                        window.focus(&editor.read(cx).focus_handle(cx));
+                    }
+                    cx.notify();
+                }
+            },
+            Err(e) => {
+                debug!(
+                    pane_id = pane_to_close,
+                    error = %e,
+                    "Cannot close pane"
+                );
+            },
+        }
+    }
+
     /// Recursively render a member of the pane tree.
     fn render_member(&self, member: &Member, basis: usize) -> AnyElement {
         match member {
@@ -382,6 +426,7 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_split_down))
             .on_action(cx.listener(Self::handle_split_left))
             .on_action(cx.listener(Self::handle_split_right))
+            .on_action(cx.listener(Self::handle_close_pane))
             .on_action(cx.listener(Self::handle_focus_pane_up))
             .on_action(cx.listener(Self::handle_focus_pane_down))
             .on_action(cx.listener(Self::handle_focus_pane_left))

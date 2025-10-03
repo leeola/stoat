@@ -361,6 +361,11 @@ actions!(
         /// Creates a new pane to the right of the active pane with a horizontal layout
         /// (wide panes side-by-side). The new pane becomes active.
         SplitRight,
+        /// Close the active pane.
+        ///
+        /// Removes the active pane from the layout. If this is the last remaining pane,
+        /// this action has no effect. After closing, focus moves to another pane.
+        ClosePane,
         /// Focus the pane above the current one.
         ///
         /// Moves focus to the pane directly above the active pane. Has no effect if there
