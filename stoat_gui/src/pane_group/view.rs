@@ -1,10 +1,14 @@
 use crate::editor::view::EditorView;
 use gpui::{
-    div, AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, Styled, Window,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, Styled, Window, div,
 };
 use std::collections::HashMap;
-use stoat::pane::{Axis, Member, PaneAxis, PaneGroup, PaneId, SplitDirection};
+use stoat::{
+    Stoat,
+    actions::{SplitDown, SplitLeft, SplitRight, SplitUp},
+    pane::{Axis, Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+};
 
 /// Main view that manages multiple editor panes in a tree layout.
 ///
@@ -27,7 +31,7 @@ impl PaneGroupView {
         let initial_pane_id = pane_group.panes()[0];
 
         let mut pane_editors = HashMap::new();
-        pane_editors.insert(initial_pane_id, initial_editor);
+        pane_editors.insert(initial_pane_id, initial_editor.clone());
 
         Self {
             pane_group,
@@ -35,6 +39,11 @@ impl PaneGroupView {
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// Get the active editor view
+    pub fn active_editor(&self) -> Option<&Entity<EditorView>> {
+        self.pane_editors.get(&self.active_pane)
     }
 
     /// Split the active pane in the given direction.
@@ -49,6 +58,81 @@ impl PaneGroupView {
         let new_pane_id = self.pane_group.split(self.active_pane, direction);
         self.pane_editors.insert(new_pane_id, new_editor);
         self.active_pane = new_pane_id;
+    }
+
+    /// Handle split up action
+    fn handle_split_up(&mut self, _: &SplitUp, window: &mut Window, cx: &mut Context<'_, Self>) {
+        // Clone the Stoat from the active pane so the new split shows the same buffer
+        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+            active_editor.read(cx).stoat().clone()
+        } else {
+            Stoat::new(cx)
+        };
+        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        self.split(SplitDirection::Up, new_editor.clone(), cx);
+        // Focus the newly created editor
+        window.focus(&new_editor.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Handle split down action
+    fn handle_split_down(
+        &mut self,
+        _: &SplitDown,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Clone the Stoat from the active pane so the new split shows the same buffer
+        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+            active_editor.read(cx).stoat().clone()
+        } else {
+            Stoat::new(cx)
+        };
+        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        self.split(SplitDirection::Down, new_editor.clone(), cx);
+        // Focus the newly created editor
+        window.focus(&new_editor.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Handle split left action
+    fn handle_split_left(
+        &mut self,
+        _: &SplitLeft,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Clone the Stoat from the active pane so the new split shows the same buffer
+        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+            active_editor.read(cx).stoat().clone()
+        } else {
+            Stoat::new(cx)
+        };
+        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        self.split(SplitDirection::Left, new_editor.clone(), cx);
+        // Focus the newly created editor
+        window.focus(&new_editor.read(cx).focus_handle(cx));
+        cx.notify();
+    }
+
+    /// Handle split right action
+    fn handle_split_right(
+        &mut self,
+        _: &SplitRight,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Clone the Stoat from the active pane so the new split shows the same buffer
+        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+            active_editor.read(cx).stoat().clone()
+        } else {
+            Stoat::new(cx)
+        };
+        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        self.split(SplitDirection::Right, new_editor.clone(), cx);
+        // Focus the newly created editor
+        window.focus(&new_editor.read(cx).focus_handle(cx));
+        cx.notify();
     }
 
     /// Recursively render a member of the pane tree.
@@ -100,10 +184,14 @@ impl Focusable for PaneGroupView {
 }
 
 impl Render for PaneGroupView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         div()
             .size_full()
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::handle_split_up))
+            .on_action(cx.listener(Self::handle_split_down))
+            .on_action(cx.listener(Self::handle_split_left))
+            .on_action(cx.listener(Self::handle_split_right))
             .child(self.render_member(self.pane_group.root()))
     }
 }

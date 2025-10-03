@@ -30,10 +30,12 @@ pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Er
             )
             .expect("failed to open/update window");
 
-        // Focus the pane group after window creation
+        // Focus the active editor after window creation
         window
             .update(cx, |view, window, cx| {
-                window.focus(&view.focus_handle(cx));
+                if let Some(editor) = view.active_editor() {
+                    window.focus(&editor.read(cx).focus_handle(cx));
+                }
             })
             .expect("failed to open/update window");
 
@@ -83,10 +85,12 @@ pub fn run_with_paths(
             )
             .expect("failed to open/update window");
 
-        // Focus the pane group after window creation
+        // Focus the active editor after window creation
         window
             .update(cx, |view, window, cx| {
-                window.focus(&view.focus_handle(cx));
+                if let Some(editor) = view.active_editor() {
+                    window.focus(&editor.read(cx).focus_handle(cx));
+                }
             })
             .expect("failed to open/update window");
 
