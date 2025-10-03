@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Delete from cursor to end of line.
@@ -36,7 +37,10 @@ impl Stoat {
         let end = Point::new(current_pos.row, line_len);
 
         if current_pos.column < line_len {
+            debug!(from = ?current_pos, to = ?end, "Delete to end of line");
             self.delete_range(current_pos..end, cx);
+        } else {
+            debug!(pos = ?current_pos, "Already at end of line, nothing to delete");
         }
     }
 }

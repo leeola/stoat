@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Move cursor up by one page (approximately one viewport height).
@@ -40,10 +41,11 @@ impl Stoat {
             let line_len = buffer_snapshot.line_len(new_row);
             let new_column = self.cursor_manager.goal_column().min(line_len);
             let new_pos = Point::new(new_row, new_column);
+            let target_scroll_y = new_row.saturating_sub(3) as f32;
+            debug!(from = ?current_pos, to = ?new_pos, lines_per_page, scroll_y = target_scroll_y, "Page up");
             self.cursor_manager.move_to_with_goal(new_pos);
 
             // Start animated scroll to keep the cursor visible
-            let target_scroll_y = new_row.saturating_sub(3) as f32;
             self.scroll
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }

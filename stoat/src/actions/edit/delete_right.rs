@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Delete character to the right of cursor (delete).
@@ -38,12 +39,16 @@ impl Stoat {
             // Delete character on same line
             let start = current_pos;
             let end = Point::new(current_pos.row, current_pos.column + 1);
+            trace!(from = ?start, to = ?end, "Delete right within line");
             self.delete_range(start..end, cx);
         } else if current_pos.row < buffer_snapshot.row_count() - 1 {
             // Merge with next line
             let start = current_pos;
             let end = Point::new(current_pos.row + 1, 0);
+            trace!(from = ?start, to = ?end, "Delete right: merging with next line");
             self.delete_range(start..end, cx);
+        } else {
+            trace!(pos = ?current_pos, "At buffer end, cannot delete right");
         }
     }
 }

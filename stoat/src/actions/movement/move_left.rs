@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Move cursor left by one character.
@@ -24,8 +25,10 @@ impl Stoat {
     /// See also [`crate::actions::movement::move_right`] for rightward movement.
     pub fn move_cursor_left(&mut self, cx: &App) {
         let current_pos = self.cursor_manager.position();
+
         if current_pos.column > 0 {
             let new_pos = Point::new(current_pos.row, current_pos.column - 1);
+            trace!(from = ?current_pos, to = ?new_pos, "Moving cursor left within line");
             self.cursor_manager.move_to(new_pos);
         } else if current_pos.row > 0 {
             // Move to end of previous line
@@ -33,7 +36,10 @@ impl Stoat {
             let prev_row = current_pos.row - 1;
             let line_len = buffer_snapshot.line_len(prev_row);
             let new_pos = Point::new(prev_row, line_len);
+            trace!(from = ?current_pos, to = ?new_pos, "Moving cursor left to end of previous line");
             self.cursor_manager.move_to(new_pos);
+        } else {
+            trace!(pos = ?current_pos, "At buffer start, cannot move left");
         }
     }
 }

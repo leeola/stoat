@@ -4,6 +4,7 @@
 //! text entry. This is the modal editing mode for typing and pasting text.
 
 use crate::{EditorMode, Stoat};
+use tracing::debug;
 
 impl Stoat {
     /// Enter Insert mode for text input.
@@ -33,6 +34,8 @@ impl Stoat {
     /// - [`crate::actions::modal::enter_normal_mode`] - return to command mode
     /// - [`crate::actions::modal::enter_visual_mode`] - enter selection mode
     pub fn enter_insert_mode(&mut self) {
+        let old_mode = self.mode();
+        debug!(from = ?old_mode, to = ?EditorMode::Insert, "Entering insert mode");
         self.set_mode(EditorMode::Insert);
     }
 }

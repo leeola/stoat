@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Move cursor right by one character.
@@ -29,11 +30,15 @@ impl Stoat {
 
         if current_pos.column < line_len {
             let new_pos = Point::new(current_pos.row, current_pos.column + 1);
+            trace!(from = ?current_pos, to = ?new_pos, "Moving cursor right within line");
             self.cursor_manager.move_to(new_pos);
         } else if current_pos.row < buffer_snapshot.row_count() - 1 {
             // Move to start of next line
             let new_pos = Point::new(current_pos.row + 1, 0);
+            trace!(from = ?current_pos, to = ?new_pos, "Moving cursor right to start of next line");
             self.cursor_manager.move_to(new_pos);
+        } else {
+            trace!(pos = ?current_pos, "At buffer end, cannot move right");
         }
     }
 }

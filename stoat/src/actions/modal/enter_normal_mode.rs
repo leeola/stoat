@@ -4,6 +4,7 @@
 //! and operations. In Normal mode, keypresses trigger commands rather than inserting text.
 
 use crate::{EditorMode, Stoat};
+use tracing::debug;
 
 impl Stoat {
     /// Enter Normal mode for command input.
@@ -32,6 +33,8 @@ impl Stoat {
     /// - [`crate::actions::modal::enter_insert_mode`] - enter text input mode
     /// - [`crate::actions::modal::enter_visual_mode`] - enter selection mode
     pub fn enter_normal_mode(&mut self) {
+        let old_mode = self.mode();
+        debug!(from = ?old_mode, to = ?EditorMode::Normal, "Entering normal mode");
         self.set_mode(EditorMode::Normal);
     }
 }

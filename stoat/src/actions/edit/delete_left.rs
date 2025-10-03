@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Delete character to the left of cursor (backspace).
@@ -35,6 +36,7 @@ impl Stoat {
             // Delete character on same line
             let start = Point::new(current_pos.row, current_pos.column - 1);
             let end = current_pos;
+            trace!(from = ?start, to = ?end, "Delete left within line");
             self.delete_range(start..end, cx);
             self.cursor_manager.move_to(start);
         } else if current_pos.row > 0 {
@@ -44,9 +46,11 @@ impl Stoat {
             let prev_line_len = buffer_snapshot.line_len(prev_row);
             let start = Point::new(prev_row, prev_line_len);
             let end = Point::new(current_pos.row, 0);
-
+            trace!(from = ?start, to = ?end, "Delete left: merging with previous line");
             self.delete_range(start..end, cx);
             self.cursor_manager.move_to(start);
+        } else {
+            trace!(pos = ?current_pos, "At buffer start, cannot delete left");
         }
     }
 }

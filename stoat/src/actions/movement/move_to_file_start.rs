@@ -5,6 +5,7 @@
 
 use crate::Stoat;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Move cursor to the start of the file.
@@ -22,7 +23,9 @@ impl Stoat {
     ///
     /// See also [`crate::actions::movement::move_to_file_end`] for end-of-file movement.
     pub fn move_cursor_to_file_start(&mut self) {
+        let current_pos = self.cursor_manager.position();
         let new_pos = Point::new(0, 0);
+        debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to file start");
         self.cursor_manager.move_to(new_pos);
     }
 }

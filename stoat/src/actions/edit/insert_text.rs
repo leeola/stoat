@@ -5,6 +5,7 @@
 
 use crate::Stoat;
 use gpui::App;
+use tracing::trace;
 
 impl Stoat {
     /// Insert text at the current cursor position.
@@ -42,7 +43,10 @@ impl Stoat {
     /// - [`crate::actions::edit::delete_right`] for delete
     pub fn insert_text(&mut self, text: &str, cx: &mut App) {
         let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let cursor_offset = buffer_snapshot.point_to_offset(self.cursor_manager.position());
+        let cursor_pos = self.cursor_manager.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        trace!(pos = ?cursor_pos, text = ?text, len = text.len(), "Inserting text");
 
         self.buffer.update(cx, |buffer, _cx| {
             buffer.edit([(cursor_offset..cursor_offset, text)]);

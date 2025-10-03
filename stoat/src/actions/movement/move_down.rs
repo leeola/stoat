@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Move cursor down by one line.
@@ -38,7 +39,10 @@ impl Stoat {
             let line_len = buffer_snapshot.line_len(new_row);
             let new_column = self.cursor_manager.goal_column().min(line_len);
             let new_pos = Point::new(new_row, new_column);
+            trace!(from = ?current_pos, to = ?new_pos, goal_column = self.cursor_manager.goal_column(), "Moving cursor down");
             self.cursor_manager.move_to_with_goal(new_pos);
+        } else {
+            trace!(pos = ?current_pos, "At last line, cannot move down");
         }
     }
 }

@@ -4,6 +4,7 @@
 //! commands extend the selection rather than just moving the cursor.
 
 use crate::{EditorMode, Stoat};
+use tracing::debug;
 
 impl Stoat {
     /// Enter Visual mode for text selection.
@@ -41,6 +42,8 @@ impl Stoat {
     /// - [`crate::actions::modal::enter_insert_mode`] - enter text input mode
     /// - [`crate::actions::selection`] - selection operations
     pub fn enter_visual_mode(&mut self) {
+        let old_mode = self.mode();
+        debug!(from = ?old_mode, to = ?EditorMode::Visual, "Entering visual mode");
         self.set_mode(EditorMode::Visual);
     }
 }

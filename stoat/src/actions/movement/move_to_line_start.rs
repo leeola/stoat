@@ -5,6 +5,7 @@
 
 use crate::Stoat;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Move cursor to the start of the current line.
@@ -23,6 +24,7 @@ impl Stoat {
     pub fn move_cursor_to_line_start(&mut self) {
         let current_pos = self.cursor_manager.position();
         let new_pos = Point::new(current_pos.row, 0);
+        debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to line start");
         self.cursor_manager.move_to(new_pos);
     }
 }

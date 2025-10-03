@@ -12,6 +12,7 @@ use stoat::{
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
 };
+use tracing::debug;
 
 /// Main view that manages multiple editor panes in a tree layout.
 ///
@@ -65,6 +66,12 @@ impl PaneGroupView {
 
     /// Handle split up action
     fn handle_split_up(&mut self, _: &SplitUp, window: &mut Window, cx: &mut Context<'_, Self>) {
+        debug!(
+            active_pane = self.active_pane,
+            direction = "Up",
+            "Splitting pane"
+        );
+
         // Clone the Stoat from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             active_editor.read(cx).stoat().clone()
@@ -73,6 +80,12 @@ impl PaneGroupView {
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Up, new_editor.clone(), cx);
+
+        debug!(
+            new_pane = self.active_pane,
+            "Split complete, focusing new pane"
+        );
+
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
         cx.notify();
@@ -85,6 +98,12 @@ impl PaneGroupView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        debug!(
+            active_pane = self.active_pane,
+            direction = "Down",
+            "Splitting pane"
+        );
+
         // Clone the Stoat from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             active_editor.read(cx).stoat().clone()
@@ -93,6 +112,12 @@ impl PaneGroupView {
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Down, new_editor.clone(), cx);
+
+        debug!(
+            new_pane = self.active_pane,
+            "Split complete, focusing new pane"
+        );
+
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
         cx.notify();
@@ -105,6 +130,12 @@ impl PaneGroupView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        debug!(
+            active_pane = self.active_pane,
+            direction = "Left",
+            "Splitting pane"
+        );
+
         // Clone the Stoat from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             active_editor.read(cx).stoat().clone()
@@ -113,6 +144,12 @@ impl PaneGroupView {
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Left, new_editor.clone(), cx);
+
+        debug!(
+            new_pane = self.active_pane,
+            "Split complete, focusing new pane"
+        );
+
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
         cx.notify();
@@ -125,6 +162,12 @@ impl PaneGroupView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        debug!(
+            active_pane = self.active_pane,
+            direction = "Right",
+            "Splitting pane"
+        );
+
         // Clone the Stoat from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             active_editor.read(cx).stoat().clone()
@@ -133,6 +176,12 @@ impl PaneGroupView {
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Right, new_editor.clone(), cx);
+
+        debug!(
+            new_pane = self.active_pane,
+            "Split complete, focusing new pane"
+        );
+
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
         cx.notify();
@@ -175,11 +224,23 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Left) {
+            debug!(
+                from_pane = self.active_pane,
+                to_pane = new_pane,
+                direction = "Left",
+                "Focusing pane"
+            );
             self.active_pane = new_pane;
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
             cx.notify();
+        } else {
+            debug!(
+                current_pane = self.active_pane,
+                direction = "Left",
+                "No pane in direction"
+            );
         }
     }
 
@@ -191,11 +252,23 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Right) {
+            debug!(
+                from_pane = self.active_pane,
+                to_pane = new_pane,
+                direction = "Right",
+                "Focusing pane"
+            );
             self.active_pane = new_pane;
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
             cx.notify();
+        } else {
+            debug!(
+                current_pane = self.active_pane,
+                direction = "Right",
+                "No pane in direction"
+            );
         }
     }
 
@@ -207,11 +280,23 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Up) {
+            debug!(
+                from_pane = self.active_pane,
+                to_pane = new_pane,
+                direction = "Up",
+                "Focusing pane"
+            );
             self.active_pane = new_pane;
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
             cx.notify();
+        } else {
+            debug!(
+                current_pane = self.active_pane,
+                direction = "Up",
+                "No pane in direction"
+            );
         }
     }
 
@@ -223,11 +308,23 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Down) {
+            debug!(
+                from_pane = self.active_pane,
+                to_pane = new_pane,
+                direction = "Down",
+                "Focusing pane"
+            );
             self.active_pane = new_pane;
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
             cx.notify();
+        } else {
+            debug!(
+                current_pane = self.active_pane,
+                direction = "Down",
+                "No pane in direction"
+            );
         }
     }
 

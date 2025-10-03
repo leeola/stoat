@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Move cursor to the end of the current line.
@@ -27,6 +28,7 @@ impl Stoat {
         let current_pos = self.cursor_manager.position();
         let line_len = buffer_snapshot.line_len(current_pos.row);
         let new_pos = Point::new(current_pos.row, line_len);
+        debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to line end");
         self.cursor_manager.move_to(new_pos);
     }
 }

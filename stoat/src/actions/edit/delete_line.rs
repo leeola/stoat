@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::debug;
 
 impl Stoat {
     /// Delete the current line.
@@ -43,6 +44,7 @@ impl Stoat {
             Point::new(current_pos.row, line_len)
         };
 
+        debug!(row = current_pos.row, from = ?line_start, to = ?line_end, "Deleting line");
         self.delete_range(line_start..line_end, cx);
         self.cursor_manager.move_to(line_start);
     }

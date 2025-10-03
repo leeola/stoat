@@ -6,6 +6,7 @@
 use crate::Stoat;
 use gpui::App;
 use text::Point;
+use tracing::trace;
 
 impl Stoat {
     /// Helper method to delete a range of text.
@@ -47,6 +48,9 @@ impl Stoat {
         let end_offset = buffer_snapshot.point_to_offset(range.end);
 
         if start_offset < end_offset {
+            let len = end_offset - start_offset;
+            trace!(start = ?range.start, end = ?range.end, bytes = len, "Deleting range");
+
             self.buffer.update(cx, |buffer, _cx| {
                 buffer.edit([(start_offset..end_offset, "")]);
             });

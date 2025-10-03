@@ -1,11 +1,12 @@
 use gpui::{
-    Along, AnyElement, App, Axis, Bounds, CursorStyle, Element, GlobalElementId, Hitbox,
-    HitboxBehavior, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Size, Style, Window, px, relative, size,
+    px, relative, size, Along, AnyElement, App, Axis, Bounds, CursorStyle, Element,
+    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Size, Style, Window,
 };
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{cell::RefCell, mem, rc::Rc, sync::Arc};
+use tracing::{debug, trace};
 
 const HANDLE_HITBOX_SIZE: f32 = 4.0;
 const DIVIDER_SIZE: f32 = 1.0;
@@ -317,12 +318,17 @@ impl Element for PaneAxisElement {
                     let handle_hitbox = handle.hitbox.clone();
                     move |e: &MouseDownEvent, phase, window, cx| {
                         if phase.bubble() && handle_hitbox.is_hovered(window) {
-                            dragged_handle.replace(Some(ix));
-                            // Double-click resets to equal sizes
                             if e.click_count >= 2 {
+                                debug!(
+                                    handle_ix = ix,
+                                    "Double-click: resetting pane sizes to equal"
+                                );
                                 let mut borrow = flexes.lock();
                                 *borrow = vec![1.0; borrow.len()];
                                 window.refresh();
+                            } else {
+                                trace!(handle_ix = ix, "Starting pane resize drag");
+                                dragged_handle.replace(Some(ix));
                             }
                             cx.stop_propagation();
                         }
