@@ -388,3 +388,102 @@ actions!(
         FocusPaneRight,
     ]
 );
+
+use once_cell::sync::Lazy;
+use std::{any::TypeId, collections::HashMap};
+
+/// Short descriptions for actions, displayed in UI overlays and tooltips.
+///
+/// This provides short, user-friendly descriptions for each action. The descriptions
+/// are intentionally concise for display in limited UI space. Future extensions will
+/// include longer description levels for more detailed help.
+pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
+    let mut help = HashMap::new();
+
+    // Movement actions
+    help.insert(TypeId::of::<MoveLeft>(), "move left");
+    help.insert(TypeId::of::<MoveRight>(), "move right");
+    help.insert(TypeId::of::<MoveUp>(), "move up");
+    help.insert(TypeId::of::<MoveDown>(), "move down");
+    help.insert(TypeId::of::<MoveWordLeft>(), "word left");
+    help.insert(TypeId::of::<MoveWordRight>(), "word right");
+    help.insert(TypeId::of::<MoveToLineStart>(), "line start");
+    help.insert(TypeId::of::<MoveToLineEnd>(), "line end");
+    help.insert(TypeId::of::<MoveToFileStart>(), "file start");
+    help.insert(TypeId::of::<MoveToFileEnd>(), "file end");
+    help.insert(TypeId::of::<PageUp>(), "page up");
+    help.insert(TypeId::of::<PageDown>(), "page down");
+
+    // Editing actions
+    help.insert(TypeId::of::<DeleteLeft>(), "delete left");
+    help.insert(TypeId::of::<DeleteRight>(), "delete right");
+    help.insert(TypeId::of::<DeleteWordLeft>(), "delete word left");
+    help.insert(TypeId::of::<DeleteWordRight>(), "delete word right");
+    help.insert(TypeId::of::<DeleteLine>(), "delete line");
+    help.insert(TypeId::of::<DeleteToEndOfLine>(), "delete to end");
+    help.insert(TypeId::of::<NewLine>(), "new line");
+    help.insert(TypeId::of::<Undo>(), "undo");
+    help.insert(TypeId::of::<Redo>(), "redo");
+    help.insert(TypeId::of::<Copy>(), "copy");
+    help.insert(TypeId::of::<Cut>(), "cut");
+    help.insert(TypeId::of::<Paste>(), "paste");
+    help.insert(TypeId::of::<Indent>(), "indent");
+    help.insert(TypeId::of::<Outdent>(), "outdent");
+
+    // Modal actions
+    help.insert(TypeId::of::<EnterInsertMode>(), "insert mode");
+    help.insert(TypeId::of::<EnterNormalMode>(), "normal mode");
+    help.insert(TypeId::of::<EnterVisualMode>(), "visual mode");
+    help.insert(TypeId::of::<ExitApp>(), "exit");
+
+    // File actions
+    help.insert(TypeId::of::<Save>(), "save");
+    help.insert(TypeId::of::<SaveAs>(), "save as");
+    help.insert(TypeId::of::<Open>(), "open");
+    help.insert(TypeId::of::<Quit>(), "quit");
+    help.insert(TypeId::of::<ForceQuit>(), "force quit");
+
+    // Selection actions
+    help.insert(TypeId::of::<SelectAll>(), "select all");
+    help.insert(TypeId::of::<ClearSelection>(), "clear selection");
+    help.insert(TypeId::of::<SelectLine>(), "select line");
+    help.insert(TypeId::of::<SelectLeft>(), "select left");
+    help.insert(TypeId::of::<SelectRight>(), "select right");
+    help.insert(TypeId::of::<SelectUp>(), "select up");
+    help.insert(TypeId::of::<SelectDown>(), "select down");
+    help.insert(TypeId::of::<SelectWordLeft>(), "select word left");
+    help.insert(TypeId::of::<SelectWordRight>(), "select word right");
+    help.insert(TypeId::of::<SelectToLineStart>(), "select to start");
+    help.insert(TypeId::of::<SelectToLineEnd>(), "select to end");
+    help.insert(TypeId::of::<SelectNextSymbol>(), "next symbol");
+    help.insert(TypeId::of::<SelectPrevSymbol>(), "prev symbol");
+    help.insert(TypeId::of::<SelectNextToken>(), "next token");
+    help.insert(TypeId::of::<SelectPrevToken>(), "prev token");
+
+    // Workspace actions
+    help.insert(TypeId::of::<SplitUp>(), "split up");
+    help.insert(TypeId::of::<SplitDown>(), "split down");
+    help.insert(TypeId::of::<SplitLeft>(), "split left");
+    help.insert(TypeId::of::<SplitRight>(), "split right");
+    help.insert(TypeId::of::<ClosePane>(), "close pane");
+    help.insert(TypeId::of::<FocusPaneUp>(), "focus up");
+    help.insert(TypeId::of::<FocusPaneDown>(), "focus down");
+    help.insert(TypeId::of::<FocusPaneLeft>(), "focus left");
+    help.insert(TypeId::of::<FocusPaneRight>(), "focus right");
+
+    help
+});
+
+/// Get short description for an action.
+///
+/// Returns the short description for the given action, or [`None`] if no
+/// description has been registered for that action type.
+///
+/// # Example
+/// ```ignore
+/// let desc = short_desc(&MoveLeft);
+/// assert_eq!(desc, Some("move left"));
+/// ```
+pub fn short_desc(action: &dyn Action) -> Option<&'static str> {
+    SHORT_DESC.get(&action.type_id()).copied()
+}

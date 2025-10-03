@@ -6,53 +6,32 @@ use stoat::EditorMode;
 ///
 /// Positioned at the bottom-right of the editor window, this component shows
 /// the most relevant keybindings for the active mode (Normal, Insert, Visual).
-/// It helps users discover and learn keyboard shortcuts.
+/// The bindings are dynamically queried from the keymap and displayed with their
+/// associated help text.
 #[derive(IntoElement)]
 pub struct CommandOverlay {
-    /// Current editor mode determining which commands to display
+    /// Current editor mode for display
     mode: EditorMode,
+    /// Pre-queried bindings for this mode (keystroke, description)
+    bindings: Vec<(String, String)>,
 }
 
 impl CommandOverlay {
-    /// Create a new command overlay for the given mode.
-    pub fn new(mode: EditorMode) -> Self {
-        Self { mode }
+    /// Create a new command overlay with bindings for the given mode.
+    ///
+    /// # Arguments
+    /// * `mode` - The editor mode to display
+    /// * `bindings` - Pre-queried keybindings for this mode
+    pub fn new(mode: EditorMode, bindings: Vec<(String, String)>) -> Self {
+        Self { mode, bindings }
     }
 
-    /// Get the keybinding hints to display for the current mode.
+    /// Convert bindings to keybinding hints for display.
     fn get_hints(&self, bg_color: Hsla) -> Vec<KeybindingHint> {
-        match self.mode {
-            EditorMode::Normal => vec![
-                KeybindingHint::new("h/j/k/l", "move", bg_color),
-                KeybindingHint::new("w/b", "word", bg_color),
-                KeybindingHint::new("0/$", "line start/end", bg_color),
-                KeybindingHint::new("gg/G", "file start/end", bg_color),
-                KeybindingHint::new("i", "insert mode", bg_color),
-                KeybindingHint::new("v", "visual mode", bg_color),
-                KeybindingHint::new("x", "delete char", bg_color),
-                KeybindingHint::new("dd", "delete line", bg_color),
-                KeybindingHint::new("D", "delete to end", bg_color),
-                KeybindingHint::new("u", "undo", bg_color),
-            ],
-            EditorMode::Insert => vec![
-                KeybindingHint::new("Esc", "normal mode", bg_color),
-                KeybindingHint::new("Arrows", "move", bg_color),
-                KeybindingHint::new("Enter", "new line", bg_color),
-                KeybindingHint::new("Backspace", "delete left", bg_color),
-                KeybindingHint::new("Delete", "delete right", bg_color),
-                KeybindingHint::new("Cmd-S", "save", bg_color),
-                KeybindingHint::new("Cmd-Z", "undo", bg_color),
-                KeybindingHint::new("Cmd-V", "paste", bg_color),
-            ],
-            EditorMode::Visual => vec![
-                KeybindingHint::new("Esc", "normal mode", bg_color),
-                KeybindingHint::new("h/j/k/l", "extend selection", bg_color),
-                KeybindingHint::new("w/b", "select word", bg_color),
-                KeybindingHint::new("0/$", "select to start/end", bg_color),
-                KeybindingHint::new("d", "delete selection", bg_color),
-                KeybindingHint::new("y", "copy selection", bg_color),
-            ],
-        }
+        self.bindings
+            .iter()
+            .map(|(key, desc)| KeybindingHint::new(key.clone(), desc.clone(), bg_color))
+            .collect()
     }
 }
 

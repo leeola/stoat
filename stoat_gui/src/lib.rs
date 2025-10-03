@@ -8,6 +8,7 @@ pub mod external_input;
 pub mod input;
 pub mod keybinding_hint;
 pub mod keymap;
+pub mod keymap_query;
 pub mod pane_group;
 pub mod syntax;
 

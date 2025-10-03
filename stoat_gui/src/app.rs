@@ -2,30 +2,30 @@ use crate::{editor::view::EditorView, pane_group::PaneGroupView};
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
 };
+use std::rc::Rc;
 use stoat::Stoat;
 
 pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
         let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
 
-        // Register Stoat keybindings
-        let bindings = stoat::keymap::create_default_keymap()
-            .bindings()
-            .cloned()
-            .collect::<Vec<_>>();
+        // Create and register Stoat keybindings
+        let keymap = Rc::new(stoat::keymap::create_default_keymap());
+        let bindings = keymap.bindings().cloned().collect::<Vec<_>>();
         cx.bind_keys(bindings);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
 
+        let keymap_clone = keymap.clone();
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| {
+                move |_, cx| {
                     let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
-                    cx.new(|cx| PaneGroupView::new(initial_editor, cx))
+                    cx.new(|cx| PaneGroupView::new(initial_editor, keymap_clone.clone(), cx))
                 },
             )
             .expect("failed to open/update window");
@@ -64,23 +64,22 @@ pub fn run_with_paths(
         }
 
         // Register Stoat keybindings
-        let bindings = stoat::keymap::create_default_keymap()
-            .bindings()
-            .cloned()
-            .collect::<Vec<_>>();
+        let keymap = Rc::new(stoat::keymap::create_default_keymap());
+        let bindings = keymap.bindings().cloned().collect::<Vec<_>>();
         cx.bind_keys(bindings);
 
         let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
 
+        let keymap_clone = keymap.clone();
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_, cx| {
+                move |_, cx| {
                     let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
-                    cx.new(|cx| PaneGroupView::new(initial_editor, cx))
+                    cx.new(|cx| PaneGroupView::new(initial_editor, keymap_clone.clone(), cx))
                 },
             )
             .expect("failed to open/update window");

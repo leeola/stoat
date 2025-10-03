@@ -2,17 +2,17 @@ use crate::{
     command_overlay::CommandOverlay, editor::view::EditorView, pane_group::element::pane_axis,
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window, div,
+    div, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, Styled, Window,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 use stoat::{
-    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
         SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    Stoat,
 };
 use tracing::debug;
 
@@ -26,13 +26,18 @@ pub struct PaneGroupView {
     pane_editors: HashMap<PaneId, Entity<EditorView>>,
     active_pane: PaneId,
     focus_handle: FocusHandle,
+    keymap: Rc<gpui::Keymap>,
 }
 
 impl PaneGroupView {
     /// Create a new pane group view with an initial editor entity.
     ///
     /// The caller must create the initial EditorView entity using App context.
-    pub fn new(initial_editor: Entity<EditorView>, cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(
+        initial_editor: Entity<EditorView>,
+        keymap: Rc<gpui::Keymap>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let pane_group = PaneGroup::new();
         let initial_pane_id = pane_group.panes()[0];
 
@@ -44,6 +49,7 @@ impl PaneGroupView {
             pane_editors,
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
+            keymap,
         }
     }
 
@@ -428,6 +434,9 @@ impl Render for PaneGroupView {
             .map(|editor| editor.read(cx).stoat().mode())
             .unwrap_or(stoat::EditorMode::Normal);
 
+        // Query keymap for bindings in the current mode
+        let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
+
         div()
             .size_full()
             .relative() // Enable absolute positioning for overlay
@@ -442,6 +451,6 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .child(self.render_member(self.pane_group.root(), 0))
-            .child(CommandOverlay::new(active_mode))
+            .child(CommandOverlay::new(active_mode, bindings))
     }
 }

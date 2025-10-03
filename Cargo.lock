@@ -6344,6 +6344,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gpui",
+ "once_cell",
  "parking_lot 0.12.4",
  "smallvec",
  "stoat_rope_v3",
