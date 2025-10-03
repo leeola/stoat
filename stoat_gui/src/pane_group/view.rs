@@ -1,16 +1,18 @@
-use crate::{editor::view::EditorView, pane_group::element::pane_axis};
+use crate::{
+    command_overlay::CommandOverlay, editor::view::EditorView, pane_group::element::pane_axis,
+};
 use gpui::{
-    div, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, Styled, Window, div,
 };
 use std::collections::HashMap;
 use stoat::{
+    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
         SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
-    Stoat,
 };
 use tracing::debug;
 
@@ -419,8 +421,16 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Get the mode from the active editor
+        let active_mode = self
+            .pane_editors
+            .get(&self.active_pane)
+            .map(|editor| editor.read(cx).stoat().mode())
+            .unwrap_or(stoat::EditorMode::Normal);
+
         div()
             .size_full()
+            .relative() // Enable absolute positioning for overlay
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_split_up))
             .on_action(cx.listener(Self::handle_split_down))
@@ -432,5 +442,6 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .child(self.render_member(self.pane_group.root(), 0))
+            .child(CommandOverlay::new(active_mode))
     }
 }
