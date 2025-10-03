@@ -1,10 +1,10 @@
 use super::{element::EditorElement, style::EditorStyle};
 use crate::{context::EditorContext, input::InputHandler};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollWheelEvent, Styled, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render,
+    ScrollWheelEvent, Styled, Window, div,
 };
-use stoat::{actions::*, ScrollDelta, Stoat};
+use stoat::{ScrollDelta, Stoat, actions::*};
 use tracing::info;
 
 pub struct EditorView {
@@ -70,6 +70,16 @@ impl EditorView {
     /// Get the current editor mode for display
     pub fn current_mode(&self) -> stoat::EditorMode {
         self.stoat.mode()
+    }
+
+    /// Get a reference to the Stoat editor state
+    pub fn stoat(&self) -> &Stoat {
+        &self.stoat
+    }
+
+    /// Set the cursor position
+    pub fn set_cursor_position(&mut self, position: text::Point) {
+        self.stoat.set_cursor_position(position);
     }
 
     /// Command handlers for direct action execution
@@ -390,6 +400,6 @@ impl Render for EditorView {
                     editor.handle_scroll(&scroll_command, cx);
                 },
             ))
-            .child(EditorElement::new(self.stoat.clone()))
+            .child(EditorElement::new(cx.entity()))
     }
 }
