@@ -1,7 +1,7 @@
 use crate::editor::view::EditorView;
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window, div,
+    IntoElement, ParentElement, Render, Styled, Window, div, rgb,
 };
 use std::collections::HashMap;
 use stoat::{
@@ -262,7 +262,22 @@ impl PaneGroupView {
             Axis::Vertical => container.flex().flex_col(),
         };
 
-        for (_idx, member) in axis.members.iter().enumerate() {
+        for (idx, member) in axis.members.iter().enumerate() {
+            // Add divider before each child except the first
+            if idx > 0 {
+                let divider = match axis.axis {
+                    Axis::Horizontal => {
+                        // Vertical divider for side-by-side panes
+                        div().w_px().h_full().bg(rgb(0x3c3c3c))
+                    },
+                    Axis::Vertical => {
+                        // Horizontal divider for stacked panes
+                        div().w_full().h_px().bg(rgb(0x3c3c3c))
+                    },
+                };
+                container = container.child(divider);
+            }
+
             // TODO: Use axis.flexes[idx] for custom sizing when PaneAxisElement is implemented
             let child = self.render_member(member);
 
