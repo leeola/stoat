@@ -6,7 +6,10 @@ use gpui::{
 use std::collections::HashMap;
 use stoat::{
     Stoat,
-    actions::{SplitDown, SplitLeft, SplitRight, SplitUp},
+    actions::{
+        FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
+        SplitRight, SplitUp,
+    },
     pane::{Axis, Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
 };
 
@@ -135,6 +138,99 @@ impl PaneGroupView {
         cx.notify();
     }
 
+    /// Get the pane in the given direction (simplified tree-order navigation)
+    fn get_pane_in_direction(&self, direction: SplitDirection) -> Option<PaneId> {
+        let all_panes = self.pane_group.panes();
+        if all_panes.len() <= 1 {
+            return None;
+        }
+
+        let current_idx = all_panes.iter().position(|&p| p == self.active_pane)?;
+
+        match direction {
+            SplitDirection::Left | SplitDirection::Up => {
+                // Previous pane (wrap around)
+                if current_idx > 0 {
+                    Some(all_panes[current_idx - 1])
+                } else {
+                    Some(all_panes[all_panes.len() - 1])
+                }
+            },
+            SplitDirection::Right | SplitDirection::Down => {
+                // Next pane (wrap around)
+                if current_idx < all_panes.len() - 1 {
+                    Some(all_panes[current_idx + 1])
+                } else {
+                    Some(all_panes[0])
+                }
+            },
+        }
+    }
+
+    /// Handle focus pane left action
+    fn handle_focus_pane_left(
+        &mut self,
+        _: &FocusPaneLeft,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Left) {
+            self.active_pane = new_pane;
+            if let Some(editor) = self.pane_editors.get(&new_pane) {
+                window.focus(&editor.read(cx).focus_handle(cx));
+            }
+            cx.notify();
+        }
+    }
+
+    /// Handle focus pane right action
+    fn handle_focus_pane_right(
+        &mut self,
+        _: &FocusPaneRight,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Right) {
+            self.active_pane = new_pane;
+            if let Some(editor) = self.pane_editors.get(&new_pane) {
+                window.focus(&editor.read(cx).focus_handle(cx));
+            }
+            cx.notify();
+        }
+    }
+
+    /// Handle focus pane up action
+    fn handle_focus_pane_up(
+        &mut self,
+        _: &FocusPaneUp,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Up) {
+            self.active_pane = new_pane;
+            if let Some(editor) = self.pane_editors.get(&new_pane) {
+                window.focus(&editor.read(cx).focus_handle(cx));
+            }
+            cx.notify();
+        }
+    }
+
+    /// Handle focus pane down action
+    fn handle_focus_pane_down(
+        &mut self,
+        _: &FocusPaneDown,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Down) {
+            self.active_pane = new_pane;
+            if let Some(editor) = self.pane_editors.get(&new_pane) {
+                window.focus(&editor.read(cx).focus_handle(cx));
+            }
+            cx.notify();
+        }
+    }
+
     /// Recursively render a member of the pane tree.
     fn render_member(&self, member: &Member) -> AnyElement {
         match member {
@@ -192,6 +288,10 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_split_down))
             .on_action(cx.listener(Self::handle_split_left))
             .on_action(cx.listener(Self::handle_split_right))
+            .on_action(cx.listener(Self::handle_focus_pane_up))
+            .on_action(cx.listener(Self::handle_focus_pane_down))
+            .on_action(cx.listener(Self::handle_focus_pane_left))
+            .on_action(cx.listener(Self::handle_focus_pane_right))
             .child(self.render_member(self.pane_group.root()))
     }
 }
