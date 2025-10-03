@@ -1,10 +1,10 @@
 use super::{element::EditorElement, style::EditorStyle};
 use crate::{context::EditorContext, input::InputHandler};
 use gpui::{
-    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollWheelEvent, Styled, Window, div,
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollWheelEvent, Styled, Window,
 };
-use stoat::{ScrollDelta, Stoat, actions::*};
+use stoat::{actions::*, ScrollDelta, Stoat};
 use tracing::info;
 
 pub struct EditorView {
@@ -80,6 +80,26 @@ impl EditorView {
     /// Set the cursor position
     pub fn set_cursor_position(&mut self, position: text::Point) {
         self.stoat.set_cursor_position(position);
+    }
+
+    /// Check if currently in selection mode
+    pub fn is_selecting(&self) -> bool {
+        self.stoat.cursor_manager().is_selecting()
+    }
+
+    /// Start selection mode at current cursor position
+    pub fn start_selection(&mut self) {
+        self.stoat.cursor_manager_mut().start_selection();
+    }
+
+    /// Extend selection to the given position
+    pub fn extend_selection_to(&mut self, position: text::Point) {
+        self.stoat.cursor_manager_mut().move_to(position);
+    }
+
+    /// End selection mode
+    pub fn end_selection(&mut self) {
+        self.stoat.cursor_manager_mut().end_selection();
     }
 
     /// Command handlers for direct action execution

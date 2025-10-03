@@ -5,6 +5,8 @@ use smallvec::SmallVec;
 pub struct EditorLayout {
     /// The shaped lines ready to paint
     pub lines: SmallVec<[PositionedLine; 32]>,
+    /// Buffer line lengths (actual character count, not shaped)
+    pub line_lengths: SmallVec<[u32; 32]>,
     /// Total bounds of the editor
     pub bounds: Bounds<Pixels>,
     /// Content area (excluding padding)
@@ -45,20 +47,24 @@ impl EditorLayout {
         if line_index >= self.lines.len() {
             // Click below last visible line - return end of last line
             let last_row = self.start_row + self.lines.len() as u32 - 1;
-            let last_line = self.lines.last()?;
-            return Some(text::Point::new(last_row, last_line.shaped.len as u32));
+            let last_line_length = self.line_lengths.last().copied().unwrap_or(0);
+            return Some(text::Point::new(last_row, last_line_length));
         }
 
         let positioned_line = &self.lines[line_index];
+        let buffer_line_length = self.line_lengths[line_index];
 
         // Calculate column from X position using the shaped line
         let x_in_line = relative_pos.x;
-        let column = if let Some(ix) = positioned_line.shaped.index_for_x(x_in_line) {
+        let shaped_column = if let Some(ix) = positioned_line.shaped.index_for_x(x_in_line) {
             ix as u32
         } else {
             // Click past end of line
             positioned_line.shaped.len as u32
         };
+
+        // Clamp to actual buffer line length
+        let column = shaped_column.min(buffer_line_length);
 
         Some(text::Point::new(row, column))
     }

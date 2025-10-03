@@ -5,9 +5,10 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, DispatchPhase, Element, ElementId, Entity, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, PaintQuad, Pixels, SharedString, Style, TextRun, Window,
+    App, Bounds, DispatchPhase, Element, ElementId, Entity, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun, Window, point,
+    px, relative, size,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -104,6 +105,7 @@ impl Element for EditorElement {
         let end_row = ((scroll_position.y + height_in_lines).ceil() as u32).min(max_row);
 
         let mut lines = SmallVec::new();
+        let mut line_lengths = SmallVec::new();
 
         // Get token snapshot for syntax highlighting
         let token_snapshot = stoat.token_snapshot();
@@ -112,6 +114,9 @@ impl Element for EditorElement {
         for row in start_row..end_row {
             let line_start = text::Point::new(row, 0);
             let line_len = buffer_snapshot.line_len(row);
+
+            // Store buffer line length for position clamping
+            line_lengths.push(line_len);
             let line_end = text::Point::new(row, line_len);
 
             // Convert line range to byte offsets for highlighting
@@ -247,10 +252,12 @@ impl Element for EditorElement {
                 shaped,
                 position: content_bounds.origin,
             });
+            line_lengths.push(0); // Empty buffer has zero length
         }
 
         let layout = EditorLayout {
             lines,
+            line_lengths,
             bounds,
             content_bounds,
             line_height: self.style.line_height,
@@ -271,7 +278,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Register mouse handler for click-to-position
+        // Register mouse down handler to position cursor
         window.on_mouse_event({
             let layout = layout.clone();
             let view = self.view.clone();
@@ -279,13 +286,48 @@ impl Element for EditorElement {
                 if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
                     if let Some(text_pos) = layout.position_for_pixel(event.position) {
                         info!(
-                            "Mouse click at pixel {:?} -> text position {:?}",
+                            "Mouse down at pixel {:?} -> text position {:?}",
                             event.position, text_pos
                         );
                         view.update(cx, |view, _| {
                             view.set_cursor_position(text_pos);
                         });
                     }
+                }
+            }
+        });
+
+        // Register mouse move handler for drag selection
+        window.on_mouse_event({
+            let layout = layout.clone();
+            let view = self.view.clone();
+            move |event: &MouseMoveEvent, phase, _window, cx| {
+                if phase == DispatchPhase::Bubble && event.pressed_button == Some(MouseButton::Left)
+                {
+                    if let Some(text_pos) = layout.position_for_pixel(event.position) {
+                        view.update(cx, |view, cx| {
+                            // Start selection mode on first drag
+                            if !view.is_selecting() {
+                                view.start_selection();
+                            }
+                            // Extend selection to current position
+                            view.extend_selection_to(text_pos);
+                            // Notify to trigger re-render
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+        });
+
+        // Register mouse up handler to end selection
+        window.on_mouse_event({
+            let view = self.view.clone();
+            move |event: &MouseUpEvent, phase, _window, cx| {
+                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                    view.update(cx, |view, _| {
+                        view.end_selection();
+                    });
                 }
             }
         });
