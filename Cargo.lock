@@ -6347,12 +6347,12 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.4",
  "serde",
- "serde_json",
  "smallvec",
  "stoat_rope_v3",
  "stoat_text_v3",
  "text",
  "thiserror 1.0.69",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

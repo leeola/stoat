@@ -22,10 +22,10 @@ use crate::actions::*;
 use gpui::{KeyBinding, Keymap};
 use serde::Deserialize;
 
-/// Embedded default keymap JSON configuration
-const DEFAULT_KEYMAP_JSON: &str = include_str!("../../keymap.json");
+/// Embedded default keymap TOML configuration
+const DEFAULT_KEYMAP_TOML: &str = include_str!("../../keymap.toml");
 
-/// Keymap configuration loaded from JSON
+/// Keymap configuration loaded from TOML
 #[derive(Debug, Deserialize)]
 struct KeymapConfig {
     bindings: Vec<BindingConfig>,
@@ -41,7 +41,7 @@ struct BindingConfig {
 
 /// Create a KeyBinding from a binding configuration.
 ///
-/// Maps action names from the JSON config to their corresponding action types
+/// Maps action names from the TOML config to their corresponding action types
 /// and constructs a KeyBinding with the specified keystroke and context.
 fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, String> {
     let key = binding_config.key.as_str();
@@ -124,7 +124,7 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
 
 /// Creates the default keymap for Stoat editor.
 ///
-/// Loads key bindings from an embedded JSON configuration file. The keymap is compiled
+/// Loads key bindings from an embedded TOML configuration file. The keymap is compiled
 /// into the binary and contains all default bindings organized by mode (Normal, Insert,
 /// Visual, Pane).
 ///
@@ -148,7 +148,7 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
 ///
 /// # Configuration
 ///
-/// The keymap is loaded from `keymap.json`, which is embedded at compile time using
+/// The keymap is loaded from `keymap.toml`, which is embedded at compile time using
 /// `include_str!`. This ensures the binary is portable and requires no external files.
 ///
 /// # Usage
@@ -159,17 +159,17 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
 /// let keymap = Rc::new(RefCell::new(create_default_keymap()));
 /// ```
 pub fn create_default_keymap() -> Keymap {
-    // Parse the embedded JSON configuration
+    // Parse the embedded TOML configuration
     let config: KeymapConfig =
-        serde_json::from_str(DEFAULT_KEYMAP_JSON).expect("Failed to parse embedded keymap.json");
+        toml::from_str(DEFAULT_KEYMAP_TOML).expect("Failed to parse embedded keymap.toml");
 
-    // Convert JSON bindings to GPUI KeyBindings
+    // Convert TOML bindings to GPUI KeyBindings
     let bindings: Vec<KeyBinding> = config
         .bindings
         .iter()
         .map(|binding_config| {
             create_keybinding(binding_config)
-                .unwrap_or_else(|err| panic!("Invalid binding in keymap.json: {}", err))
+                .unwrap_or_else(|err| panic!("Invalid binding in keymap.toml: {}", err))
         })
         .collect();
 
