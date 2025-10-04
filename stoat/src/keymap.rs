@@ -20,11 +20,113 @@
 
 use crate::actions::*;
 use gpui::{KeyBinding, Keymap};
+use serde::Deserialize;
+
+/// Embedded default keymap JSON configuration
+const DEFAULT_KEYMAP_JSON: &str = include_str!("../../keymap.json");
+
+/// Keymap configuration loaded from JSON
+#[derive(Debug, Deserialize)]
+struct KeymapConfig {
+    bindings: Vec<BindingConfig>,
+}
+
+/// Individual key binding configuration
+#[derive(Debug, Deserialize)]
+struct BindingConfig {
+    key: String,
+    action: String,
+    context: String,
+}
+
+/// Create a KeyBinding from a binding configuration.
+///
+/// Maps action names from the JSON config to their corresponding action types
+/// and constructs a KeyBinding with the specified keystroke and context.
+fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, String> {
+    let key = binding_config.key.as_str();
+    let context = Some(binding_config.context.as_str());
+
+    match binding_config.action.as_str() {
+        // Movement actions
+        "MoveLeft" => Ok(KeyBinding::new(key, MoveLeft, context)),
+        "MoveRight" => Ok(KeyBinding::new(key, MoveRight, context)),
+        "MoveUp" => Ok(KeyBinding::new(key, MoveUp, context)),
+        "MoveDown" => Ok(KeyBinding::new(key, MoveDown, context)),
+        "MoveToLineStart" => Ok(KeyBinding::new(key, MoveToLineStart, context)),
+        "MoveToLineEnd" => Ok(KeyBinding::new(key, MoveToLineEnd, context)),
+        "MoveToFileStart" => Ok(KeyBinding::new(key, MoveToFileStart, context)),
+        "MoveToFileEnd" => Ok(KeyBinding::new(key, MoveToFileEnd, context)),
+        "MoveWordLeft" => Ok(KeyBinding::new(key, MoveWordLeft, context)),
+        "MoveWordRight" => Ok(KeyBinding::new(key, MoveWordRight, context)),
+        "PageUp" => Ok(KeyBinding::new(key, PageUp, context)),
+        "PageDown" => Ok(KeyBinding::new(key, PageDown, context)),
+
+        // Selection actions
+        "SelectNextSymbol" => Ok(KeyBinding::new(key, SelectNextSymbol, context)),
+        "SelectPrevSymbol" => Ok(KeyBinding::new(key, SelectPrevSymbol, context)),
+        "SelectNextToken" => Ok(KeyBinding::new(key, SelectNextToken, context)),
+        "SelectPrevToken" => Ok(KeyBinding::new(key, SelectPrevToken, context)),
+        "SelectLeft" => Ok(KeyBinding::new(key, SelectLeft, context)),
+        "SelectRight" => Ok(KeyBinding::new(key, SelectRight, context)),
+        "SelectUp" => Ok(KeyBinding::new(key, SelectUp, context)),
+        "SelectDown" => Ok(KeyBinding::new(key, SelectDown, context)),
+        "SelectToLineStart" => Ok(KeyBinding::new(key, SelectToLineStart, context)),
+        "SelectToLineEnd" => Ok(KeyBinding::new(key, SelectToLineEnd, context)),
+        "SelectAll" => Ok(KeyBinding::new(key, SelectAll, context)),
+
+        // Edit actions
+        "DeleteLeft" => Ok(KeyBinding::new(key, DeleteLeft, context)),
+        "DeleteRight" => Ok(KeyBinding::new(key, DeleteRight, context)),
+        "DeleteLine" => Ok(KeyBinding::new(key, DeleteLine, context)),
+        "DeleteToEndOfLine" => Ok(KeyBinding::new(key, DeleteToEndOfLine, context)),
+        "DeleteWordLeft" => Ok(KeyBinding::new(key, DeleteWordLeft, context)),
+        "DeleteWordRight" => Ok(KeyBinding::new(key, DeleteWordRight, context)),
+        "NewLine" => Ok(KeyBinding::new(key, NewLine, context)),
+        "Indent" => Ok(KeyBinding::new(key, Indent, context)),
+        "Outdent" => Ok(KeyBinding::new(key, Outdent, context)),
+
+        // Modal actions
+        "EnterInsertMode" => Ok(KeyBinding::new(key, EnterInsertMode, context)),
+        "EnterNormalMode" => Ok(KeyBinding::new(key, EnterNormalMode, context)),
+        "EnterVisualMode" => Ok(KeyBinding::new(key, EnterVisualMode, context)),
+        "EnterPaneMode" => Ok(KeyBinding::new(key, EnterPaneMode, context)),
+
+        // Clipboard actions
+        "Copy" => Ok(KeyBinding::new(key, Copy, context)),
+        "Cut" => Ok(KeyBinding::new(key, Cut, context)),
+        "Paste" => Ok(KeyBinding::new(key, Paste, context)),
+
+        // File actions
+        "Save" => Ok(KeyBinding::new(key, Save, context)),
+        "Open" => Ok(KeyBinding::new(key, Open, context)),
+        "Quit" => Ok(KeyBinding::new(key, Quit, context)),
+        "ExitApp" => Ok(KeyBinding::new(key, ExitApp, context)),
+
+        // Undo/redo
+        "Undo" => Ok(KeyBinding::new(key, Undo, context)),
+        "Redo" => Ok(KeyBinding::new(key, Redo, context)),
+
+        // Pane actions
+        "SplitUp" => Ok(KeyBinding::new(key, SplitUp, context)),
+        "SplitDown" => Ok(KeyBinding::new(key, SplitDown, context)),
+        "SplitLeft" => Ok(KeyBinding::new(key, SplitLeft, context)),
+        "SplitRight" => Ok(KeyBinding::new(key, SplitRight, context)),
+        "ClosePane" => Ok(KeyBinding::new(key, ClosePane, context)),
+        "FocusPaneLeft" => Ok(KeyBinding::new(key, FocusPaneLeft, context)),
+        "FocusPaneRight" => Ok(KeyBinding::new(key, FocusPaneRight, context)),
+        "FocusPaneUp" => Ok(KeyBinding::new(key, FocusPaneUp, context)),
+        "FocusPaneDown" => Ok(KeyBinding::new(key, FocusPaneDown, context)),
+
+        _ => Err(format!("Unknown action: {}", binding_config.action)),
+    }
+}
 
 /// Creates the default keymap for Stoat editor.
 ///
-/// Returns a [`Keymap`] containing all default key bindings organized by mode. The keymap
-/// includes vim-style bindings in Normal mode and standard text editing bindings in Insert mode.
+/// Loads key bindings from an embedded JSON configuration file. The keymap is compiled
+/// into the binary and contains all default bindings organized by mode (Normal, Insert,
+/// Visual, Pane).
 ///
 /// # Key Binding Organization
 ///
@@ -44,6 +146,11 @@ use gpui::{KeyBinding, Keymap};
 /// - **Mode transitions**: `escape` to return to normal mode
 /// - **Operations**: `y` for copy, `d` for cut
 ///
+/// # Configuration
+///
+/// The keymap is loaded from `keymap.json`, which is embedded at compile time using
+/// `include_str!`. This ensures the binary is portable and requires no external files.
+///
 /// # Usage
 ///
 /// This function is typically called once during editor initialization:
@@ -52,7 +159,27 @@ use gpui::{KeyBinding, Keymap};
 /// let keymap = Rc::new(RefCell::new(create_default_keymap()));
 /// ```
 pub fn create_default_keymap() -> Keymap {
-    let bindings = vec![
+    // Parse the embedded JSON configuration
+    let config: KeymapConfig =
+        serde_json::from_str(DEFAULT_KEYMAP_JSON).expect("Failed to parse embedded keymap.json");
+
+    // Convert JSON bindings to GPUI KeyBindings
+    let bindings: Vec<KeyBinding> = config
+        .bindings
+        .iter()
+        .map(|binding_config| {
+            create_keybinding(binding_config)
+                .unwrap_or_else(|err| panic!("Invalid binding in keymap.json: {}", err))
+        })
+        .collect();
+
+    Keymap::new(bindings)
+}
+
+// Old hardcoded implementation preserved below for reference (can be deleted later)
+#[allow(dead_code)]
+fn create_default_keymap_old() -> Keymap {
+    let bindings_old = vec![
         // ===== NORMAL MODE BINDINGS =====
         // Movement - vim-style hjkl
         KeyBinding::new("h", MoveLeft, Some("Editor && mode == normal")),
@@ -199,7 +326,7 @@ pub fn create_default_keymap() -> Keymap {
         KeyBinding::new("ctrl-l", FocusPaneRight, Some("Editor && mode == pane")),
     ];
 
-    Keymap::new(bindings)
+    Keymap::new(bindings_old)
 }
 
 #[cfg(test)]
