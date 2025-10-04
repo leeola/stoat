@@ -63,7 +63,7 @@ mod tests {
         s.input("i");
         assert_eq!(s.mode(), "insert");
 
-        s.input(" world");
+        s.input("space w o r l d");
         s.assert_cursor_notation("hello world|");
     }
 

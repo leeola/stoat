@@ -86,7 +86,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 2);
-        s.input("x"); // delete_left
+        s.input("shift-x"); // delete_left
         assert_eq!(s.text(), "hllo");
     }
 
@@ -95,7 +95,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 1);
-        s.input("X"); // delete_right
+        s.input("x"); // delete_right
         assert_eq!(s.text(), "hllo");
     }
 }

@@ -135,6 +135,10 @@ impl Render for StoatView {
                 view.stoat.set_mode("visual");
                 cx.notify();
             }))
+            .on_action(cx.listener(|view: &mut Self, _: &EnterPaneMode, _, cx| {
+                view.stoat.set_mode("pane");
+                cx.notify();
+            }))
             // Selection actions
             .on_action(cx.listener(|view: &mut Self, _: &SelectNextSymbol, _, cx| {
                 view.stoat.select_next_symbol(cx);
@@ -310,9 +314,11 @@ impl StoatTest {
 
     /// Set the editor mode
     pub fn set_mode(&mut self, mode: &str) {
-        self.view.update(&mut self.cx, |view, _| {
+        self.view.update(&mut self.cx, |view, cx| {
             view.stoat_mut().set_mode(mode);
+            cx.notify(); // Trigger re-render to update key context
         });
+        self.cx.run_until_parked(); // Wait for render to complete
     }
 
     /// Get the current selection as (start_row, start_col, end_row, end_col)

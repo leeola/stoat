@@ -90,7 +90,7 @@ mod tests {
         s.set_text("hello");
         s.set_cursor(0, 5);
         s.set_mode("insert");
-        s.input(" world");
+        s.input("space w o r l d");
         s.assert_cursor_notation("hello world|");
     }
 
@@ -100,7 +100,7 @@ mod tests {
         s.set_text("world");
         s.set_cursor(0, 0);
         s.set_mode("insert");
-        s.input("hello ");
+        s.input("h e l l o space");
         s.assert_cursor_notation("hello |world");
     }
 

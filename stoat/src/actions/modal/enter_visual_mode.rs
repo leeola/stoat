@@ -84,7 +84,7 @@ mod tests {
         s.input("v"); // Enter visual
         assert_eq!(s.mode(), "visual");
 
-        s.input("\x1b"); // Escape
+        s.input("escape"); // Escape
         assert_eq!(s.mode(), "normal");
     }
 }

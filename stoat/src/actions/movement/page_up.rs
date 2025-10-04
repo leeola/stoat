@@ -68,10 +68,12 @@ mod tests {
 
         // Start at line 20
         s.set_cursor(20, 0);
-        s.input("\x1b[5~"); // PageUp key
+        s.input("pageup"); // PageUp key
 
         // Should move up by 10 lines
-        s.assert_cursor_notation("line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\n|line 10");
+        let (row, col) = s.cursor();
+        assert_eq!(row, 10);
+        assert_eq!(col, 0);
     }
 
     #[test]
@@ -80,7 +82,7 @@ mod tests {
         s.set_text("line 0\nline 1\nline 2\nline 3\nline 4");
         s.resize_lines(10.0);
         s.set_cursor(2, 0);
-        s.input("\x1b[5~"); // PageUp key
+        s.input("pageup"); // PageUp key
 
         // Should clamp to start
         s.assert_cursor_notation("|line 0\nline 1\nline 2\nline 3\nline 4");
@@ -92,7 +94,7 @@ mod tests {
         s.set_text("line 0\nline 1\nline 2");
         s.resize_lines(10.0);
         s.set_cursor(0, 0);
-        s.input("\x1b[5~"); // PageUp key
+        s.input("pageup"); // PageUp key
 
         // Should stay at start
         s.assert_cursor_notation("|line 0\nline 1\nline 2");

@@ -49,7 +49,7 @@ mod tests {
         s.set_text("hello");
         s.set_mode("insert");
 
-        s.input("\x1b"); // Escape key
+        s.input("escape"); // Escape key
         assert_eq!(s.mode(), "normal");
     }
 
@@ -60,7 +60,7 @@ mod tests {
         s.set_cursor(0, 0);
         s.set_mode("insert");
 
-        s.input("\x1b"); // Escape to normal
+        s.input("escape"); // Escape to normal
         assert_eq!(s.mode(), "normal");
 
         s.input("l"); // Move right
@@ -74,8 +74,8 @@ mod tests {
         s.set_cursor(0, 5);
         s.set_mode("insert");
 
-        s.input(" world");
-        s.input("\x1b"); // Escape to normal
+        s.input("space w o r l d");
+        s.input("escape"); // Escape to normal
         s.input("x"); // Should not insert 'x', should delete char
 
         // In normal mode, 'x' deletes character under cursor

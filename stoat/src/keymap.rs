@@ -88,6 +88,7 @@ pub fn create_default_keymap() -> Keymap {
         KeyBinding::new("escape", ExitApp, Some("Editor && mode == normal")),
         // Editing in normal mode
         KeyBinding::new("x", DeleteRight, Some("Editor && mode == normal")),
+        KeyBinding::new("shift-x", DeleteLeft, Some("Editor && mode == normal")),
         KeyBinding::new("d d", DeleteLine, Some("Editor && mode == normal")),
         KeyBinding::new("D", DeleteToEndOfLine, Some("Editor && mode == normal")),
         // Undo/redo
