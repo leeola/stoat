@@ -20,6 +20,10 @@ display_name = "VISUAL"
 name = "pane"
 display_name = "PANE"
 
+[[modes]]
+name = "file_finder"
+display_name = "FILE FINDER"
+
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]
 key = "h"
@@ -527,3 +531,29 @@ context = "Editor && mode == pane"
 key = "ctrl-l"
 action = "FocusPaneRight"
 context = "Editor && mode == pane"
+
+# File Finder Mode - Quick file navigation
+[[bindings]]
+key = "escape"
+action = "FileFinderDismiss"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
+key = "up"
+action = "FileFinderPrev"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
+key = "down"
+action = "FileFinderNext"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
+key = "backspace"
+action = "DeleteLeft"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
+key = "enter"
+action = "FileFinderSelect"
+context = "Editor && mode == file_finder"

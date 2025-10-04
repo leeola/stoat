@@ -1,96 +1,78 @@
 //! File finder modal for quick file navigation
 //!
-//! Provides a Ctrl-p style file picker with fuzzy filtering. The file finder displays
-//! as a modal overlay showing a list of files that can be filtered by typing.
+//! Renders the file finder modal overlay based on state from [`stoat::Stoat`]. This component
+//! is stateless - all state management and input handling happens in the core via the mode system.
 
 use gpui::{
-    App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyContext, KeyDownEvent, Modifiers, ParentElement, Render, Styled, Window, div,
-    prelude::FluentBuilder, px, rgb, rgba,
+    div, prelude::FluentBuilder, px, rgb, rgba, App, IntoElement, ParentElement, RenderOnce,
+    Styled, Window,
 };
 use std::path::PathBuf;
 
-/// File finder modal for quick file navigation.
+/// File finder modal renderer.
 ///
-/// Displays an overlay modal with:
-/// - Input box at the top for filtering
-/// - List of files below that updates as you type
-/// - Keyboard navigation with arrow keys
-/// - Escape to dismiss
+/// This is a stateless component that renders the file finder UI based on state from
+/// [`stoat::Stoat`]. All interaction is handled through the normal action system in file_finder
+/// mode:
+///
+/// - Text input goes to the input buffer via [`stoat::Stoat::insert_text`]
+/// - Backspace deletes from input buffer via [`stoat::Stoat::delete_left`]
+/// - Arrow keys navigate via [`stoat::Stoat::file_finder_next`]/[`stoat::Stoat::file_finder_prev`]
+/// - Escape dismisses via [`stoat::Stoat::file_finder_dismiss`]
+///
+/// The file finder is displayed when [`stoat::Stoat::mode`] returns `"file_finder"`.
+#[derive(IntoElement)]
 pub struct FileFinder {
-    /// All available files
+    query: String,
     files: Vec<PathBuf>,
-    /// Currently visible files after filtering
-    filtered_files: Vec<PathBuf>,
-    /// Index of currently selected file
-    selected_index: usize,
-    /// Focus handle for the file finder
-    focus_handle: FocusHandle,
-    /// Previous focus to restore on dismiss
-    previous_focus: Option<FocusHandle>,
+    selected: usize,
 }
 
 impl FileFinder {
-    /// Create a new file finder with the given list of files.
-    ///
-    /// # Arguments
-    /// * `files` - List of file paths to display
-    /// * `previous_focus` - Focus handle to restore when dismissed
-    /// * `window` - GPUI window reference
-    /// * `cx` - Context for creating the file finder
-    pub fn new(
-        files: Vec<PathBuf>,
-        previous_focus: Option<FocusHandle>,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Self {
-        let filtered_files = files.clone();
-        let focus_handle = cx.focus_handle();
-
+    /// Create a new file finder renderer with the given state.
+    pub fn new(query: String, files: Vec<PathBuf>, selected: usize) -> Self {
         Self {
+            query,
             files,
-            filtered_files,
-            selected_index: 0,
-            focus_handle,
-            previous_focus,
+            selected,
         }
     }
 
-    /// Update the filtered file list based on the query string.
-    ///
-    /// Performs simple substring matching (case-insensitive) to filter files.
-    fn update_filter(&mut self, query: &str) {
-        if query.is_empty() {
-            self.filtered_files = self.files.clone();
-        } else {
-            let query_lower = query.to_lowercase();
-            self.filtered_files = self
-                .files
-                .iter()
-                .filter(|path| path.to_string_lossy().to_lowercase().contains(&query_lower))
-                .cloned()
-                .collect();
-        }
+    /// Render the input box showing the current query.
+    fn render_input(&self) -> impl IntoElement {
+        let query = self.query.clone();
 
-        // Reset selection to top
-        self.selected_index = 0;
+        div()
+            .p(px(8.0))
+            .border_b_1()
+            .border_color(rgb(0x3e3e42))
+            .bg(rgb(0x252526))
+            .text_color(rgb(0xd4d4d4))
+            .child(if query.is_empty() {
+                "Type to search files...".to_string()
+            } else {
+                query
+            })
     }
 
-    /// Render the list of filtered files
+    /// Render the list of filtered files.
     fn render_file_list(&self) -> impl IntoElement {
+        let files = &self.files;
+        let selected = self.selected;
+
         div()
             .flex()
             .flex_col()
             .overflow_y_hidden()
-            .max_h(px(300.0))
-            .children(self.filtered_files.iter().enumerate().map(|(i, path)| {
+            .max_h(px(400.0))
+            .children(files.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(12.0))
                     .py(px(6.0))
-                    .when(i == self.selected_index, |div| {
-                        div.bg(rgb(0x3b4261)) // Subtle blue-gray highlight
+                    .when(i == selected, |div| {
+                        div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected file
                     })
-                    .text_color(rgb(0xd4d4d4)) // Light gray text
+                    .text_color(rgb(0xd4d4d4))
                     .child(
                         path.file_name()
                             .unwrap_or_default()
@@ -99,81 +81,33 @@ impl FileFinder {
                     )
             }))
     }
-
-    /// Handle keyboard navigation
-    fn handle_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        match event.keystroke.key.as_str() {
-            "escape" if event.keystroke.modifiers == Modifiers::default() => {
-                if let Some(ref previous_focus) = self.previous_focus {
-                    window.focus(previous_focus);
-                }
-                cx.emit(DismissEvent);
-            },
-            "up" if event.keystroke.modifiers == Modifiers::default() => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                    cx.notify();
-                }
-            },
-            "down" if event.keystroke.modifiers == Modifiers::default() => {
-                if self.selected_index + 1 < self.filtered_files.len() {
-                    self.selected_index += 1;
-                    cx.notify();
-                }
-            },
-            _ => {},
-        }
-    }
 }
 
-impl Focusable for FileFinder {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl EventEmitter<DismissEvent> for FileFinder {}
-
-impl Render for FileFinder {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+impl RenderOnce for FileFinder {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         div()
-            .track_focus(&self.focus_handle)
             .absolute()
             .top_0()
             .left_0()
             .right_0()
             .bottom_0()
-            .bg(rgba(0x00000030)) // Lighter background overlay
+            .bg(rgba(0x00000030)) // Light dimmed background overlay
             .flex()
             .items_center()
             .justify_center()
-            .key_context({
-                let mut ctx = KeyContext::new_with_defaults();
-                ctx.add("FileFinder");
-                ctx
-            })
-            .on_key_down(cx.listener(Self::handle_key_down))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .w(px(600.0))
-                    .max_h(px(400.0))
-                    .bg(rgb(0x1e1e1e)) // Dark gray background matching VS Code theme
+                    .max_h(px(500.0))
+                    .bg(rgb(0x1e1e1e)) // Dark background matching VS Code theme
                     .border_1()
                     .border_color(rgb(0x3e3e42)) // Subtle border
                     .rounded(px(8.0))
                     .overflow_hidden()
-                    // FIXME: Add input box for filtering
-                    .child(
-                        // File list
-                        self.render_file_list(),
-                    ),
+                    .child(self.render_input())
+                    .child(self.render_file_list()),
             )
     }
 }

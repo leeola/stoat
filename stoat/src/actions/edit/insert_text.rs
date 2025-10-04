@@ -17,22 +17,29 @@ impl Stoat {
     /// # Behavior
     ///
     /// - Inserts text at cursor offset
-    /// - Re-parses buffer to update token map
+    /// - Re-parses buffer to update token map (main buffer only)
     /// - Advances cursor by length of inserted text
     /// - Handles single characters, strings, and pasted content
+    /// - In file_finder mode, inserts into input buffer and re-filters files
+    ///
+    /// # Mode-Aware Routing
+    ///
+    /// - **file_finder mode**: Inserts into input buffer, triggers file filtering
+    /// - **Other modes**: Inserts into main buffer, updates syntax highlighting
     ///
     /// # Implementation Details
     ///
     /// This method:
-    /// 1. Converts cursor position to byte offset
-    /// 2. Updates the buffer with the new text
-    /// 3. Re-parses the entire buffer (full re-parse for simplicity)
-    /// 4. Moves cursor forward by the inserted text length
+    /// 1. Checks current mode and selects appropriate buffer
+    /// 2. Converts cursor position to byte offset
+    /// 3. Updates the buffer with the new text
+    /// 4. Re-parses main buffer or re-filters files depending on mode
+    /// 5. Moves cursor forward by the inserted text length
     ///
     /// # Context
     ///
     /// This is dispatched by the input system when:
-    /// - User types a character in insert mode
+    /// - User types a character in insert mode or file_finder mode
     /// - Text is pasted from clipboard
     /// - IME systems complete multi-character input
     ///
@@ -42,6 +49,27 @@ impl Stoat {
     /// - [`crate::actions::edit::delete_left`] for backspace
     /// - [`crate::actions::edit::delete_right`] for delete
     pub fn insert_text(&mut self, text: &str, cx: &mut App) {
+        // Route to file finder input buffer if in file_finder mode
+        if self.mode() == "file_finder" {
+            if let Some(input_buffer) = &self.file_finder_input {
+                // Insert into input buffer at end
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _cx| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
+
+                // Re-filter files based on new query
+                let query = self.file_finder_query(cx);
+                self.filter_files(&query);
+
+                trace!(query = ?query, filtered_count = self.file_finder_filtered.len(), "File finder: filtered");
+            }
+            return;
+        }
+
+        // Main buffer insertion for all other modes
         let buffer_snapshot = self.buffer.read(cx).snapshot();
         let cursor_pos = self.cursor_manager.position();
         let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);

@@ -127,6 +127,12 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FocusPaneUp" => Ok(KeyBinding::new(key, FocusPaneUp, context)),
         "FocusPaneDown" => Ok(KeyBinding::new(key, FocusPaneDown, context)),
 
+        // File finder actions
+        "FileFinderNext" => Ok(KeyBinding::new(key, FileFinderNext, context)),
+        "FileFinderPrev" => Ok(KeyBinding::new(key, FileFinderPrev, context)),
+        "FileFinderDismiss" => Ok(KeyBinding::new(key, FileFinderDismiss, context)),
+        "FileFinderSelect" => Ok(KeyBinding::new(key, FileFinderSelect, context)),
+
         _ => Err(format!("Unknown action: {}", binding_config.action)),
     }
 }

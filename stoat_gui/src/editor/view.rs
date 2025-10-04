@@ -261,6 +261,27 @@ impl EditorView {
 
         cx.notify();
     }
+
+    /// File finder command handlers
+    fn handle_file_finder_next(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.file_finder_next();
+        cx.notify();
+    }
+
+    fn handle_file_finder_prev(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.file_finder_prev();
+        cx.notify();
+    }
+
+    fn handle_file_finder_dismiss(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.file_finder_dismiss();
+        cx.notify();
+    }
+
+    fn handle_file_finder_select(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.file_finder_select();
+        cx.notify();
+    }
 }
 
 impl Focusable for EditorView {
@@ -399,11 +420,33 @@ impl Render for EditorView {
                     editor.handle_delete_to_end_of_line(cx);
                 },
             ))
-            // Handle text input in insert mode as fallback (when no action matched)
+            // File finder handlers
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &FileFinderNext, _window: &mut Window, cx| {
+                    editor.handle_file_finder_next(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &FileFinderPrev, _window: &mut Window, cx| {
+                    editor.handle_file_finder_prev(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &FileFinderDismiss, _window: &mut Window, cx| {
+                    editor.handle_file_finder_dismiss(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &FileFinderSelect, _window: &mut Window, cx| {
+                    editor.handle_file_finder_select(cx);
+                },
+            ))
+            // Handle text input in insert/file_finder mode as fallback (when no action matched)
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, _, cx| {
-                    // Only insert text in insert mode when no action matched
-                    if editor.stoat.mode() == "insert" {
+                    let mode = editor.stoat.mode();
+                    // Insert text in insert mode or file_finder mode when no action matched
+                    if mode == "insert" || mode == "file_finder" {
                         if let Some(ref key_char) = event.keystroke.key_char {
                             // Only insert if no control/alt modifiers
                             if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt

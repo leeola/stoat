@@ -23,6 +23,7 @@ mod modal;
 mod movement;
 mod scroll;
 mod selection;
+mod shell;
 
 use crate::ScrollDelta;
 use gpui::{actions, Action, Pixels, Point};
@@ -347,9 +348,9 @@ actions!(
     ]
 );
 
-// Workspace actions - pane management
+// Shell actions - pane management and file finder
 actions!(
-    workspace,
+    shell,
     [
         /// Split the active pane upward.
         ///
@@ -396,6 +397,26 @@ actions!(
         /// Moves focus to the pane directly to the right of the active pane. Has no effect
         /// if there is no pane to the right.
         FocusPaneRight,
+        /// Move to the next file in the file finder list.
+        ///
+        /// In file finder mode, moves the selection highlight down to the next file in the
+        /// filtered list. Wraps to the first file if at the end.
+        FileFinderNext,
+        /// Move to the previous file in the file finder list.
+        ///
+        /// In file finder mode, moves the selection highlight up to the previous file in the
+        /// filtered list. Wraps to the last file if at the beginning.
+        FileFinderPrev,
+        /// Dismiss the file finder and return to the previous mode.
+        ///
+        /// Closes the file finder modal and restores the mode that was active before
+        /// opening the file finder (typically Normal mode).
+        FileFinderDismiss,
+        /// Select the currently highlighted file in the file finder.
+        ///
+        /// Opens the selected file in the editor. This action is typically bound to Enter
+        /// in file finder mode.
+        FileFinderSelect,
     ]
 );
 
@@ -448,6 +469,12 @@ pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     help.insert(TypeId::of::<FocusPaneRight>(), "focus right");
     help.insert(TypeId::of::<FocusPaneUp>(), "focus up");
     help.insert(TypeId::of::<FocusPaneDown>(), "focus down");
+
+    // File finder actions
+    help.insert(TypeId::of::<FileFinderNext>(), "next file");
+    help.insert(TypeId::of::<FileFinderPrev>(), "prev file");
+    help.insert(TypeId::of::<FileFinderDismiss>(), "dismiss");
+    help.insert(TypeId::of::<FileFinderSelect>(), "select file");
 
     help
 });

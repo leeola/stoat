@@ -34,8 +34,8 @@ impl Stoat {
     /// # Related
     ///
     /// See also:
-    /// - [`crate::actions::workspace::SplitRight`] - split pane operations
-    /// - [`crate::actions::workspace::FocusPaneLeft`] - pane navigation
+    /// - [`crate::actions::shell::SplitRight`] - split pane operations
+    /// - [`crate::actions::shell::FocusPaneLeft`] - pane navigation
     /// - [`crate::actions::modal::enter_normal_mode`] - return to command mode
     pub fn enter_pane_mode(&mut self) {
         let old_mode = self.mode();

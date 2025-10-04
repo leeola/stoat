@@ -20,6 +20,12 @@ impl Stoat {
     /// - If at line start: merges with previous line (removes newline)
     /// - If at buffer start: no effect
     /// - Cursor moves to deletion point
+    /// - In file_finder mode, deletes from end of input buffer and re-filters
+    ///
+    /// # Mode-Aware Routing
+    ///
+    /// - **file_finder mode**: Deletes from end of input buffer, triggers file filtering
+    /// - **Other modes**: Deletes from main buffer at cursor position
     ///
     /// # Implementation
     ///
@@ -31,6 +37,29 @@ impl Stoat {
     /// - [`crate::actions::edit::delete_right`] for forward delete
     /// - [`crate::actions::edit::delete_range`] for the underlying deletion mechanism
     pub fn delete_left(&mut self, cx: &mut App) {
+        // Route to file finder input buffer if in file_finder mode
+        if self.mode() == "file_finder" {
+            if let Some(input_buffer) = &self.file_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character
+                    input_buffer.update(cx, |buffer, _cx| {
+                        buffer.edit([(len - 1..len, "")]);
+                    });
+
+                    // Re-filter files based on new query
+                    let query = self.file_finder_query(cx);
+                    self.filter_files(&query);
+
+                    trace!(query = ?query, filtered_count = self.file_finder_filtered.len(), "File finder: filtered after delete");
+                }
+            }
+            return;
+        }
+
+        // Main buffer deletion for all other modes
         let current_pos = self.cursor_manager.position();
         if current_pos.column > 0 {
             // Delete character on same line

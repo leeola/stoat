@@ -3,11 +3,10 @@ use crate::{
     pane_group::element::pane_axis,
 };
 use gpui::{
-    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, DismissEvent, Entity,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window,
+    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window,
 };
-use std::{collections::HashMap, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, rc::Rc};
 use stoat::{
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenFileFinder,
@@ -29,8 +28,6 @@ pub struct PaneGroupView {
     active_pane: PaneId,
     focus_handle: FocusHandle,
     keymap: Rc<gpui::Keymap>,
-    file_finder: Option<Entity<FileFinder>>,
-    _file_finder_subscription: Option<Subscription>,
 }
 
 impl PaneGroupView {
@@ -54,8 +51,6 @@ impl PaneGroupView {
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
             keymap,
-            file_finder: None,
-            _file_finder_subscription: None,
         }
     }
 
@@ -82,38 +77,16 @@ impl PaneGroupView {
     fn handle_open_file_finder(
         &mut self,
         _: &OpenFileFinder,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // For now, use hardcoded test files
-        // TODO: Replace with actual file discovery
-        let test_files = vec![
-            PathBuf::from("src/main.rs"),
-            PathBuf::from("src/lib.rs"),
-            PathBuf::from("Cargo.toml"),
-            PathBuf::from("README.md"),
-        ];
-
-        // Get the current focus to restore later
-        let previous_focus = self
-            .active_editor()
-            .map(|editor| editor.read(cx).focus_handle(cx));
-
-        let file_finder = cx.new(|cx| FileFinder::new(test_files, previous_focus, window, cx));
-
-        // Subscribe to dismiss event to close the finder
-        self._file_finder_subscription = Some(cx.subscribe(
-            &file_finder,
-            |this, _finder, _event: &DismissEvent, cx| {
-                this.file_finder = None;
-                this._file_finder_subscription = None;
-                cx.notify();
-            },
-        ));
-
-        self.file_finder = Some(file_finder.clone());
-        window.focus(&file_finder.read(cx).focus_handle(cx));
-        cx.notify();
+        // Open file finder in the active editor's Stoat instance
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat_mut().open_file_finder(cx);
+            });
+            cx.notify();
+        }
     }
 
     /// Split the active pane in the given direction.
@@ -521,8 +494,8 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Get the mode from the active editor
-        let (active_mode, mode_display) = self
+        // Get the mode and file finder data from the active editor
+        let (active_mode, mode_display, file_finder_data) = self
             .pane_editors
             .get(&self.active_pane)
             .map(|editor| {
@@ -532,9 +505,21 @@ impl Render for PaneGroupView {
                     .get_mode(mode_name)
                     .map(|m| m.display_name.clone())
                     .unwrap_or_else(|| mode_name.to_uppercase());
-                (mode_name, display)
+
+                // Extract file finder data if in file_finder mode
+                let ff_data = if mode_name == "file_finder" {
+                    Some((
+                        stoat.file_finder_query(cx),
+                        stoat.file_finder_filtered_files().to_vec(),
+                        stoat.file_finder_selected_index(),
+                    ))
+                } else {
+                    None
+                };
+
+                (mode_name, display, ff_data)
             })
-            .unwrap_or(("normal", "NORMAL".to_string()));
+            .unwrap_or(("normal", "NORMAL".to_string(), None));
 
         // Query keymap for bindings in the current mode
         let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
@@ -555,6 +540,13 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_open_file_finder))
             .child(self.render_member(self.pane_group.root(), 0))
             .child(CommandOverlay::new(mode_display, bindings))
-            .when_some(self.file_finder.clone(), |div, finder| div.child(finder))
+            .when(active_mode == "file_finder", |div| {
+                // Render file finder overlay when in file_finder mode
+                if let Some((query, files, selected)) = file_finder_data {
+                    div.child(FileFinder::new(query, files, selected))
+                } else {
+                    div
+                }
+            })
     }
 }

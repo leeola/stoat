@@ -37,7 +37,7 @@ pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
-use std::{num::NonZeroU64, sync::Arc};
+use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
 use stoat_text_v3::{Language, Parser};
 use text::{Buffer, BufferId, BufferSnapshot, Point};
@@ -53,6 +53,12 @@ pub struct Stoat {
     viewport_lines: Option<f32>,
     modes: Vec<Mode>,
     current_mode: String,
+    // File finder state
+    file_finder_input: Option<Entity<Buffer>>,
+    file_finder_files: Vec<PathBuf>,
+    file_finder_filtered: Vec<PathBuf>,
+    file_finder_selected: usize,
+    file_finder_previous_mode: Option<String>,
 }
 
 impl Stoat {
@@ -75,6 +81,11 @@ impl Stoat {
             viewport_lines: None,
             modes: crate::keymap::load_default_modes(),
             current_mode: "normal".into(),
+            file_finder_input: None,
+            file_finder_files: Vec::new(),
+            file_finder_filtered: Vec::new(),
+            file_finder_selected: 0,
+            file_finder_previous_mode: None,
         }
     }
 
@@ -165,6 +176,50 @@ impl Stoat {
     /// Set the editor mode by name
     pub fn set_mode(&mut self, mode: &str) {
         self.current_mode = mode.to_string();
+    }
+
+    /// Get the file finder input buffer
+    pub fn file_finder_input_buffer(&self) -> Option<&Entity<Buffer>> {
+        self.file_finder_input.as_ref()
+    }
+
+    /// Get the file finder query text from the input buffer
+    pub fn file_finder_query(&self, cx: &App) -> String {
+        self.file_finder_input
+            .as_ref()
+            .map(|buf| buf.read(cx).snapshot().text())
+            .unwrap_or_default()
+    }
+
+    /// Get the filtered files list
+    pub fn file_finder_filtered_files(&self) -> &[PathBuf] {
+        &self.file_finder_filtered
+    }
+
+    /// Get the selected file index
+    pub fn file_finder_selected_index(&self) -> usize {
+        self.file_finder_selected
+    }
+
+    /// Filter files based on the current query.
+    ///
+    /// Performs case-insensitive substring matching on file paths.
+    /// Updates the filtered files list and resets selection to 0.
+    pub fn filter_files(&mut self, query: &str) {
+        if query.is_empty() {
+            self.file_finder_filtered = self.file_finder_files.clone();
+        } else {
+            let query_lower = query.to_lowercase();
+            self.file_finder_filtered = self
+                .file_finder_files
+                .iter()
+                .filter(|path| path.to_string_lossy().to_lowercase().contains(&query_lower))
+                .cloned()
+                .collect();
+        }
+
+        // Reset selection to top when filter changes
+        self.file_finder_selected = 0;
     }
 
     /// Get all available modes
