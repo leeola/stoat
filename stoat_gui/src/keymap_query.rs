@@ -79,8 +79,6 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, Stri
     let remaining = 15usize.saturating_sub(results.len());
     results.extend(global.into_iter().take(remaining)); // Fill to 15 total with globals
 
-    tracing::debug!("Mode {:?}: returning {} bindings", mode, results.len());
-
     results
 }
 

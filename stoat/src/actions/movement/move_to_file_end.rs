@@ -31,6 +31,7 @@ impl Stoat {
         let new_pos = Point::new(last_row, last_line_len);
         debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to file end");
         self.cursor_manager.move_to(new_pos);
+        self.ensure_cursor_visible();
     }
 }
 

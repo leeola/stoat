@@ -38,6 +38,7 @@ impl Stoat {
             let new_pos = Point::new(prev_row, line_len);
             trace!(from = ?current_pos, to = ?new_pos, "Moving cursor left to end of previous line");
             self.cursor_manager.move_to(new_pos);
+            self.ensure_cursor_visible();
         } else {
             trace!(pos = ?current_pos, "At buffer start, cannot move left");
         }

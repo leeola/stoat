@@ -39,6 +39,7 @@ impl Stoat {
             let new_pos = Point::new(new_row, new_column);
             trace!(from = ?current_pos, to = ?new_pos, goal_column = self.cursor_manager.goal_column(), "Moving cursor up");
             self.cursor_manager.move_to_with_goal(new_pos);
+            self.ensure_cursor_visible();
         } else {
             trace!(pos = ?current_pos, "At first line, cannot move up");
         }

@@ -30,6 +30,7 @@ impl Stoat {
         let new_pos = Point::new(current_pos.row, line_len);
         debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to line end");
         self.cursor_manager.move_to(new_pos);
+        self.ensure_cursor_visible();
     }
 }
 

@@ -195,6 +195,57 @@ impl Stoat {
     pub fn is_scroll_animating(&self) -> bool {
         self.scroll.is_animating()
     }
+
+    /// Ensure the cursor is visible within the viewport by adjusting scroll position if needed.
+    ///
+    /// This method checks if the current cursor position is outside the visible viewport and
+    /// animates the scroll position to bring it into view. It maintains some padding (3 lines)
+    /// from the viewport edges for better context visibility.
+    ///
+    /// # Behavior
+    ///
+    /// - If cursor is above viewport: scrolls up to show cursor 3 lines from bottom
+    /// - If cursor is below viewport: scrolls down to show cursor 3 lines from top
+    /// - If cursor is within viewport: no scroll adjustment
+    /// - Does nothing if viewport dimensions are not set
+    ///
+    /// # Padding
+    ///
+    /// The 3-line padding provides context around the cursor position and prevents it from
+    /// appearing at the very edge of the viewport, which improves readability.
+    ///
+    /// # Related
+    ///
+    /// This is called automatically by movement commands after cursor position changes.
+    /// See [`crate::actions::movement`] for usage examples.
+    pub fn ensure_cursor_visible(&mut self) {
+        // Get viewport dimensions - if not set, we can't determine visibility
+        let Some(viewport_lines) = self.viewport_lines else {
+            return;
+        };
+
+        let cursor_row = self.cursor_manager.position().row as f32;
+        let scroll_y = self.scroll.position.y;
+        let last_visible_line = scroll_y + viewport_lines;
+
+        const PADDING: f32 = 3.0; // Lines of padding from viewport edges
+
+        // Check if cursor is above viewport
+        if cursor_row < scroll_y {
+            // Scroll up to show cursor near bottom of viewport
+            let target_scroll_y = (cursor_row - viewport_lines + PADDING).max(0.0);
+            self.scroll
+                .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
+        }
+        // Check if cursor is below viewport
+        else if cursor_row >= last_visible_line {
+            // Scroll down to show cursor near top of viewport
+            let target_scroll_y = (cursor_row - PADDING).max(0.0);
+            self.scroll
+                .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
+        }
+        // Cursor is within viewport - no adjustment needed
+    }
 }
 
 pub mod cli {

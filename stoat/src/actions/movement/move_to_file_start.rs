@@ -27,6 +27,7 @@ impl Stoat {
         let new_pos = Point::new(0, 0);
         debug!(from = ?current_pos, to = ?new_pos, "Moving cursor to file start");
         self.cursor_manager.move_to(new_pos);
+        self.ensure_cursor_visible();
     }
 }
 

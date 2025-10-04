@@ -50,6 +50,7 @@ impl Render for StoatView {
             crate::EditorMode::Normal => "normal",
             crate::EditorMode::Insert => "insert",
             crate::EditorMode::Visual => "visual",
+            crate::EditorMode::Pane => "pane",
         };
 
         div()
