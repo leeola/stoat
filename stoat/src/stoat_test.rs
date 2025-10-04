@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{Stoat, actions::*};
+use crate::{actions::*, Stoat};
 use gpui::{
-    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
-    Styled, TestAppContext, Window, div,
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
+    Size, Styled, TestAppContext, Window,
 };
 use text::Point;
 

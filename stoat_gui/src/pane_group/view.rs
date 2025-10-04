@@ -1,15 +1,17 @@
 use crate::{
-    command_overlay::CommandOverlay, editor::view::EditorView, pane_group::element::pane_axis,
+    command_overlay::CommandOverlay, editor::view::EditorView, file_finder::FileFinder,
+    pane_group::element::pane_axis,
 };
 use gpui::{
-    div, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, Styled, Window,
+    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, DismissEvent, Entity,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Subscription, Window,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, path::PathBuf, rc::Rc};
 use stoat::{
     actions::{
-        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, SplitDown, SplitLeft,
-        SplitRight, SplitUp,
+        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenFileFinder,
+        SplitDown, SplitLeft, SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -27,6 +29,8 @@ pub struct PaneGroupView {
     active_pane: PaneId,
     focus_handle: FocusHandle,
     keymap: Rc<gpui::Keymap>,
+    file_finder: Option<Entity<FileFinder>>,
+    _file_finder_subscription: Option<Subscription>,
 }
 
 impl PaneGroupView {
@@ -50,6 +54,8 @@ impl PaneGroupView {
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
             keymap,
+            file_finder: None,
+            _file_finder_subscription: None,
         }
     }
 
@@ -70,6 +76,44 @@ impl PaneGroupView {
                 }
             });
         }
+    }
+
+    /// Handle opening the file finder
+    fn handle_open_file_finder(
+        &mut self,
+        _: &OpenFileFinder,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // For now, use hardcoded test files
+        // TODO: Replace with actual file discovery
+        let test_files = vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("Cargo.toml"),
+            PathBuf::from("README.md"),
+        ];
+
+        // Get the current focus to restore later
+        let previous_focus = self
+            .active_editor()
+            .map(|editor| editor.read(cx).focus_handle(cx));
+
+        let file_finder = cx.new(|cx| FileFinder::new(test_files, previous_focus, window, cx));
+
+        // Subscribe to dismiss event to close the finder
+        self._file_finder_subscription = Some(cx.subscribe(
+            &file_finder,
+            |this, _finder, _event: &DismissEvent, cx| {
+                this.file_finder = None;
+                this._file_finder_subscription = None;
+                cx.notify();
+            },
+        ));
+
+        self.file_finder = Some(file_finder.clone());
+        window.focus(&file_finder.read(cx).focus_handle(cx));
+        cx.notify();
     }
 
     /// Split the active pane in the given direction.
@@ -508,7 +552,9 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_down))
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
+            .on_action(cx.listener(Self::handle_open_file_finder))
             .child(self.render_member(self.pane_group.root(), 0))
             .child(CommandOverlay::new(mode_display, bindings))
+            .when_some(self.file_finder.clone(), |div, finder| div.child(finder))
     }
 }

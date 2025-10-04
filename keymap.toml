@@ -448,6 +448,11 @@ action = "Open"
 context = "Editor"
 
 [[bindings]]
+key = "ctrl-p"
+action = "OpenFileFinder"
+context = "Editor"
+
+[[bindings]]
 key = "tab"
 action = "Indent"
 context = "Editor"

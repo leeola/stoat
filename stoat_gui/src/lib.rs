@@ -5,6 +5,7 @@ pub mod context;
 pub mod cursor;
 pub mod editor;
 pub mod external_input;
+pub mod file_finder;
 pub mod input;
 pub mod keybinding_hint;
 pub mod keymap;

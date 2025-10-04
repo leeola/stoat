@@ -247,6 +247,11 @@ actions!(
         ///
         /// Displays a file picker dialog to select a file to open in the editor.
         Open,
+        /// Open the file finder.
+        ///
+        /// Displays a fuzzy file finder modal to quickly navigate to files in the current
+        /// directory.
+        OpenFileFinder,
         /// Quit the editor.
         ///
         /// Closes the editor with save prompts for modified buffers.

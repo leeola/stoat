@@ -108,6 +108,7 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         // File actions
         "Save" => Ok(KeyBinding::new(key, Save, context)),
         "Open" => Ok(KeyBinding::new(key, Open, context)),
+        "OpenFileFinder" => Ok(KeyBinding::new(key, OpenFileFinder, context)),
         "Quit" => Ok(KeyBinding::new(key, Quit, context)),
         "ExitApp" => Ok(KeyBinding::new(key, ExitApp, context)),
 
