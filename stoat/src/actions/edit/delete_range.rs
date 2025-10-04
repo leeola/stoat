@@ -60,7 +60,9 @@ impl Stoat {
             let contents = buffer_snapshot.text();
             match self.parser.parse(&contents, &buffer_snapshot) {
                 Ok(tokens) => {
-                    self.token_map.replace_tokens(tokens, &buffer_snapshot);
+                    self.token_map
+                        .lock()
+                        .replace_tokens(tokens, &buffer_snapshot);
                 },
                 Err(e) => {
                     tracing::error!("Failed to parse after delete: {}", e);

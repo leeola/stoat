@@ -35,8 +35,9 @@ impl Mode {
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
+use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, sync::Arc};
 use stoat_rope_v3::{TokenMap, TokenSnapshot};
 use stoat_text_v3::{Language, Parser};
 use text::{Buffer, BufferId, BufferSnapshot, Point};
@@ -44,7 +45,7 @@ use text::{Buffer, BufferId, BufferSnapshot, Point};
 #[derive(Clone)]
 pub struct Stoat {
     buffer: Entity<Buffer>,
-    token_map: TokenMap,
+    token_map: Arc<Mutex<TokenMap>>,
     parser: Parser,
     current_language: Language,
     scroll: ScrollPosition,
@@ -59,7 +60,7 @@ impl Stoat {
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         let buffer_snapshot = buffer.read(cx).snapshot();
-        let token_map = TokenMap::new(&buffer_snapshot);
+        let token_map = Arc::new(Mutex::new(TokenMap::new(&buffer_snapshot)));
 
         let current_language = Language::PlainText;
         let parser = Parser::new(current_language).expect("Failed to create parser");
@@ -86,7 +87,7 @@ impl Stoat {
     }
 
     pub fn token_snapshot(&self) -> TokenSnapshot {
-        self.token_map.snapshot()
+        self.token_map.lock().snapshot()
     }
 
     pub fn scroll_position(&self) -> gpui::Point<f32> {
@@ -120,7 +121,9 @@ impl Stoat {
                 let buffer_snapshot = self.buffer.read(cx).snapshot();
                 match self.parser.parse(&contents, &buffer_snapshot) {
                     Ok(tokens) => {
-                        self.token_map.replace_tokens(tokens, &buffer_snapshot);
+                        self.token_map
+                            .lock()
+                            .replace_tokens(tokens, &buffer_snapshot);
                     },
                     Err(e) => {
                         tracing::error!("Failed to parse file: {}", e);

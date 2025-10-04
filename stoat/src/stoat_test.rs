@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{actions::*, Stoat};
+use crate::{Stoat, actions::*};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
-    Size, Styled, TestAppContext, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
+    Styled, TestAppContext, Window, div,
 };
 use text::Point;
 
@@ -432,7 +432,10 @@ impl StoatTest {
             let buffer_snapshot = stoat.buffer.read(cx).snapshot();
             match stoat.parser.parse(text, &buffer_snapshot) {
                 Ok(tokens) => {
-                    stoat.token_map.replace_tokens(tokens, &buffer_snapshot);
+                    stoat
+                        .token_map
+                        .lock()
+                        .replace_tokens(tokens, &buffer_snapshot);
                 },
                 Err(e) => {
                     eprintln!("Failed to parse in set_text: {}", e);
