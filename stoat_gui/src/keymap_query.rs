@@ -53,7 +53,12 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, Stri
         }
 
         let (matches_list, _pending) = keymap.bindings_for_input(keystrokes, &this_contexts);
-        if matches_list.is_empty() {
+        // Check if THIS specific binding is in the matches by comparing action types
+        // (pointer equality doesn't work since bindings_for_input returns cloned bindings)
+        if !matches_list
+            .iter()
+            .any(|b| b.action().type_id() == binding.action().type_id())
+        {
             continue;
         }
 
