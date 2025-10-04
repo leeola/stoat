@@ -18,7 +18,7 @@
 //! - Modifiers: `ctrl`, `alt`, `shift`, `cmd` (macOS), `super` (Linux), `win` (Windows)
 //! - Examples: `"h"`, `"ctrl-c"`, `"cmd-s"`, `"escape"`
 
-use crate::actions::*;
+use crate::{actions::*, Mode};
 use gpui::{KeyBinding, Keymap};
 use serde::Deserialize;
 
@@ -28,7 +28,15 @@ const DEFAULT_KEYMAP_TOML: &str = include_str!("../../keymap.toml");
 /// Keymap configuration loaded from TOML
 #[derive(Debug, Deserialize)]
 struct KeymapConfig {
+    modes: Vec<ModeConfig>,
     bindings: Vec<BindingConfig>,
+}
+
+/// Mode configuration from TOML
+#[derive(Debug, Deserialize)]
+struct ModeConfig {
+    name: String,
+    display_name: String,
 }
 
 /// Individual key binding configuration
@@ -174,6 +182,38 @@ pub fn create_default_keymap() -> Keymap {
         .collect();
 
     Keymap::new(bindings)
+}
+
+/// Loads the default modes for Stoat editor.
+///
+/// Parses mode definitions from the embedded TOML configuration file. Each mode has a
+/// name (used in context predicates) and a display name (shown in the UI).
+///
+/// # Mode Definitions
+///
+/// Modes are defined in `keymap.toml`:
+/// ```toml
+/// [[modes]]
+/// name = "normal"
+/// display_name = "NORMAL"
+/// ```
+///
+/// # Usage
+///
+/// This function is typically called once during editor initialization in [`crate::Stoat::new`]:
+///
+/// ```rust,ignore
+/// modes: crate::keymap::load_default_modes(),
+/// ```
+pub fn load_default_modes() -> Vec<Mode> {
+    let config: KeymapConfig =
+        toml::from_str(DEFAULT_KEYMAP_TOML).expect("Failed to parse embedded keymap.toml");
+
+    config
+        .modes
+        .into_iter()
+        .map(|m| Mode::new(m.name, m.display_name))
+        .collect()
 }
 
 // Old hardcoded implementation preserved below for reference (can be deleted later)

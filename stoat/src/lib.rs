@@ -72,12 +72,7 @@ impl Stoat {
             scroll: ScrollPosition::new(),
             cursor_manager: CursorManager::new(),
             viewport_lines: None,
-            modes: vec![
-                Mode::new("normal", "NORMAL"),
-                Mode::new("insert", "INSERT"),
-                Mode::new("visual", "VISUAL"),
-                Mode::new("pane", "PANE"),
-            ],
+            modes: crate::keymap::load_default_modes(),
             current_mode: "normal".into(),
         }
     }

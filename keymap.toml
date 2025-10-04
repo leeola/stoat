@@ -3,6 +3,23 @@
 # This file defines all key bindings for the Stoat editor, organized by mode.
 # Each binding specifies a key, the action to execute, and the context where it applies.
 
+# Editor Modes
+[[modes]]
+name = "normal"
+display_name = "NORMAL"
+
+[[modes]]
+name = "insert"
+display_name = "INSERT"
+
+[[modes]]
+name = "visual"
+display_name = "VISUAL"
+
+[[modes]]
+name = "pane"
+display_name = "PANE"
+
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]
 key = "h"
