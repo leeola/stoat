@@ -40,21 +40,21 @@ impl EditorView {
     /// Handle entering insert mode
     fn handle_enter_insert_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Insert mode");
-        self.stoat.set_mode(stoat::EditorMode::Insert);
+        self.stoat.set_mode("insert");
         cx.notify();
     }
 
     /// Handle entering normal mode
     fn handle_enter_normal_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Normal mode");
-        self.stoat.set_mode(stoat::EditorMode::Normal);
+        self.stoat.set_mode("normal");
         cx.notify();
     }
 
     /// Handle entering pane mode
     fn handle_enter_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Pane mode");
-        self.stoat.set_mode(stoat::EditorMode::Pane);
+        self.stoat.set_mode("pane");
         cx.notify();
     }
 
@@ -75,7 +75,7 @@ impl EditorView {
     }
 
     /// Get the current editor mode for display
-    pub fn current_mode(&self) -> stoat::EditorMode {
+    pub fn current_mode(&self) -> &str {
         self.stoat.mode()
     }
 
@@ -286,13 +286,8 @@ impl Render for EditorView {
             }
         }
 
-        // Determine mode string for key context
-        let mode_str = match self.stoat.mode() {
-            stoat::EditorMode::Normal => "normal",
-            stoat::EditorMode::Insert => "insert",
-            stoat::EditorMode::Visual => "visual",
-            stoat::EditorMode::Pane => "pane",
-        };
+        // Get current mode name for key context
+        let mode_str = self.stoat.mode().to_string();
 
         // Wrap the editor element in a div that can handle keyboard input
         div()
@@ -408,7 +403,7 @@ impl Render for EditorView {
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, _, cx| {
                     // Only insert text in insert mode when no action matched
-                    if editor.stoat.mode() == stoat::EditorMode::Insert {
+                    if editor.stoat.mode() == "insert" {
                         if let Some(ref key_char) = event.keystroke.key_char {
                             // Only insert if no control/alt modifiers
                             if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt

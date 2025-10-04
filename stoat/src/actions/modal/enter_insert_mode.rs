@@ -3,7 +3,7 @@
 //! Transitions the editor from Normal or Visual mode to Insert mode, enabling direct
 //! text entry. This is the modal editing mode for typing and pasting text.
 
-use crate::{EditorMode, Stoat};
+use crate::Stoat;
 use tracing::debug;
 
 impl Stoat {
@@ -35,23 +35,23 @@ impl Stoat {
     /// - [`crate::actions::modal::enter_visual_mode`] - enter selection mode
     pub fn enter_insert_mode(&mut self) {
         let old_mode = self.mode();
-        debug!(from = ?old_mode, to = ?EditorMode::Insert, "Entering insert mode");
-        self.set_mode(EditorMode::Insert);
+        debug!(from = old_mode, to = "insert", "Entering insert mode");
+        self.set_mode("insert");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{EditorMode, Stoat};
+    use crate::Stoat;
 
     #[test]
     fn enter_insert_from_normal() {
         let mut s = Stoat::test();
         s.set_text("hello");
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
 
         s.input("i");
-        assert_eq!(s.mode(), EditorMode::Insert);
+        assert_eq!(s.mode(), "insert");
     }
 
     #[test]
@@ -61,7 +61,7 @@ mod tests {
         s.set_cursor(0, 5);
 
         s.input("i");
-        assert_eq!(s.mode(), EditorMode::Insert);
+        assert_eq!(s.mode(), "insert");
 
         s.input(" world");
         s.assert_cursor_notation("hello world|");

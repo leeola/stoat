@@ -3,7 +3,7 @@
 //! Transitions the editor to Normal mode, the default command mode for navigation
 //! and operations. In Normal mode, keypresses trigger commands rather than inserting text.
 
-use crate::{EditorMode, Stoat};
+use crate::Stoat;
 use tracing::debug;
 
 impl Stoat {
@@ -34,23 +34,23 @@ impl Stoat {
     /// - [`crate::actions::modal::enter_visual_mode`] - enter selection mode
     pub fn enter_normal_mode(&mut self) {
         let old_mode = self.mode();
-        debug!(from = ?old_mode, to = ?EditorMode::Normal, "Entering normal mode");
-        self.set_mode(EditorMode::Normal);
+        debug!(from = old_mode, to = "normal", "Entering normal mode");
+        self.set_mode("normal");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{EditorMode, Stoat};
+    use crate::Stoat;
 
     #[test]
     fn enter_normal_from_insert() {
         let mut s = Stoat::test();
         s.set_text("hello");
-        s.set_mode(EditorMode::Insert);
+        s.set_mode("insert");
 
         s.input("\x1b"); // Escape key
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
     }
 
     #[test]
@@ -58,10 +58,10 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello world");
         s.set_cursor(0, 0);
-        s.set_mode(EditorMode::Insert);
+        s.set_mode("insert");
 
         s.input("\x1b"); // Escape to normal
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
 
         s.input("l"); // Move right
         s.assert_cursor_notation("h|ello world");
@@ -72,13 +72,13 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 5);
-        s.set_mode(EditorMode::Insert);
+        s.set_mode("insert");
 
         s.input(" world");
         s.input("\x1b"); // Escape to normal
         s.input("x"); // Should not insert 'x', should delete char
 
         // In normal mode, 'x' deletes character under cursor
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
     }
 }

@@ -3,7 +3,7 @@
 //! Transitions the editor to Visual mode for text selection. In Visual mode, movement
 //! commands extend the selection rather than just moving the cursor.
 
-use crate::{EditorMode, Stoat};
+use crate::Stoat;
 use tracing::debug;
 
 impl Stoat {
@@ -43,23 +43,23 @@ impl Stoat {
     /// - [`crate::actions::selection`] - selection operations
     pub fn enter_visual_mode(&mut self) {
         let old_mode = self.mode();
-        debug!(from = ?old_mode, to = ?EditorMode::Visual, "Entering visual mode");
-        self.set_mode(EditorMode::Visual);
+        debug!(from = old_mode, to = "visual", "Entering visual mode");
+        self.set_mode("visual");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{EditorMode, Stoat};
+    use crate::Stoat;
 
     #[test]
     fn enter_visual_from_normal() {
         let mut s = Stoat::test();
         s.set_text("hello");
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
 
         s.input("v");
-        assert_eq!(s.mode(), EditorMode::Visual);
+        assert_eq!(s.mode(), "visual");
     }
 
     #[test]
@@ -69,7 +69,7 @@ mod tests {
         s.set_cursor(0, 0);
 
         s.input("v"); // Enter visual mode
-        assert_eq!(s.mode(), EditorMode::Visual);
+        assert_eq!(s.mode(), "visual");
 
         s.input("w"); // Select forward to next word
         let (start_row, start_col, end_row, end_col) = s.selection();
@@ -82,9 +82,9 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.input("v"); // Enter visual
-        assert_eq!(s.mode(), EditorMode::Visual);
+        assert_eq!(s.mode(), "visual");
 
         s.input("\x1b"); // Escape
-        assert_eq!(s.mode(), EditorMode::Normal);
+        assert_eq!(s.mode(), "normal");
     }
 }

@@ -9,38 +9,24 @@ mod selection;
 #[cfg(test)]
 pub mod stoat_test;
 
-/// Editor modes for modal editing
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum EditorMode {
-    /// Normal mode - for navigation and commands
-    #[default]
-    Normal,
-    /// Insert mode - for text input
-    Insert,
-    /// Visual mode - for text selection
-    Visual,
-    /// Pane mode - for pane management commands
-    Pane,
+/// Editor mode definition
+///
+/// A mode represents a distinct editing context with its own set of keybindings.
+/// Modes are defined at runtime, allowing for user-configurable modal editing behavior.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mode {
+    /// Internal identifier for the mode (e.g., "normal", "insert")
+    pub name: String,
+    /// Display name shown to users (e.g., "NORMAL", "INSERT")
+    pub display_name: String,
 }
 
-impl EditorMode {
-    /// Returns the string representation of the mode for key binding predicates
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EditorMode::Normal => "normal",
-            EditorMode::Insert => "insert",
-            EditorMode::Visual => "visual",
-            EditorMode::Pane => "pane",
-        }
-    }
-
-    /// Returns the string representation of the mode for display
-    pub fn as_display_str(&self) -> &'static str {
-        match self {
-            EditorMode::Normal => "NORMAL",
-            EditorMode::Insert => "INSERT",
-            EditorMode::Visual => "VISUAL",
-            EditorMode::Pane => "PANE",
+impl Mode {
+    /// Create a new mode with the given name and display name
+    pub fn new(name: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            display_name: display_name.into(),
         }
     }
 }
@@ -64,7 +50,8 @@ pub struct Stoat {
     scroll: ScrollPosition,
     cursor_manager: CursorManager,
     viewport_lines: Option<f32>,
-    mode: EditorMode,
+    modes: Vec<Mode>,
+    current_mode: String,
 }
 
 impl Stoat {
@@ -85,7 +72,13 @@ impl Stoat {
             scroll: ScrollPosition::new(),
             cursor_manager: CursorManager::new(),
             viewport_lines: None,
-            mode: EditorMode::default(),
+            modes: vec![
+                Mode::new("normal", "NORMAL"),
+                Mode::new("insert", "INSERT"),
+                Mode::new("visual", "VISUAL"),
+                Mode::new("pane", "PANE"),
+            ],
+            current_mode: "normal".into(),
         }
     }
 
@@ -166,14 +159,24 @@ impl Stoat {
         self.viewport_lines = Some(lines);
     }
 
-    /// Get the current editor mode
-    pub fn mode(&self) -> EditorMode {
-        self.mode
+    /// Get the current editor mode name
+    pub fn mode(&self) -> &str {
+        &self.current_mode
     }
 
-    /// Set the editor mode
-    pub fn set_mode(&mut self, mode: EditorMode) {
-        self.mode = mode;
+    /// Set the editor mode by name
+    pub fn set_mode(&mut self, mode: &str) {
+        self.current_mode = mode.to_string();
+    }
+
+    /// Get all available modes
+    pub fn modes(&self) -> &[Mode] {
+        &self.modes
+    }
+
+    /// Get a specific mode by name
+    pub fn get_mode(&self, name: &str) -> Option<&Mode> {
+        self.modes.iter().find(|m| m.name == name)
     }
 
     /// Get the cursor manager

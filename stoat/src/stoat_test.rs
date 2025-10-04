@@ -46,12 +46,7 @@ impl Focusable for StoatView {
 
 impl Render for StoatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode_str = match self.stoat.mode() {
-            crate::EditorMode::Normal => "normal",
-            crate::EditorMode::Insert => "insert",
-            crate::EditorMode::Visual => "visual",
-            crate::EditorMode::Pane => "pane",
-        };
+        let mode_str = self.stoat.mode().to_string();
 
         div()
             .id("stoat-test-view")
@@ -129,15 +124,15 @@ impl Render for StoatView {
             )
             // Modal actions
             .on_action(cx.listener(|view: &mut Self, _: &EnterInsertMode, _, cx| {
-                view.stoat.set_mode(crate::EditorMode::Insert);
+                view.stoat.set_mode("insert");
                 cx.notify();
             }))
             .on_action(cx.listener(|view: &mut Self, _: &EnterNormalMode, _, cx| {
-                view.stoat.set_mode(crate::EditorMode::Normal);
+                view.stoat.set_mode("normal");
                 cx.notify();
             }))
             .on_action(cx.listener(|view: &mut Self, _: &EnterVisualMode, _, cx| {
-                view.stoat.set_mode(crate::EditorMode::Visual);
+                view.stoat.set_mode("visual");
                 cx.notify();
             }))
             // Selection actions
@@ -161,7 +156,7 @@ impl Render for StoatView {
             .on_key_down(
                 cx.listener(|view: &mut Self, event: &gpui::KeyDownEvent, _, cx| {
                     // Only insert text in insert mode when no action matched
-                    if view.stoat.mode() == crate::EditorMode::Insert {
+                    if view.stoat.mode() == "insert" {
                         if let Some(ref key_char) = event.keystroke.key_char {
                             // Only insert if no control/alt modifiers
                             if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt
@@ -308,13 +303,13 @@ impl StoatTest {
     }
 
     /// Get the current editor mode
-    pub fn mode(&mut self) -> crate::EditorMode {
+    pub fn mode(&mut self) -> String {
         self.view
-            .update_in(&mut self.cx, |view, _, _| view.stoat().mode())
+            .update_in(&mut self.cx, |view, _, _| view.stoat().mode().to_string())
     }
 
     /// Set the editor mode
-    pub fn set_mode(&mut self, mode: crate::EditorMode) {
+    pub fn set_mode(&mut self, mode: &str) {
         self.view.update(&mut self.cx, |view, _| {
             view.stoat_mut().set_mode(mode);
         });
@@ -342,7 +337,7 @@ impl StoatTest {
 
     /// Assert the editor mode matches expected
     #[track_caller]
-    pub fn assert_mode(&mut self, expected: crate::EditorMode) {
+    pub fn assert_mode(&mut self, expected: &str) {
         assert_eq!(self.mode(), expected);
     }
 
@@ -623,11 +618,11 @@ mod tests {
     #[test]
     fn escape_exits_insert() {
         let mut s = Stoat::test();
-        s.assert_mode(crate::EditorMode::Normal);
+        s.assert_mode("normal");
         s.input("i");
-        s.assert_mode(crate::EditorMode::Insert);
+        s.assert_mode("insert");
         s.input("escape");
-        s.assert_mode(crate::EditorMode::Normal);
+        s.assert_mode("normal");
     }
 
     #[test]
@@ -683,17 +678,17 @@ mod tests {
         let mut s = Stoat::test();
 
         // Default mode should be Normal
-        s.assert_mode(crate::EditorMode::Normal);
+        s.assert_mode("normal");
 
         // Test mode switching
-        s.set_mode(crate::EditorMode::Insert);
-        s.assert_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
+        s.assert_mode("insert");
 
-        s.set_mode(crate::EditorMode::Visual);
-        s.assert_mode(crate::EditorMode::Visual);
+        s.set_mode("visual");
+        s.assert_mode("visual");
 
-        s.set_mode(crate::EditorMode::Normal);
-        s.assert_mode(crate::EditorMode::Normal);
+        s.set_mode("normal");
+        s.assert_mode("normal");
     }
 
     #[test]

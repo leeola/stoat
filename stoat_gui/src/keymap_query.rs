@@ -1,6 +1,5 @@
 use gpui::{KeyBinding, KeyContext, Keymap};
 use std::collections::HashSet;
-use stoat::EditorMode;
 
 /// Query keybindings for a specific editor mode.
 ///
@@ -10,20 +9,13 @@ use stoat::EditorMode;
 ///
 /// # Arguments
 /// * `keymap` - The keymap to query
-/// * `mode` - The editor mode to get bindings for
+/// * `mode` - The editor mode name to get bindings for
 ///
 /// # Returns
 /// A vector of (keystroke_string, description) tuples, limited to ~15 entries
-pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, String)> {
+pub fn bindings_for_mode(keymap: &Keymap, mode: &str) -> Vec<(String, String)> {
     // Build context for the given mode
-    let mode_str = match mode {
-        EditorMode::Normal => "normal",
-        EditorMode::Insert => "insert",
-        EditorMode::Visual => "visual",
-        EditorMode::Pane => "pane",
-    };
-
-    let context_str = format!("Editor mode={}", mode_str);
+    let context_str = format!("Editor mode={}", mode);
     let this_contexts = vec![
         KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
         KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
@@ -65,7 +57,7 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, Stri
         seen_actions.insert(action_id);
 
         // Check if this binding is mode-specific by testing it against all modes
-        let is_mode_specific = is_binding_mode_specific(keymap, binding, mode);
+        let is_mode_specific = is_binding_mode_specific(keymap, binding);
 
         let keystroke = format_keystrokes(binding);
         let entry = (keystroke, desc.to_string());
@@ -87,32 +79,16 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: EditorMode) -> Vec<(String, Stri
     results
 }
 
-/// Check if a binding is specific to the given mode (vs available in all modes)
-fn is_binding_mode_specific(
-    keymap: &Keymap,
-    binding: &KeyBinding,
-    _current_mode: EditorMode,
-) -> bool {
+/// Check if a binding is specific to one mode (vs available in all modes)
+fn is_binding_mode_specific(keymap: &Keymap, binding: &KeyBinding) -> bool {
     let keystrokes = binding.keystrokes();
 
     // Test against all four modes
-    let modes = [
-        EditorMode::Normal,
-        EditorMode::Insert,
-        EditorMode::Visual,
-        EditorMode::Pane,
-    ];
+    let modes = ["normal", "insert", "visual", "pane"];
     let mut active_in_count = 0;
 
-    for mode in modes {
-        let mode_str = match mode {
-            EditorMode::Normal => "normal",
-            EditorMode::Insert => "insert",
-            EditorMode::Visual => "visual",
-            EditorMode::Pane => "pane",
-        };
-
-        let context_str = format!("Editor mode={}", mode_str);
+    for mode_name in modes {
+        let context_str = format!("Editor mode={}", mode_name);
         let contexts = vec![
             KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
             KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),

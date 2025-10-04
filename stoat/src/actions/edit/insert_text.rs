@@ -79,7 +79,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 2);
-        s.set_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
         s.input("x");
         s.assert_cursor_notation("hex|llo");
     }
@@ -89,7 +89,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 5);
-        s.set_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
         s.input(" world");
         s.assert_cursor_notation("hello world|");
     }
@@ -99,7 +99,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("world");
         s.set_cursor(0, 0);
-        s.set_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
         s.input("hello ");
         s.assert_cursor_notation("hello |world");
     }
@@ -109,7 +109,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 5);
-        s.set_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
         s.input("!");
         s.assert_cursor_notation("hello!|");
     }
@@ -119,7 +119,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 5);
-        s.set_mode(crate::EditorMode::Insert);
+        s.set_mode("insert");
         s.input("\n");
         s.assert_cursor_notation("hello\n|");
     }

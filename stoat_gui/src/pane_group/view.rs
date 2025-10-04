@@ -64,8 +64,8 @@ impl PaneGroupView {
     fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(editor) = self.pane_editors.get_mut(&self.active_pane) {
             editor.update(cx, |editor, cx| {
-                if editor.stoat().mode() == stoat::EditorMode::Pane {
-                    editor.stoat_mut().set_mode(stoat::EditorMode::Normal);
+                if editor.stoat().mode() == "pane" {
+                    editor.stoat_mut().set_mode("normal");
                     cx.notify();
                 }
             });
@@ -478,11 +478,19 @@ impl Focusable for PaneGroupView {
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // Get the mode from the active editor
-        let active_mode = self
+        let (active_mode, mode_display) = self
             .pane_editors
             .get(&self.active_pane)
-            .map(|editor| editor.read(cx).stoat().mode())
-            .unwrap_or(stoat::EditorMode::Normal);
+            .map(|editor| {
+                let stoat = editor.read(cx).stoat();
+                let mode_name = stoat.mode();
+                let display = stoat
+                    .get_mode(mode_name)
+                    .map(|m| m.display_name.clone())
+                    .unwrap_or_else(|| mode_name.to_uppercase());
+                (mode_name, display)
+            })
+            .unwrap_or(("normal", "NORMAL".to_string()));
 
         // Query keymap for bindings in the current mode
         let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
@@ -501,6 +509,6 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .child(self.render_member(self.pane_group.root(), 0))
-            .child(CommandOverlay::new(active_mode, bindings))
+            .child(CommandOverlay::new(mode_display, bindings))
     }
 }

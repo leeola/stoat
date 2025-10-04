@@ -1,6 +1,5 @@
 use crate::keybinding_hint::KeybindingHint;
 use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Window};
-use stoat::EditorMode;
 
 /// Overlay displaying available commands for the current editor mode.
 ///
@@ -10,8 +9,8 @@ use stoat::EditorMode;
 /// associated help text.
 #[derive(IntoElement)]
 pub struct CommandOverlay {
-    /// Current editor mode for display
-    mode: EditorMode,
+    /// Mode display name (e.g., "NORMAL", "INSERT")
+    mode_display: String,
     /// Pre-queried bindings for this mode (keystroke, description)
     bindings: Vec<(String, String)>,
 }
@@ -20,10 +19,13 @@ impl CommandOverlay {
     /// Create a new command overlay with bindings for the given mode.
     ///
     /// # Arguments
-    /// * `mode` - The editor mode to display
+    /// * `mode_display` - The mode display name (e.g., "NORMAL")
     /// * `bindings` - Pre-queried keybindings for this mode
-    pub fn new(mode: EditorMode, bindings: Vec<(String, String)>) -> Self {
-        Self { mode, bindings }
+    pub fn new(mode_display: String, bindings: Vec<(String, String)>) -> Self {
+        Self {
+            mode_display,
+            bindings,
+        }
     }
 
     /// Convert bindings to keybinding hints for display.
@@ -64,7 +66,7 @@ impl RenderOnce for CommandOverlay {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(text_color)
                             .mb_1()
-                            .child(format!("{}  MODE", self.mode.as_display_str())),
+                            .child(format!("{}  MODE", self.mode_display)),
                     )
                     .child(div().flex().flex_col().gap_1().children(hints)),
             )
