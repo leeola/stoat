@@ -43,7 +43,7 @@ impl Stoat {
     /// - [`crate::actions::edit::delete_line`]
     /// - [`crate::actions::edit::delete_to_end_of_line`]
     pub(crate) fn delete_range(&mut self, range: std::ops::Range<Point>, cx: &mut App) {
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let start_offset = buffer_snapshot.point_to_offset(range.start);
         let end_offset = buffer_snapshot.point_to_offset(range.end);
 
@@ -51,23 +51,19 @@ impl Stoat {
             let len = end_offset - start_offset;
             trace!(start = ?range.start, end = ?range.end, bytes = len, "Deleting range");
 
-            self.buffer.update(cx, |buffer, _cx| {
-                buffer.edit([(start_offset..end_offset, "")]);
-            });
+            // Update buffer and reparse through active item
+            let active_item = self.active_buffer_item(cx);
+            active_item.update(cx, |item, cx| {
+                // Edit buffer
+                item.buffer().update(cx, |buffer, _| {
+                    buffer.edit([(start_offset..end_offset, "")]);
+                });
 
-            // Re-parse entire buffer after deletion
-            let buffer_snapshot = self.buffer.read(cx).snapshot();
-            let contents = buffer_snapshot.text();
-            match self.parser.parse(&contents, &buffer_snapshot) {
-                Ok(tokens) => {
-                    self.token_map
-                        .lock()
-                        .replace_tokens(tokens, &buffer_snapshot);
-                },
-                Err(e) => {
+                // Reparse to update syntax highlighting
+                if let Err(e) = item.reparse(cx) {
                     tracing::error!("Failed to parse after delete: {}", e);
-                },
-            }
+                }
+            });
         }
     }
 }

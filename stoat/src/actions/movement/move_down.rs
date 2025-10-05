@@ -30,7 +30,7 @@ impl Stoat {
     ///
     /// See also [`crate::actions::movement::move_up`] for upward movement.
     pub fn move_cursor_down(&mut self, cx: &App) {
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let max_row = buffer_snapshot.row_count() - 1;
         let current_pos = self.cursor_manager.position();
 

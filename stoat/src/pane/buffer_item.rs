@@ -36,8 +36,8 @@
 
 use super::item::Item;
 use gpui::{
-    div, App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString,
-    Window,
+    App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString, Window,
+    div,
 };
 use parking_lot::Mutex;
 use std::sync::Arc;

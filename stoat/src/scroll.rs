@@ -1,4 +1,4 @@
-use gpui::{point, Pixels, Point};
+use gpui::{Pixels, Point, point};
 use std::time::{Duration, Instant};
 
 /// Scroll delta for mouse wheel and trackpad events

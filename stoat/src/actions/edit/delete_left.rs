@@ -70,7 +70,7 @@ impl Stoat {
             self.cursor_manager.move_to(start);
         } else if current_pos.row > 0 {
             // Merge with previous line
-            let buffer_snapshot = self.buffer.read(cx).snapshot();
+            let buffer_snapshot = self.buffer_snapshot(cx);
             let prev_row = current_pos.row - 1;
             let prev_line_len = buffer_snapshot.line_len(prev_row);
             let start = Point::new(prev_row, prev_line_len);

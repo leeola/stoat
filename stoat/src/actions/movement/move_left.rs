@@ -32,7 +32,7 @@ impl Stoat {
             self.cursor_manager.move_to(new_pos);
         } else if current_pos.row > 0 {
             // Move to end of previous line
-            let buffer_snapshot = self.buffer.read(cx).snapshot();
+            let buffer_snapshot = self.buffer_snapshot(cx);
             let prev_row = current_pos.row - 1;
             let line_len = buffer_snapshot.line_len(prev_row);
             let new_pos = Point::new(prev_row, line_len);

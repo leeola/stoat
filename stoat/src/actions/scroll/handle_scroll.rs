@@ -69,7 +69,7 @@ impl Stoat {
         );
 
         // Apply bounds checking
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let max_scroll_y = (buffer_snapshot.row_count() as f32 - 1.0).max(0.0);
 
         let bounded_position = gpui::point(

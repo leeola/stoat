@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{actions::*, Stoat};
+use crate::{Stoat, actions::*};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
-    Size, Styled, TestAppContext, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
+    Styled, TestAppContext, Window, div,
 };
 use text::Point;
 
@@ -419,32 +419,23 @@ impl StoatTest {
         self.view.update(&mut self.cx, |view, cx| {
             let stoat = view.stoat_mut();
 
-            // Update language and parser if needed
-            if stoat.current_language != language {
-                stoat.current_language = language;
-                stoat.parser =
-                    stoat_text_v3::Parser::new(language).expect("Failed to create parser");
-            }
+            // Update language, buffer, and reparse through active item
+            let active_item = stoat.active_buffer_item(cx);
+            active_item.update(cx, |item, cx| {
+                // Set language (updates parser if changed)
+                item.set_language(language);
 
-            // Clear buffer and insert new text
-            stoat.buffer.update(cx, |buf, _| {
-                let len = buf.len();
-                buf.edit([(0..len, text)]);
-            });
+                // Clear buffer and insert new text
+                item.buffer().update(cx, |buf, _| {
+                    let len = buf.len();
+                    buf.edit([(0..len, text)]);
+                });
 
-            // Re-parse entire buffer after edit
-            let buffer_snapshot = stoat.buffer.read(cx).snapshot();
-            match stoat.parser.parse(text, &buffer_snapshot) {
-                Ok(tokens) => {
-                    stoat
-                        .token_map
-                        .lock()
-                        .replace_tokens(tokens, &buffer_snapshot);
-                },
-                Err(e) => {
+                // Reparse to update syntax highlighting
+                if let Err(e) = item.reparse(cx) {
                     eprintln!("Failed to parse in set_text: {}", e);
-                },
-            }
+                }
+            });
 
             // Reset cursor to origin
             stoat.set_cursor_position(Point::new(0, 0));

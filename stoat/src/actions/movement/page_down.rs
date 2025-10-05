@@ -34,7 +34,7 @@ impl Stoat {
     pub fn move_cursor_page_down(&mut self, cx: &App) {
         let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let max_row = buffer_snapshot.row_count() - 1;
         let current_pos = self.cursor_manager.position();
 

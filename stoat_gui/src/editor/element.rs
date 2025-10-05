@@ -108,7 +108,7 @@ impl Element for EditorElement {
         let mut line_lengths = SmallVec::new();
 
         // Get token snapshot for syntax highlighting
-        let token_snapshot = stoat.token_snapshot();
+        let token_snapshot = stoat.token_snapshot(cx);
 
         // Only iterate through visible rows
         for row in start_row..end_row {

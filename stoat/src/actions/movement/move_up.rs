@@ -32,7 +32,7 @@ impl Stoat {
     pub fn move_cursor_up(&mut self, cx: &App) {
         let current_pos = self.cursor_manager.position();
         if current_pos.row > 0 {
-            let buffer_snapshot = self.buffer.read(cx).snapshot();
+            let buffer_snapshot = self.buffer_snapshot(cx);
             let new_row = current_pos.row - 1;
             let line_len = buffer_snapshot.line_len(new_row);
             let new_column = self.cursor_manager.goal_column().min(line_len);

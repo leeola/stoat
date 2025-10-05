@@ -61,7 +61,7 @@ impl Stoat {
             return Some(start_offset..end_offset);
         }
 
-        let token_snapshot = self.token_snapshot();
+        let token_snapshot = self.token_snapshot(cx);
         let cursor_pos = self.cursor_manager.position();
         let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
 

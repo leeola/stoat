@@ -70,31 +70,28 @@ impl Stoat {
         }
 
         // Main buffer insertion for all other modes
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let cursor_pos = self.cursor_manager.position();
         let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
 
         trace!(pos = ?cursor_pos, text = ?text, len = text.len(), "Inserting text");
 
-        self.buffer.update(cx, |buffer, _cx| {
-            buffer.edit([(cursor_offset..cursor_offset, text)]);
+        // Update buffer and reparse through active item
+        let active_item = self.active_buffer_item(cx);
+        active_item.update(cx, |item, cx| {
+            // Edit buffer
+            item.buffer().update(cx, |buffer, _| {
+                buffer.edit([(cursor_offset..cursor_offset, text)]);
+            });
+
+            // Reparse to update syntax highlighting
+            if let Err(e) = item.reparse(cx) {
+                tracing::error!("Failed to parse after insert: {}", e);
+            }
         });
 
-        // Re-parse entire buffer after edit
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
-        let contents = buffer_snapshot.text();
-        match self.parser.parse(&contents, &buffer_snapshot) {
-            Ok(tokens) => {
-                self.token_map
-                    .lock()
-                    .replace_tokens(tokens, &buffer_snapshot);
-            },
-            Err(e) => {
-                tracing::error!("Failed to parse after insert: {}", e);
-            },
-        }
-
         // Move cursor forward by the inserted text length
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let new_cursor_position = buffer_snapshot.offset_to_point(cursor_offset + text.len());
         self.cursor_manager.move_to(new_cursor_position);
     }

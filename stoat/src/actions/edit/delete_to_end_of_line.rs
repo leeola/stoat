@@ -31,7 +31,7 @@ impl Stoat {
     /// - [`crate::actions::edit::delete_line`] for full line deletion
     /// - [`crate::actions::edit::delete_range`] for the underlying deletion mechanism
     pub fn delete_to_end_of_line(&mut self, cx: &mut App) {
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let current_pos = self.cursor_manager.position();
         let line_len = buffer_snapshot.line_len(current_pos.row);
         let end = Point::new(current_pos.row, line_len);

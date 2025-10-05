@@ -25,7 +25,7 @@ impl Stoat {
     /// See also [`crate::actions::movement::move_to_file_start`] for start-of-file movement.
     pub fn move_cursor_to_file_end(&mut self, cx: &App) {
         let current_pos = self.cursor_manager.position();
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer_snapshot(cx);
         let last_row = buffer_snapshot.row_count().saturating_sub(1);
         let last_line_len = buffer_snapshot.line_len(last_row);
         let new_pos = Point::new(last_row, last_line_len);

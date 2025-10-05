@@ -36,7 +36,7 @@ impl Mode {
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
-use pane::BufferItem;
+use pane::{BufferItem, ItemHandle};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
 use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
@@ -47,8 +47,12 @@ use worktree::Worktree;
 
 #[derive(Clone)]
 pub struct Stoat {
-    /// Main buffer item (will become Vec<Box<dyn ItemHandle>> in next phase)
-    item: Entity<BufferItem>,
+    /// Items displayed in editor (buffers, terminals, etc.)
+    /// FIXME: Currently Vec<Entity<BufferItem>>. When we add other item types
+    /// (terminals, etc.), convert to Vec<Box<dyn ItemHandle>> with proper downcasting.
+    items: Vec<Entity<BufferItem>>,
+    /// Index of currently active item
+    active_item_index: usize,
     scroll: ScrollPosition,
     cursor_manager: CursorManager,
     viewport_lines: Option<f32>,
@@ -70,14 +74,18 @@ impl Stoat {
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
 
-        // Create buffer item wrapping the buffer
+        // Create initial buffer item
         let item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
+
+        // Create items vec with initial item
+        let items = vec![item];
 
         // Initialize worktree for instant file finder
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
         Self {
-            item,
+            items,
+            active_item_index: 0,
             scroll: ScrollPosition::new(),
             cursor_manager: CursorManager::new(),
             viewport_lines: None,
@@ -93,16 +101,50 @@ impl Stoat {
         }
     }
 
+    /// Add a new item to the editor and activate it.
+    ///
+    /// The item is added at the end of the items list and becomes the active item.
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - The buffer item to add
+    pub fn add_item(&mut self, item: Entity<BufferItem>) {
+        self.items.push(item);
+        self.active_item_index = self.items.len() - 1;
+    }
+
+    /// Activate an item by index.
+    ///
+    /// If the index is out of bounds, does nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Index of the item to activate
+    pub fn activate_item(&mut self, index: usize) {
+        if index < self.items.len() {
+            self.active_item_index = index;
+        }
+    }
+
+    /// Get the active buffer item.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are no items (should never happen in practice).
+    fn active_buffer_item(&self, _cx: &App) -> Entity<BufferItem> {
+        self.items[self.active_item_index].clone()
+    }
+
     pub fn buffer(&self, cx: &App) -> Entity<Buffer> {
-        self.item.read(cx).buffer().clone()
+        self.active_buffer_item(cx).read(cx).buffer().clone()
     }
 
     pub fn buffer_snapshot(&self, cx: &App) -> BufferSnapshot {
-        self.item.read(cx).buffer_snapshot(cx)
+        self.active_buffer_item(cx).read(cx).buffer_snapshot(cx)
     }
 
     pub fn token_snapshot(&self, cx: &App) -> TokenSnapshot {
-        self.item.read(cx).token_snapshot()
+        self.active_buffer_item(cx).read(cx).token_snapshot()
     }
 
     pub fn scroll_position(&self) -> gpui::Point<f32> {
@@ -120,8 +162,9 @@ impl Stoat {
                     .map(Language::from_extension)
                     .unwrap_or(Language::PlainText);
 
-                // Update buffer item with new content and language
-                self.item.update(cx, |item, cx| {
+                // Update active buffer item with new content and language
+                let active_item = self.active_buffer_item(cx);
+                active_item.update(cx, |item, cx| {
                     // Set language (updates parser if changed)
                     item.set_language(language);
 
@@ -141,7 +184,11 @@ impl Stoat {
     }
 
     pub fn buffer_contents(&self, cx: &App) -> String {
-        self.item.read(cx).buffer().read(cx).text()
+        self.active_buffer_item(cx)
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .text()
     }
 
     /// Get the current cursor position
