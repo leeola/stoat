@@ -36,20 +36,19 @@ impl Mode {
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
+use pane::BufferItem;
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
 use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
-use stoat_rope_v3::{TokenMap, TokenSnapshot};
-use stoat_text_v3::{Language, Parser};
+use stoat_rope_v3::TokenSnapshot;
+use stoat_text_v3::Language;
 use text::{Buffer, BufferId, BufferSnapshot, Point};
 use worktree::Worktree;
 
 #[derive(Clone)]
 pub struct Stoat {
-    buffer: Entity<Buffer>,
-    token_map: Arc<Mutex<TokenMap>>,
-    parser: Parser,
-    current_language: Language,
+    /// Main buffer item (will become Vec<Box<dyn ItemHandle>> in next phase)
+    item: Entity<BufferItem>,
     scroll: ScrollPosition,
     cursor_manager: CursorManager,
     viewport_lines: Option<f32>,
@@ -70,20 +69,15 @@ impl Stoat {
     pub fn new(cx: &mut App) -> Self {
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
-        let buffer_snapshot = buffer.read(cx).snapshot();
-        let token_map = Arc::new(Mutex::new(TokenMap::new(&buffer_snapshot)));
 
-        let current_language = Language::PlainText;
-        let parser = Parser::new(current_language).expect("Failed to create parser");
+        // Create buffer item wrapping the buffer
+        let item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
 
         // Initialize worktree for instant file finder
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
         Self {
-            buffer,
-            token_map,
-            parser,
-            current_language,
+            item,
             scroll: ScrollPosition::new(),
             cursor_manager: CursorManager::new(),
             viewport_lines: None,
@@ -99,16 +93,16 @@ impl Stoat {
         }
     }
 
-    pub fn buffer(&self) -> &Entity<Buffer> {
-        &self.buffer
+    pub fn buffer(&self, cx: &App) -> Entity<Buffer> {
+        self.item.read(cx).buffer().clone()
     }
 
     pub fn buffer_snapshot(&self, cx: &App) -> BufferSnapshot {
-        self.buffer.read(cx).snapshot()
+        self.item.read(cx).buffer_snapshot(cx)
     }
 
-    pub fn token_snapshot(&self) -> TokenSnapshot {
-        self.token_map.lock().snapshot()
+    pub fn token_snapshot(&self, cx: &App) -> TokenSnapshot {
+        self.item.read(cx).token_snapshot()
     }
 
     pub fn scroll_position(&self) -> gpui::Point<f32> {
@@ -116,7 +110,7 @@ impl Stoat {
     }
 
     pub fn load_files(&mut self, paths: &[&std::path::Path], cx: &mut App) {
-        // Load first file into buffer
+        // Load first file into buffer item
         if let Some(first_path) = paths.first() {
             if let Ok(contents) = std::fs::read_to_string(first_path) {
                 // Detect language from file extension
@@ -126,36 +120,28 @@ impl Stoat {
                     .map(Language::from_extension)
                     .unwrap_or(Language::PlainText);
 
-                // Update parser if language changed
-                if language != self.current_language {
-                    self.current_language = language;
-                    self.parser = Parser::new(language).expect("Failed to create parser");
-                }
+                // Update buffer item with new content and language
+                self.item.update(cx, |item, cx| {
+                    // Set language (updates parser if changed)
+                    item.set_language(language);
 
-                // Update buffer
-                self.buffer.update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, contents.as_str())]);
-                });
+                    // Update buffer content
+                    item.buffer().update(cx, |buffer, _| {
+                        let len = buffer.len();
+                        buffer.edit([(0..len, contents.as_str())]);
+                    });
 
-                // Parse and update tokens
-                let buffer_snapshot = self.buffer.read(cx).snapshot();
-                match self.parser.parse(&contents, &buffer_snapshot) {
-                    Ok(tokens) => {
-                        self.token_map
-                            .lock()
-                            .replace_tokens(tokens, &buffer_snapshot);
-                    },
-                    Err(e) => {
+                    // Reparse to update tokens
+                    if let Err(e) = item.reparse(cx) {
                         tracing::error!("Failed to parse file: {}", e);
-                    },
-                }
+                    }
+                });
             }
         }
     }
 
     pub fn buffer_contents(&self, cx: &App) -> String {
-        self.buffer.read(cx).text()
+        self.item.read(cx).buffer().read(cx).text()
     }
 
     /// Get the current cursor position
