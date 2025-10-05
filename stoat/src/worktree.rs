@@ -28,7 +28,7 @@
 mod ignore;
 
 use self::ignore::IgnoreStack;
-use ::ignore::gitignore::{Gitignore, GitignoreBuilder, gitconfig_excludes_path};
+use ::ignore::gitignore::{gitconfig_excludes_path, Gitignore, GitignoreBuilder};
 use fuzzy::CharBag;
 use std::{
     path::{Path, PathBuf},

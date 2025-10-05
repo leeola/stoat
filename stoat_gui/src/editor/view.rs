@@ -1,10 +1,10 @@
 use super::{element::EditorElement, style::EditorStyle};
 use crate::{context::EditorContext, input::InputHandler};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollWheelEvent, Styled, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, Render,
+    ScrollWheelEvent, Styled, Window, div,
 };
-use stoat::{actions::*, ScrollDelta, Stoat};
+use stoat::{ScrollDelta, Stoat, actions::*};
 use tracing::info;
 
 pub struct EditorView {
@@ -295,7 +295,7 @@ impl EditorView {
     }
 
     fn handle_file_finder_select(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.file_finder_select();
+        self.stoat.file_finder_select(cx);
         cx.notify();
     }
 }

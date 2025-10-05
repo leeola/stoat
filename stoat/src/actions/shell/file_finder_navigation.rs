@@ -166,31 +166,43 @@ impl Stoat {
     /// # Behavior
     ///
     /// - Loads the selected file into the buffer
+    /// - Resets cursor to start of file
     /// - Dismisses the file finder
     /// - Returns to previous mode
     /// - No-op if file finder is not open or no file is selected
     ///
-    /// # Implementation Note
+    /// # Implementation
     ///
-    /// Currently a placeholder - file loading will be implemented when we have
-    /// multi-file support in the core.
+    /// Uses [`crate::Stoat::load_files`] to handle file loading, which:
+    /// - Reads file contents
+    /// - Detects language from extension
+    /// - Updates parser and tokens
+    /// - Replaces buffer contents
     ///
     /// # Related
     ///
     /// See also:
     /// - [`crate::Stoat::file_finder_dismiss`] - close without selecting
     /// - [`crate::Stoat::open_file_finder`] - open file finder
-    pub fn file_finder_select(&mut self) {
+    /// - [`crate::Stoat::load_files`] - file loading implementation
+    pub fn file_finder_select(&mut self, cx: &mut gpui::App) {
         if self.mode() != "file_finder" {
             return;
         }
 
         if self.file_finder_selected < self.file_finder_filtered.len() {
-            let selected_file = &self.file_finder_filtered[self.file_finder_selected];
-            debug!(file = ?selected_file, "File finder: select");
+            let relative_path = &self.file_finder_filtered[self.file_finder_selected];
+            debug!(file = ?relative_path, "File finder: select");
 
-            // FIXME: Load file into buffer when multi-file support is added
-            // For now, just dismiss the file finder
+            // Build absolute path from worktree root
+            let root = self.worktree.lock().snapshot().root().to_path_buf();
+            let abs_path = root.join(relative_path);
+
+            // Load file into buffer
+            self.load_files(&[&abs_path], cx);
+
+            // Move cursor to start of file
+            self.set_cursor_position(text::Point::new(0, 0));
         }
 
         self.file_finder_dismiss();
