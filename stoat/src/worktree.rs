@@ -28,7 +28,7 @@
 mod ignore;
 
 use self::ignore::IgnoreStack;
-use ::ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ::ignore::gitignore::{Gitignore, GitignoreBuilder, gitconfig_excludes_path};
 use fuzzy::CharBag;
 use std::{
     path::{Path, PathBuf},
@@ -241,13 +241,17 @@ impl Worktree {
     ///
     /// # Gitignore Processing
     ///
-    /// Respects `.gitignore` files found during traversal. Each directory's
-    /// `.gitignore` extends parent rules, matching git's behavior.
+    /// Respects gitignore rules in this order (matching git's precedence):
+    /// 1. Global gitignore from git config (`core.excludesfile`)
+    /// 2. Repository `.git/info/exclude` files
+    /// 3. Directory `.gitignore` files (parent to child)
+    ///
+    /// Each directory's `.gitignore` extends parent rules, matching git's behavior.
     ///
     /// # Filters
     ///
     /// Automatically excludes:
-    /// - Files matching `.gitignore` rules
+    /// - Files matching gitignore rules
     /// - Files larger than 10MB
     /// - Directories deeper than 10 levels
     ///
@@ -256,7 +260,18 @@ impl Worktree {
     /// This is called from [`crate::Stoat::new()`] during editor initialization.
     pub fn new(root: PathBuf) -> Self {
         let mut entries = Vec::new();
-        let ignore_stack = IgnoreStack::none();
+
+        // Load global gitignore from git config (core.excludesfile)
+        let ignore_stack = if let Some(global_path) = gitconfig_excludes_path() {
+            if let Ok(gitignore) = build_gitignore(&global_path) {
+                IgnoreStack::global(Arc::new(gitignore))
+            } else {
+                IgnoreStack::none()
+            }
+        } else {
+            IgnoreStack::none()
+        };
+
         let root_char_bag = CharBag::default();
 
         Self::walk_directory(
@@ -392,13 +407,29 @@ impl Worktree {
         // Sort to ensure .gitignore is processed before other files
         children.sort_by_key(|e| e.file_name());
 
-        // First pass: look for .gitignore
+        // First pass: look for .gitignore and .git/info/exclude
+        let mut found_gitignore = false;
+        let mut found_git = false;
+
         for entry in &children {
             if entry.file_name() == ".gitignore" {
                 let gitignore_path = entry.path();
                 if let Ok(gitignore) = build_gitignore(&gitignore_path) {
                     ignore_stack = ignore_stack.append(abs_dir.into(), Arc::new(gitignore));
                 }
+                found_gitignore = true;
+            } else if entry.file_name() == ".git" && entry.path().is_dir() {
+                // Load .git/info/exclude for repository-specific excludes
+                let exclude_path = entry.path().join("info").join("exclude");
+                if exclude_path.exists() {
+                    if let Ok(gitignore) = build_gitignore(&exclude_path) {
+                        ignore_stack = ignore_stack.append(abs_dir.into(), Arc::new(gitignore));
+                    }
+                }
+                found_git = true;
+            }
+
+            if found_gitignore && found_git {
                 break;
             }
         }

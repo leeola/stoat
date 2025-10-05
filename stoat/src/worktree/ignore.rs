@@ -45,6 +45,7 @@ use std::{ffi::OsStr, path::Path, sync::Arc};
 /// # Variants
 ///
 /// - [`None`](IgnoreStack::None) - No ignore rules (base case)
+/// - [`Global`](IgnoreStack::Global) - Global gitignore from git config
 /// - [`All`](IgnoreStack::All) - Ignore everything (used for special cases)
 /// - [`Some`](IgnoreStack::Some) - Contains rules + parent stack
 ///
@@ -57,6 +58,11 @@ use std::{ffi::OsStr, path::Path, sync::Arc};
 pub enum IgnoreStack {
     /// No ignore rules - nothing is ignored
     None,
+    /// Global gitignore rules from git config (core.excludesfile)
+    Global {
+        /// Compiled global gitignore rules
+        ignore: Arc<Gitignore>,
+    },
     /// A level in the stack with gitignore rules
     Some {
         /// Absolute path to the directory containing the .gitignore file
@@ -77,6 +83,30 @@ impl IgnoreStack {
     /// are encountered, call [`append`](Self::append) to build up the stack.
     pub fn none() -> Arc<Self> {
         Arc::new(Self::None)
+    }
+
+    /// Create an ignore stack with global gitignore rules.
+    ///
+    /// Global rules are loaded from git's `core.excludesfile` config setting,
+    /// typically `~/.config/git/ignore`. These rules apply to all repositories.
+    ///
+    /// # Arguments
+    ///
+    /// * `ignore` - Compiled global gitignore rules
+    ///
+    /// # Usage
+    ///
+    /// Called during worktree initialization:
+    ///
+    /// ```ignore
+    /// if let Some(global_path) = gitconfig_excludes_path() {
+    ///     if let Ok(gitignore) = build_gitignore(&global_path) {
+    ///         ignore_stack = IgnoreStack::global(Arc::new(gitignore));
+    ///     }
+    /// }
+    /// ```
+    pub fn global(ignore: Arc<Gitignore>) -> Arc<Self> {
+        Arc::new(Self::Global { ignore })
     }
 
     /// Create a stack that ignores everything.
@@ -161,6 +191,14 @@ impl IgnoreStack {
         match self {
             Self::None => false,
             Self::All => true,
+            Self::Global { ignore } => {
+                // Global gitignore uses absolute paths
+                match ignore.matched(abs_path, is_dir) {
+                    ignore::Match::None => false,
+                    ignore::Match::Ignore(_) => true,
+                    ignore::Match::Whitelist(_) => false,
+                }
+            },
             Self::Some {
                 abs_base_path,
                 ignore,
