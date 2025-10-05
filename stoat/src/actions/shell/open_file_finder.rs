@@ -59,9 +59,66 @@ impl Stoat {
         self.file_finder_files = files;
         self.file_finder_selected = 0;
 
+        // Load preview for first file
+        self.file_finder_preview = self
+            .file_finder_filtered
+            .first()
+            .and_then(|path| load_file_preview(path));
+
         // Enter file_finder mode
         self.set_mode("file_finder");
     }
+}
+
+/// Load a preview of a file's contents.
+///
+/// Reads up to the first 1000 lines or 100KB of a file for preview display.
+/// Returns [`None`] if the file cannot be read, is binary, or contains invalid UTF-8.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file to preview
+///
+/// # Returns
+///
+/// File contents as a string, or [`None`] if preview cannot be generated
+fn load_file_preview(path: &Path) -> Option<String> {
+    const MAX_BYTES: usize = 100 * 1024; // 100KB
+    const MAX_LINES: usize = 1000;
+
+    // Read file with size limit
+    let contents = std::fs::read(path).ok()?;
+
+    // Check for binary content (null bytes in first 1KB)
+    let check_size = contents.len().min(1024);
+    if contents[..check_size].contains(&0) {
+        return None; // Binary file
+    }
+
+    // Try to decode as UTF-8
+    let text = String::from_utf8(contents).ok()?;
+
+    // Limit to first MAX_BYTES or MAX_LINES
+    let mut result = String::new();
+    let mut byte_count = 0;
+    let mut line_count = 0;
+
+    for line in text.lines() {
+        if line_count >= MAX_LINES || byte_count >= MAX_BYTES {
+            result.push_str("\n\n... (preview truncated)");
+            break;
+        }
+
+        if line_count > 0 {
+            result.push('\n');
+        }
+        result.push_str(line);
+
+        byte_count += line.len() + 1; // +1 for newline
+        line_count += 1;
+    }
+
+    Some(result)
 }
 
 /// Discover files recursively from the given root directory.

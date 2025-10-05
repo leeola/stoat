@@ -26,15 +26,22 @@ pub struct FileFinder {
     query: String,
     files: Vec<PathBuf>,
     selected: usize,
+    preview: Option<String>,
 }
 
 impl FileFinder {
     /// Create a new file finder renderer with the given state.
-    pub fn new(query: String, files: Vec<PathBuf>, selected: usize) -> Self {
+    pub fn new(
+        query: String,
+        files: Vec<PathBuf>,
+        selected: usize,
+        preview: Option<String>,
+    ) -> Self {
         Self {
             query,
             files,
             selected,
+            preview,
         }
     }
 
@@ -64,7 +71,6 @@ impl FileFinder {
             .flex()
             .flex_col()
             .flex_1()
-            .overflow_y_hidden()
             .children(files.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(12.0))
@@ -80,6 +86,24 @@ impl FileFinder {
                             .to_string(),
                     )
             }))
+    }
+
+    /// Render the file preview panel.
+    fn render_preview(&self) -> impl IntoElement {
+        let preview_text = self.preview.clone().unwrap_or_else(|| {
+            "No preview available\n\n(File may be binary or too large)".to_string()
+        });
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .p(px(12.0))
+            .bg(rgb(0x1a1a1a))
+            .text_color(rgb(0xd4d4d4))
+            .font_family(".AppleSystemUIFontMonospaced")
+            .text_size(px(12.0))
+            .child(preview_text)
     }
 }
 
@@ -107,7 +131,32 @@ impl RenderOnce for FileFinder {
                     .rounded(px(8.0))
                     .overflow_hidden()
                     .child(self.render_input())
-                    .child(self.render_file_list()),
+                    .child(
+                        // Two-panel layout: file list on left, preview on right
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(
+                                // Left panel: file list (40%)
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w_2_5()
+                                    .border_r_1()
+                                    .border_color(rgb(0x3e3e42))
+                                    .child(self.render_file_list()),
+                            )
+                            .child(
+                                // Right panel: preview (60%)
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .child(self.render_preview()),
+                            ),
+                    ),
             )
     }
 }

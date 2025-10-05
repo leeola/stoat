@@ -59,6 +59,7 @@ pub struct Stoat {
     file_finder_filtered: Vec<PathBuf>,
     file_finder_selected: usize,
     file_finder_previous_mode: Option<String>,
+    file_finder_preview: Option<String>,
 }
 
 impl Stoat {
@@ -86,6 +87,7 @@ impl Stoat {
             file_finder_filtered: Vec::new(),
             file_finder_selected: 0,
             file_finder_previous_mode: None,
+            file_finder_preview: None,
         }
     }
 
@@ -199,6 +201,11 @@ impl Stoat {
     /// Get the selected file index
     pub fn file_finder_selected_index(&self) -> usize {
         self.file_finder_selected
+    }
+
+    /// Get the file preview content for the selected file
+    pub fn file_finder_preview_content(&self) -> Option<&str> {
+        self.file_finder_preview.as_deref()
     }
 
     /// Filter files based on the current query.
