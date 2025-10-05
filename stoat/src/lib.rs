@@ -1,5 +1,6 @@
 pub mod actions;
 mod cursor;
+mod file_index;
 pub mod keymap;
 pub mod log;
 pub mod pane;
@@ -34,6 +35,7 @@ impl Mode {
 // Re-export types that the GUI layer will need
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
+use file_index::FileIndex;
 use gpui::{App, AppContext, Entity};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
@@ -60,6 +62,8 @@ pub struct Stoat {
     file_finder_selected: usize,
     file_finder_previous_mode: Option<String>,
     file_finder_preview: Option<String>,
+    // File index (shared across cloned Stoats)
+    file_index: Arc<Mutex<FileIndex>>,
 }
 
 impl Stoat {
@@ -71,6 +75,9 @@ impl Stoat {
 
         let current_language = Language::PlainText;
         let parser = Parser::new(current_language).expect("Failed to create parser");
+
+        // Initialize file index for instant file finder
+        let file_index = Arc::new(Mutex::new(FileIndex::new(PathBuf::from("."))));
 
         Self {
             buffer,
@@ -88,6 +95,7 @@ impl Stoat {
             file_finder_selected: 0,
             file_finder_previous_mode: None,
             file_finder_preview: None,
+            file_index,
         }
     }
 

@@ -83,8 +83,8 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: &str) -> Vec<(String, String)> {
 fn is_binding_mode_specific(keymap: &Keymap, binding: &KeyBinding) -> bool {
     let keystrokes = binding.keystrokes();
 
-    // Test against all four modes
-    let modes = ["normal", "insert", "visual", "pane"];
+    // Test against all modes
+    let modes = ["normal", "insert", "visual", "pane", "file_finder", "space"];
     let mut active_in_count = 0;
 
     for mode_name in modes {

@@ -500,6 +500,7 @@ pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     help.insert(TypeId::of::<FocusPaneDown>(), "focus down");
 
     // File finder actions
+    help.insert(TypeId::of::<OpenFileFinder>(), "file finder");
     help.insert(TypeId::of::<FileFinderNext>(), "next file");
     help.insert(TypeId::of::<FileFinderPrev>(), "prev file");
     help.insert(TypeId::of::<FileFinderDismiss>(), "dismiss");
