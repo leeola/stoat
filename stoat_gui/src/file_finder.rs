@@ -4,8 +4,8 @@
 //! is stateless - all state management and input handling happens in the core via the mode system.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, rgb, rgba, App, IntoElement, ParentElement, RenderOnce,
-    Styled, Window,
+    App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
+    rgb, rgba,
 };
 use std::path::PathBuf;
 
@@ -63,8 +63,8 @@ impl FileFinder {
         div()
             .flex()
             .flex_col()
+            .flex_1()
             .overflow_y_hidden()
-            .max_h(px(400.0))
             .children(files.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(12.0))
@@ -74,8 +74,8 @@ impl FileFinder {
                     })
                     .text_color(rgb(0xd4d4d4))
                     .child(
-                        path.file_name()
-                            .unwrap_or_default()
+                        path.strip_prefix("./")
+                            .unwrap_or(path)
                             .to_string_lossy()
                             .to_string(),
                     )
@@ -99,8 +99,8 @@ impl RenderOnce for FileFinder {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(600.0))
-                    .max_h(px(500.0))
+                    .w_3_4()
+                    .h_3_4()
                     .bg(rgb(0x1e1e1e)) // Dark background matching VS Code theme
                     .border_1()
                     .border_color(rgb(0x3e3e42)) // Subtle border
