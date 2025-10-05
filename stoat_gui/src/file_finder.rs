@@ -50,7 +50,7 @@ impl FileFinder {
         let query = self.query.clone();
 
         div()
-            .p(px(8.0))
+            .p(px(6.0))
             .border_b_1()
             .border_color(rgb(0x3e3e42))
             .bg(rgb(0x252526))
@@ -73,12 +73,13 @@ impl FileFinder {
             .flex_1()
             .children(files.iter().enumerate().map(|(i, path)| {
                 div()
-                    .px(px(12.0))
-                    .py(px(6.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
                     .when(i == selected, |div| {
                         div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected file
                     })
                     .text_color(rgb(0xd4d4d4))
+                    .text_size(px(11.0))
                     .child(
                         path.strip_prefix("./")
                             .unwrap_or(path)
@@ -108,7 +109,11 @@ impl FileFinder {
 }
 
 impl RenderOnce for FileFinder {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        // Check window width to determine if we should show preview
+        let viewport_width = window.viewport_size().width.0;
+        let show_preview = viewport_width > 1000.0;
+
         div()
             .absolute()
             .top_0()
@@ -131,7 +136,7 @@ impl RenderOnce for FileFinder {
                     .rounded(px(8.0))
                     .overflow_hidden()
                     .child(self.render_input())
-                    .child(
+                    .child(if show_preview {
                         // Two-panel layout: file list on left, preview on right
                         div()
                             .flex()
@@ -139,24 +144,33 @@ impl RenderOnce for FileFinder {
                             .flex_1()
                             .overflow_hidden()
                             .child(
-                                // Left panel: file list (40%)
+                                // Left panel: file list (45%)
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .w_2_5()
+                                    .w(px(viewport_width * 0.75 * 0.45))
                                     .border_r_1()
                                     .border_color(rgb(0x3e3e42))
                                     .child(self.render_file_list()),
                             )
                             .child(
-                                // Right panel: preview (60%)
+                                // Right panel: preview (55%)
                                 div()
                                     .flex()
                                     .flex_col()
                                     .flex_1()
                                     .child(self.render_preview()),
-                            ),
-                    ),
+                            )
+                    } else {
+                        // Single panel: just file list
+                        div().flex().flex_row().flex_1().overflow_hidden().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .child(self.render_file_list()),
+                        )
+                    }),
             )
     }
 }
