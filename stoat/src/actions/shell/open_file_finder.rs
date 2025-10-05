@@ -12,23 +12,24 @@ use tracing::debug;
 impl Stoat {
     /// Open the file finder modal.
     ///
-    /// Discovers all files in the current directory (recursively), creates an input buffer
-    /// for the search query, and transitions to file_finder mode.
+    /// Reads files from the worktree snapshot, creates an input buffer for search query,
+    /// and transitions to file_finder mode. Files are loaded instantly from the pre-built
+    /// worktree snapshot.
     ///
     /// # Behavior
     ///
     /// - Saves current mode to restore later
-    /// - Discovers files recursively from current directory
+    /// - Reads files from worktree snapshot (instant access)
     /// - Creates empty input buffer for search query
     /// - Initializes filtered files list (initially all files)
     /// - Sets mode to "file_finder"
     ///
-    /// # File Discovery
+    /// # Architecture
     ///
-    /// Discovers files using simple recursive directory walking, ignoring:
-    /// - Hidden files/directories (starting with `.`)
-    /// - Common ignore patterns (node_modules, target, .git, etc.)
-    /// - Files larger than 10MB
+    /// Uses [`crate::worktree::Worktree`] snapshot for instant file access. The worktree
+    /// is initialized during [`crate::Stoat::new()`] and contains all files discovered
+    /// via recursive directory walking. Similar to Zed's approach where file finder queries
+    /// the worktree snapshot rather than performing I/O at open time.
     ///
     /// # Related
     ///
@@ -36,15 +37,19 @@ impl Stoat {
     /// - [`crate::Stoat::file_finder_dismiss`] - close file finder
     /// - [`crate::Stoat::file_finder_next`] - navigate down
     /// - [`crate::Stoat::file_finder_prev`] - navigate up
+    /// - [`crate::worktree::Worktree`] - file discovery system
     pub fn open_file_finder(&mut self, cx: &mut App) {
         debug!(from_mode = self.mode(), "Opening file finder");
 
         // Save current mode to restore later
         self.file_finder_previous_mode = Some(self.current_mode.clone());
 
-        // Read files from pre-built index (instant!)
-        let files = self.file_index.lock().files().to_vec();
-        debug!(file_count = files.len(), "Loaded files from index");
+        // Read files from worktree snapshot (instant!)
+        let files = self.worktree.lock().snapshot().files().to_vec();
+        debug!(
+            file_count = files.len(),
+            "Loaded files from worktree snapshot"
+        );
 
         // Create input buffer for search query
         let buffer_id = BufferId::from(NonZeroU64::new(2).unwrap()); // Use ID 2 for input buffer
