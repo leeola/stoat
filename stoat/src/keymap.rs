@@ -55,6 +55,17 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
     let key = binding_config.key.as_str();
     let context = Some(binding_config.context.as_str());
 
+    // Check for parameterized SetMode action: SetMode(mode_name)
+    if let Some(mode_name) = binding_config.action.strip_prefix("SetMode(") {
+        if let Some(mode_name) = mode_name.strip_suffix(")") {
+            return Ok(KeyBinding::new(
+                key,
+                SetMode(mode_name.to_string()),
+                context,
+            ));
+        }
+    }
+
     match binding_config.action.as_str() {
         // Movement actions
         "MoveLeft" => Ok(KeyBinding::new(key, MoveLeft, context)),
@@ -414,7 +425,7 @@ mod tests {
             !bindings.is_empty(),
             "Expected binding for 'i' in normal mode"
         );
-        assert!(bindings[0].action().as_any().is::<EnterInsertMode>());
+        assert!(bindings[0].action().as_any().is::<SetMode>());
     }
 
     #[gpui::test]
@@ -434,7 +445,7 @@ mod tests {
             !bindings.is_empty(),
             "Expected binding for 'escape' in insert mode"
         );
-        assert!(bindings[0].action().as_any().is::<EnterNormalMode>());
+        assert!(bindings[0].action().as_any().is::<SetMode>());
 
         // Test arrow keys work in insert mode
         let (bindings, _pending) =

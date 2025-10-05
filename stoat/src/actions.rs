@@ -231,6 +231,35 @@ actions!(
     ]
 );
 
+/// Set the editor mode dynamically.
+///
+/// Changes to the specified mode by name. This is the generic action for all
+/// mode transitions, replacing individual [`EnterInsertMode`], [`EnterNormalMode`],
+/// [`EnterVisualMode`], and [`EnterPaneMode`] actions.
+///
+/// # Arguments
+///
+/// * `0` - The name of the mode to activate (e.g., "normal", "insert", "visual", "pane", "space")
+///
+/// # Examples
+///
+/// ```ignore
+/// SetMode("normal".to_string())  // Enter normal mode
+/// SetMode("insert".to_string())  // Enter insert mode
+/// SetMode("space".to_string())   // Enter space command mode
+/// ```
+///
+/// # Related
+///
+/// See also the mode-specific actions (kept for backward compatibility):
+/// - [`EnterInsertMode`] - enter insert mode
+/// - [`EnterNormalMode`] - enter normal mode
+/// - [`EnterVisualMode`] - enter visual mode
+/// - [`EnterPaneMode`] - enter pane mode
+#[derive(Clone, PartialEq, Action)]
+#[action(no_json)]
+pub struct SetMode(pub String);
+
 // File actions - file operations
 actions!(
     editor_file,

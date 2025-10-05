@@ -123,6 +123,10 @@ impl Render for StoatView {
                 }),
             )
             // Modal actions
+            .on_action(cx.listener(|view: &mut Self, action: &SetMode, _, cx| {
+                view.stoat.handle_set_mode(&action.0);
+                cx.notify();
+            }))
             .on_action(cx.listener(|view: &mut Self, _: &EnterInsertMode, _, cx| {
                 view.stoat.set_mode("insert");
                 cx.notify();
@@ -586,6 +590,87 @@ impl StoatTest {
             actual_y, expected_y,
             "Expected scroll Y position {expected_y}, got {actual_y}"
         );
+    }
+
+    /// Get mutable reference to the app context (for file finder tests)
+    pub fn cx_mut(&mut self) -> &mut gpui::VisualTestContext {
+        &mut self.cx
+    }
+
+    /// Open the file finder
+    pub fn open_file_finder(&mut self) {
+        self.view.update(&mut self.cx, |view, cx| {
+            view.stoat_mut().open_file_finder(cx);
+        });
+    }
+
+    /// Navigate to next file in file finder
+    pub fn file_finder_next(&mut self) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().file_finder_next();
+        });
+    }
+
+    /// Navigate to previous file in file finder
+    pub fn file_finder_prev(&mut self) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().file_finder_prev();
+        });
+    }
+
+    /// Dismiss the file finder
+    pub fn file_finder_dismiss(&mut self) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().file_finder_dismiss();
+        });
+    }
+
+    /// Get the file finder input buffer
+    pub fn file_finder_input(&self) -> Option<gpui::Entity<text::Buffer>> {
+        self.view.read_with(&self.cx, |view, _| {
+            view.stoat().file_finder_input_buffer().cloned()
+        })
+    }
+
+    /// Get the file finder filtered files
+    pub fn file_finder_filtered(&self) -> Vec<std::path::PathBuf> {
+        self.view.read_with(&self.cx, |view, _| {
+            view.stoat().file_finder_filtered_files().to_vec()
+        })
+    }
+
+    /// Set the file finder filtered files (for testing)
+    pub fn set_file_finder_filtered(&mut self, files: Vec<std::path::PathBuf>) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().file_finder_filtered = files;
+        });
+    }
+
+    /// Get the file finder selected index
+    pub fn file_finder_selected(&self) -> usize {
+        self.view.read_with(&self.cx, |view, _| {
+            view.stoat().file_finder_selected_index()
+        })
+    }
+
+    /// Set the file finder selected index (for testing)
+    pub fn set_file_finder_selected(&mut self, index: usize) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().file_finder_selected = index;
+        });
+    }
+
+    /// Get the file finder all files
+    pub fn file_finder_files(&self) -> Vec<std::path::PathBuf> {
+        self.view
+            .read_with(&self.cx, |view, _| view.stoat().file_finder_files.clone())
+    }
+
+    /// Get the file finder previous mode
+    pub fn file_finder_previous_mode(&self) -> Option<String> {
+        self.view.read_with(&self.cx, |view, _| {
+            view.stoat().file_finder_previous_mode.clone()
+        })
     }
 }
 

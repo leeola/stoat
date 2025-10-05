@@ -122,14 +122,14 @@ impl Stoat {
         }
     }
 
-    /// Dismiss the file finder and return to the previous mode.
+    /// Dismiss the file finder and return to normal mode.
     ///
-    /// Closes the file finder modal, clears all file finder state, and restores
-    /// the mode that was active before opening the file finder.
+    /// Closes the file finder modal, clears all file finder state, and returns
+    /// to normal mode.
     ///
     /// # Behavior
     ///
-    /// - Restores previous mode (typically Normal)
+    /// - Returns to normal mode
     /// - Clears input buffer
     /// - Clears file lists
     /// - Resets selection index
@@ -147,12 +147,8 @@ impl Stoat {
 
         debug!("Dismissing file finder");
 
-        // Restore previous mode
-        if let Some(previous_mode) = self.file_finder_previous_mode.take() {
-            self.set_mode(&previous_mode);
-        } else {
-            self.set_mode("normal");
-        }
+        // Always return to normal mode
+        self.set_mode("normal");
 
         // Clear file finder state
         self.file_finder_input = None;
@@ -160,6 +156,7 @@ impl Stoat {
         self.file_finder_filtered.clear();
         self.file_finder_selected = 0;
         self.file_finder_preview = None;
+        self.file_finder_previous_mode = None;
     }
 
     /// Select the currently highlighted file in the file finder.
@@ -208,66 +205,66 @@ mod tests {
     #[test]
     fn file_finder_next_increments() {
         let mut s = Stoat::test();
-        s.open_file_finder(&mut s.cx);
+        s.open_file_finder();
 
         // Set up some test files
-        s.file_finder_filtered = vec![
+        s.set_file_finder_filtered(vec![
             PathBuf::from("a.rs"),
             PathBuf::from("b.rs"),
             PathBuf::from("c.rs"),
-        ];
-        s.file_finder_selected = 0;
+        ]);
+        s.set_file_finder_selected(0);
 
         s.file_finder_next();
-        assert_eq!(s.file_finder_selected, 1);
+        assert_eq!(s.file_finder_selected(), 1);
 
         s.file_finder_next();
-        assert_eq!(s.file_finder_selected, 2);
+        assert_eq!(s.file_finder_selected(), 2);
 
         // Should not go past end
         s.file_finder_next();
-        assert_eq!(s.file_finder_selected, 2);
+        assert_eq!(s.file_finder_selected(), 2);
     }
 
     #[test]
     fn file_finder_prev_decrements() {
         let mut s = Stoat::test();
-        s.open_file_finder(&mut s.cx);
+        s.open_file_finder();
 
         // Set up some test files
-        s.file_finder_filtered = vec![
+        s.set_file_finder_filtered(vec![
             PathBuf::from("a.rs"),
             PathBuf::from("b.rs"),
             PathBuf::from("c.rs"),
-        ];
-        s.file_finder_selected = 2;
+        ]);
+        s.set_file_finder_selected(2);
 
         s.file_finder_prev();
-        assert_eq!(s.file_finder_selected, 1);
+        assert_eq!(s.file_finder_selected(), 1);
 
         s.file_finder_prev();
-        assert_eq!(s.file_finder_selected, 0);
+        assert_eq!(s.file_finder_selected(), 0);
 
         // Should not go below 0
         s.file_finder_prev();
-        assert_eq!(s.file_finder_selected, 0);
+        assert_eq!(s.file_finder_selected(), 0);
     }
 
     #[test]
     fn file_finder_dismiss_clears_state() {
         let mut s = Stoat::test();
-        s.open_file_finder(&mut s.cx);
+        s.open_file_finder();
 
         assert_eq!(s.mode(), "file_finder");
-        assert!(s.file_finder_input.is_some());
+        assert!(s.file_finder_input().is_some());
 
         s.file_finder_dismiss();
 
         assert_eq!(s.mode(), "normal");
-        assert!(s.file_finder_input.is_none());
-        assert!(s.file_finder_files.is_empty());
-        assert!(s.file_finder_filtered.is_empty());
-        assert_eq!(s.file_finder_selected, 0);
+        assert!(s.file_finder_input().is_none());
+        assert!(s.file_finder_files().is_empty());
+        assert!(s.file_finder_filtered().is_empty());
+        assert_eq!(s.file_finder_selected(), 0);
     }
 
     #[test]

@@ -180,6 +180,22 @@ impl Stoat {
         self.current_mode = mode.to_string();
     }
 
+    /// Handle the SetMode action.
+    ///
+    /// Changes to the specified mode and logs the transition.
+    /// This is the handler called by the GUI layer when a [`actions::SetMode`] action is
+    /// dispatched.
+    ///
+    /// # Related
+    ///
+    /// See also:
+    /// - [`Self::set_mode`] - internal mode setter without logging
+    /// - [`actions::SetMode`] - the action this handles
+    pub fn handle_set_mode(&mut self, mode: &str) {
+        tracing::debug!(to = mode, "Setting mode");
+        self.set_mode(mode);
+    }
+
     /// Get the file finder input buffer
     pub fn file_finder_input_buffer(&self) -> Option<&Entity<Buffer>> {
         self.file_finder_input.as_ref()

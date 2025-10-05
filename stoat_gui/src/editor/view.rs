@@ -58,6 +58,13 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Handle setting mode dynamically
+    fn handle_set_mode(&mut self, mode: &str, cx: &mut Context<'_, Self>) {
+        info!("Setting mode to: {}", mode);
+        self.stoat.handle_set_mode(mode);
+        cx.notify();
+    }
+
     /// Handle app exit
     fn handle_exit_app(&mut self, cx: &mut Context<'_, Self>) {
         info!("Exiting application");
@@ -149,6 +156,15 @@ impl EditorView {
         cx: &mut Context<'_, Self>,
     ) {
         self.handle_enter_pane_mode(cx);
+    }
+
+    fn handle_set_mode_action(
+        &mut self,
+        action: &SetMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.handle_set_mode(&action.0, cx);
     }
 
     fn handle_exit_app_action(
@@ -326,6 +342,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_insert_mode_action))
             .on_action(cx.listener(Self::handle_enter_normal_mode_action))
             .on_action(cx.listener(Self::handle_enter_pane_mode_action))
+            .on_action(cx.listener(Self::handle_set_mode_action))
             .on_action(cx.listener(Self::handle_exit_app_action))
             // Movement handlers
             .on_action(cx.listener(

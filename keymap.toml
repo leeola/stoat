@@ -24,6 +24,10 @@ display_name = "PANE"
 name = "file_finder"
 display_name = "FILE FINDER"
 
+[[modes]]
+name = "space"
+display_name = "SPACE"
+
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]
 key = "h"
@@ -118,33 +122,38 @@ context = "Editor && mode == normal"
 # Mode transitions
 [[bindings]]
 key = "i"
-action = "EnterInsertMode"
+action = "SetMode(insert)"
 context = "Editor && mode == normal"
 
 [[bindings]]
 key = "v"
-action = "EnterVisualMode"
+action = "SetMode(visual)"
 context = "Editor && mode == normal"
 
 [[bindings]]
 key = "ctrl-w"
-action = "EnterPaneMode"
+action = "SetMode(pane)"
 context = "Editor && mode == normal"
 
 [[bindings]]
 key = "escape"
-action = "EnterNormalMode"
+action = "SetMode(normal)"
 context = "Editor && mode == insert"
 
 [[bindings]]
 key = "escape"
-action = "EnterNormalMode"
+action = "SetMode(normal)"
 context = "Editor && mode == visual"
 
 [[bindings]]
 key = "escape"
-action = "EnterNormalMode"
+action = "SetMode(normal)"
 context = "Editor && mode == pane"
+
+[[bindings]]
+key = "space"
+action = "SetMode(space)"
+context = "Editor && mode == normal"
 
 [[bindings]]
 key = "escape"
@@ -452,11 +461,6 @@ action = "Open"
 context = "Editor"
 
 [[bindings]]
-key = "ctrl-p"
-action = "OpenFileFinder"
-context = "Editor"
-
-[[bindings]]
 key = "tab"
 action = "Indent"
 context = "Editor"
@@ -557,3 +561,14 @@ context = "Editor && mode == file_finder"
 key = "enter"
 action = "FileFinderSelect"
 context = "Editor && mode == file_finder"
+
+# Space Mode - Leader key for commands
+[[bindings]]
+key = "p"
+action = "OpenFileFinder"
+context = "Editor && mode == space"
+
+[[bindings]]
+key = "escape"
+action = "SetMode(normal)"
+context = "Editor && mode == space"

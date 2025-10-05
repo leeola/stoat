@@ -4,8 +4,8 @@
 //! is stateless - all state management and input handling happens in the core via the mode system.
 
 use gpui::{
-    App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, prelude::FluentBuilder, px,
-    rgb, rgba,
+    div, prelude::FluentBuilder, px, rgb, rgba, App, IntoElement, ParentElement, RenderOnce,
+    Styled, Window,
 };
 use std::path::PathBuf;
 

@@ -199,14 +199,14 @@ mod tests {
     fn open_file_finder_creates_state() {
         let mut s = Stoat::test();
         assert_eq!(s.mode(), "normal");
-        assert!(s.file_finder_input.is_none());
+        assert!(s.file_finder_input().is_none());
 
-        s.open_file_finder(&mut s.cx);
+        s.open_file_finder();
 
         assert_eq!(s.mode(), "file_finder");
-        assert!(s.file_finder_input.is_some());
-        assert_eq!(s.file_finder_previous_mode, Some("normal".to_string()));
-        assert_eq!(s.file_finder_selected, 0);
+        assert!(s.file_finder_input().is_some());
+        assert_eq!(s.file_finder_previous_mode(), Some("normal".to_string()));
+        assert_eq!(s.file_finder_selected(), 0);
     }
 
     #[test]
