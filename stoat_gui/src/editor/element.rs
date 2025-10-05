@@ -224,7 +224,8 @@ impl Element for EditorElement {
                 shaped,
                 position: point(
                     content_bounds.origin.x,
-                    content_bounds.origin.y + px(relative_row as f32 * self.style.line_height.0),
+                    content_bounds.origin.y
+                        + px(relative_row as f32 * f32::from(self.style.line_height)),
                 ),
             });
         }

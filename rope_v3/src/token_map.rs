@@ -124,7 +124,7 @@ impl TokenSnapshot {
     pub fn cursor<'a>(
         &'a self,
         buffer: &'a BufferSnapshot,
-    ) -> sum_tree::Cursor<'a, TokenEntry, TokenSummary> {
+    ) -> sum_tree::Cursor<'a, 'a, TokenEntry, TokenSummary> {
         self.tokens.cursor(buffer)
     }
 

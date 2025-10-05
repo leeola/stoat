@@ -50,8 +50,14 @@ smallvec = { version = "1.13", features = [
 ] }
 rustc-hash = "2.0"
 
-# Note: GPUI dependencies will be handled differently
-# For now we'll use a simpler approach
+# Zed dependencies - pinned to specific commit to prevent accidental updates
+text = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+gpui_macros = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+sum_tree = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+fuzzy = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+clock = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+rope = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

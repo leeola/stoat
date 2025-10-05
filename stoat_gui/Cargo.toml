@@ -13,10 +13,10 @@ workspace = true
 stoat = { path = "../stoat" }
 stoat_rope_v3 = { path = "../rope_v3" }
 stoat_text_v3 = { path = "../text_v3" }
-gpui = { git = "https://github.com/zed-industries/zed.git" }
-text = { git = "https://github.com/zed-industries/zed.git" }
-sum_tree = { git = "https://github.com/zed-industries/zed.git" }
-clock = { git = "https://github.com/zed-industries/zed.git" }
+gpui = { workspace = true }
+text = { workspace = true }
+sum_tree = { workspace = true }
+clock = { workspace = true }
 anyhow = "1.0"
 smallvec = "1.13"
 parking_lot = { workspace = true }

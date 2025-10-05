@@ -311,7 +311,7 @@ impl Render for EditorView {
         // Update viewport dimensions in Stoat
         let viewport_size = window.viewport_size();
         let style = EditorStyle::default();
-        let visible_lines = viewport_size.height.0 / style.line_height.0;
+        let visible_lines = viewport_size.height / style.line_height;
         self.stoat.set_visible_line_count(visible_lines);
 
         // Update scroll animation and schedule next frame if still animating

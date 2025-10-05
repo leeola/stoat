@@ -106,13 +106,13 @@ impl Item for TokenEntry {
 }
 
 impl Summary for TokenSummary {
-    type Context = text::BufferSnapshot;
+    type Context<'a> = &'a text::BufferSnapshot;
 
-    fn zero(_cx: &text::BufferSnapshot) -> Self {
+    fn zero<'a>(_cx: Self::Context<'a>) -> Self {
         Self::default()
     }
 
-    fn add_summary(&mut self, other: &Self, buffer: &text::BufferSnapshot) {
+    fn add_summary<'a>(&mut self, other: &Self, buffer: Self::Context<'a>) {
         // Update range to encompass both
         if self.range == (Anchor::MAX..Anchor::MAX) {
             self.range = other.range.clone();

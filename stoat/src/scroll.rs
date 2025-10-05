@@ -138,13 +138,14 @@ impl ScrollPosition {
         is_fast: bool,
     ) -> gpui::Point<f32> {
         let multiplier = if is_fast { fast_multiplier } else { 1.0 };
+        let line_height_px = Pixels::from(line_height);
 
         let scroll_offset = match delta {
             ScrollDelta::Pixels(pixel_delta) => {
                 // Convert pixels to lines for consistent behavior
                 gpui::point(
-                    pixel_delta.x.0 / line_height * sensitivity * multiplier,
-                    pixel_delta.y.0 / line_height * sensitivity * multiplier,
+                    pixel_delta.x / line_height_px * sensitivity * multiplier,
+                    pixel_delta.y / line_height_px * sensitivity * multiplier,
                 )
             },
             ScrollDelta::Lines(line_delta) => {

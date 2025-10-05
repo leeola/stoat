@@ -45,10 +45,11 @@ impl Stoat {
         self.file_finder_previous_mode = Some(self.current_mode.clone());
 
         // Read files from worktree snapshot (instant!)
-        let files = self.worktree.lock().snapshot().files().to_vec();
+        // Exclude gitignored files by default
+        let files = self.worktree.lock().snapshot().files(false);
         debug!(
             file_count = files.len(),
-            "Loaded files from worktree snapshot"
+            "Loaded files from worktree snapshot (excluding ignored)"
         );
 
         // Create input buffer for search query

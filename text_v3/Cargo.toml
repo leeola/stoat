@@ -18,7 +18,7 @@ tree-sitter-rust = "0.20"
 tree-sitter-md = "0.1"
 
 # Zed's text infrastructure (for BufferSnapshot, Anchor)
-text = { git = "https://github.com/zed-industries/zed.git" }
+text = { workspace = true }
 
 # Error handling
 anyhow = "1.0"

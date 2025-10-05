@@ -111,7 +111,7 @@ impl FileFinder {
 impl RenderOnce for FileFinder {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         // Check window width to determine if we should show preview
-        let viewport_width = window.viewport_size().width.0;
+        let viewport_width = f32::from(window.viewport_size().width);
         let show_preview = viewport_width > 1000.0;
 
         div()

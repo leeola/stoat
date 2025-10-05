@@ -14,9 +14,9 @@ rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 
 # Zed crates from git
-sum_tree = { git = "https://github.com/zed-industries/zed.git" }
-text = { git = "https://github.com/zed-industries/zed.git" }
-clock = { git = "https://github.com/zed-industries/zed.git" }
+sum_tree = { workspace = true }
+text = { workspace = true }
+clock = { workspace = true }
 
 [dev-dependencies]
 rand = "0.8"

@@ -259,7 +259,7 @@ impl StoatTest {
     /// Set the window size in pixels
     pub fn set_window_size(&mut self, size: Size<Pixels>) {
         // Calculate how many lines fit in this pixel height
-        let lines = size.height.0 / self.line_height;
+        let lines = f32::from(size.height) / self.line_height;
         self.set_viewport_lines(lines);
     }
 
@@ -556,7 +556,7 @@ impl StoatTest {
     /// Simulate trackpad scroll event with pixel-based scrolling and optional fast mode
     pub fn scroll_pixels_with_fast(&mut self, pixels_x: f32, pixels_y: f32, fast_scroll: bool) {
         let delta =
-            crate::ScrollDelta::Pixels(gpui::point(gpui::Pixels(pixels_x), gpui::Pixels(pixels_y)));
+            crate::ScrollDelta::Pixels(gpui::point(Pixels::from(pixels_x), Pixels::from(pixels_y)));
         self.view.update(&mut self.cx, |view, cx| {
             view.stoat_mut()
                 .handle_scroll_event(&delta, fast_scroll, cx);
@@ -749,8 +749,8 @@ mod tests {
 
         // Test pixel-based sizing with default line height (20px)
         s.set_window_size(Size {
-            width: Pixels(800.0),
-            height: Pixels(600.0), // 600 / 20 = 30 lines
+            width: Pixels::from(800.0),
+            height: Pixels::from(600.0), // 600 / 20 = 30 lines
         });
         assert_eq!(s.viewport_lines(), Some(30.0));
     }
@@ -761,8 +761,8 @@ mod tests {
         s.set_line_height(16.0);
 
         s.set_window_size(Size {
-            width: Pixels(800.0),
-            height: Pixels(480.0), // 480 / 16 = 30 lines
+            width: Pixels::from(800.0),
+            height: Pixels::from(480.0), // 480 / 16 = 30 lines
         });
         assert_eq!(s.viewport_lines(), Some(30.0));
     }

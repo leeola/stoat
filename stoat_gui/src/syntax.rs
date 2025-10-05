@@ -973,7 +973,7 @@ pub struct HighlightedChunks<'a> {
     current_text_remaining: &'a str,
 
     // Token cursor (stateful!)
-    token_cursor: Cursor<'a, TokenEntry, TokenSummary>,
+    token_cursor: Cursor<'a, 'a, TokenEntry, TokenSummary>,
     current_token: Option<&'a TokenEntry>,
 
     // Position tracking
