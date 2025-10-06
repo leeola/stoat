@@ -4,11 +4,8 @@ members = [
   "stoat",
   "stoat_gui",
   "bin",
-  "text",
   "text_v3",
-  "rope",
   "stoat_ast",
-  "rope_v2",
   "rope_v3",
   "agent/claude_code",
 ]
