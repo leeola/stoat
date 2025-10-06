@@ -40,8 +40,8 @@ use pane::{BufferItem, ItemVariant};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
 use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
-use stoat_rope_v3::TokenSnapshot;
-use stoat_text_v3::Language;
+use stoat_rope::TokenSnapshot;
+use stoat_text::Language;
 use text::{Buffer, BufferId, BufferSnapshot, Point};
 use worktree::Worktree;
 

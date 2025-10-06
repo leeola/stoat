@@ -34,7 +34,7 @@
 use gpui::HighlightStyle;
 use rustc_hash::FxHashMap;
 use std::ops::Range;
-use stoat_rope_v3::{SyntaxKind, TokenEntry, TokenSnapshot, TokenSummary};
+use stoat_rope::{SyntaxKind, TokenEntry, TokenSnapshot, TokenSummary};
 use sum_tree::Cursor;
 use text::{BufferSnapshot, Chunks, ToOffset};
 
@@ -872,9 +872,9 @@ mod tests {
         );
         let snapshot = buffer.snapshot();
 
-        // Parse using stoat_text_v3
+        // Parse using stoat_text
         let mut parser =
-            stoat_text_v3::Parser::new(stoat_text_v3::Language::Rust).expect("valid rust parser");
+            stoat_text::Parser::new(stoat_text::Language::Rust).expect("valid rust parser");
         let tokens = parser.parse(source, &snapshot).expect("valid parse");
 
         println!("\nTokens:");
@@ -886,7 +886,7 @@ mod tests {
         }
 
         // Create token map
-        let mut token_map = stoat_rope_v3::TokenMap::new(&snapshot);
+        let mut token_map = stoat_rope::TokenMap::new(&snapshot);
         token_map.replace_tokens(tokens, &snapshot);
         let token_snapshot = token_map.snapshot();
 

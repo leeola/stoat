@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{Stoat, actions::*};
+use crate::{actions::*, Stoat};
 use gpui::{
-    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
-    Styled, TestAppContext, Window, div,
+    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
+    Size, Styled, TestAppContext, Window,
 };
 use text::Point;
 
@@ -403,7 +403,7 @@ impl StoatTest {
     /// s.set_text("fn foo() {}");  // Text set, cursor at start, parsed as Rust
     /// ```
     pub fn set_text(&mut self, text: &str) {
-        self.set_text_with_language(text, stoat_text_v3::Language::Rust);
+        self.set_text_with_language(text, stoat_text::Language::Rust);
     }
 
     /// Set buffer text with a specific language for parsing
@@ -413,9 +413,9 @@ impl StoatTest {
     ///
     /// # Example
     /// ```ignore
-    /// s.set_text_with_language("# Hello", stoat_text_v3::Language::Markdown);
+    /// s.set_text_with_language("# Hello", stoat_text::Language::Markdown);
     /// ```
-    pub fn set_text_with_language(&mut self, text: &str, language: stoat_text_v3::Language) {
+    pub fn set_text_with_language(&mut self, text: &str, language: stoat_text::Language) {
         self.view.update(&mut self.cx, |view, cx| {
             let stoat = view.stoat_mut();
 

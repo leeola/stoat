@@ -1,7 +1,7 @@
 //! Convert tree-sitter AST to flat token list
 
 use crate::language::Language;
-use stoat_rope_v3::{Language as RopeLanguage, SyntaxKind, TokenEntry};
+use stoat_rope::{Language as RopeLanguage, SyntaxKind, TokenEntry};
 use text::BufferSnapshot;
 use tree_sitter::{Node, Tree};
 

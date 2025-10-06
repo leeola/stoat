@@ -36,13 +36,13 @@
 
 use super::item::Item;
 use gpui::{
-    App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString, Window,
-    div,
+    div, App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString,
+    Window,
 };
 use parking_lot::Mutex;
 use std::sync::Arc;
-use stoat_rope_v3::{TokenMap, TokenSnapshot};
-use stoat_text_v3::{Language, Parser};
+use stoat_rope::{TokenMap, TokenSnapshot};
+use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot};
 
 /// Events emitted by a buffer item.

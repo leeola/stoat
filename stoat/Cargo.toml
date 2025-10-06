@@ -12,8 +12,8 @@ gui = []
 clap = { workspace = true, features = ["derive"] }
 smallvec = { workspace = true }
 parking_lot = { workspace = true }
-stoat_rope_v3 = { path = "../rope_v3" }
-stoat_text_v3 = { path = "../text_v3" }
+stoat_rope = { path = "../rope" }
+stoat_text = { path = "../text" }
 text = { workspace = true }
 gpui = { workspace = true }
 enum_dispatch = "0.3"

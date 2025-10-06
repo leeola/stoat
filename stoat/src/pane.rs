@@ -1,7 +1,7 @@
 mod buffer_item;
 mod item;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 pub use buffer_item::{BufferItem, BufferItemEvent};
 use gpui::{Axis, Bounds, Pixels};
 pub use item::{Item, ItemHandle, ItemVariant};

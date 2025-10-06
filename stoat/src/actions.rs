@@ -26,7 +26,7 @@ mod selection;
 mod shell;
 
 use crate::ScrollDelta;
-use gpui::{Action, Pixels, Point, actions};
+use gpui::{actions, Action, Pixels, Point};
 
 /// Insert text at the current cursor position(s).
 ///

@@ -1,5 +1,5 @@
 [package]
-name = "stoat_text_v3"
+name = "stoat_text"
 version = "0.1.0"
 edition = "2021"
 readme = "../README.md"
@@ -7,8 +7,8 @@ authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
 [dependencies]
-# Rope v3 for token types
-stoat_rope_v3 = { path = "../rope_v3" }
+# Rope for token types
+stoat_rope = { path = "../rope" }
 
 # Tree-sitter core
 tree-sitter = "0.20"

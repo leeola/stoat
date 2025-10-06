@@ -1,7 +1,7 @@
 //! Parser wrapper for tree-sitter
 
 use crate::{convert, language::Language};
-use stoat_rope_v3::TokenEntry;
+use stoat_rope::TokenEntry;
 use text::BufferSnapshot;
 use tree_sitter::Parser as TsParser;
 

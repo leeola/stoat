@@ -18,7 +18,7 @@
 //! - Modifiers: `ctrl`, `alt`, `shift`, `cmd` (macOS), `super` (Linux), `win` (Windows)
 //! - Examples: `"h"`, `"ctrl-c"`, `"cmd-s"`, `"escape"`
 
-use crate::{Mode, actions::*};
+use crate::{actions::*, Mode};
 use gpui::{KeyBinding, Keymap};
 use serde::Deserialize;
 

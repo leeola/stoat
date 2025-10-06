@@ -209,7 +209,7 @@ impl TokenSnapshot {
 
 /// Simple fallback tokenizer (stub - should be replaced with proper parsing)
 ///
-/// This is a placeholder. The actual parsing should be done by stoat_text_v3
+/// This is a placeholder. The actual parsing should be done by stoat_text
 /// at a higher level (in stoat core or GUI), and the resulting tokens should
 /// be inserted directly into the TokenMap.
 fn tokenize_text(_text: &str, _range: Range<Anchor>, _buffer: &BufferSnapshot) -> Vec<TokenEntry> {

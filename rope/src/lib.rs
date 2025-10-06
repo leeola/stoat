@@ -1,4 +1,4 @@
-//! stoat_rope_v3 - Token metadata tracking for AST using Zed's infrastructure
+//! stoat_rope - Token metadata tracking for AST using Zed's infrastructure
 //!
 //! This crate provides a TokenMap that stores AST token metadata synchronized
 //! with a text buffer, following Zed's architecture where text (Rope) and
@@ -12,7 +12,7 @@
 //!
 //! ## Example
 //! ```ignore
-//! use stoat_rope_v3::{TokenMap, SyntaxKind};
+//! use stoat_rope::{TokenMap, SyntaxKind};
 //! use text::BufferSnapshot;
 //!
 //! let mut token_map = TokenMap::new();

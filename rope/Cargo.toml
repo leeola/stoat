@@ -1,5 +1,5 @@
 [package]
-name = "stoat_rope_v3"
+name = "stoat_rope"
 version = "0.1.0"
 edition = "2021"
 readme = "../README.md"

@@ -6469,8 +6469,8 @@ dependencies = [
  "parking_lot 0.12.4",
  "serde",
  "smallvec",
- "stoat_rope_v3",
- "stoat_text_v3",
+ "stoat_rope",
+ "stoat_text",
  "sum_tree",
  "text",
  "thiserror 1.0.69",
@@ -6527,15 +6527,15 @@ dependencies = [
  "rustc-hash 2.1.1",
  "smallvec",
  "stoat",
- "stoat_rope_v3",
- "stoat_text_v3",
+ "stoat_rope",
+ "stoat_text",
  "sum_tree",
  "text",
  "tracing",
 ]
 
 [[package]]
-name = "stoat_rope_v3"
+name = "stoat_rope"
 version = "0.1.0"
 dependencies = [
  "clock",
@@ -6548,11 +6548,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoat_text_v3"
+name = "stoat_text"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "stoat_rope_v3",
+ "stoat_rope",
  "text",
  "tree-sitter",
  "tree-sitter-md",

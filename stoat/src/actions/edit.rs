@@ -41,7 +41,7 @@
 //! This module is part of the [`crate::actions`] system and integrates with:
 //! - [`crate::Stoat`] - the main editor state where edits are applied
 //! - [`text::Buffer`] - the underlying text storage
-//! - [`stoat_text_v3::Parser`] - for re-parsing after edits
+//! - [`stoat_text::Parser`] - for re-parsing after edits
 //! - GPUI action system - for keyboard bindings and command dispatch
 //! - [`crate::actions::editor_edit`] - the action namespace for edit commands
 
