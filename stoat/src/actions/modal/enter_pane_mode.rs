@@ -21,7 +21,7 @@ impl Stoat {
     ///
     /// # Common Bindings
     ///
-    /// - `ctrl-w` - enter pane mode (from Normal mode)
+    /// - `space a` - enter pane mode (from Normal mode)
     ///
     /// # Pane Mode Commands
     ///

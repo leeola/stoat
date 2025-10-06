@@ -131,11 +131,6 @@ action = "SetMode(visual)"
 context = "Editor && mode == normal"
 
 [[bindings]]
-key = "ctrl-w"
-action = "SetMode(pane)"
-context = "Editor && mode == normal"
-
-[[bindings]]
 key = "escape"
 action = "SetMode(normal)"
 context = "Editor && mode == insert"
@@ -573,6 +568,11 @@ action = "FileFinderSelect"
 context = "Editor && mode == file_finder"
 
 # Space Mode - Leader key for commands
+[[bindings]]
+key = "a"
+action = "SetMode(pane)"
+context = "Editor && mode == space"
+
 [[bindings]]
 key = "p"
 action = "OpenFileFinder"
