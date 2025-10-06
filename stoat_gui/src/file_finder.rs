@@ -112,6 +112,7 @@ impl RenderOnce for FileFinder {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         // Check window width to determine if we should show preview
         let viewport_width = f32::from(window.viewport_size().width);
+        let viewport_height = f32::from(window.viewport_size().height);
         let show_preview = viewport_width > 1000.0;
 
         div()
@@ -129,7 +130,7 @@ impl RenderOnce for FileFinder {
                     .flex()
                     .flex_col()
                     .w_3_4()
-                    .h_3_4()
+                    .h(px(viewport_height * 0.85))
                     .bg(rgb(0x1e1e1e)) // Dark background matching VS Code theme
                     .border_1()
                     .border_color(rgb(0x3e3e42)) // Subtle border
