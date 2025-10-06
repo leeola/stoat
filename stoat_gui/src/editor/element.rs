@@ -6,10 +6,10 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, DispatchPhase, Element, ElementId, Entity, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun,
-    Window,
+    App, Bounds, DispatchPhase, Element, ElementId, Entity, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun, Window, point,
+    px, relative, size,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -74,7 +74,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         // Calculate gutter bounds
-        let gutter_width = self.style.gutter_width;
+        let gutter_width = self.compute_gutter_width(cx);
         let gutter_bounds = Bounds {
             origin: bounds.origin + point(self.style.padding, self.style.padding),
             size: size(gutter_width, bounds.size.height - self.style.padding * 2.0),
@@ -264,19 +264,23 @@ impl Element for EditorElement {
             line_lengths.push(0); // Empty buffer has zero length
         }
 
-        // Compute gutter layout with diff indicators
-        let stoat = self.view.read(cx).stoat();
-        let buffer_item = stoat.active_buffer_item(cx);
-        let diff = buffer_item.read(cx).diff();
+        // Compute gutter layout with diff indicators (if enabled)
+        let gutter = if self.style.show_diff_indicators {
+            let stoat = self.view.read(cx).stoat();
+            let buffer_item = stoat.active_buffer_item(cx);
+            let diff = buffer_item.read(cx).diff();
 
-        let gutter = GutterLayout::new(
-            gutter_bounds,
-            start_row..end_row,
-            diff,
-            &buffer_snapshot,
-            self.style.gutter_width,
-            self.style.line_height,
-        );
+            Some(GutterLayout::new(
+                gutter_bounds,
+                start_row..end_row,
+                diff,
+                &buffer_snapshot,
+                gutter_width,
+                self.style.line_height,
+            ))
+        } else {
+            None
+        };
 
         let layout = EditorLayout {
             lines,
@@ -286,7 +290,7 @@ impl Element for EditorElement {
             line_height: self.style.line_height,
             scroll_position,
             start_row,
-            gutter: Some(gutter),
+            gutter,
         };
 
         Rc::new(layout)
@@ -667,34 +671,69 @@ impl EditorElement {
             return;
         };
 
-        // Paint gutter background (slightly darker than editor background)
-        let mut gutter_bg = self.syntax_theme.background_color;
-        gutter_bg.l = (gutter_bg.l - 0.05).max(0.0);
+        // Paint gutter background using styled color
         window.paint_quad(PaintQuad {
             bounds: gutter.dimensions.bounds,
             corner_radii: Default::default(),
-            background: gutter_bg.into(),
+            background: self.style.gutter_background_color.into(),
             border_color: Default::default(),
             border_widths: Default::default(),
             border_style: Default::default(),
         });
 
-        // Paint diff indicators
+        // Paint diff indicators with blended colors
         for indicator in &gutter.diff_indicators {
-            let color = match indicator.status {
+            let diff_color = match indicator.status {
                 stoat::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
                 stoat::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
                 stoat::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
             };
 
+            // Blend diff color with editor background to prevent transparency artifacts
+            let blended_color = self.syntax_theme.background_color.blend(diff_color);
+
             window.paint_quad(PaintQuad {
                 bounds: indicator.bounds,
-                corner_radii: Default::default(),
-                background: color.into(),
+                corner_radii: indicator.corner_radii,
+                background: blended_color.into(),
                 border_color: Default::default(),
                 border_widths: Default::default(),
                 border_style: Default::default(),
             });
+        }
+    }
+
+    /// Compute gutter width dynamically based on enabled features.
+    ///
+    /// Returns the total width needed for the gutter, accounting for:
+    /// - Line numbers (if enabled)
+    /// - Diff indicators (if enabled)
+    /// - Minimum width of 8px if any feature is enabled
+    fn compute_gutter_width(&self, _cx: &App) -> Pixels {
+        let mut width = px(0.0);
+
+        // Add width for line numbers (if enabled)
+        if self.style.show_line_numbers {
+            // Future: compute based on max line number digits
+            // For now, placeholder width:
+            width = width + px(40.0);
+        }
+
+        // Add width for diff indicators (if enabled)
+        if self.style.show_diff_indicators {
+            // Widest diff indicator is deleted hunk: 0.35 * line_height
+            let diff_width = (0.35 * self.style.line_height).floor();
+            // Add 4px padding (2px on each side)
+            let diff_total = diff_width + px(4.0);
+
+            width = width.max(diff_total);
+        }
+
+        // Minimum width of 8px if any feature is enabled
+        if width > px(0.0) {
+            width.max(px(8.0))
+        } else {
+            px(0.0) // No gutter if no features enabled
         }
     }
 }

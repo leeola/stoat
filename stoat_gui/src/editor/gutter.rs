@@ -35,7 +35,7 @@
 //! - [`EditorStyle`](super::style::EditorStyle) - Configures gutter appearance
 //! - [`BufferDiff`](stoat::git_diff::BufferDiff) - Source of diff data
 
-use gpui::{point, px, size, Bounds, Pixels, Point};
+use gpui::{point, px, size, Bounds, Corners, Pixels, Point};
 use std::ops::Range;
 use stoat::git_diff::{BufferDiff, DiffHunkStatus};
 use text::{BufferSnapshot, ToPoint};
@@ -54,18 +54,20 @@ pub struct GutterDimensions {
 
 /// A visual indicator for a git diff change in the gutter.
 ///
-/// Represents a single colored bar showing that a line has been added, modified, or deleted.
-/// Each indicator is positioned at a specific row and colored according to its [`DiffHunkStatus`].
+/// Represents an entire diff hunk rendered as a continuous colored shape.
+/// Each indicator spans the full range of changed lines in a hunk and is styled
+/// according to its [`DiffHunkStatus`].
 ///
-/// Indicators are thin vertical bars (3px wide) positioned at the right edge of the gutter.
+/// Indicators are proportional-width vertical bars on the left edge of the gutter.
+/// Deleted hunks (zero-length) are rendered as small rounded pills.
 #[derive(Debug, Clone)]
 pub struct DiffIndicator {
-    /// Row number in the buffer (0-indexed)
-    pub row: u32,
     /// Type of change (determines color)
     pub status: DiffHunkStatus,
     /// Bounds where this indicator should be painted
     pub bounds: Bounds<Pixels>,
+    /// Corner radii for rounded corners (used for deleted hunks)
+    pub corner_radii: Corners<Pixels>,
 }
 
 /// Complete gutter layout for rendering.
@@ -147,46 +149,56 @@ impl GutterLayout {
         let mut diff_indicators = Vec::new();
 
         if let Some(diff) = diff {
-            let indicator_width = px(3.0);
-            let indicator_padding = px(4.0);
+            // Strip width scales with line height (matches Zed)
+            let strip_width = (0.275 * line_height).floor();
 
             for hunk in &diff.hunks {
                 // Convert anchor range to row range
                 let hunk_start_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
                 let hunk_end_row = hunk.buffer_range.end.to_point(buffer_snapshot).row;
 
-                // Handle deleted hunks (zero-length range)
-                let (start_row, end_row) = if hunk_start_row == hunk_end_row
+                // Check if hunk intersects visible rows
+                if hunk_end_row < visible_rows.start || hunk_start_row >= visible_rows.end {
+                    continue;
+                }
+
+                // Clamp to visible range
+                let visible_start = hunk_start_row.max(visible_rows.start);
+                let visible_end = hunk_end_row.min(visible_rows.end.saturating_sub(1));
+
+                // Compute bounds and corner radii based on hunk type
+                let (bounds, corner_radii) = if hunk_start_row == hunk_end_row
                     && matches!(hunk.status, DiffHunkStatus::Deleted)
                 {
-                    // Deleted hunk - show indicator at deletion point
-                    (hunk_start_row, hunk_start_row)
+                    // Deleted hunk (zero-length) - small rounded pill
+                    let width = (0.35 * line_height).floor();
+                    let y_offset = line_height * ((visible_start - visible_rows.start) as f32)
+                        - line_height / 2.0;
+
+                    let bounds = Bounds {
+                        origin: point(gutter_bounds.origin.x, gutter_bounds.origin.y + y_offset),
+                        size: size(width, line_height),
+                    };
+
+                    (bounds, Corners::all(line_height))
                 } else {
-                    (hunk_start_row, hunk_end_row.max(hunk_start_row))
+                    // Added/Modified hunk - continuous vertical bar
+                    let y_start = line_height * ((visible_start - visible_rows.start) as f32);
+                    let y_end = line_height * ((visible_end - visible_rows.start + 1) as f32);
+
+                    let bounds = Bounds {
+                        origin: point(gutter_bounds.origin.x, gutter_bounds.origin.y + y_start),
+                        size: size(strip_width, y_end - y_start),
+                    };
+
+                    (bounds, Corners::all(px(0.0)))
                 };
 
-                // Create indicator for each visible row in this hunk
-                for row in start_row..=end_row {
-                    if row >= visible_rows.start && row < visible_rows.end {
-                        let relative_row = row - visible_rows.start;
-
-                        let indicator_bounds = Bounds {
-                            origin: point(
-                                gutter_bounds.origin.x + gutter_width
-                                    - indicator_width
-                                    - indicator_padding,
-                                gutter_bounds.origin.y + line_height * (relative_row as f32),
-                            ),
-                            size: size(indicator_width, line_height),
-                        };
-
-                        diff_indicators.push(DiffIndicator {
-                            row,
-                            status: hunk.status,
-                            bounds: indicator_bounds,
-                        });
-                    }
-                }
+                diff_indicators.push(DiffIndicator {
+                    status: hunk.status,
+                    bounds,
+                    corner_radii,
+                });
             }
         }
 
@@ -209,20 +221,5 @@ impl GutterLayout {
     /// `true` if position is inside gutter, `false` otherwise
     pub fn contains_point(&self, position: Point<Pixels>) -> bool {
         self.dimensions.bounds.contains(&position)
-    }
-
-    /// Find the diff indicator at a given row.
-    ///
-    /// Used for mouse interaction (future Phase 3 feature).
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Row number to search for
-    ///
-    /// # Returns
-    ///
-    /// Reference to the indicator at this row, if one exists
-    pub fn indicator_for_row(&self, row: u32) -> Option<&DiffIndicator> {
-        self.diff_indicators.iter().find(|ind| ind.row == row)
     }
 }
