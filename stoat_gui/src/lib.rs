@@ -13,8 +13,8 @@ pub mod keymap_query;
 pub mod pane_group;
 pub mod syntax;
 
-// Re-export the main entry points for convenience
-pub use app::{run_with_paths, run_with_stoat};
+// Re-export the main entry point for convenience
+pub use app::run_with_paths;
 
 // Helper function that maintains backward compatibility
 pub fn run_with_paths_simple(

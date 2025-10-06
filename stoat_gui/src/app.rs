@@ -5,51 +5,6 @@ use gpui::{
 use std::rc::Rc;
 use stoat::Stoat;
 
-pub fn run_with_stoat(stoat: Option<Stoat>) -> Result<(), Box<dyn std::error::Error>> {
-    Application::new().run(move |cx: &mut App| {
-        let stoat = stoat.unwrap_or_else(|| Stoat::new(cx));
-
-        // Create and register Stoat keybindings
-        let keymap = Rc::new(stoat::keymap::create_default_keymap());
-        let bindings = keymap.bindings().cloned().collect::<Vec<_>>();
-        cx.bind_keys(bindings);
-
-        let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
-
-        let keymap_clone = keymap.clone();
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    ..Default::default()
-                },
-                move |_, cx| {
-                    let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
-                    cx.new(|cx| PaneGroupView::new(initial_editor, keymap_clone.clone(), cx))
-                },
-            )
-            .expect("failed to open/update window");
-
-        // Focus the active editor after window creation
-        window
-            .update(cx, |view, window, cx| {
-                if let Some(editor) = view.active_editor() {
-                    window.focus(&editor.read(cx).focus_handle(cx));
-                }
-            })
-            .expect("failed to open/update window");
-
-        cx.on_window_closed(|cx| {
-            cx.quit();
-        })
-        .detach();
-
-        cx.activate(true);
-    });
-
-    Ok(())
-}
-
 pub fn run_with_paths(
     paths: Vec<std::path::PathBuf>,
     input_sequence: Option<String>,
@@ -68,7 +23,16 @@ pub fn run_with_paths(
         let bindings = keymap.bindings().cloned().collect::<Vec<_>>();
         cx.bind_keys(bindings);
 
-        let bounds = Bounds::centered(None, size(px(800.0), px(600.0)), cx);
+        // Size window to 80% of screen size for better default experience
+        let window_size = cx
+            .primary_display()
+            .map(|display| {
+                let screen = display.bounds().size;
+                size(screen.width * 0.8, screen.height * 0.8)
+            })
+            .unwrap_or_else(|| size(px(1200.0), px(800.0)));
+
+        let bounds = Bounds::centered(None, window_size, cx);
 
         let keymap_clone = keymap.clone();
         let window = cx
