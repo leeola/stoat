@@ -553,6 +553,16 @@ action = "FileFinderNext"
 context = "Editor && mode == file_finder"
 
 [[bindings]]
+key = "ctrl-p"
+action = "FileFinderPrev"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
+key = "ctrl-n"
+action = "FileFinderNext"
+context = "Editor && mode == file_finder"
+
+[[bindings]]
 key = "backspace"
 action = "DeleteLeft"
 context = "Editor && mode == file_finder"
