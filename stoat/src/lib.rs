@@ -45,12 +45,12 @@ use stoat_text_v3::Language;
 use text::{Buffer, BufferId, BufferSnapshot, Point};
 use worktree::Worktree;
 
-#[derive(Clone)]
 pub struct Stoat {
     /// Items displayed in editor (buffers, terminals, etc.)
-    /// FIXME: Currently Vec<Entity<BufferItem>>. When we add other item types
-    /// (terminals, etc.), convert to Vec<Box<dyn ItemHandle>> with proper downcasting.
-    items: Vec<Entity<BufferItem>>,
+    ///
+    /// Uses trait objects to support heterogeneous item types (buffers, terminals, etc.)
+    /// in the same collection. Items can be downcast to concrete types when needed.
+    items: Vec<Box<dyn ItemHandle>>,
     /// Index of currently active item
     active_item_index: usize,
     scroll: ScrollPosition,
@@ -77,8 +77,8 @@ impl Stoat {
         // Create initial buffer item
         let item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
 
-        // Create items vec with initial item
-        let items = vec![item];
+        // Create items vec with initial item (boxed as trait object)
+        let items: Vec<Box<dyn ItemHandle>> = vec![Box::new(item)];
 
         // Initialize worktree for instant file finder
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
@@ -107,8 +107,8 @@ impl Stoat {
     ///
     /// # Arguments
     ///
-    /// * `item` - The buffer item to add
-    pub fn add_item(&mut self, item: Entity<BufferItem>) {
+    /// * `item` - The item to add (boxed trait object supporting any item type)
+    pub fn add_item(&mut self, item: Box<dyn ItemHandle>) {
         self.items.push(item);
         self.active_item_index = self.items.len() - 1;
     }
@@ -130,9 +130,11 @@ impl Stoat {
     ///
     /// # Panics
     ///
-    /// Panics if there are no items (should never happen in practice).
+    /// Panics if there are no items or if the active item is not a BufferItem.
     fn active_buffer_item(&self, _cx: &App) -> Entity<BufferItem> {
-        self.items[self.active_item_index].clone()
+        self.items[self.active_item_index]
+            .downcast::<BufferItem>()
+            .expect("Active item must be a BufferItem")
     }
 
     pub fn buffer(&self, cx: &App) -> Entity<Buffer> {
@@ -365,6 +367,27 @@ impl Stoat {
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }
         // Cursor is within viewport - no adjustment needed
+    }
+}
+
+impl Clone for Stoat {
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.iter().map(|item| item.boxed_clone()).collect(),
+            active_item_index: self.active_item_index,
+            scroll: self.scroll.clone(),
+            cursor_manager: self.cursor_manager.clone(),
+            viewport_lines: self.viewport_lines,
+            modes: self.modes.clone(),
+            current_mode: self.current_mode.clone(),
+            file_finder_input: self.file_finder_input.clone(),
+            file_finder_files: self.file_finder_files.clone(),
+            file_finder_filtered: self.file_finder_filtered.clone(),
+            file_finder_selected: self.file_finder_selected,
+            file_finder_previous_mode: self.file_finder_previous_mode.clone(),
+            file_finder_preview: self.file_finder_preview.clone(),
+            worktree: self.worktree.clone(),
+        }
     }
 }
 

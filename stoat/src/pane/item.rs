@@ -37,8 +37,8 @@
 //! - [`crate::Stoat`] - Main editor state that manages items
 
 use gpui::{
-    AnyElement, App, Context, Entity, EntityId, EventEmitter, IntoElement, Render, SharedString,
-    Window,
+    AnyElement, AnyView, App, Context, Entity, EntityId, EventEmitter, IntoElement, Render,
+    SharedString, Window,
 };
 use std::any::Any;
 
@@ -233,6 +233,16 @@ pub trait ItemHandle: 'static + Send {
     /// New boxed handle pointing to the same item entity
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
 
+    /// Convert to type-erased view for downcasting.
+    ///
+    /// Used by [`dyn ItemHandle::downcast`] to convert back to concrete `Entity<T>` types.
+    /// Returns an [`AnyView`] that can be downcast to the original entity type.
+    ///
+    /// # Returns
+    ///
+    /// Type-erased view that can be downcast back to `Entity<T>`
+    fn to_any(&self) -> AnyView;
+
     /// Render this item's content.
     ///
     /// Called by the pane to render the active item's content area.
@@ -290,7 +300,43 @@ impl<T: Item> ItemHandle for Entity<T> {
         Box::new(self.clone())
     }
 
+    fn to_any(&self) -> AnyView {
+        self.clone().into()
+    }
+
     fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         self.update(cx, |item, cx| item.render(window, cx).into_any_element())
+    }
+}
+
+/// Extension methods for `dyn ItemHandle` trait objects.
+///
+/// Provides downcasting utilities to convert from trait objects back to concrete types.
+impl dyn ItemHandle {
+    /// Downcast this trait object to a concrete `Entity<V>` type.
+    ///
+    /// Attempts to convert the type-erased handle back to its original entity type.
+    /// Returns `None` if the handle is not of type `V`.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `V` - The concrete item type to downcast to (must implement [`Item`])
+    ///
+    /// # Returns
+    ///
+    /// `Some(Entity<V>)` if downcast succeeds, `None` if types don't match
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let item: Box<dyn ItemHandle> = Box::new(buffer_item);
+    ///
+    /// if let Some(buffer) = item.downcast::<BufferItem>() {
+    ///     // Access BufferItem-specific methods
+    ///     let contents = buffer.read(cx).buffer_snapshot(cx).text();
+    /// }
+    /// ```
+    pub fn downcast<V: 'static>(&self) -> Option<Entity<V>> {
+        self.to_any().downcast().ok()
     }
 }
