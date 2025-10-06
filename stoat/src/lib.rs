@@ -5,6 +5,7 @@ pub mod git_repository;
 pub mod keymap;
 pub mod log;
 pub mod pane;
+mod rel_path;
 mod scroll;
 mod selection;
 mod worktree;
@@ -37,6 +38,7 @@ impl Mode {
 // Re-export types that the GUI layer will need
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
+use fuzzy::CharBag;
 use gpui::{App, AppContext, Entity};
 use pane::{BufferItem, ItemVariant};
 use parking_lot::Mutex;
@@ -45,7 +47,7 @@ use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
 use stoat_rope::TokenSnapshot;
 use stoat_text::Language;
 use text::{Buffer, BufferId, BufferSnapshot, Point};
-use worktree::Worktree;
+use worktree::{Entry, Worktree};
 
 pub struct Stoat {
     /// Items displayed in editor (buffers, terminals, etc.)
@@ -62,7 +64,7 @@ pub struct Stoat {
     current_mode: String,
     // File finder state
     file_finder_input: Option<Entity<Buffer>>,
-    file_finder_files: Vec<PathBuf>,
+    file_finder_files: Vec<Entry>,
     file_finder_filtered: Vec<PathBuf>,
     file_finder_selected: usize,
     file_finder_previous_mode: Option<String>,
@@ -135,7 +137,7 @@ impl Stoat {
     /// # Panics
     ///
     /// Panics if there are no items or if the active item is not a BufferItem.
-    pub fn active_buffer_item(&self, cx: &App) -> Entity<BufferItem> {
+    pub fn active_buffer_item(&self, _cx: &App) -> Entity<BufferItem> {
         self.items[self.active_item_index]
             .as_buffer()
             .expect("Active item must be a BufferItem")
@@ -301,18 +303,62 @@ impl Stoat {
 
     /// Filter files based on the current query.
     ///
-    /// Performs case-insensitive substring matching on file paths.
+    /// Performs fuzzy-like matching on file paths using CharBag pre-filtering and substring
+    /// matching. Results are ranked by match position (earlier matches score higher).
     /// Updates the filtered files list and resets selection to 0.
     pub fn filter_files(&mut self, query: &str) {
         if query.is_empty() {
-            self.file_finder_filtered = self.file_finder_files.clone();
-        } else {
-            let query_lower = query.to_lowercase();
+            // No query: show all files
             self.file_finder_filtered = self
                 .file_finder_files
                 .iter()
-                .filter(|path| path.to_string_lossy().to_lowercase().contains(&query_lower))
-                .cloned()
+                .map(|e| PathBuf::from(e.path.as_unix_str()))
+                .collect();
+        } else {
+            // Build query CharBag for fast pre-filtering
+            let query_lower = query.to_lowercase();
+            let query_char_bag: CharBag = query_lower.chars().collect();
+
+            // Filter using CharBag first (fast), then substring match (precise)
+            let mut matches: Vec<(usize, &Entry)> = self
+                .file_finder_files
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| {
+                    // Fast pre-filter: check if entry has all query chars
+                    entry.char_bag.is_superset(query_char_bag)
+                })
+                .filter_map(|(i, entry)| {
+                    // Precise filter: case-insensitive substring match
+                    let path_lower = entry.path.as_unix_str().to_lowercase();
+                    path_lower.find(&query_lower).map(|_pos| (i, entry))
+                })
+                .collect();
+
+            // Sort by filename match position (earlier = better)
+            // Prefer matches in filename over directory path
+            matches.sort_by_key(|(_, entry)| {
+                let path_str = entry.path.as_unix_str();
+                let path_lower = path_str.to_lowercase();
+                let filename = path_str.rsplit('/').next().unwrap_or(path_str);
+                let filename_lower = filename.to_lowercase();
+
+                // Score: filename match position (0 = best), then full path position
+                if let Some(pos) = filename_lower.find(&query_lower) {
+                    pos // Match in filename - use position in filename
+                } else {
+                    path_lower.find(&query_lower).unwrap_or(usize::MAX) + 10000 // Match in path -
+                                                                                // penalize
+                }
+            });
+
+            // Limit results
+            matches.truncate(100);
+
+            // Convert to PathBuf
+            self.file_finder_filtered = matches
+                .into_iter()
+                .map(|(_, entry)| PathBuf::from(entry.path.as_unix_str()))
                 .collect();
         }
 

@@ -5,7 +5,7 @@
 
 use crate::Stoat;
 use gpui::{App, AppContext};
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, path::PathBuf};
 use text::{Buffer, BufferId};
 use tracing::debug;
 
@@ -46,9 +46,9 @@ impl Stoat {
 
         // Read files from worktree snapshot (instant!)
         // Exclude gitignored files by default
-        let files = self.worktree.lock().snapshot().files(false);
+        let entries = self.worktree.lock().snapshot().entries(false);
         debug!(
-            file_count = files.len(),
+            file_count = entries.len(),
             "Loaded files from worktree snapshot (excluding ignored)"
         );
 
@@ -57,9 +57,14 @@ impl Stoat {
         let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
 
         // Initialize file finder state
+        // Convert entries to paths for the filtered display list
+        let paths: Vec<PathBuf> = entries
+            .iter()
+            .map(|e| PathBuf::from(e.path.to_string()))
+            .collect();
         self.file_finder_input = Some(input_buffer);
-        self.file_finder_filtered = files.clone();
-        self.file_finder_files = files;
+        self.file_finder_filtered = paths;
+        self.file_finder_files = entries;
         self.file_finder_selected = 0;
 
         // Skip initial preview for instant open (load on selection change)

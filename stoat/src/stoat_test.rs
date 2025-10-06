@@ -2,10 +2,10 @@
 
 pub mod cursor_notation;
 
-use crate::{actions::*, Stoat};
+use crate::{Stoat, actions::*};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render,
-    Size, Styled, TestAppContext, Window,
+    App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, Pixels, Render, Size,
+    Styled, TestAppContext, Window, div,
 };
 use text::Point;
 
@@ -708,8 +708,13 @@ impl StoatTest {
 
     /// Get the file finder all files
     pub fn file_finder_files(&self) -> Vec<std::path::PathBuf> {
-        self.view
-            .read_with(&self.cx, |view, _| view.stoat().file_finder_files.clone())
+        self.view.read_with(&self.cx, |view, _| {
+            view.stoat()
+                .file_finder_files
+                .iter()
+                .map(|e| std::path::PathBuf::from(e.path.as_unix_str()))
+                .collect()
+        })
     }
 
     /// Get the file finder previous mode

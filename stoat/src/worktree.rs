@@ -28,9 +28,11 @@
 mod ignore;
 
 use self::ignore::IgnoreStack;
+use crate::rel_path::RelPath;
 use ::ignore::gitignore::{gitconfig_excludes_path, Gitignore, GitignoreBuilder};
 use fuzzy::CharBag;
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -117,7 +119,7 @@ pub struct Snapshot {
 #[derive(Clone, Debug)]
 pub struct Entry {
     /// Path relative to worktree root
-    pub path: Arc<Path>,
+    pub path: Arc<RelPath>,
     /// Whether this entry is a directory
     pub is_dir: bool,
     /// Whether this entry matches gitignore rules
@@ -142,7 +144,7 @@ pub struct Entry {
 /// - `non_ignored_file_count` - Non-ignored files only
 #[derive(Clone, Debug)]
 pub struct EntrySummary {
-    max_path: Arc<Path>,
+    max_path: Arc<RelPath>,
     count: usize,
     non_ignored_count: usize,
     file_count: usize,
@@ -154,18 +156,18 @@ pub struct EntrySummary {
 /// Wraps an `Arc<Path>` and implements [`Dimension`] so the tree can be indexed
 /// by path. This allows efficient lookups like "find the entry for path X".
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct PathKey(pub Arc<Path>);
+pub struct PathKey(pub Arc<RelPath>);
 
 impl Default for PathKey {
     fn default() -> Self {
-        Self(Path::new("").into())
+        Self(RelPath::empty().into())
     }
 }
 
 impl Default for EntrySummary {
     fn default() -> Self {
         Self {
-            max_path: Path::new("").into(),
+            max_path: RelPath::empty().into(),
             count: 0,
             non_ignored_count: 0,
             file_count: 0,
@@ -479,8 +481,15 @@ impl Worktree {
                         .map(|c| c.to_ascii_lowercase()),
                 );
 
+                // Convert Path to RelPath
+                let rel_path = match RelPath::from_path(&rel_entry_path) {
+                    Ok(Cow::Borrowed(path)) => path.into(),
+                    Ok(Cow::Owned(path)) => path.into(),
+                    Err(_) => continue, // Skip paths that can't be converted
+                };
+
                 entries.push(Entry {
-                    path: Arc::from(rel_entry_path.as_ref()),
+                    path: rel_path,
                     is_dir: false,
                     is_ignored,
                     char_bag,
@@ -543,7 +552,19 @@ impl Snapshot {
         self.entries_by_path
             .iter()
             .filter(|entry| !entry.is_dir && (include_ignored || !entry.is_ignored))
-            .map(|entry| entry.path.as_ref().to_path_buf())
+            .map(|entry| PathBuf::from(entry.path.to_string()))
+            .collect()
+    }
+
+    /// Get all file entries (not just paths) for fuzzy matching.
+    ///
+    /// Returns clones of Entry objects which contain the path, char_bag, and other metadata
+    /// needed for efficient fuzzy matching.
+    pub fn entries(&self, include_ignored: bool) -> Vec<Entry> {
+        self.entries_by_path
+            .iter()
+            .filter(|entry| !entry.is_dir && (include_ignored || !entry.is_ignored))
+            .cloned()
             .collect()
     }
 

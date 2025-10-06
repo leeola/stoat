@@ -255,7 +255,7 @@ pub trait ItemHandle: 'static + Send {
 /// let handle: Box<dyn ItemHandle> = Box::new(buffer_item);
 /// ```
 impl<T: Item> ItemHandle for Entity<T> {
-    fn item_id(&self, cx: &App) -> EntityId {
+    fn item_id(&self, _cx: &App) -> EntityId {
         self.entity_id()
     }
 
