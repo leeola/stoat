@@ -27,6 +27,11 @@ anyhow.workspace = true
 once_cell = "1.20"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+git2 = { version = "0.20", default-features = false, features = [
+  "vendored-libgit2",
+  "vendored-openssl",
+] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+tempfile = "3.12"

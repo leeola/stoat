@@ -35,6 +35,7 @@
 //! - [`text::Buffer`] - Underlying text storage
 
 use super::item::Item;
+use crate::git_diff::BufferDiff;
 use gpui::{
     div, App, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, SharedString,
     Window,
@@ -67,6 +68,7 @@ pub enum BufferItemEvent {
 /// - `token_map` - Syntax highlighting tokens (shared, can be accessed from render thread)
 /// - `parser` - Tree-sitter parser for current language
 /// - `current_language` - Active language (Rust, JavaScript, etc.)
+/// - `diff` - Git diff state (optional, None if not in git repo or diff disabled)
 ///
 /// # Lifecycle
 ///
@@ -99,6 +101,9 @@ pub struct BufferItem {
 
     /// Current language setting
     current_language: Language,
+
+    /// Git diff state (None if not in git repo or diff disabled)
+    diff: Option<BufferDiff>,
 }
 
 impl BufferItem {
@@ -136,6 +141,7 @@ impl BufferItem {
             token_map,
             parser,
             current_language: language,
+            diff: None,
         }
     }
 
@@ -253,6 +259,26 @@ impl BufferItem {
     /// Active language
     pub fn language(&self) -> Language {
         self.current_language
+    }
+
+    /// Get reference to the current diff state.
+    ///
+    /// # Returns
+    ///
+    /// Reference to [`BufferDiff`] if one exists, None otherwise
+    pub fn diff(&self) -> Option<&BufferDiff> {
+        self.diff.as_ref()
+    }
+
+    /// Set the diff state for this buffer.
+    ///
+    /// Called after computing a diff from git HEAD content.
+    ///
+    /// # Arguments
+    ///
+    /// * `diff` - New diff state, or None to clear
+    pub fn set_diff(&mut self, diff: Option<BufferDiff>) {
+        self.diff = diff;
     }
 }
 
