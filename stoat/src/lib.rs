@@ -38,8 +38,11 @@ impl Mode {
 // Re-export types that the GUI layer will need
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
-use fuzzy::CharBag;
 use gpui::{App, AppContext, Entity};
+use nucleo_matcher::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config, Matcher,
+};
 use pane::{BufferItem, ItemVariant};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
@@ -69,6 +72,7 @@ pub struct Stoat {
     file_finder_selected: usize,
     file_finder_previous_mode: Option<String>,
     file_finder_preview: Option<String>,
+    file_finder_matcher: Matcher,
     // Worktree (shared across cloned Stoats)
     worktree: Arc<Mutex<Worktree>>,
 }
@@ -101,6 +105,7 @@ impl Stoat {
             file_finder_selected: 0,
             file_finder_previous_mode: None,
             file_finder_preview: None,
+            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
             worktree,
         }
     }
@@ -303,9 +308,10 @@ impl Stoat {
 
     /// Filter files based on the current query.
     ///
-    /// Performs fuzzy-like matching on file paths using CharBag pre-filtering and substring
-    /// matching. Results are ranked by match position (earlier matches score higher).
-    /// Updates the filtered files list and resets selection to 0.
+    /// Performs true fuzzy matching on file paths using nucleo-matcher.
+    /// Supports non-contiguous character matching (e.g., "stoedit" matches
+    /// "stoat/src/actions/edit.rs"). Results are ranked by match quality score. Updates the
+    /// filtered files list and resets selection to 0.
     pub fn filter_files(&mut self, query: &str) {
         if query.is_empty() {
             // No query: show all files
@@ -315,50 +321,29 @@ impl Stoat {
                 .map(|e| PathBuf::from(e.path.as_unix_str()))
                 .collect();
         } else {
-            // Build query CharBag for fast pre-filtering
-            let query_lower = query.to_lowercase();
-            let query_char_bag: CharBag = query_lower.chars().collect();
+            // Parse pattern for smart fuzzy matching with case-insensitive and normalized matching
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
-            // Filter using CharBag first (fast), then substring match (precise)
-            let mut matches: Vec<(usize, &Entry)> = self
+            // Build candidate list with paths as strings
+            let candidates: Vec<&str> = self
                 .file_finder_files
                 .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    // Fast pre-filter: check if entry has all query chars
-                    entry.char_bag.is_superset(query_char_bag)
-                })
-                .filter_map(|(i, entry)| {
-                    // Precise filter: case-insensitive substring match
-                    let path_lower = entry.path.as_unix_str().to_lowercase();
-                    path_lower.find(&query_lower).map(|_pos| (i, entry))
-                })
+                .map(|e| e.path.as_unix_str())
                 .collect();
 
-            // Sort by filename match position (earlier = better)
-            // Prefer matches in filename over directory path
-            matches.sort_by_key(|(_, entry)| {
-                let path_str = entry.path.as_unix_str();
-                let path_lower = path_str.to_lowercase();
-                let filename = path_str.rsplit('/').next().unwrap_or(path_str);
-                let filename_lower = filename.to_lowercase();
+            // Match and score all candidates using nucleo-matcher
+            let mut matches = pattern.match_list(candidates, &mut self.file_finder_matcher);
 
-                // Score: filename match position (0 = best), then full path position
-                if let Some(pos) = filename_lower.find(&query_lower) {
-                    pos // Match in filename - use position in filename
-                } else {
-                    path_lower.find(&query_lower).unwrap_or(usize::MAX) + 10000 // Match in path -
-                                                                                // penalize
-                }
-            });
+            // Sort by score (descending - higher score = better match)
+            matches.sort_by(|a, b| b.1.cmp(&a.1));
 
-            // Limit results
+            // Limit to top 100 results
             matches.truncate(100);
 
-            // Convert to PathBuf
+            // Convert to PathBuf for display
             self.file_finder_filtered = matches
                 .into_iter()
-                .map(|(_, entry)| PathBuf::from(entry.path.as_unix_str()))
+                .map(|(path, _score)| PathBuf::from(path))
                 .collect();
         }
 
@@ -464,6 +449,7 @@ impl Clone for Stoat {
             file_finder_selected: self.file_finder_selected,
             file_finder_previous_mode: self.file_finder_previous_mode.clone(),
             file_finder_preview: self.file_finder_preview.clone(),
+            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
             worktree: self.worktree.clone(),
         }
     }
@@ -492,6 +478,151 @@ pub mod cli {
                 #[arg(short, long, help = "Input sequence to execute")]
                 input: Option<String>,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_matching_tests {
+    use crate::Stoat;
+    use std::path::PathBuf;
+
+    #[test]
+    fn matches_non_contiguous_chars() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Query "stoedit" should match "stoat/src/actions/edit.rs"
+        // s -> stoat
+        // t -> (already matched)
+        // o -> (already matched)
+        // e -> actions/edit
+        // d -> edit
+        // i -> edit
+        // t -> edit
+        s.filter_files("stoedit");
+
+        let filtered = s.file_finder_filtered();
+        assert!(
+            filtered
+                .iter()
+                .any(|p| p.to_string_lossy().contains("actions/edit.rs")),
+            "Expected 'stoedit' to match 'stoat/src/actions/edit.rs', but it didn't. Matches: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Uppercase query should match lowercase files
+        s.filter_files("EDIT");
+
+        let filtered = s.file_finder_filtered();
+        assert!(
+            filtered
+                .iter()
+                .any(|p| p.to_string_lossy().to_lowercase().contains("edit")),
+            "Expected case-insensitive match for 'EDIT', but got: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn empty_query_shows_all_files() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        let all_files_count = s.file_finder_files().len();
+
+        s.filter_files("");
+
+        let filtered_count = s.file_finder_filtered().len();
+        assert_eq!(
+            all_files_count, filtered_count,
+            "Empty query should show all files. Expected {}, got {}",
+            all_files_count, filtered_count
+        );
+    }
+
+    #[test]
+    fn limits_results_to_100() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Use a very broad query that would match many files
+        s.filter_files("s");
+
+        let filtered = s.file_finder_filtered();
+        assert!(
+            filtered.len() <= 100,
+            "Expected at most 100 results, got {}",
+            filtered.len()
+        );
+    }
+
+    #[test]
+    fn resets_selection_on_filter() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Set selection to non-zero
+        s.set_file_finder_selected(5);
+        assert_eq!(s.file_finder_selected(), 5);
+
+        // Filter should reset to 0
+        s.filter_files("test");
+
+        assert_eq!(
+            s.file_finder_selected(),
+            0,
+            "Expected selection to reset to 0 after filtering"
+        );
+    }
+
+    #[test]
+    fn query_with_no_matches_returns_empty() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Query that should match no files
+        s.filter_files("xyzqwertyuiopasdfghjkl");
+
+        let filtered = s.file_finder_filtered();
+        assert!(
+            filtered.is_empty(),
+            "Expected no matches for nonsense query, got: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn prefers_better_matches() {
+        let mut s = Stoat::test();
+        s.open_file_finder();
+
+        // Query "lib" should rank lib.rs higher than other files containing "lib"
+        s.filter_files("lib");
+
+        let filtered = s.file_finder_filtered();
+        if !filtered.is_empty() {
+            // First result should be the best match
+            let first = &filtered[0];
+            let first_str = first.to_string_lossy();
+
+            // lib.rs should be highly ranked
+            assert!(
+                first_str.contains("lib.rs")
+                    || filtered
+                        .iter()
+                        .take(3)
+                        .any(|p| p.to_string_lossy().contains("lib.rs")),
+                "Expected 'lib.rs' to be in top 3 matches for query 'lib', but top result was: {}. Top 3: {:?}",
+                first_str,
+                filtered.iter().take(3).collect::<Vec<_>>()
+            );
         }
     }
 }

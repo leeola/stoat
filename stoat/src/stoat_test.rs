@@ -671,6 +671,13 @@ impl StoatTest {
         });
     }
 
+    /// Filter files based on query
+    pub fn filter_files(&mut self, query: &str) {
+        self.view.update(&mut self.cx, |view, _| {
+            view.stoat_mut().filter_files(query);
+        });
+    }
+
     /// Get the file finder input buffer
     pub fn file_finder_input(&self) -> Option<gpui::Entity<text::Buffer>> {
         self.view.read_with(&self.cx, |view, _| {
