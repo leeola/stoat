@@ -74,7 +74,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         // Calculate gutter bounds
-        let gutter_width = self.compute_gutter_width(cx);
+        let (gutter_width, gutter_right_padding) = self.compute_gutter_width(cx);
         let gutter_bounds = Bounds {
             origin: bounds.origin + point(self.style.padding, self.style.padding),
             size: size(gutter_width, bounds.size.height - self.style.padding * 2.0),
@@ -276,6 +276,7 @@ impl Element for EditorElement {
                 diff,
                 &buffer_snapshot,
                 gutter_width,
+                gutter_right_padding,
                 self.style.line_height,
             ))
         } else {
@@ -671,11 +672,11 @@ impl EditorElement {
             return;
         };
 
-        // Paint gutter background using styled color
+        // Paint gutter background (same as editor background)
         window.paint_quad(PaintQuad {
             bounds: gutter.dimensions.bounds,
             corner_radii: Default::default(),
-            background: self.style.gutter_background_color.into(),
+            background: self.syntax_theme.background_color.into(),
             border_color: Default::default(),
             border_widths: Default::default(),
             border_style: Default::default(),
@@ -705,35 +706,46 @@ impl EditorElement {
 
     /// Compute gutter width dynamically based on enabled features.
     ///
-    /// Returns the total width needed for the gutter, accounting for:
+    /// Returns `(total_width, right_padding)` where:
+    /// - `total_width` - Full gutter width including padding
+    /// - `right_padding` - Spacing between gutter content and editor text
+    ///
+    /// Width accounts for:
     /// - Line numbers (if enabled)
-    /// - Diff indicators (if enabled)
+    /// - Diff indicators (if enabled) with [`EditorStyle::diff_indicator_padding`]
+    /// - Right padding from [`EditorStyle::gutter_right_padding`]
     /// - Minimum width of 8px if any feature is enabled
-    fn compute_gutter_width(&self, _cx: &App) -> Pixels {
-        let mut width = px(0.0);
+    ///
+    /// All padding values are configurable via [`EditorStyle`].
+    fn compute_gutter_width(&self, _cx: &App) -> (Pixels, Pixels) {
+        let mut content_width = px(0.0);
 
         // Add width for line numbers (if enabled)
         if self.style.show_line_numbers {
             // Future: compute based on max line number digits
             // For now, placeholder width:
-            width = width + px(40.0);
+            content_width = content_width + px(40.0);
         }
 
         // Add width for diff indicators (if enabled)
         if self.style.show_diff_indicators {
             // Widest diff indicator is deleted hunk: 0.35 * line_height
             let diff_width = (0.35 * self.style.line_height).floor();
-            // Add 4px padding (2px on each side)
-            let diff_total = diff_width + px(4.0);
+            // Add configured padding around indicator
+            let diff_total = diff_width + self.style.diff_indicator_padding;
 
-            width = width.max(diff_total);
+            content_width = content_width.max(diff_total);
         }
 
-        // Minimum width of 8px if any feature is enabled
-        if width > px(0.0) {
-            width.max(px(8.0))
+        // Add right padding for spacing between gutter and content
+        if content_width > px(0.0) {
+            let min_width = content_width.max(px(8.0));
+            (
+                min_width + self.style.gutter_right_padding,
+                self.style.gutter_right_padding,
+            )
         } else {
-            px(0.0) // No gutter if no features enabled
+            (px(0.0), px(0.0)) // No gutter if no features enabled
         }
     }
 }

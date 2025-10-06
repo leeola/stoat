@@ -48,6 +48,8 @@ use text::{BufferSnapshot, ToPoint};
 pub struct GutterDimensions {
     /// Width of the gutter in pixels (typically 40px)
     pub width: Pixels,
+    /// Padding between gutter content and editor text
+    pub right_padding: Pixels,
     /// Bounds of the entire gutter area
     pub bounds: Bounds<Pixels>,
 }
@@ -119,6 +121,7 @@ impl GutterLayout {
     /// * `diff` - Optional diff data (None if not in git repo)
     /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
     /// * `gutter_width` - Total width of gutter in pixels
+    /// * `right_padding` - Spacing between gutter content and editor text
     /// * `line_height` - Height of one line in pixels
     ///
     /// # Returns
@@ -139,10 +142,12 @@ impl GutterLayout {
         diff: Option<&BufferDiff>,
         buffer_snapshot: &BufferSnapshot,
         gutter_width: Pixels,
+        right_padding: Pixels,
         line_height: Pixels,
     ) -> Self {
         let dimensions = GutterDimensions {
             width: gutter_width,
+            right_padding,
             bounds: gutter_bounds,
         };
 
