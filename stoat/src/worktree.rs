@@ -29,8 +29,7 @@ mod ignore;
 
 use self::ignore::IgnoreStack;
 use crate::rel_path::RelPath;
-use ::ignore::gitignore::{gitconfig_excludes_path, Gitignore, GitignoreBuilder};
-use fuzzy::CharBag;
+use ::ignore::gitignore::{Gitignore, GitignoreBuilder, gitconfig_excludes_path};
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
@@ -94,8 +93,6 @@ pub struct Snapshot {
     entries_by_path: SumTree<Entry>,
     /// Root directory of this snapshot
     root: PathBuf,
-    /// CharBag for the root path (used to generate entry char_bags)
-    root_char_bag: CharBag,
 }
 
 /// Metadata for a single file or directory entry.
@@ -114,8 +111,6 @@ pub struct Snapshot {
 /// - `path` - Relative path from worktree root (used as key)
 /// - `is_dir` - Whether this is a directory
 /// - `is_ignored` - Whether gitignore rules exclude this entry
-/// - `char_bag` - Lowercased characters from path (for fuzzy matching)
-/// - `size` - File size in bytes (0 for directories)
 #[derive(Clone, Debug)]
 pub struct Entry {
     /// Path relative to worktree root
@@ -124,10 +119,6 @@ pub struct Entry {
     pub is_dir: bool,
     /// Whether this entry matches gitignore rules
     pub is_ignored: bool,
-    /// Character bag for fuzzy matching (lowercased path characters)
-    pub char_bag: CharBag,
-    /// File size in bytes (0 for directories)
-    pub size: u64,
 }
 
 /// Summary type for [`Entry`] in the [`SumTree`].
@@ -274,16 +265,7 @@ impl Worktree {
             IgnoreStack::none()
         };
 
-        let root_char_bag = CharBag::default();
-
-        Self::walk_directory(
-            &root,
-            Path::new(""),
-            &mut entries,
-            ignore_stack,
-            root_char_bag,
-            0,
-        );
+        Self::walk_directory(&root, Path::new(""), &mut entries, ignore_stack, 0);
 
         // Build SumTree from collected entries
         let mut tree = SumTree::new(());
@@ -294,7 +276,6 @@ impl Worktree {
         let snapshot = Snapshot {
             entries_by_path: tree,
             root: root.clone(),
-            root_char_bag,
         };
 
         Self { snapshot, root }
@@ -336,16 +317,8 @@ impl Worktree {
     pub fn refresh(&mut self) {
         let mut entries = Vec::new();
         let ignore_stack = IgnoreStack::none();
-        let root_char_bag = CharBag::default();
 
-        Self::walk_directory(
-            &self.root,
-            Path::new(""),
-            &mut entries,
-            ignore_stack,
-            root_char_bag,
-            0,
-        );
+        Self::walk_directory(&self.root, Path::new(""), &mut entries, ignore_stack, 0);
 
         // Rebuild SumTree
         let mut tree = SumTree::new(());
@@ -356,7 +329,6 @@ impl Worktree {
         self.snapshot = Snapshot {
             entries_by_path: tree,
             root: self.root.clone(),
-            root_char_bag,
         };
     }
 
@@ -371,7 +343,6 @@ impl Worktree {
     /// * `rel_path` - Relative path from worktree root
     /// * `entries` - Accumulator for discovered [`Entry`] structs
     /// * `ignore_stack` - Current gitignore rule stack
-    /// * `root_char_bag` - CharBag for root path
     /// * `depth` - Current recursion depth (for limiting depth)
     ///
     /// # Gitignore Processing
@@ -391,7 +362,6 @@ impl Worktree {
         rel_path: &Path,
         entries: &mut Vec<Entry>,
         mut ignore_stack: Arc<IgnoreStack>,
-        root_char_bag: CharBag,
         depth: usize,
     ) {
         // Limit recursion depth to avoid infinite loops
@@ -462,7 +432,6 @@ impl Worktree {
                         &rel_entry_path,
                         entries,
                         ignore_stack.clone(),
-                        root_char_bag,
                         depth + 1,
                     );
                 }
@@ -471,15 +440,6 @@ impl Worktree {
                 if metadata.len() > 10 * 1024 * 1024 {
                     continue;
                 }
-
-                // Create Entry for this file
-                let mut char_bag = root_char_bag;
-                char_bag.extend(
-                    rel_entry_path
-                        .to_string_lossy()
-                        .chars()
-                        .map(|c| c.to_ascii_lowercase()),
-                );
 
                 // Convert Path to RelPath
                 let rel_path = match RelPath::from_path(&rel_entry_path) {
@@ -492,8 +452,6 @@ impl Worktree {
                     path: rel_path,
                     is_dir: false,
                     is_ignored,
-                    char_bag,
-                    size: metadata.len(),
                 });
             }
         }
@@ -524,42 +482,10 @@ fn build_gitignore(path: &Path) -> anyhow::Result<Gitignore> {
 }
 
 impl Snapshot {
-    /// Get file paths from the snapshot, optionally filtering out ignored files.
-    ///
-    /// Iterates through the [`SumTree`] and collects file paths. The `include_ignored`
-    /// parameter controls whether gitignored files are included in the result.
-    ///
-    /// # Arguments
-    ///
-    /// * `include_ignored` - If `false`, excludes files matching `.gitignore` rules
-    ///
-    /// # Returns
-    ///
-    /// Vector of paths to files (not directories), sorted alphabetically.
-    ///
-    /// # Usage
-    ///
-    /// ```ignore
-    /// let files = snapshot.files(false); // Exclude gitignored files
-    /// let all_files = snapshot.files(true); // Include everything
-    /// ```
-    ///
-    /// # Performance
-    ///
-    /// This allocates a new `Vec` each call. For hot paths, consider iterating
-    /// the tree directly or caching the result.
-    pub fn files(&self, include_ignored: bool) -> Vec<PathBuf> {
-        self.entries_by_path
-            .iter()
-            .filter(|entry| !entry.is_dir && (include_ignored || !entry.is_ignored))
-            .map(|entry| PathBuf::from(entry.path.to_string()))
-            .collect()
-    }
-
     /// Get all file entries (not just paths) for fuzzy matching.
     ///
-    /// Returns clones of Entry objects which contain the path, char_bag, and other metadata
-    /// needed for efficient fuzzy matching.
+    /// Returns clones of Entry objects which contain the path and metadata.
+    /// Used by the file finder for fuzzy matching with nucleo-matcher.
     pub fn entries(&self, include_ignored: bool) -> Vec<Entry> {
         self.entries_by_path
             .iter()
