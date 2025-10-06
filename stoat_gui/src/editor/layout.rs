@@ -1,3 +1,4 @@
+use super::gutter::GutterLayout;
 use gpui::{Bounds, Pixels, Point, ShapedLine};
 use smallvec::SmallVec;
 
@@ -9,7 +10,7 @@ pub struct EditorLayout {
     pub line_lengths: SmallVec<[u32; 32]>,
     /// Total bounds of the editor
     pub bounds: Bounds<Pixels>,
-    /// Content area (excluding padding)
+    /// Content area (excluding padding and gutter)
     pub content_bounds: Bounds<Pixels>,
     /// Line height for positioning
     pub line_height: Pixels,
@@ -17,6 +18,8 @@ pub struct EditorLayout {
     pub scroll_position: Point<f32>,
     /// First visible row
     pub start_row: u32,
+    /// Gutter layout (git diff indicators, line numbers, etc.)
+    pub gutter: Option<GutterLayout>,
 }
 
 /// A shaped line with its rendering position
