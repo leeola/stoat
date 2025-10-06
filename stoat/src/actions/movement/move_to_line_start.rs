@@ -39,7 +39,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello world");
         s.set_cursor(0, 6);
-        s.input("0");
+        s.command("MoveToLineStart");
         s.assert_cursor_notation("|hello world");
     }
 
@@ -48,7 +48,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 0);
-        s.input("0");
+        s.command("MoveToLineStart");
         s.assert_cursor_notation("|hello");
     }
 
@@ -57,7 +57,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\nbar\nbaz");
         s.set_cursor(1, 2);
-        s.input("0");
+        s.command("MoveToLineStart");
         s.assert_cursor_notation("foo\n|bar\nbaz");
     }
 }

@@ -59,7 +59,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\nbar\nbaz");
         s.set_cursor(1, 1);
-        s.input("d d");
+        s.command("DeleteLine");
         s.assert_cursor_notation("foo\n|baz");
     }
 
@@ -68,7 +68,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\nbar\nbaz");
         s.set_cursor(0, 2);
-        s.input("d d");
+        s.command("DeleteLine");
         s.assert_cursor_notation("|bar\nbaz");
     }
 
@@ -77,7 +77,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\nbar\nbaz");
         s.set_cursor(2, 2);
-        s.input("d d");
+        s.command("DeleteLine");
         s.assert_cursor_notation("foo\nbar\n|");
     }
 
@@ -86,7 +86,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello world");
         s.set_cursor(0, 5);
-        s.input("d d");
+        s.command("DeleteLine");
         s.assert_cursor_notation("|");
     }
 
@@ -95,7 +95,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\n\nbar");
         s.set_cursor(1, 0);
-        s.input("d d");
+        s.command("DeleteLine");
         s.assert_cursor_notation("foo\n|bar");
     }
 }

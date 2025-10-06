@@ -117,9 +117,9 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("fn foo() -> Result<()>");
         s.set_cursor(0, 0); // At start
-        s.input("W"); // Select "fn"
+        s.command("SelectNextToken"); // Select "fn"
         s.assert_cursor_notation("<|fn||> foo() -> Result<()>");
-        s.input("W"); // Select "foo"
+        s.command("SelectNextToken"); // Select "foo"
         s.assert_cursor_notation("fn <|foo||>() -> Result<()>");
     }
 
@@ -128,7 +128,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo.bar");
         s.set_cursor(0, 3); // At the dot
-        s.input("W"); // Select the dot token
+        s.command("SelectNextToken"); // Select the dot token
         s.assert_cursor_notation("foo<|.||>bar");
     }
 
@@ -137,7 +137,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x + y");
         s.set_cursor(0, 2); // At the plus
-        s.input("W"); // Select the plus token
+        s.command("SelectNextToken"); // Select the plus token
         s.assert_cursor_notation("x <|+||> y");
     }
 
@@ -146,7 +146,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo()");
         s.set_cursor(0, 3); // After "foo", at opening paren
-        s.input("W"); // Select opening paren
+        s.command("SelectNextToken"); // Select opening paren
         s.assert_cursor_notation("foo<|(||>)");
     }
 
@@ -154,7 +154,7 @@ mod tests {
     fn select_identifier_at_start() {
         let mut s = Stoat::test();
         s.set_text("identifier");
-        s.input("W"); // Select next token from origin
+        s.command("SelectNextToken"); // Select next token from origin
         s.assert_cursor_notation("<|identifier||>");
     }
 
@@ -163,7 +163,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x   42");
         s.set_cursor(0, 1); // After "x"
-        s.input("W"); // Should skip spaces and select "42"
+        s.command("SelectNextToken"); // Should skip spaces and select "42"
         s.assert_cursor_notation("x   <|42||>");
     }
 
@@ -172,7 +172,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x\n\n  foo");
         s.set_cursor(0, 1); // After "x"
-        s.input("W"); // Should skip newlines/spaces and select "foo"
+        s.command("SelectNextToken"); // Should skip newlines/spaces and select "foo"
         s.assert_cursor_notation("x\n\n  <|foo||>");
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("word");
         s.set_cursor(0, 4); // At end
-        s.input("W"); // No token to select
+        s.command("SelectNextToken"); // No token to select
         s.assert_cursor_notation("word|"); // Cursor stays at end
     }
 
@@ -190,7 +190,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("identifier foo");
         s.set_cursor(0, 2); // Middle of "identifier"
-        s.input("W"); // Select rest of current token
+        s.command("SelectNextToken"); // Select rest of current token
         s.assert_cursor_notation("id<|entifier||> foo");
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("fn foo() -> u32");
         s.set_cursor(0, 9); // After "fn foo() ", at "->"
-        s.input("W"); // Select "->" token
+        s.command("SelectNextToken"); // Select "->" token
         s.assert_cursor_notation("fn foo() <|->||> u32");
     }
 }

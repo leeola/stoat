@@ -122,9 +122,9 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("fn foo() -> Result<()>");
         s.set_cursor(0, 22); // At end, after last ">"
-        s.input("B"); // Select last ">" with cursor on left
+        s.command("SelectPrevToken"); // Select last ">" with cursor on left
         s.assert_cursor_notation("fn foo() -> Result<()<||>|>");
-        s.input("B"); // Select ")" with cursor on left
+        s.command("SelectPrevToken"); // Select ")" with cursor on left
         s.assert_cursor_notation("fn foo() -> Result<(<||)|>>");
     }
 
@@ -133,7 +133,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo  ");
         s.set_cursor(0, 5); // After "foo  " (in trailing space)
-        s.input("B"); // Select "foo" with cursor on left
+        s.command("SelectPrevToken"); // Select "foo" with cursor on left
         s.assert_cursor_notation("<||foo|>  ");
     }
 
@@ -142,7 +142,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo.bar");
         s.set_cursor(0, 4); // After the dot (at "b" in "bar")
-        s.input("B"); // Select dot (previous token)
+        s.command("SelectPrevToken"); // Select dot (previous token)
         s.assert_cursor_notation("foo<||.|>bar");
     }
 
@@ -151,7 +151,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x + y");
         s.set_cursor(0, 4); // After "x + "
-        s.input("B"); // Select "+" (previous token)
+        s.command("SelectPrevToken"); // Select "+" (previous token)
         s.assert_cursor_notation("x <||+|> y");
     }
 
@@ -160,9 +160,9 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo()");
         s.set_cursor(0, 5); // After "foo()"
-        s.input("B"); // Select closing paren
+        s.command("SelectPrevToken"); // Select closing paren
         s.assert_cursor_notation("foo(<||)|>");
-        s.input("B"); // Select opening paren
+        s.command("SelectPrevToken"); // Select opening paren
         s.assert_cursor_notation("foo<||(|>)");
     }
 
@@ -171,7 +171,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("42   x");
         s.set_cursor(0, 6); // After "42   x"
-        s.input("B"); // Should select "x" with cursor on left
+        s.command("SelectPrevToken"); // Should select "x" with cursor on left
         s.assert_cursor_notation("42   <||x|>");
     }
 
@@ -180,7 +180,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\n\nx");
         s.set_cursor(1, 0); // Start of line 1 (after first newline)
-        s.input("B"); // Should select "foo" with cursor on left
+        s.command("SelectPrevToken"); // Should select "foo" with cursor on left
         s.assert_cursor_notation("<||foo|>\n\nx");
     }
 
@@ -189,7 +189,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("word");
         s.set_cursor(0, 0); // At start
-        s.input("B"); // No token to select
+        s.command("SelectPrevToken"); // No token to select
         s.assert_cursor_notation("|word"); // Cursor stays at start
     }
 
@@ -198,7 +198,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo identifier");
         s.set_cursor(0, 8); // Middle of "identifier" (after "iden")
-        s.input("B"); // Select from start of "identifier" to cursor, cursor on left
+        s.command("SelectPrevToken"); // Select from start of "identifier" to cursor, cursor on left
         s.assert_cursor_notation("foo <||iden|>tifier");
     }
 
@@ -207,7 +207,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("fn foo() -> u32");
         s.set_cursor(0, 12); // After "fn foo() -> "
-        s.input("B"); // Select "->"
+        s.command("SelectPrevToken"); // Select "->"
         s.assert_cursor_notation("fn foo() <||->|> u32");
     }
 }

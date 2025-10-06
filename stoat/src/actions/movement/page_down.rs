@@ -71,7 +71,7 @@ mod tests {
 
         // Start at line 5
         s.set_cursor(5, 0);
-        s.input("pagedown"); // PageDown key
+        s.command("PageDown");
 
         // Line 15 should be at cursor (moved down by 10 lines)
         let text = s.text();
@@ -86,7 +86,7 @@ mod tests {
         s.set_text(&lines.join("\n"));
         s.resize_lines(10.0);
         s.set_cursor(15, 0);
-        s.input("pagedown"); // PageDown key
+        s.command("PageDown");
 
         // Should clamp near end (line 19)
         let text = s.text();
@@ -100,7 +100,7 @@ mod tests {
         s.set_text("line 0\nline 1\nline 2");
         s.resize_lines(10.0);
         s.set_cursor(2, 0);
-        s.input("pagedown"); // PageDown key
+        s.command("PageDown");
 
         // Should stay near end
         s.assert_cursor_notation("line 0\nline 1\n|line 2");

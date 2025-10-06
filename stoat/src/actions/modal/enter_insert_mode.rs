@@ -50,7 +50,7 @@ mod tests {
         s.set_text("hello");
         assert_eq!(s.mode(), "normal");
 
-        s.input("i");
+        s.command("EnterInsertMode");
         assert_eq!(s.mode(), "insert");
     }
 
@@ -60,7 +60,7 @@ mod tests {
         s.set_text("hello");
         s.set_cursor(0, 5);
 
-        s.input("i");
+        s.command("EnterInsertMode");
         assert_eq!(s.mode(), "insert");
 
         s.input("space w o r l d");
@@ -73,7 +73,7 @@ mod tests {
         s.set_text("hello world");
         s.set_cursor(0, 6);
 
-        s.input("i");
+        s.command("EnterInsertMode");
         s.assert_cursor_notation("hello |world");
     }
 }

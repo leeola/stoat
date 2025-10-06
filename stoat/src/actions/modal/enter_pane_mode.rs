@@ -54,7 +54,7 @@ mod tests {
         s.set_text("hello");
         assert_eq!(s.mode(), "normal");
 
-        s.input("ctrl-w");
+        s.command("EnterPaneMode");
         assert_eq!(s.mode(), "pane");
     }
 
@@ -63,10 +63,10 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
 
-        s.input("ctrl-w");
+        s.command("EnterPaneMode");
         assert_eq!(s.mode(), "pane");
 
-        s.input("escape");
+        s.command("EnterNormalMode");
         assert_eq!(s.mode(), "normal");
     }
 }

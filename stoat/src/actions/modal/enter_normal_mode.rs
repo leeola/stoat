@@ -49,7 +49,7 @@ mod tests {
         s.set_text("hello");
         s.set_mode("insert");
 
-        s.input("escape"); // Escape key
+        s.command("EnterNormalMode");
         assert_eq!(s.mode(), "normal");
     }
 
@@ -60,10 +60,10 @@ mod tests {
         s.set_cursor(0, 0);
         s.set_mode("insert");
 
-        s.input("escape"); // Escape to normal
+        s.command("EnterNormalMode");
         assert_eq!(s.mode(), "normal");
 
-        s.input("l"); // Move right
+        s.command("MoveRight");
         s.assert_cursor_notation("h|ello world");
     }
 
@@ -75,8 +75,8 @@ mod tests {
         s.set_mode("insert");
 
         s.input("space w o r l d");
-        s.input("escape"); // Escape to normal
-        s.input("x"); // Should not insert 'x', should delete char
+        s.command("EnterNormalMode");
+        s.input("x");
 
         // In normal mode, 'x' deletes character under cursor
         assert_eq!(s.mode(), "normal");

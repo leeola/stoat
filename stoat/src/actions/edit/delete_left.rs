@@ -93,7 +93,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 3);
-        s.input("shift-x");
+        s.command("DeleteLeft");
         s.assert_cursor_notation("he|lo");
     }
 
@@ -102,7 +102,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("foo\nbar");
         s.set_cursor(1, 0);
-        s.input("shift-x");
+        s.command("DeleteLeft");
         s.assert_cursor_notation("foo|bar");
     }
 
@@ -111,7 +111,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("hello");
         s.set_cursor(0, 0);
-        s.input("shift-x");
+        s.command("DeleteLeft");
         s.assert_cursor_notation("|hello");
     }
 

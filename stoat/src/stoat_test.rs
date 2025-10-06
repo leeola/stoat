@@ -459,6 +459,61 @@ impl StoatTest {
         self.cx.run_until_parked();
     }
 
+    /// Execute a command by name, bypassing the keymap.
+    ///
+    /// Directly dispatches an action to the editor without going through keystroke
+    /// binding resolution. This makes tests independent of keymap configuration and
+    /// clearer about what command they're testing.
+    ///
+    /// # Example
+    /// ```ignore
+    /// s.command("MoveLeft");       // Move cursor left
+    /// s.command("EnterInsertMode"); // Enter insert mode
+    /// s.command("SelectNextToken"); // Select next token
+    /// ```
+    pub fn command(&mut self, action_name: &str) {
+        match action_name {
+            // Movement actions
+            "MoveLeft" => self.cx.dispatch_action(MoveLeft),
+            "MoveRight" => self.cx.dispatch_action(MoveRight),
+            "MoveUp" => self.cx.dispatch_action(MoveUp),
+            "MoveDown" => self.cx.dispatch_action(MoveDown),
+            "MoveToLineStart" => self.cx.dispatch_action(MoveToLineStart),
+            "MoveToLineEnd" => self.cx.dispatch_action(MoveToLineEnd),
+            "MoveToFileStart" => self.cx.dispatch_action(MoveToFileStart),
+            "MoveToFileEnd" => self.cx.dispatch_action(MoveToFileEnd),
+            "PageUp" => self.cx.dispatch_action(PageUp),
+            "PageDown" => self.cx.dispatch_action(PageDown),
+
+            // Modal actions
+            "EnterInsertMode" => self.cx.dispatch_action(EnterInsertMode),
+            "EnterNormalMode" => self.cx.dispatch_action(EnterNormalMode),
+            "EnterVisualMode" => self.cx.dispatch_action(EnterVisualMode),
+            "EnterPaneMode" => self.cx.dispatch_action(EnterPaneMode),
+
+            // Edit actions
+            "DeleteLeft" => self.cx.dispatch_action(DeleteLeft),
+            "DeleteRight" => self.cx.dispatch_action(DeleteRight),
+            "DeleteLine" => self.cx.dispatch_action(DeleteLine),
+            "DeleteToEndOfLine" => self.cx.dispatch_action(DeleteToEndOfLine),
+
+            // Selection actions
+            "SelectNextSymbol" => self.cx.dispatch_action(SelectNextSymbol),
+            "SelectPrevSymbol" => self.cx.dispatch_action(SelectPrevSymbol),
+            "SelectNextToken" => self.cx.dispatch_action(SelectNextToken),
+            "SelectPrevToken" => self.cx.dispatch_action(SelectPrevToken),
+
+            // Shell actions
+            "OpenFileFinder" => self.cx.dispatch_action(OpenFileFinder),
+            "FileFinderNext" => self.cx.dispatch_action(FileFinderNext),
+            "FileFinderPrev" => self.cx.dispatch_action(FileFinderPrev),
+            "FileFinderDismiss" => self.cx.dispatch_action(FileFinderDismiss),
+
+            _ => panic!("Unknown command: {}", action_name),
+        }
+        self.cx.run_until_parked();
+    }
+
     /// Assert current state matches cursor notation
     ///
     /// Compares current buffer text, cursor, and selection against

@@ -130,9 +130,9 @@ mod tests {
     fn select_symbol() {
         let mut s = Stoat::test();
         s.set_text("fn foo() -> Result<()>");
-        s.input("w"); // Select "foo"
+        s.command("SelectNextSymbol"); // Select "foo"
         s.assert_cursor_notation("fn <|foo||>() -> Result<()>");
-        s.input("w"); // Select "Result"
+        s.command("SelectNextSymbol"); // Select "Result"
         s.assert_cursor_notation("fn foo() -> <|Result||><()>");
     }
 
@@ -140,7 +140,7 @@ mod tests {
     fn select_identifier_at_start() {
         let mut s = Stoat::test();
         s.set_text("identifier");
-        s.input("w"); // Select next token from origin
+        s.command("SelectNextSymbol"); // Select next token from origin
         s.assert_cursor_notation("<|identifier||>");
     }
 
@@ -149,7 +149,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("keyword fn");
         s.set_cursor(0, 8); // After "keyword "
-        s.input("w"); // Select next token
+        s.command("SelectNextSymbol"); // Select next token
         s.assert_cursor_notation("keyword <|fn||>");
     }
 
@@ -158,7 +158,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("let x = 42");
         s.set_cursor(0, 8); // Position at start of "42"
-        s.input("w"); // Select next token
+        s.command("SelectNextSymbol"); // Select next token
         s.assert_cursor_notation("let x = <|42||>");
     }
 
@@ -167,7 +167,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x   42");
         s.set_cursor(0, 1); // After "x"
-        s.input("w"); // Should skip spaces and select "42"
+        s.command("SelectNextSymbol"); // Should skip spaces and select "42"
         s.assert_cursor_notation("x   <|42||>");
     }
 
@@ -176,7 +176,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("x\n\n  foo");
         s.set_cursor(0, 1); // After "x"
-        s.input("w"); // Should skip newlines/spaces and select "foo"
+        s.command("SelectNextSymbol"); // Should skip newlines/spaces and select "foo"
         s.assert_cursor_notation("x\n\n  <|foo||>");
     }
 
@@ -185,7 +185,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("word");
         s.set_cursor(0, 4); // At end
-        s.input("w"); // No token to select
+        s.command("SelectNextSymbol"); // No token to select
         s.assert_cursor_notation("word|"); // Cursor stays at end
     }
 
@@ -194,7 +194,7 @@ mod tests {
         let mut s = Stoat::test();
         s.set_text("identifier foo");
         s.set_cursor(0, 2); // Middle of "identifier"
-        s.input("w"); // Select rest of current token
+        s.command("SelectNextSymbol"); // Select rest of current token
         s.assert_cursor_notation("id<|entifier||> foo");
     }
 }

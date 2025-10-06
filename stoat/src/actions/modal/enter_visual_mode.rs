@@ -58,7 +58,7 @@ mod tests {
         s.set_text("hello");
         assert_eq!(s.mode(), "normal");
 
-        s.input("v");
+        s.command("EnterVisualMode");
         assert_eq!(s.mode(), "visual");
     }
 
@@ -68,10 +68,10 @@ mod tests {
         s.set_text("hello world");
         s.set_cursor(0, 0);
 
-        s.input("v"); // Enter visual mode
+        s.command("EnterVisualMode");
         assert_eq!(s.mode(), "visual");
 
-        s.input("w"); // Select forward to next word
+        s.input("w");
         let (start_row, start_col, end_row, end_col) = s.selection();
         // Should have a non-empty selection
         assert!(start_row != end_row || start_col != end_col);
@@ -81,10 +81,10 @@ mod tests {
     fn escape_exits_visual_mode() {
         let mut s = Stoat::test();
         s.set_text("hello");
-        s.input("v"); // Enter visual
+        s.command("EnterVisualMode");
         assert_eq!(s.mode(), "visual");
 
-        s.input("escape"); // Escape
+        s.command("EnterNormalMode");
         assert_eq!(s.mode(), "normal");
     }
 }
