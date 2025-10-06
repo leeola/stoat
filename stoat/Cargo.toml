@@ -16,6 +16,7 @@ stoat_rope_v3 = { path = "../rope_v3" }
 stoat_text_v3 = { path = "../text_v3" }
 text = { workspace = true }
 gpui = { workspace = true }
+enum_dispatch = "0.3"
 sum_tree = { workspace = true }
 fuzzy = { workspace = true }
 ignore = "0.4"

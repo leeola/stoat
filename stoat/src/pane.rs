@@ -4,7 +4,7 @@ mod item;
 use anyhow::{Result, bail};
 pub use buffer_item::{BufferItem, BufferItemEvent};
 use gpui::{Axis, Bounds, Pixels};
-pub use item::{Item, ItemHandle};
+pub use item::{Item, ItemHandle, ItemVariant};
 use parking_lot::Mutex;
 use std::sync::Arc;
 

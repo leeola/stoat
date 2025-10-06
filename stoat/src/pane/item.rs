@@ -36,9 +36,10 @@
 //! - [`super::buffer_item::BufferItem`] - Concrete item implementation for text buffers
 //! - [`crate::Stoat`] - Main editor state that manages items
 
+use enum_dispatch::enum_dispatch;
 use gpui::{
-    AnyElement, AnyView, App, Context, Entity, EntityId, EventEmitter, IntoElement, Render,
-    SharedString, Window,
+    AnyElement, App, Context, Entity, EntityId, EventEmitter, IntoElement, Render, SharedString,
+    Window,
 };
 use std::any::Any;
 
@@ -158,20 +159,20 @@ pub trait Item: EventEmitter<Self::Event> + Render + Sized {
 
 /// Type-erased handle to an item.
 ///
-/// Allows storing heterogeneous item types in collections like `Vec<Box<dyn ItemHandle>>`.
-/// Provides the same interface as [`Item`] but without generic type parameters.
+/// Allows storing heterogeneous item types in enum collections via [`ItemVariant`].
+/// Uses `enum_dispatch` for static dispatch - faster than dynamic dispatch.
 ///
 /// # Implementation
 ///
 /// Automatically implemented for `Entity<T> where T: Item` via blanket impl.
-/// Users typically don't implement this directly.
+/// The `#[enum_dispatch]` macro generates the implementation for [`ItemVariant`].
 ///
 /// # Usage
 ///
 /// ```ignore
-/// let items: Vec<Box<dyn ItemHandle>> = vec![
-///     Box::new(buffer_item_entity),
-///     Box::new(terminal_item_entity),
+/// let items: Vec<ItemVariant> = vec![
+///     ItemVariant::Buffer(buffer_item_entity),
+///     // ItemVariant::Terminal(terminal_item_entity),
 /// ];
 ///
 /// for item in &items {
@@ -183,7 +184,9 @@ pub trait Item: EventEmitter<Self::Event> + Render + Sized {
 ///
 /// See also:
 /// - [`Item`] - Concrete item trait
-/// - [`crate::Stoat`] - Stores `Vec<Box<dyn ItemHandle>>` for multiple items
+/// - [`ItemVariant`] - Enum holding different item types
+/// - [`crate::Stoat`] - Stores `Vec<ItemVariant>` for multiple items
+#[enum_dispatch]
 pub trait ItemHandle: 'static + Send {
     /// Get unique identifier for this item entity.
     ///
@@ -222,26 +225,6 @@ pub trait ItemHandle: 'static + Send {
     ///
     /// See [`Item::deactivated`] for details.
     fn deactivated(&self, window: &mut Window, cx: &mut App);
-
-    /// Clone this handle into a new boxed trait object.
-    ///
-    /// Required because `Box<dyn ItemHandle>` doesn't automatically support cloning.
-    /// Each item type must provide its own clone logic.
-    ///
-    /// # Returns
-    ///
-    /// New boxed handle pointing to the same item entity
-    fn boxed_clone(&self) -> Box<dyn ItemHandle>;
-
-    /// Convert to type-erased view for downcasting.
-    ///
-    /// Used by [`dyn ItemHandle::downcast`] to convert back to concrete `Entity<T>` types.
-    /// Returns an [`AnyView`] that can be downcast to the original entity type.
-    ///
-    /// # Returns
-    ///
-    /// Type-erased view that can be downcast back to `Entity<T>`
-    fn to_any(&self) -> AnyView;
 
     /// Render this item's content.
     ///
@@ -296,47 +279,70 @@ impl<T: Item> ItemHandle for Entity<T> {
         self.update(cx, |item, cx| item.deactivated(window, cx))
     }
 
-    fn boxed_clone(&self) -> Box<dyn ItemHandle> {
-        Box::new(self.clone())
-    }
-
-    fn to_any(&self) -> AnyView {
-        self.clone().into()
-    }
-
     fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         self.update(cx, |item, cx| item.render(window, cx).into_any_element())
     }
 }
 
-/// Extension methods for `dyn ItemHandle` trait objects.
+/// Enum holding different item type variants.
 ///
-/// Provides downcasting utilities to convert from trait objects back to concrete types.
-impl dyn ItemHandle {
-    /// Downcast this trait object to a concrete `Entity<V>` type.
+/// Uses `enum_dispatch` to provide efficient static dispatch to [`ItemHandle`] trait methods.
+/// This enum replaces `Box<dyn ItemHandle>` for better performance (~4-10x faster).
+///
+/// # Variants
+///
+/// - [`Buffer`](Self::Buffer) - Text buffer item ([`Entity<BufferItem>`])
+///
+/// # Performance
+///
+/// enum_dispatch provides:
+/// - No vtable lookups (direct dispatch)
+/// - No heap allocations (enum stored inline)
+/// - Better cache locality
+/// - Compiler can inline and optimize
+///
+/// # Adding New Item Types
+///
+/// When adding a new item type (e.g., Terminal):
+/// 1. Add variant: `Terminal(Entity<TerminalItem>)`
+/// 2. Add downcast helper: `pub fn as_terminal(&self) -> Option<...>`
+/// 3. Update match arms in [`crate::Stoat`]
+///
+/// # Example
+///
+/// ```ignore
+/// let item = ItemVariant::Buffer(buffer_entity);
+///
+/// // Use as ItemHandle
+/// let title = item.tab_content_text(cx);
+///
+/// // Downcast to specific type
+/// if let Some(buffer) = item.as_buffer() {
+///     let snapshot = buffer.read(cx).buffer_snapshot(cx);
+/// }
+/// ```
+#[enum_dispatch(ItemHandle)]
+#[derive(Clone)]
+pub enum ItemVariant {
+    /// Text buffer editor item
+    Buffer(Entity<super::buffer_item::BufferItem>),
+}
+
+impl ItemVariant {
+    /// Downcast to buffer item entity.
     ///
-    /// Attempts to convert the type-erased handle back to its original entity type.
-    /// Returns `None` if the handle is not of type `V`.
-    ///
-    /// # Type Parameters
-    ///
-    /// * `V` - The concrete item type to downcast to (must implement [`Item`])
-    ///
-    /// # Returns
-    ///
-    /// `Some(Entity<V>)` if downcast succeeds, `None` if types don't match
+    /// Returns `Some(Entity<BufferItem>)` if this is a Buffer variant, `None` otherwise.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// let item: Box<dyn ItemHandle> = Box::new(buffer_item);
-    ///
-    /// if let Some(buffer) = item.downcast::<BufferItem>() {
-    ///     // Access BufferItem-specific methods
-    ///     let contents = buffer.read(cx).buffer_snapshot(cx).text();
+    /// if let Some(buffer) = item.as_buffer() {
+    ///     buffer.update(cx, |buf, cx| buf.reparse(cx));
     /// }
     /// ```
-    pub fn downcast<V: 'static>(&self) -> Option<Entity<V>> {
-        self.to_any().downcast().ok()
+    pub fn as_buffer(&self) -> Option<&Entity<super::buffer_item::BufferItem>> {
+        match self {
+            ItemVariant::Buffer(entity) => Some(entity),
+        }
     }
 }

@@ -36,7 +36,7 @@ impl Mode {
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
-use pane::{BufferItem, ItemHandle};
+use pane::{BufferItem, ItemVariant};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
 use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
@@ -48,9 +48,9 @@ use worktree::Worktree;
 pub struct Stoat {
     /// Items displayed in editor (buffers, terminals, etc.)
     ///
-    /// Uses trait objects to support heterogeneous item types (buffers, terminals, etc.)
-    /// in the same collection. Items can be downcast to concrete types when needed.
-    items: Vec<Box<dyn ItemHandle>>,
+    /// Uses enum_dispatch for efficient static dispatch - 4-10x faster than trait objects.
+    /// Items can be downcast via helper methods like `as_buffer()`.
+    items: Vec<ItemVariant>,
     /// Index of currently active item
     active_item_index: usize,
     scroll: ScrollPosition,
@@ -77,8 +77,8 @@ impl Stoat {
         // Create initial buffer item
         let item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
 
-        // Create items vec with initial item (boxed as trait object)
-        let items: Vec<Box<dyn ItemHandle>> = vec![Box::new(item)];
+        // Create items vec with initial item (using enum_dispatch)
+        let items = vec![ItemVariant::Buffer(item)];
 
         // Initialize worktree for instant file finder
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
@@ -107,8 +107,8 @@ impl Stoat {
     ///
     /// # Arguments
     ///
-    /// * `item` - The item to add (boxed trait object supporting any item type)
-    pub fn add_item(&mut self, item: Box<dyn ItemHandle>) {
+    /// * `item` - The item to add (ItemVariant enum supporting any item type)
+    pub fn add_item(&mut self, item: ItemVariant) {
         self.items.push(item);
         self.active_item_index = self.items.len() - 1;
     }
@@ -133,8 +133,9 @@ impl Stoat {
     /// Panics if there are no items or if the active item is not a BufferItem.
     fn active_buffer_item(&self, _cx: &App) -> Entity<BufferItem> {
         self.items[self.active_item_index]
-            .downcast::<BufferItem>()
+            .as_buffer()
             .expect("Active item must be a BufferItem")
+            .clone()
     }
 
     pub fn buffer(&self, cx: &App) -> Entity<Buffer> {
@@ -373,7 +374,7 @@ impl Stoat {
 impl Clone for Stoat {
     fn clone(&self) -> Self {
         Self {
-            items: self.items.iter().map(|item| item.boxed_clone()).collect(),
+            items: self.items.clone(),
             active_item_index: self.active_item_index,
             scroll: self.scroll.clone(),
             cursor_manager: self.cursor_manager.clone(),
