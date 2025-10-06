@@ -130,10 +130,12 @@ impl Stoat {
 
     /// Get the active buffer item.
     ///
+    /// Used by GUI layer to access buffer item properties like diff state.
+    ///
     /// # Panics
     ///
     /// Panics if there are no items or if the active item is not a BufferItem.
-    fn active_buffer_item(&self, _cx: &App) -> Entity<BufferItem> {
+    pub fn active_buffer_item(&self, cx: &App) -> Entity<BufferItem> {
         self.items[self.active_item_index]
             .as_buffer()
             .expect("Active item must be a BufferItem")
@@ -183,6 +185,33 @@ impl Stoat {
                     if let Err(e) = item.reparse(cx) {
                         tracing::error!("Failed to parse file: {}", e);
                     }
+
+                    // Compute git diff if file is in a repository
+                    if let Ok(repo) = crate::git_repository::Repository::discover(first_path) {
+                        if let Ok(head_content) = repo.head_content(first_path) {
+                            let buffer_snapshot = item.buffer().read(cx).snapshot();
+                            let buffer_id = buffer_snapshot.remote_id();
+
+                            match crate::git_diff::BufferDiff::new(
+                                buffer_id,
+                                head_content,
+                                &buffer_snapshot,
+                            ) {
+                                Ok(diff) => {
+                                    tracing::debug!(
+                                        "Computed diff with {} hunks",
+                                        diff.hunks.len()
+                                    );
+                                    item.set_diff(Some(diff));
+                                },
+                                Err(e) => {
+                                    tracing::warn!("Failed to compute diff: {}", e);
+                                },
+                            }
+                        }
+                        // File not in git HEAD (new/untracked) - this is expected
+                    }
+                    // Not in git repository - this is expected for non-git files
                 });
             }
         }

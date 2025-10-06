@@ -35,7 +35,7 @@
 //! - [`EditorStyle`](super::style::EditorStyle) - Configures gutter appearance
 //! - [`BufferDiff`](stoat::git_diff::BufferDiff) - Source of diff data
 
-use gpui::{Bounds, Pixels, Point, point, px, size};
+use gpui::{point, px, size, Bounds, Pixels, Point};
 use std::ops::Range;
 use stoat::git_diff::{BufferDiff, DiffHunkStatus};
 use text::{BufferSnapshot, ToPoint};

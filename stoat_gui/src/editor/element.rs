@@ -1,4 +1,5 @@
 use super::{
+    gutter::GutterLayout,
     layout::{EditorLayout, PositionedLine},
     style::EditorStyle,
     view::EditorView,
@@ -72,11 +73,18 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // Calculate content bounds (with padding)
-        let content_bounds = Bounds {
+        // Calculate gutter bounds
+        let gutter_width = self.style.gutter_width;
+        let gutter_bounds = Bounds {
             origin: bounds.origin + point(self.style.padding, self.style.padding),
+            size: size(gutter_width, bounds.size.height - self.style.padding * 2.0),
+        };
+
+        // Calculate content bounds (shifted right by gutter width)
+        let content_bounds = Bounds {
+            origin: bounds.origin + point(self.style.padding + gutter_width, self.style.padding),
             size: size(
-                bounds.size.width - self.style.padding * 2.0,
+                bounds.size.width - self.style.padding * 2.0 - gutter_width,
                 bounds.size.height - self.style.padding * 2.0,
             ),
         };
@@ -256,6 +264,20 @@ impl Element for EditorElement {
             line_lengths.push(0); // Empty buffer has zero length
         }
 
+        // Compute gutter layout with diff indicators
+        let stoat = self.view.read(cx).stoat();
+        let buffer_item = stoat.active_buffer_item(cx);
+        let diff = buffer_item.read(cx).diff();
+
+        let gutter = GutterLayout::new(
+            gutter_bounds,
+            start_row..end_row,
+            diff,
+            &buffer_snapshot,
+            self.style.gutter_width,
+            self.style.line_height,
+        );
+
         let layout = EditorLayout {
             lines,
             line_lengths,
@@ -264,6 +286,7 @@ impl Element for EditorElement {
             line_height: self.style.line_height,
             scroll_position,
             start_row,
+            gutter: Some(gutter),
         };
 
         Rc::new(layout)
@@ -342,6 +365,9 @@ impl Element for EditorElement {
             border_widths: Default::default(),
             border_style: Default::default(),
         });
+
+        // Paint git diff gutter (after background, before selection)
+        self.paint_gutter(layout, window, cx);
 
         // Paint selection (behind text)
         self.paint_selection(layout, window, cx);
@@ -622,6 +648,53 @@ impl EditorElement {
                     border_style: Default::default(),
                 });
             }
+        }
+    }
+
+    /// Paint the git diff gutter with colored indicators.
+    ///
+    /// Renders the gutter area on the left side of the editor with:
+    /// - Background fill in gutter area
+    /// - Colored bars for each changed line (green=added, blue=modified, red=deleted)
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - Editor layout containing gutter layout with diff indicators
+    /// * `window` - GPUI window for painting operations
+    /// * `cx` - App context
+    fn paint_gutter(&self, layout: &EditorLayout, window: &mut Window, _cx: &mut App) {
+        let Some(gutter) = &layout.gutter else {
+            return;
+        };
+
+        // Paint gutter background (slightly darker than editor background)
+        let mut gutter_bg = self.syntax_theme.background_color;
+        gutter_bg.l = (gutter_bg.l - 0.05).max(0.0);
+        window.paint_quad(PaintQuad {
+            bounds: gutter.dimensions.bounds,
+            corner_radii: Default::default(),
+            background: gutter_bg.into(),
+            border_color: Default::default(),
+            border_widths: Default::default(),
+            border_style: Default::default(),
+        });
+
+        // Paint diff indicators
+        for indicator in &gutter.diff_indicators {
+            let color = match indicator.status {
+                stoat::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
+                stoat::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
+                stoat::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+            };
+
+            window.paint_quad(PaintQuad {
+                bounds: indicator.bounds,
+                corner_radii: Default::default(),
+                background: color.into(),
+                border_color: Default::default(),
+                border_widths: Default::default(),
+                border_style: Default::default(),
+            });
         }
     }
 }
