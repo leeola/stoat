@@ -1,0 +1,18 @@
+[package]
+name = "stoat_gui_v4"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal GUI for Stoat v4 using GPUI Entity pattern"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[lints]
+workspace = true
+
+[dependencies]
+stoat_v4 = { path = "../stoat_v4" }
+stoat_text = { path = "../text" }
+gpui = { workspace = true }
+text = { workspace = true }
+anyhow = "1.0"
+tracing = "0.1"

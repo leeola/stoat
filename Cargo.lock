@@ -6545,8 +6545,8 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "clap",
- "stoat",
- "stoat_gui",
+ "stoat_gui_v4",
+ "stoat_v4",
  "tempfile",
  "tokio",
  "tracing",
@@ -6567,6 +6567,18 @@ dependencies = [
  "stoat_rope",
  "stoat_text",
  "sum_tree",
+ "text",
+ "tracing",
+]
+
+[[package]]
+name = "stoat_gui_v4"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "stoat_text",
+ "stoat_v4",
  "text",
  "tracing",
 ]

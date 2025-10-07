@@ -3,12 +3,10 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    actions::*,
     file_finder::{load_file_preview, load_text_only, PreviewData},
     stoat::Stoat,
-    worktree::Entry,
 };
-use gpui::Context;
+use gpui::{AppContext, Context};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use std::{num::NonZeroU64, path::PathBuf};
 use text::{Buffer, BufferId};
@@ -20,8 +18,9 @@ impl Stoat {
     /// Insert text at cursor
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         let cursor = self.cursor.position();
-        self.buffer_item.read(cx).buffer().update(cx, |buffer, _| {
-            let offset = buffer.offset_from_point(cursor);
+        let buffer = self.buffer_item.read(cx).buffer().clone();
+        buffer.update(cx, |buffer, _| {
+            let offset = buffer.point_to_offset(cursor);
             buffer.edit([(offset..offset, text)]);
         });
 
@@ -45,8 +44,9 @@ impl Stoat {
             return; // At start of line
         }
 
-        self.buffer_item.read(cx).buffer().update(cx, |buffer, _| {
-            let offset = buffer.offset_from_point(cursor);
+        let buffer = self.buffer_item.read(cx).buffer().clone();
+        buffer.update(cx, |buffer, _| {
+            let offset = buffer.point_to_offset(cursor);
             buffer.edit([(offset - 1..offset, "")]);
         });
 
@@ -287,11 +287,11 @@ impl Stoat {
 
         // Spawn async task with WeakEntity<Self> handle
         // This is the key pattern: cx.spawn gives us self handle!
-        self.file_finder_preview_task = Some(cx.spawn(async move |this, mut cx| {
+        self.file_finder_preview_task = Some(cx.spawn(async move |this, cx| {
             // Phase 1: Load plain text immediately
             if let Some(text) = load_text_only(&abs_path).await {
                 // Update self through entity handle
-                let _ = this.update(&mut cx, |stoat, cx| {
+                let _ = this.update(cx, |stoat, cx| {
                     stoat.file_finder_preview = Some(PreviewData::Plain(text));
                     cx.notify();
                 });
@@ -299,13 +299,11 @@ impl Stoat {
 
             // Phase 2: Load syntax-highlighted version
             if let Some(highlighted) = load_file_preview(&abs_path_for_highlight).await {
-                let _ = this.update(&mut cx, |stoat, cx| {
+                let _ = this.update(cx, |stoat, cx| {
                     stoat.file_finder_preview = Some(highlighted);
                     cx.notify();
                 });
             }
-
-            Ok(())
         }));
     }
 

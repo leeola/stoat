@@ -4,23 +4,18 @@
 //! self-updating async tasks.
 
 use crate::{
-    actions::*,
     buffer_item::BufferItem,
     cursor::CursorManager,
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::PreviewData,
     scroll::ScrollPosition,
     worktree::{Entry, Worktree},
 };
-use gpui::{Context, Entity, EventEmitter, Task};
-use nucleo_matcher::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Config, Matcher,
-};
+use gpui::{AppContext, Context, Entity, EventEmitter, Task};
+use nucleo_matcher::{Config, Matcher};
 use parking_lot::Mutex;
 use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
-use stoat_rope::TokenSnapshot;
 use stoat_text::Language;
-use text::{Buffer, BufferId, BufferSnapshot, Point};
+use text::{Buffer, BufferId, Point};
 
 /// Events emitted by Stoat
 #[derive(Clone, Debug)]

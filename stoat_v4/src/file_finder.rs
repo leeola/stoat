@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the Context<Self> pattern - Stoat can spawn self-updating async tasks.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use stoat_rope::TokenSnapshot;
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferId};

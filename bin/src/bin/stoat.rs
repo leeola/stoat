@@ -1,12 +1,25 @@
 use clap::Parser;
-use stoat::cli::config::{Cli, Command};
+
+#[derive(Parser)]
+#[command(name = "stoat")]
+#[command(about = "A text editor", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Parser)]
+pub enum Command {
+    #[command(about = "Launch GUI with v4 architecture", name = "gui")]
+    Gui {
+        #[arg(help = "Files to open")]
+        paths: Vec<std::path::PathBuf>,
+    },
+}
 
 fn main() {
-    // Initialize logging as early as possible
-    if let Err(e) = stoat::log::init() {
-        eprintln!("Failed to initialize logging: {e}");
-        std::process::exit(1);
-    }
+    // Initialize logging
+    tracing_subscriber::fmt::init();
 
     tracing::info!("Starting Stoat editor");
 
@@ -14,22 +27,15 @@ fn main() {
 
     // Handle subcommands
     match cli.command {
-        #[cfg(feature = "gui")]
-        Some(Command::Gui { paths, input }) => {
-            // We'll create the Stoat instance inside the GUI with proper App context
-            // Just pass the paths to the GUI
-
-            // Launch GUI directly without any tokio runtime
-            if let Err(e) = stoat_bin::commands::gui::run(paths, input) {
+        Some(Command::Gui { paths }) => {
+            // Launch GUI v4
+            if let Err(e) = stoat_bin::commands::gui_v4::run(paths) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }
         },
         None => {
-            // No commands implemented yet - just print a message
-            eprintln!(
-                "Stoat editor initialized. Use 'stoat gui' to launch the graphical interface."
-            );
+            eprintln!("Stoat editor. Use 'stoat gui' to launch the graphical interface.");
         },
     }
 }

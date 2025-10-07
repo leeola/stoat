@@ -8,8 +8,6 @@ use gpui::{actions, Action};
 actions!(
     stoat_v4,
     [
-        /// Insert text at cursor position
-        InsertText,
         /// Delete character before cursor
         DeleteLeft,
         /// Delete character after cursor
@@ -64,14 +62,7 @@ actions!(
     ]
 );
 
-// Scroll actions
-actions!(
-    stoat_v4,
-    [
-        /// Scroll view
-        Scroll,
-    ]
-);
+// Scroll actions - Scroll has data so defined below with #[derive(Action)]
 
 /// Insert text action data
 #[derive(Clone, PartialEq, Action)]

@@ -567,6 +567,11 @@ pub mod cli {
                 #[arg(short, long, help = "Input sequence to execute")]
                 input: Option<String>,
             },
+            #[command(about = "Launch GUI with v4 architecture (testing)", name = "gui-v4")]
+            GuiV4 {
+                #[arg(help = "Files to open")]
+                paths: Vec<std::path::PathBuf>,
+            },
         }
     }
 }

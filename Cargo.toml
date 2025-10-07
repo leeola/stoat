@@ -4,6 +4,7 @@ members = [
   "stoat",
   "stoat_gui",
   "stoat_v4",
+  "stoat_gui_v4",
   "bin",
   "text",
   "stoat_ast",
