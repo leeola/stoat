@@ -6597,6 +6597,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_v4"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "enum_dispatch",
+ "gpui",
+ "ignore",
+ "nucleo-matcher",
+ "parking_lot 0.12.4",
+ "smol",
+ "stoat_rope",
+ "stoat_text",
+ "sum_tree",
+ "text",
+ "tracing",
+]
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

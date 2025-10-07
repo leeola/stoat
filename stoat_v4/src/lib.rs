@@ -1,0 +1,22 @@
+//! Stoat v4 - Editor with proper GPUI Entity pattern.
+//!
+//! Key architectural change: Stoat methods take `&mut Context<Self>` instead of `&mut App`,
+//! enabling self-updating async tasks.
+
+pub mod actions;
+pub mod buffer_item;
+pub mod cursor;
+pub mod file_finder;
+pub mod rel_path;
+pub mod scroll;
+pub mod stoat;
+pub mod stoat_actions;
+pub mod worktree;
+
+// Re-exports
+pub use actions::*;
+pub use buffer_item::BufferItem;
+pub use cursor::{Cursor, CursorManager};
+pub use file_finder::PreviewData;
+pub use scroll::{ScrollDelta, ScrollPosition};
+pub use stoat::{Stoat, StoatEvent};

@@ -1,0 +1,23 @@
+[package]
+name = "stoat_v4"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lee Olayvar <leegit@fastmail.com>"]
+license-file = "../LICENSE"
+
+[dependencies]
+gpui = { workspace = true }
+text = { workspace = true }
+sum_tree = { workspace = true }
+stoat_rope = { path = "../rope" }
+stoat_text = { path = "../text" }
+smol = "2.0"
+nucleo-matcher = "0.3.1"
+tracing = "0.1"
+anyhow.workspace = true
+parking_lot = { workspace = true }
+ignore = "0.4"
+enum_dispatch = "0.3"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
