@@ -69,48 +69,25 @@ impl CommandPalette {
             .children(commands.iter().enumerate().map(|(i, cmd)| {
                 div()
                     .flex()
-                    .flex_row()
-                    .justify_between()
+                    .flex_col()
+                    .gap_0p5()
                     .px(px(12.0))
                     .py(px(4.0))
                     .when(i == selected, |div| {
                         div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected command
                     })
                     .child(
-                        // Left side: command name and description
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_color(rgb(0xd4d4d4))
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(cmd.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(0x808080))
-                                    .text_size(px(10.0))
-                                    .child(cmd.description.clone()),
-                            ),
+                            .text_color(rgb(0xd4d4d4))
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(cmd.name.clone()),
                     )
                     .child(
-                        // Right side: keybinding
                         div()
-                            .flex()
-                            .items_center()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(rgb(0x404040))
-                            .bg(rgb(0x1a1a1a))
-                            .text_color(rgb(0x909090))
+                            .text_color(rgb(0x808080))
                             .text_size(px(10.0))
-                            .font_family(".AppleSystemUIFontMonospaced")
-                            .child(cmd.keystroke.clone()),
+                            .child(cmd.description.clone()),
                     )
             }))
     }

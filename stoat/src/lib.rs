@@ -60,10 +60,8 @@ use worktree::{Entry, Worktree};
 pub struct CommandInfo {
     /// Action name (e.g., "MoveLeft", "Save")
     pub name: String,
-    /// Short description of what the command does
+    /// Description of what the command does
     pub description: String,
-    /// Primary keybinding for this command (e.g., "h", "Cmd-S")
-    pub keystroke: String,
     /// TypeId for dispatching the action
     pub type_id: TypeId,
 }

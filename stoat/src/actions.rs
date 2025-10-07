@@ -480,46 +480,55 @@ use std::{any::TypeId, collections::HashMap};
 /// Metadata for actions, providing display names and descriptions.
 ///
 /// This trait is implemented for all action types to provide consistent metadata
-/// for UI display, command palette integration, and help systems.
+/// for UI display, command palette integration, and help systems. It supports
+/// a three-tiered description system:
+/// - **help_text**: Compact 1-2 words for the bottom help modal
+/// - **description**: Detailed 1-2 sentences for the command palette
+/// - **documentation**: (Future) Full paragraphs for manual pages
 pub trait ActionMetadata {
     /// The canonical name of the action (e.g., "MoveLeft").
     fn action_name() -> &'static str;
 
-    /// A short description for compact display (e.g., "move left").
+    /// Compact help text for the bottom help modal (e.g., "move left").
     ///
-    /// Used in the help modal at the bottom of the screen where space is limited.
-    fn action_short_desc() -> &'static str;
+    /// This is a very brief 1-2 word description displayed in the help overlay
+    /// at the bottom of the screen where horizontal space is limited.
+    fn help_text() -> &'static str;
 
-    /// A full sentence description for detailed display (e.g., "Move the cursor one character to
-    /// the left").
+    /// Detailed description for the command palette.
     ///
-    /// Used in the command palette where more descriptive text helps users understand actions.
-    fn action_long_desc() -> &'static str;
+    /// This is a 1-2 sentence description that provides context and explains
+    /// the action's behavior. Used in the command palette where users are
+    /// searching for and learning about commands.
+    fn description() -> &'static str;
 }
 
 /// Helper macro to implement [`ActionMetadata`] for an action type.
 ///
-/// This macro reduces boilerplate by implementing the ActionMetadata trait with both
-/// short and long descriptions.
+/// This macro reduces boilerplate by implementing the ActionMetadata trait with
+/// help text and description.
 ///
 /// # Usage
 /// ```ignore
-/// action_metadata!(MoveLeft, "move left", "Move the cursor one character to the left");
-/// action_metadata!(DeleteLine, "delete line", "Delete the entire current line");
+/// action_metadata!(
+///     MoveLeft,
+///     "move left",
+///     "Move the cursor one character to the left. In normal mode, stops at the beginning of the line."
+/// );
 /// ```
 macro_rules! action_metadata {
-    ($type:ty, $short:expr, $long:expr) => {
+    ($type:ty, $help:expr, $desc:expr) => {
         impl ActionMetadata for $type {
             fn action_name() -> &'static str {
                 stringify!($type)
             }
 
-            fn action_short_desc() -> &'static str {
-                $short
+            fn help_text() -> &'static str {
+                $help
             }
 
-            fn action_long_desc() -> &'static str {
-                $long
+            fn description() -> &'static str {
+                $desc
             }
         }
     };
@@ -531,201 +540,241 @@ macro_rules! action_metadata {
 action_metadata!(
     MoveLeft,
     "move left",
-    "Move the cursor one character to the left"
+    "Move the cursor one character to the left. In normal mode, stops at the beginning of the line."
 );
 action_metadata!(
     MoveRight,
     "move right",
-    "Move the cursor one character to the right"
+    "Move the cursor one character to the right. In normal mode, stops at the end of the line."
 );
-action_metadata!(MoveUp, "move up", "Move the cursor up one line");
-action_metadata!(MoveDown, "move down", "Move the cursor down one line");
+action_metadata!(
+    MoveUp,
+    "move up",
+    "Move the cursor up one line, maintaining the column position when possible. Stops at the first line."
+);
+action_metadata!(
+    MoveDown,
+    "move down",
+    "Move the cursor down one line, maintaining the column position when possible. Stops at the last line."
+);
 action_metadata!(
     MoveToLineStart,
     "line start",
-    "Move the cursor to the beginning of the current line"
+    "Move the cursor to the beginning of the current line, before any indentation or content."
 );
 action_metadata!(
     MoveToLineEnd,
     "line end",
-    "Move the cursor to the end of the current line"
+    "Move the cursor to the end of the current line, after all content."
 );
 action_metadata!(
     MoveToFileStart,
     "file start",
-    "Move the cursor to the beginning of the file"
+    "Jump to the very beginning of the file, moving the cursor to line 1, column 1."
 );
 action_metadata!(
     MoveToFileEnd,
     "file end",
-    "Move the cursor to the end of the file"
+    "Jump to the very end of the file, moving the cursor to the last line."
 );
 action_metadata!(
     PageUp,
     "page up",
-    "Scroll up one page while moving the cursor"
+    "Scroll up one page (viewport height) and move the cursor to maintain visibility."
 );
 action_metadata!(
     PageDown,
     "page down",
-    "Scroll down one page while moving the cursor"
+    "Scroll down one page (viewport height) and move the cursor to maintain visibility."
 );
 
 // Edit actions
 action_metadata!(
     DeleteLeft,
     "delete left",
-    "Delete the character to the left of the cursor (backspace)"
+    "Delete the character to the left of the cursor (backspace). In insert mode, may merge lines if at line start."
 );
 action_metadata!(
     DeleteRight,
     "delete right",
-    "Delete the character to the right of the cursor"
+    "Delete the character to the right of the cursor. In normal mode, does not advance the cursor position."
 );
-action_metadata!(DeleteLine, "delete line", "Delete the entire current line");
+action_metadata!(
+    DeleteLine,
+    "delete line",
+    "Delete the entire current line including its content and the line break, moving subsequent lines up."
+);
 action_metadata!(
     DeleteToEndOfLine,
     "delete to end",
-    "Delete from the cursor to the end of the line"
+    "Delete all text from the cursor position to the end of the current line, preserving the line break."
 );
 
 // Mode transition actions
 action_metadata!(
     EnterInsertMode,
     "insert mode",
-    "Enter insert mode for typing text"
+    "Switch to insert mode where you can type and edit text freely. Press Escape to return to normal mode."
 );
 action_metadata!(
     EnterNormalMode,
     "normal mode",
-    "Return to normal mode for navigation and commands"
+    "Return to normal mode for navigation, commands, and modal editing. This is the default mode."
 );
 action_metadata!(
     EnterVisualMode,
     "visual mode",
-    "Enter visual mode for selecting text"
+    "Enter visual mode to select text by moving the cursor. Selection anchors at the current position."
 );
 action_metadata!(
     EnterPaneMode,
     "pane mode",
-    "Enter pane mode for managing split windows"
+    "Enter pane mode for creating, closing, and navigating between split panes. Press Escape to exit."
 );
 
 // Selection actions
 action_metadata!(
     SelectNextSymbol,
     "next symbol",
-    "Extend selection to the next symbol boundary"
+    "Extend the current selection forward to the next symbol boundary (word, punctuation, or whitespace transition)."
 );
 action_metadata!(
     SelectPrevSymbol,
     "prev symbol",
-    "Extend selection to the previous symbol boundary"
+    "Extend the current selection backward to the previous symbol boundary (word, punctuation, or whitespace transition)."
 );
 action_metadata!(
     SelectNextToken,
     "next token",
-    "Extend selection to the next token"
+    "Extend the current selection forward to include the next complete token in the document."
 );
 action_metadata!(
     SelectPrevToken,
     "prev token",
-    "Extend selection to the previous token"
+    "Extend the current selection backward to include the previous complete token in the document."
 );
 
 // Pane management actions
 action_metadata!(
     SplitRight,
     "split right",
-    "Split the current pane by creating a new pane to the right"
+    "Split the current pane vertically, creating a new empty pane to the right. Both panes share the available width."
 );
 action_metadata!(
     SplitDown,
     "split down",
-    "Split the current pane by creating a new pane below"
+    "Split the current pane horizontally, creating a new empty pane below. Both panes share the available height."
 );
 action_metadata!(
     SplitLeft,
     "split left",
-    "Split the current pane by creating a new pane to the left"
+    "Split the current pane vertically, creating a new empty pane to the left. Both panes share the available width."
 );
 action_metadata!(
     SplitUp,
     "split up",
-    "Split the current pane by creating a new pane above"
+    "Split the current pane horizontally, creating a new empty pane above. Both panes share the available height."
 );
-action_metadata!(ClosePane, "close pane", "Close the currently focused pane");
+action_metadata!(
+    ClosePane,
+    "close pane",
+    "Close the currently focused pane and remove it from the layout. Cannot close the last remaining pane."
+);
 action_metadata!(
     FocusPaneLeft,
     "focus left",
-    "Move focus to the pane on the left"
+    "Move keyboard focus to the pane immediately to the left of the current pane, if one exists."
 );
 action_metadata!(
     FocusPaneRight,
     "focus right",
-    "Move focus to the pane on the right"
+    "Move keyboard focus to the pane immediately to the right of the current pane, if one exists."
 );
-action_metadata!(FocusPaneUp, "focus up", "Move focus to the pane above");
-action_metadata!(FocusPaneDown, "focus down", "Move focus to the pane below");
+action_metadata!(
+    FocusPaneUp,
+    "focus up",
+    "Move keyboard focus to the pane immediately above the current pane, if one exists."
+);
+action_metadata!(
+    FocusPaneDown,
+    "focus down",
+    "Move keyboard focus to the pane immediately below the current pane, if one exists."
+);
 
 // File operations
-action_metadata!(Save, "save file", "Save the current file to disk");
-action_metadata!(Open, "open file", "Open a file for editing");
-action_metadata!(Quit, "quit", "Close the current file or exit the editor");
-action_metadata!(ExitApp, "exit app", "Exit the application completely");
+action_metadata!(
+    Save,
+    "save file",
+    "Save the current file's contents to disk, writing all unsaved changes. Prompts for path if file is new."
+);
+action_metadata!(
+    Open,
+    "open file",
+    "Open the file picker to select a file for editing in the current pane."
+);
+action_metadata!(
+    Quit,
+    "quit",
+    "Close the current pane's file. If it's the last pane, exits the application. Warns if there are unsaved changes."
+);
+action_metadata!(
+    ExitApp,
+    "exit app",
+    "Immediately exit the application, closing all panes and files. Warns if there are unsaved changes in any file."
+);
 
 // File finder actions
 action_metadata!(
     OpenFileFinder,
     "file finder",
-    "Open the file finder to search for and open files"
+    "Open the fuzzy file finder modal to quickly search for and open files by name from the current directory."
 );
 action_metadata!(
     FileFinderNext,
     "next file",
-    "Move selection to the next file in the finder"
+    "Move the selection highlight down to the next matching file in the file finder results list."
 );
 action_metadata!(
     FileFinderPrev,
     "prev file",
-    "Move selection to the previous file in the finder"
+    "Move the selection highlight up to the previous matching file in the file finder results list."
 );
 action_metadata!(
     FileFinderDismiss,
     "dismiss",
-    "Close the file finder without opening a file"
+    "Close the file finder modal without opening any file and return to the editor."
 );
 action_metadata!(
     FileFinderSelect,
     "select file",
-    "Open the currently selected file from the finder"
+    "Open the currently highlighted file from the finder in the active pane and close the finder modal."
 );
 
 // Command palette actions
 action_metadata!(
     OpenCommandPalette,
     "command palette",
-    "Open the command palette to search and execute commands"
+    "Open the command palette to fuzzy search all available commands and see their keybindings and descriptions."
 );
 action_metadata!(
     CommandPaletteNext,
     "next command",
-    "Move selection to the next command in the palette"
+    "Move the selection highlight down to the next matching command in the command palette results list."
 );
 action_metadata!(
     CommandPalettePrev,
     "prev command",
-    "Move selection to the previous command in the palette"
+    "Move the selection highlight up to the previous matching command in the command palette results list."
 );
 action_metadata!(
     CommandPaletteDismiss,
     "dismiss",
-    "Close the command palette without executing a command"
+    "Close the command palette modal without executing any command and return to the previous mode."
 );
 action_metadata!(
     CommandPaletteExecute,
     "execute",
-    "Execute the currently selected command from the palette"
+    "Execute the currently highlighted command from the palette, close the palette, and return to the previous mode."
 );
 
 /// Action names mapped by TypeId for runtime lookup.
@@ -847,141 +896,109 @@ pub static ACTION_NAMES: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     names
 });
 
-/// Short descriptions for actions, displayed in UI overlays and tooltips.
+/// Compact help text for actions, displayed in UI overlays and tooltips.
 ///
 /// Populated from [`ActionMetadata`] implementations for all registered action types.
-pub static SHORT_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
+/// These are 1-2 word descriptions optimized for space-constrained displays.
+pub static HELP_TEXT: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     let mut help = HashMap::new();
 
     // Register all actions using their ActionMetadata implementations
-    help.insert(TypeId::of::<MoveLeft>(), MoveLeft::action_short_desc());
-    help.insert(TypeId::of::<MoveRight>(), MoveRight::action_short_desc());
-    help.insert(TypeId::of::<MoveUp>(), MoveUp::action_short_desc());
-    help.insert(TypeId::of::<MoveDown>(), MoveDown::action_short_desc());
+    help.insert(TypeId::of::<MoveLeft>(), MoveLeft::help_text());
+    help.insert(TypeId::of::<MoveRight>(), MoveRight::help_text());
+    help.insert(TypeId::of::<MoveUp>(), MoveUp::help_text());
+    help.insert(TypeId::of::<MoveDown>(), MoveDown::help_text());
     help.insert(
         TypeId::of::<MoveToLineStart>(),
-        MoveToLineStart::action_short_desc(),
+        MoveToLineStart::help_text(),
     );
-    help.insert(
-        TypeId::of::<MoveToLineEnd>(),
-        MoveToLineEnd::action_short_desc(),
-    );
+    help.insert(TypeId::of::<MoveToLineEnd>(), MoveToLineEnd::help_text());
     help.insert(
         TypeId::of::<MoveToFileStart>(),
-        MoveToFileStart::action_short_desc(),
+        MoveToFileStart::help_text(),
     );
-    help.insert(
-        TypeId::of::<MoveToFileEnd>(),
-        MoveToFileEnd::action_short_desc(),
-    );
-    help.insert(TypeId::of::<PageUp>(), PageUp::action_short_desc());
-    help.insert(TypeId::of::<PageDown>(), PageDown::action_short_desc());
-    help.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::action_short_desc());
-    help.insert(
-        TypeId::of::<DeleteRight>(),
-        DeleteRight::action_short_desc(),
-    );
-    help.insert(TypeId::of::<DeleteLine>(), DeleteLine::action_short_desc());
+    help.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::help_text());
+    help.insert(TypeId::of::<PageUp>(), PageUp::help_text());
+    help.insert(TypeId::of::<PageDown>(), PageDown::help_text());
+    help.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::help_text());
+    help.insert(TypeId::of::<DeleteRight>(), DeleteRight::help_text());
+    help.insert(TypeId::of::<DeleteLine>(), DeleteLine::help_text());
     help.insert(
         TypeId::of::<DeleteToEndOfLine>(),
-        DeleteToEndOfLine::action_short_desc(),
+        DeleteToEndOfLine::help_text(),
     );
     help.insert(
         TypeId::of::<EnterInsertMode>(),
-        EnterInsertMode::action_short_desc(),
+        EnterInsertMode::help_text(),
     );
     help.insert(
         TypeId::of::<EnterNormalMode>(),
-        EnterNormalMode::action_short_desc(),
+        EnterNormalMode::help_text(),
     );
     help.insert(
         TypeId::of::<EnterVisualMode>(),
-        EnterVisualMode::action_short_desc(),
+        EnterVisualMode::help_text(),
     );
-    help.insert(
-        TypeId::of::<EnterPaneMode>(),
-        EnterPaneMode::action_short_desc(),
-    );
+    help.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::help_text());
     help.insert(
         TypeId::of::<SelectNextSymbol>(),
-        SelectNextSymbol::action_short_desc(),
+        SelectNextSymbol::help_text(),
     );
     help.insert(
         TypeId::of::<SelectPrevSymbol>(),
-        SelectPrevSymbol::action_short_desc(),
+        SelectPrevSymbol::help_text(),
     );
     help.insert(
         TypeId::of::<SelectNextToken>(),
-        SelectNextToken::action_short_desc(),
+        SelectNextToken::help_text(),
     );
     help.insert(
         TypeId::of::<SelectPrevToken>(),
-        SelectPrevToken::action_short_desc(),
+        SelectPrevToken::help_text(),
     );
-    help.insert(TypeId::of::<SplitRight>(), SplitRight::action_short_desc());
-    help.insert(TypeId::of::<SplitDown>(), SplitDown::action_short_desc());
-    help.insert(TypeId::of::<SplitLeft>(), SplitLeft::action_short_desc());
-    help.insert(TypeId::of::<SplitUp>(), SplitUp::action_short_desc());
-    help.insert(TypeId::of::<ClosePane>(), ClosePane::action_short_desc());
-    help.insert(
-        TypeId::of::<FocusPaneLeft>(),
-        FocusPaneLeft::action_short_desc(),
-    );
-    help.insert(
-        TypeId::of::<FocusPaneRight>(),
-        FocusPaneRight::action_short_desc(),
-    );
-    help.insert(
-        TypeId::of::<FocusPaneUp>(),
-        FocusPaneUp::action_short_desc(),
-    );
-    help.insert(
-        TypeId::of::<FocusPaneDown>(),
-        FocusPaneDown::action_short_desc(),
-    );
-    help.insert(TypeId::of::<Save>(), Save::action_short_desc());
-    help.insert(TypeId::of::<Open>(), Open::action_short_desc());
-    help.insert(TypeId::of::<Quit>(), Quit::action_short_desc());
-    help.insert(TypeId::of::<ExitApp>(), ExitApp::action_short_desc());
-    help.insert(
-        TypeId::of::<OpenFileFinder>(),
-        OpenFileFinder::action_short_desc(),
-    );
-    help.insert(
-        TypeId::of::<FileFinderNext>(),
-        FileFinderNext::action_short_desc(),
-    );
-    help.insert(
-        TypeId::of::<FileFinderPrev>(),
-        FileFinderPrev::action_short_desc(),
-    );
+    help.insert(TypeId::of::<SplitRight>(), SplitRight::help_text());
+    help.insert(TypeId::of::<SplitDown>(), SplitDown::help_text());
+    help.insert(TypeId::of::<SplitLeft>(), SplitLeft::help_text());
+    help.insert(TypeId::of::<SplitUp>(), SplitUp::help_text());
+    help.insert(TypeId::of::<ClosePane>(), ClosePane::help_text());
+    help.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::help_text());
+    help.insert(TypeId::of::<FocusPaneRight>(), FocusPaneRight::help_text());
+    help.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::help_text());
+    help.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::help_text());
+    help.insert(TypeId::of::<Save>(), Save::help_text());
+    help.insert(TypeId::of::<Open>(), Open::help_text());
+    help.insert(TypeId::of::<Quit>(), Quit::help_text());
+    help.insert(TypeId::of::<ExitApp>(), ExitApp::help_text());
+    help.insert(TypeId::of::<OpenFileFinder>(), OpenFileFinder::help_text());
+    help.insert(TypeId::of::<FileFinderNext>(), FileFinderNext::help_text());
+    help.insert(TypeId::of::<FileFinderPrev>(), FileFinderPrev::help_text());
     help.insert(
         TypeId::of::<FileFinderDismiss>(),
-        FileFinderDismiss::action_short_desc(),
+        FileFinderDismiss::help_text(),
     );
     help.insert(
         TypeId::of::<FileFinderSelect>(),
-        FileFinderSelect::action_short_desc(),
+        FileFinderSelect::help_text(),
     );
     help.insert(
         TypeId::of::<OpenCommandPalette>(),
-        OpenCommandPalette::action_short_desc(),
+        OpenCommandPalette::help_text(),
     );
     help.insert(
         TypeId::of::<CommandPaletteNext>(),
-        CommandPaletteNext::action_short_desc(),
+        CommandPaletteNext::help_text(),
     );
     help.insert(
         TypeId::of::<CommandPalettePrev>(),
-        CommandPalettePrev::action_short_desc(),
+        CommandPalettePrev::help_text(),
     );
     help.insert(
         TypeId::of::<CommandPaletteDismiss>(),
-        CommandPaletteDismiss::action_short_desc(),
+        CommandPaletteDismiss::help_text(),
     );
     help.insert(
         TypeId::of::<CommandPaletteExecute>(),
-        CommandPaletteExecute::action_short_desc(),
+        CommandPaletteExecute::help_text(),
     );
 
     help
@@ -1010,143 +1027,128 @@ pub fn action_name(action: &dyn Action) -> Option<&'static str> {
 ///
 /// # Example
 /// ```ignore
-/// let desc = short_desc(&MoveLeft);
+/// let desc = help_text(&MoveLeft);
 /// assert_eq!(desc, Some("move left"));
 /// ```
-pub fn short_desc(action: &dyn Action) -> Option<&'static str> {
-    SHORT_DESC.get(&action.type_id()).copied()
+pub fn help_text(action: &dyn Action) -> Option<&'static str> {
+    HELP_TEXT.get(&action.type_id()).copied()
 }
 
-/// Long descriptions for actions, displayed in the command palette.
+/// Detailed descriptions for actions, displayed in the command palette.
 ///
 /// Populated from [`ActionMetadata`] implementations for all registered action types.
-/// These are full sentences that provide detailed explanations of what each action does.
-pub static LONG_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
+/// These are 1-2 sentence descriptions that provide context and behavioral details.
+pub static DESCRIPTION: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
     let mut long = HashMap::new();
 
     // Register all actions using their ActionMetadata implementations
-    long.insert(TypeId::of::<MoveLeft>(), MoveLeft::action_long_desc());
-    long.insert(TypeId::of::<MoveRight>(), MoveRight::action_long_desc());
-    long.insert(TypeId::of::<MoveUp>(), MoveUp::action_long_desc());
-    long.insert(TypeId::of::<MoveDown>(), MoveDown::action_long_desc());
+    long.insert(TypeId::of::<MoveLeft>(), MoveLeft::description());
+    long.insert(TypeId::of::<MoveRight>(), MoveRight::description());
+    long.insert(TypeId::of::<MoveUp>(), MoveUp::description());
+    long.insert(TypeId::of::<MoveDown>(), MoveDown::description());
     long.insert(
         TypeId::of::<MoveToLineStart>(),
-        MoveToLineStart::action_long_desc(),
+        MoveToLineStart::description(),
     );
-    long.insert(
-        TypeId::of::<MoveToLineEnd>(),
-        MoveToLineEnd::action_long_desc(),
-    );
+    long.insert(TypeId::of::<MoveToLineEnd>(), MoveToLineEnd::description());
     long.insert(
         TypeId::of::<MoveToFileStart>(),
-        MoveToFileStart::action_long_desc(),
+        MoveToFileStart::description(),
     );
-    long.insert(
-        TypeId::of::<MoveToFileEnd>(),
-        MoveToFileEnd::action_long_desc(),
-    );
-    long.insert(TypeId::of::<PageUp>(), PageUp::action_long_desc());
-    long.insert(TypeId::of::<PageDown>(), PageDown::action_long_desc());
-    long.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::action_long_desc());
-    long.insert(TypeId::of::<DeleteRight>(), DeleteRight::action_long_desc());
-    long.insert(TypeId::of::<DeleteLine>(), DeleteLine::action_long_desc());
+    long.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::description());
+    long.insert(TypeId::of::<PageUp>(), PageUp::description());
+    long.insert(TypeId::of::<PageDown>(), PageDown::description());
+    long.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::description());
+    long.insert(TypeId::of::<DeleteRight>(), DeleteRight::description());
+    long.insert(TypeId::of::<DeleteLine>(), DeleteLine::description());
     long.insert(
         TypeId::of::<DeleteToEndOfLine>(),
-        DeleteToEndOfLine::action_long_desc(),
+        DeleteToEndOfLine::description(),
     );
     long.insert(
         TypeId::of::<EnterInsertMode>(),
-        EnterInsertMode::action_long_desc(),
+        EnterInsertMode::description(),
     );
     long.insert(
         TypeId::of::<EnterNormalMode>(),
-        EnterNormalMode::action_long_desc(),
+        EnterNormalMode::description(),
     );
     long.insert(
         TypeId::of::<EnterVisualMode>(),
-        EnterVisualMode::action_long_desc(),
+        EnterVisualMode::description(),
     );
-    long.insert(
-        TypeId::of::<EnterPaneMode>(),
-        EnterPaneMode::action_long_desc(),
-    );
+    long.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::description());
     long.insert(
         TypeId::of::<SelectNextSymbol>(),
-        SelectNextSymbol::action_long_desc(),
+        SelectNextSymbol::description(),
     );
     long.insert(
         TypeId::of::<SelectPrevSymbol>(),
-        SelectPrevSymbol::action_long_desc(),
+        SelectPrevSymbol::description(),
     );
     long.insert(
         TypeId::of::<SelectNextToken>(),
-        SelectNextToken::action_long_desc(),
+        SelectNextToken::description(),
     );
     long.insert(
         TypeId::of::<SelectPrevToken>(),
-        SelectPrevToken::action_long_desc(),
+        SelectPrevToken::description(),
     );
-    long.insert(TypeId::of::<SplitRight>(), SplitRight::action_long_desc());
-    long.insert(TypeId::of::<SplitDown>(), SplitDown::action_long_desc());
-    long.insert(TypeId::of::<SplitLeft>(), SplitLeft::action_long_desc());
-    long.insert(TypeId::of::<SplitUp>(), SplitUp::action_long_desc());
-    long.insert(TypeId::of::<ClosePane>(), ClosePane::action_long_desc());
-    long.insert(
-        TypeId::of::<FocusPaneLeft>(),
-        FocusPaneLeft::action_long_desc(),
-    );
+    long.insert(TypeId::of::<SplitRight>(), SplitRight::description());
+    long.insert(TypeId::of::<SplitDown>(), SplitDown::description());
+    long.insert(TypeId::of::<SplitLeft>(), SplitLeft::description());
+    long.insert(TypeId::of::<SplitUp>(), SplitUp::description());
+    long.insert(TypeId::of::<ClosePane>(), ClosePane::description());
+    long.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::description());
     long.insert(
         TypeId::of::<FocusPaneRight>(),
-        FocusPaneRight::action_long_desc(),
+        FocusPaneRight::description(),
     );
-    long.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::action_long_desc());
-    long.insert(
-        TypeId::of::<FocusPaneDown>(),
-        FocusPaneDown::action_long_desc(),
-    );
-    long.insert(TypeId::of::<Save>(), Save::action_long_desc());
-    long.insert(TypeId::of::<Open>(), Open::action_long_desc());
-    long.insert(TypeId::of::<Quit>(), Quit::action_long_desc());
-    long.insert(TypeId::of::<ExitApp>(), ExitApp::action_long_desc());
+    long.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::description());
+    long.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::description());
+    long.insert(TypeId::of::<Save>(), Save::description());
+    long.insert(TypeId::of::<Open>(), Open::description());
+    long.insert(TypeId::of::<Quit>(), Quit::description());
+    long.insert(TypeId::of::<ExitApp>(), ExitApp::description());
     long.insert(
         TypeId::of::<OpenFileFinder>(),
-        OpenFileFinder::action_long_desc(),
+        OpenFileFinder::description(),
     );
     long.insert(
         TypeId::of::<FileFinderNext>(),
-        FileFinderNext::action_long_desc(),
+        FileFinderNext::description(),
     );
     long.insert(
         TypeId::of::<FileFinderPrev>(),
-        FileFinderPrev::action_long_desc(),
+        FileFinderPrev::description(),
     );
     long.insert(
         TypeId::of::<FileFinderDismiss>(),
-        FileFinderDismiss::action_long_desc(),
+        FileFinderDismiss::description(),
     );
     long.insert(
         TypeId::of::<FileFinderSelect>(),
-        FileFinderSelect::action_long_desc(),
+        FileFinderSelect::description(),
     );
     long.insert(
         TypeId::of::<OpenCommandPalette>(),
-        OpenCommandPalette::action_long_desc(),
+        OpenCommandPalette::description(),
     );
     long.insert(
         TypeId::of::<CommandPaletteNext>(),
-        CommandPaletteNext::action_long_desc(),
+        CommandPaletteNext::description(),
     );
     long.insert(
         TypeId::of::<CommandPalettePrev>(),
-        CommandPalettePrev::action_long_desc(),
+        CommandPalettePrev::description(),
     );
     long.insert(
         TypeId::of::<CommandPaletteDismiss>(),
-        CommandPaletteDismiss::action_long_desc(),
+        CommandPaletteDismiss::description(),
     );
     long.insert(
         TypeId::of::<CommandPaletteExecute>(),
-        CommandPaletteExecute::action_long_desc(),
+        CommandPaletteExecute::description(),
     );
 
     long
@@ -1161,9 +1163,9 @@ pub static LONG_DESC: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
 ///
 /// # Example
 /// ```ignore
-/// let desc = long_desc(&MoveLeft);
-/// assert_eq!(desc, Some("Move the cursor one character to the left"));
+/// let desc = description(&MoveLeft);
+/// assert_eq!(desc, Some("Move the cursor one character to the left. In normal mode, stops at the beginning of the line."));
 /// ```
-pub fn long_desc(action: &dyn Action) -> Option<&'static str> {
-    LONG_DESC.get(&action.type_id()).copied()
+pub fn description(action: &dyn Action) -> Option<&'static str> {
+    DESCRIPTION.get(&action.type_id()).copied()
 }

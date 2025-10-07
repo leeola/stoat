@@ -27,8 +27,8 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: &str) -> Vec<(String, String)> {
 
     // Separate mode-specific and global bindings
     for binding in keymap.bindings() {
-        // Skip if no short description
-        let Some(desc) = stoat::actions::short_desc(binding.action()) else {
+        // Skip if no help text
+        let Some(desc) = stoat::actions::help_text(binding.action()) else {
             continue;
         };
 

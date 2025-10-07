@@ -1,11 +1,10 @@
 //! Command palette modal for fuzzy command search and execution
 //!
 //! Provides a searchable interface to discover and execute all available commands in the editor.
-//! Commands are built from the keymap bindings, showing each action with its keybinding and
-//! description.
+//! Commands are built from the keymap bindings, showing each action's name and description.
 
 use crate::{CommandInfo, Stoat};
-use gpui::{App, AppContext, KeyBinding, Keymap};
+use gpui::{App, AppContext, Keymap};
 use std::{any::TypeId, num::NonZeroU64};
 use text::{Buffer, BufferId};
 use tracing::debug;
@@ -201,19 +200,15 @@ fn build_command_list(keymap: &Keymap) -> Vec<CommandInfo> {
         let Some(name) = crate::actions::action_name(action) else {
             continue;
         };
-        let Some(description) = crate::actions::long_desc(action) else {
+        let Some(description) = crate::actions::description(action) else {
             continue;
         };
-
-        // Format keystroke for display
-        let keystroke = format_keystrokes(binding);
 
         commands_by_type_id.insert(
             type_id,
             CommandInfo {
                 name: name.to_string(),
                 description: description.to_string(),
-                keystroke,
                 type_id,
             },
         );
@@ -224,17 +219,4 @@ fn build_command_list(keymap: &Keymap) -> Vec<CommandInfo> {
     commands.sort_by(|a, b| a.name.cmp(&b.name));
 
     commands
-}
-
-/// Format keystrokes for display.
-///
-/// Converts GPUI keystroke representation to user-friendly strings.
-/// Examples: "h", "Space A", "Cmd-S"
-fn format_keystrokes(binding: &KeyBinding) -> String {
-    binding
-        .keystrokes()
-        .iter()
-        .map(|k| format!("{}", k))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
