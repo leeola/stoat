@@ -6,10 +6,10 @@ use super::{
 };
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    point, px, relative, size, App, Bounds, DispatchPhase, Element, ElementId, Entity, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun,
-    Window,
+    App, Bounds, DispatchPhase, Element, ElementId, Entity, Font, FontStyle, FontWeight,
+    GlobalElementId, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, SharedString, Style, TextRun, Window, point,
+    px, relative, size,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -102,7 +102,8 @@ impl Element for EditorElement {
         static EMPTY_LINE: SharedString = SharedString::new_static(" ");
 
         // Get buffer content and scroll position
-        let stoat = self.view.read(cx).stoat();
+        let stoat_entity = self.view.read(cx).stoat();
+        let stoat = stoat_entity.read(cx);
         let buffer_snapshot = stoat.buffer_snapshot(cx);
         let scroll_position = stoat.scroll_position();
 
@@ -266,7 +267,8 @@ impl Element for EditorElement {
 
         // Compute gutter layout with diff indicators (if enabled)
         let gutter = if self.style.show_diff_indicators {
-            let stoat = self.view.read(cx).stoat();
+            let stoat_entity = self.view.read(cx).stoat();
+            let stoat = stoat_entity.read(cx);
             let buffer_item = stoat.active_buffer_item(cx);
             let diff = buffer_item.read(cx).diff();
 
@@ -318,8 +320,8 @@ impl Element for EditorElement {
                             "Mouse down at pixel {:?} -> text position {:?}",
                             event.position, text_pos
                         );
-                        view.update(cx, |view, _| {
-                            view.set_cursor_position(text_pos);
+                        view.update(cx, |view, cx| {
+                            view.set_cursor_position(text_pos, cx);
                         });
                     }
                 }
@@ -336,11 +338,11 @@ impl Element for EditorElement {
                     if let Some(text_pos) = layout.position_for_pixel(event.position) {
                         view.update(cx, |view, cx| {
                             // Start selection mode on first drag
-                            if !view.is_selecting() {
-                                view.start_selection();
+                            if !view.is_selecting(cx) {
+                                view.start_selection(cx);
                             }
                             // Extend selection to current position
-                            view.extend_selection_to(text_pos);
+                            view.extend_selection_to(text_pos, cx);
                             // Notify to trigger re-render
                             cx.notify();
                         });
@@ -354,8 +356,8 @@ impl Element for EditorElement {
             let view = self.view.clone();
             move |event: &MouseUpEvent, phase, _window, cx| {
                 if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                    view.update(cx, |view, _| {
-                        view.end_selection();
+                    view.update(cx, |view, cx| {
+                        view.end_selection(cx);
                     });
                 }
             }
@@ -395,7 +397,8 @@ impl Element for EditorElement {
 impl EditorElement {
     /// Paint the cursor at the current position
     fn paint_cursor(&self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
-        let stoat = self.view.read(cx).stoat();
+        let stoat_entity = self.view.read(cx).stoat();
+        let stoat = stoat_entity.read(cx);
         let cursor_position = stoat.cursor_position();
         let buffer_snapshot = stoat.buffer_snapshot(cx);
 
@@ -504,7 +507,8 @@ impl EditorElement {
 
     /// Paint the selection highlight
     fn paint_selection(&self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
-        let stoat = self.view.read(cx).stoat();
+        let stoat_entity = self.view.read(cx).stoat();
+        let stoat = stoat_entity.read(cx);
         let selection = stoat.cursor_manager().selection();
 
         // Only paint if there's an actual selection (not just a cursor)

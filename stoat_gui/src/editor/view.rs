@@ -1,21 +1,21 @@
 use super::{element::EditorElement, style::EditorStyle};
 use crate::{context::EditorContext, input::InputHandler};
 use gpui::{
-    div, App, Context, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollWheelEvent, Styled, Window,
+    div, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
 use stoat::{actions::*, ScrollDelta, Stoat};
 use tracing::info;
 
 pub struct EditorView {
-    stoat: Stoat,
+    stoat: Entity<Stoat>,
     pub input_handler: InputHandler,
     context: EditorContext,
     focus_handle: FocusHandle,
 }
 
 impl EditorView {
-    pub fn new(stoat: Stoat, cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
         Self {
@@ -31,7 +31,9 @@ impl EditorView {
         info!("Inserting text: '{}'", command.0);
 
         // Insert text at cursor position using Stoat's optimized method
-        self.stoat.insert_text(&command.0, cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.insert_text(&command.0, cx);
+        });
 
         // Notify for re-render
         cx.notify();
@@ -40,28 +42,36 @@ impl EditorView {
     /// Handle entering insert mode
     fn handle_enter_insert_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Insert mode");
-        self.stoat.set_mode("insert");
+        self.stoat.update(cx, |stoat, _| {
+            stoat.set_mode("insert");
+        });
         cx.notify();
     }
 
     /// Handle entering normal mode
     fn handle_enter_normal_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Normal mode");
-        self.stoat.set_mode("normal");
+        self.stoat.update(cx, |stoat, _| {
+            stoat.set_mode("normal");
+        });
         cx.notify();
     }
 
     /// Handle entering pane mode
     fn handle_enter_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         info!("Entering Pane mode");
-        self.stoat.set_mode("pane");
+        self.stoat.update(cx, |stoat, _| {
+            stoat.set_mode("pane");
+        });
         cx.notify();
     }
 
     /// Handle setting mode dynamically
     fn handle_set_mode(&mut self, mode: &str, cx: &mut Context<'_, Self>) {
         info!("Setting mode to: {}", mode);
-        self.stoat.handle_set_mode(mode);
+        self.stoat.update(cx, |stoat, _| {
+            stoat.handle_set_mode(mode);
+        });
         cx.notify();
     }
 
@@ -82,43 +92,46 @@ impl EditorView {
     }
 
     /// Get the current editor mode for display
-    pub fn current_mode(&self) -> &str {
-        self.stoat.mode()
+    pub fn current_mode(&self, cx: &App) -> String {
+        self.stoat.read(cx).mode().to_string()
     }
 
-    /// Get a reference to the Stoat editor state
-    pub fn stoat(&self) -> &Stoat {
-        &self.stoat
-    }
-
-    /// Get a mutable reference to the Stoat editor state
-    pub fn stoat_mut(&mut self) -> &mut Stoat {
-        &mut self.stoat
+    /// Get the Stoat Entity handle
+    pub fn stoat(&self) -> Entity<Stoat> {
+        self.stoat.clone()
     }
 
     /// Set the cursor position
-    pub fn set_cursor_position(&mut self, position: text::Point) {
-        self.stoat.set_cursor_position(position);
+    pub fn set_cursor_position(&mut self, position: text::Point, cx: &mut App) {
+        self.stoat.update(cx, |stoat, _| {
+            stoat.set_cursor_position(position);
+        });
     }
 
     /// Check if currently in selection mode
-    pub fn is_selecting(&self) -> bool {
-        self.stoat.cursor_manager().is_selecting()
+    pub fn is_selecting(&self, cx: &App) -> bool {
+        self.stoat.read(cx).cursor_manager().is_selecting()
     }
 
     /// Start selection mode at current cursor position
-    pub fn start_selection(&mut self) {
-        self.stoat.cursor_manager_mut().start_selection();
+    pub fn start_selection(&mut self, cx: &mut App) {
+        self.stoat.update(cx, |stoat, _| {
+            stoat.cursor_manager_mut().start_selection();
+        });
     }
 
     /// Extend selection to the given position
-    pub fn extend_selection_to(&mut self, position: text::Point) {
-        self.stoat.cursor_manager_mut().move_to(position);
+    pub fn extend_selection_to(&mut self, position: text::Point, cx: &mut App) {
+        self.stoat.update(cx, |stoat, _| {
+            stoat.cursor_manager_mut().move_to(position);
+        });
     }
 
     /// End selection mode
-    pub fn end_selection(&mut self) {
-        self.stoat.cursor_manager_mut().end_selection();
+    pub fn end_selection(&mut self, cx: &mut App) {
+        self.stoat.update(cx, |stoat, _| {
+            stoat.cursor_manager_mut().end_selection();
+        });
     }
 
     /// Command handlers for direct action execution
@@ -178,152 +191,207 @@ impl EditorView {
 
     /// Movement command handlers
     fn handle_move_left(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_left(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_left(cx);
+        });
         cx.notify();
     }
 
     fn handle_move_right(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_right(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_right(cx);
+        });
         cx.notify();
     }
 
     fn handle_move_up(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_up(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_up(cx);
+        });
         cx.notify();
     }
 
     fn handle_move_down(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_down(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_down(cx);
+        });
         cx.notify();
     }
 
     fn handle_move_to_line_start(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_line_start();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.move_cursor_to_line_start();
+        });
         cx.notify();
     }
 
     fn handle_move_to_line_end(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_line_end(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_to_line_end(cx);
+        });
         cx.notify();
     }
 
     fn handle_move_to_file_start(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_file_start();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.move_cursor_to_file_start();
+        });
         cx.notify();
     }
 
     fn handle_move_to_file_end(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_to_file_end(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_to_file_end(cx);
+        });
         cx.notify();
     }
 
     fn handle_page_up(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_page_up(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_page_up(cx);
+        });
         cx.notify();
     }
 
     fn handle_page_down(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.move_cursor_page_down(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_cursor_page_down(cx);
+        });
         cx.notify();
     }
 
     /// Selection command handlers
     fn handle_select_next_symbol(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.select_next_symbol(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_next_symbol(cx);
+        });
         cx.notify();
     }
 
     fn handle_select_prev_symbol(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.select_prev_symbol(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_prev_symbol(cx);
+        });
         cx.notify();
     }
 
     fn handle_select_next_token(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.select_next_token(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_next_token(cx);
+        });
         cx.notify();
     }
 
     fn handle_select_prev_token(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.select_prev_token(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_prev_token(cx);
+        });
         cx.notify();
     }
 
     /// Deletion command handlers
     fn handle_delete_left(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_left(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_left(cx);
+        });
         cx.notify();
     }
 
     fn handle_delete_right(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_right(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_right(cx);
+        });
         cx.notify();
     }
 
     fn handle_delete_line(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_line(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_line(cx);
+        });
         cx.notify();
     }
 
     fn handle_delete_to_end_of_line(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.delete_to_end_of_line(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_to_end_of_line(cx);
+        });
         cx.notify();
     }
 
     /// Handle scroll events from mouse wheel or trackpad
     fn handle_scroll(&mut self, command: &HandleScroll, cx: &mut Context<'_, Self>) {
         // Pass scroll event to Stoat for processing
-        self.stoat
-            .handle_scroll_event(&command.delta, command.fast_scroll, cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.handle_scroll_event(&command.delta, command.fast_scroll, cx);
+        });
 
         cx.notify();
     }
 
     /// File finder command handlers
     fn handle_file_finder_next(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.file_finder_next();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.file_finder_next();
+        });
         cx.notify();
     }
 
     fn handle_file_finder_prev(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.file_finder_prev();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.file_finder_prev();
+        });
         cx.notify();
     }
 
     fn handle_file_finder_dismiss(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.file_finder_dismiss();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.file_finder_dismiss();
+        });
         cx.notify();
     }
 
     fn handle_file_finder_select(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.file_finder_select(cx);
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.file_finder_select(cx);
+        });
         cx.notify();
     }
 
     /// Command palette command handlers
     fn handle_command_palette_next(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.command_palette_next();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.command_palette_next();
+        });
         cx.notify();
     }
 
     fn handle_command_palette_prev(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.command_palette_prev();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.command_palette_prev();
+        });
         cx.notify();
     }
 
     fn handle_command_palette_dismiss(&mut self, cx: &mut Context<'_, Self>) {
-        self.stoat.command_palette_dismiss();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.command_palette_dismiss();
+        });
         cx.notify();
     }
 
     fn handle_command_palette_execute(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         // Get the selected command's TypeId
-        if let Some(type_id) = self.stoat.command_palette_selected_type_id() {
+        let type_id = self.stoat.read(cx).command_palette_selected_type_id();
+
+        if let Some(type_id) = type_id {
             // Dispatch the selected command
             crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
         }
 
         // Dismiss the command palette
-        self.stoat.command_palette_dismiss();
+        self.stoat.update(cx, |stoat, _| {
+            stoat.command_palette_dismiss();
+        });
         cx.notify();
     }
 }
@@ -340,19 +408,25 @@ impl Render for EditorView {
         let viewport_size = window.viewport_size();
         let style = EditorStyle::default();
         let visible_lines = viewport_size.height / style.line_height;
-        self.stoat.set_visible_line_count(visible_lines);
+        self.stoat.update(cx, |stoat, _| {
+            stoat.set_visible_line_count(visible_lines);
+        });
 
         // Update scroll animation and schedule next frame if still animating
-        if self.stoat.is_scroll_animating() {
-            let still_animating = self.stoat.update_scroll_animation();
-            if still_animating {
-                // Request next frame for smooth animation
-                window.request_animation_frame();
+        let still_animating = self.stoat.update(cx, |stoat, _| {
+            if stoat.is_scroll_animating() {
+                stoat.update_scroll_animation()
+            } else {
+                false
             }
+        });
+        if still_animating {
+            // Request next frame for smooth animation
+            window.request_animation_frame();
         }
 
         // Get current mode name for key context
-        let mode_str = self.stoat.mode().to_string();
+        let mode_str = self.stoat.read(cx).mode().to_string();
 
         // Wrap the editor element in a div that can handle keyboard input
         div()
@@ -511,7 +585,7 @@ impl Render for EditorView {
             // action matched)
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, _, cx| {
-                    let mode = editor.stoat.mode();
+                    let mode = editor.stoat.read(cx).mode().to_string();
                     // Insert text in insert mode, file_finder mode, or command_palette mode when no
                     // action matched
                     if mode == "insert" || mode == "file_finder" || mode == "command_palette" {
@@ -519,7 +593,9 @@ impl Render for EditorView {
                             // Only insert if no control/alt modifiers
                             if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt
                             {
-                                editor.stoat.insert_text(key_char, cx);
+                                editor.stoat.update(cx, |stoat, cx| {
+                                    stoat.insert_text(key_char, cx);
+                                });
                                 cx.notify();
                             }
                         }

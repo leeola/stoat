@@ -10,14 +10,6 @@ pub fn run_with_paths(
     input_sequence: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
-        let mut stoat = Stoat::new(cx);
-
-        // Load files if provided
-        if !paths.is_empty() {
-            let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_ref()).collect();
-            stoat.load_files(&path_refs, cx);
-        }
-
         // Register Stoat keybindings
         let keymap = Rc::new(stoat::keymap::create_default_keymap());
         let bindings = keymap.bindings().cloned().collect::<Vec<_>>();
@@ -35,6 +27,7 @@ pub fn run_with_paths(
         let bounds = Bounds::centered(None, window_size, cx);
 
         let keymap_clone = keymap.clone();
+        let paths_clone = paths.clone();
         let window = cx
             .open_window(
                 WindowOptions {
@@ -42,7 +35,21 @@ pub fn run_with_paths(
                     ..Default::default()
                 },
                 move |_, cx| {
-                    let initial_editor = cx.new(|cx| EditorView::new(stoat, cx));
+                    // Create Stoat Entity inside window context
+                    let stoat_entity = cx.new(|cx| {
+                        let mut stoat = Stoat::new(cx);
+
+                        // Load files if provided
+                        if !paths_clone.is_empty() {
+                            let path_refs: Vec<&std::path::Path> =
+                                paths_clone.iter().map(|p| p.as_ref()).collect();
+                            stoat.load_files(&path_refs, cx);
+                        }
+
+                        stoat
+                    });
+
+                    let initial_editor = cx.new(|cx| EditorView::new(stoat_entity, cx));
                     cx.new(|cx| PaneGroupView::new(initial_editor, keymap_clone.clone(), cx))
                 },
             )

@@ -65,8 +65,11 @@ impl PaneGroupView {
     fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(editor) = self.pane_editors.get_mut(&self.active_pane) {
             editor.update(cx, |editor, cx| {
-                if editor.stoat().mode() == "pane" {
-                    editor.stoat_mut().set_mode("normal");
+                let mode = editor.stoat().read(cx).mode().to_string();
+                if mode == "pane" {
+                    editor.stoat().update(cx, |stoat, _| {
+                        stoat.set_mode("normal");
+                    });
                     cx.notify();
                 }
             });
@@ -83,7 +86,9 @@ impl PaneGroupView {
         // Open file finder in the active editor's Stoat instance
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
-                editor.stoat_mut().open_file_finder(cx);
+                editor.stoat().update(cx, |stoat, cx| {
+                    stoat.open_file_finder(cx);
+                });
             });
             cx.notify();
         }
@@ -98,8 +103,11 @@ impl PaneGroupView {
     ) {
         // Open command palette in the active editor's Stoat instance
         if let Some(editor) = self.active_editor() {
+            let keymap = self.keymap.clone();
             editor.update(cx, |editor, cx| {
-                editor.stoat_mut().open_command_palette(&self.keymap, cx);
+                editor.stoat().update(cx, |stoat, cx| {
+                    stoat.open_command_palette(&keymap, cx);
+                });
             });
             cx.notify();
         }
@@ -127,11 +135,11 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat from the active pane so the new split shows the same buffer
+        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat().clone()
+            active_editor.read(cx).stoat()
         } else {
-            Stoat::new(cx)
+            cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Up, new_editor.clone(), cx);
@@ -163,11 +171,11 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat from the active pane so the new split shows the same buffer
+        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat().clone()
+            active_editor.read(cx).stoat()
         } else {
-            Stoat::new(cx)
+            cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Down, new_editor.clone(), cx);
@@ -199,11 +207,11 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat from the active pane so the new split shows the same buffer
+        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat().clone()
+            active_editor.read(cx).stoat()
         } else {
-            Stoat::new(cx)
+            cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Left, new_editor.clone(), cx);
@@ -235,11 +243,11 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat from the active pane so the new split shows the same buffer
+        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat().clone()
+            active_editor.read(cx).stoat()
         } else {
-            Stoat::new(cx)
+            cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
         self.split(SplitDirection::Right, new_editor.clone(), cx);
@@ -515,7 +523,8 @@ impl Render for PaneGroupView {
             .pane_editors
             .get(&self.active_pane)
             .map(|editor| {
-                let stoat = editor.read(cx).stoat();
+                let stoat_entity = editor.read(cx).stoat();
+                let stoat = stoat_entity.read(cx);
                 let mode_name = stoat.mode();
                 let display = stoat
                     .get_mode(mode_name)

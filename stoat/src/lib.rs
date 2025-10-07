@@ -544,33 +544,6 @@ impl Stoat {
     }
 }
 
-impl Clone for Stoat {
-    fn clone(&self) -> Self {
-        Self {
-            items: self.items.clone(),
-            active_item_index: self.active_item_index,
-            scroll: self.scroll.clone(),
-            cursor_manager: self.cursor_manager.clone(),
-            viewport_lines: self.viewport_lines,
-            modes: self.modes.clone(),
-            current_mode: self.current_mode.clone(),
-            file_finder_input: self.file_finder_input.clone(),
-            file_finder_files: self.file_finder_files.clone(),
-            file_finder_filtered: self.file_finder_filtered.clone(),
-            file_finder_selected: self.file_finder_selected,
-            file_finder_previous_mode: self.file_finder_previous_mode.clone(),
-            file_finder_preview: self.file_finder_preview.clone(),
-            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
-            command_palette_input: self.command_palette_input.clone(),
-            command_palette_commands: self.command_palette_commands.clone(),
-            command_palette_filtered: self.command_palette_filtered.clone(),
-            command_palette_selected: self.command_palette_selected,
-            command_palette_previous_mode: self.command_palette_previous_mode.clone(),
-            worktree: self.worktree.clone(),
-        }
-    }
-}
-
 pub mod cli {
     pub mod config {
         use clap::Parser;
