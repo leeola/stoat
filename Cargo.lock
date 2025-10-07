@@ -6628,6 +6628,7 @@ dependencies = [
  "stoat_text",
  "sum_tree",
  "text",
+ "thiserror 1.0.69",
  "toml",
  "tracing",
  "tracing-subscriber",

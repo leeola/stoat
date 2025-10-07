@@ -509,13 +509,15 @@ mod tests {
     fn worktree_discovers_rust_files() {
         let worktree = Worktree::new(PathBuf::from("src"));
         let snapshot = worktree.snapshot();
-        let files = snapshot.files(false); // Exclude ignored files
+        let entries = snapshot.entries(false); // Exclude ignored files
 
-        assert!(!files.is_empty(), "Should discover files in src/");
+        assert!(!entries.is_empty(), "Should discover files in src/");
 
         // Should find lib.rs
         assert!(
-            files.iter().any(|p| p.ends_with("lib.rs")),
+            entries
+                .iter()
+                .any(|e| e.path.as_unix_str().ends_with("lib.rs")),
             "Should find lib.rs"
         );
     }
@@ -524,11 +526,13 @@ mod tests {
     fn snapshot_ignores_hidden() {
         let worktree = Worktree::new(PathBuf::from("."));
         let snapshot = worktree.snapshot();
-        let files = snapshot.files(false); // Exclude ignored files
+        let entries = snapshot.entries(false); // Exclude ignored files
 
         // Should not include .git directory files (gitignored by IgnoreStack)
         assert!(
-            !files.iter().any(|p| p.to_string_lossy().contains(".git/")),
+            !entries
+                .iter()
+                .any(|e| e.path.as_unix_str().contains(".git/")),
             "Should not include .git directory"
         );
     }
@@ -536,11 +540,11 @@ mod tests {
     #[test]
     fn worktree_refresh_updates_list() {
         let mut worktree = Worktree::new(PathBuf::from("src"));
-        let initial_count = worktree.snapshot().files(false).len();
+        let initial_count = worktree.snapshot().entries(false).len();
 
         // Refresh should work (may or may not change count depending on FS state)
         worktree.refresh();
-        let after_count = worktree.snapshot().files(false).len();
+        let after_count = worktree.snapshot().entries(false).len();
 
         // Should still have files
         assert!(after_count > 0, "Should still have files after refresh");

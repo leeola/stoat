@@ -157,4 +157,42 @@ impl Stoat {
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }
     }
+
+    /// Create a Stoat instance for testing with an empty buffer.
+    ///
+    /// Returns a [`TestStoat`] wrapper that provides test-oriented helper methods.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stoat = Stoat::test(cx);
+    /// stoat.update(|s, cx| s.insert_text("hello", cx));
+    /// assert_eq!(stoat.buffer_text(), "hello");
+    /// ```
+    #[cfg(test)]
+    pub fn test(cx: &mut gpui::TestAppContext) -> crate::test::TestStoat<'_> {
+        crate::test::TestStoat::new("", cx)
+    }
+
+    /// Create a Stoat instance for testing with specific buffer content.
+    ///
+    /// Returns a [`TestStoat`] wrapper that provides test-oriented helper methods.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - Initial buffer content
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stoat = Stoat::test_with_text("hello\nworld", cx);
+    /// assert_eq!(stoat.buffer_text(), "hello\nworld");
+    /// ```
+    #[cfg(test)]
+    pub fn test_with_text<'a>(
+        text: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> crate::test::TestStoat<'a> {
+        crate::test::TestStoat::new(text, cx)
+    }
 }

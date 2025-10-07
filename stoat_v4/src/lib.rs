@@ -15,6 +15,12 @@ pub mod stoat;
 pub mod stoat_actions;
 pub mod worktree;
 
+#[cfg(test)]
+pub mod test;
+
+#[cfg(test)]
+mod tests;
+
 // Re-exports
 pub use actions::*;
 pub use buffer_item::BufferItem;
