@@ -66,7 +66,8 @@ impl Stoat {
     /// Takes `&mut Context<Self>` to follow Zed's Buffer pattern.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let welcome_text = "Welcome to Stoat v4!\n\nPress 'i' to enter insert mode.\nType some text.\nPress Esc to return to normal mode.\n\nPress 'h', 'j', 'k', 'l' to move in normal mode.";
+        let buffer = cx.new(|_| Buffer::new(0, buffer_id, welcome_text));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));

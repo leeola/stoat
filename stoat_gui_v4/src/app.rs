@@ -4,6 +4,10 @@ use stoat_v4::Stoat;
 
 pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
+        // Register keybindings
+        let keymap = stoat_v4::keymap::create_default_keymap();
+        cx.bind_keys(keymap.bindings().cloned());
+
         // Size window to 80% of screen size
         let window_size = cx
             .primary_display()
@@ -25,7 +29,14 @@ pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std
                 let stoat = cx.new(|cx| Stoat::new(cx));
 
                 // Create EditorView that renders the Stoat entity
-                cx.new(|cx| EditorView::new(stoat, cx))
+                let editor_view = cx.new(|cx| EditorView::new(stoat, cx));
+
+                // Set the entity reference so EditorView can pass it to EditorElement
+                editor_view.update(cx, |view, _| {
+                    view.set_entity(editor_view.clone());
+                });
+
+                editor_view
             },
         )
         .expect("failed to open window");

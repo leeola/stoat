@@ -18,8 +18,11 @@ pub enum Command {
 }
 
 fn main() {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    // Initialize logging with STOAT_LOG support
+    if let Err(e) = stoat_v4::log::init() {
+        eprintln!("Failed to initialize logging: {e}");
+        std::process::exit(1);
+    }
 
     tracing::info!("Starting Stoat editor");
 

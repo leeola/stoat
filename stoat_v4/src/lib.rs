@@ -7,6 +7,8 @@ pub mod actions;
 pub mod buffer_item;
 pub mod cursor;
 pub mod file_finder;
+pub mod keymap;
+pub mod log;
 pub mod rel_path;
 pub mod scroll;
 pub mod stoat;

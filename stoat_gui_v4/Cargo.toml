@@ -12,7 +12,11 @@ workspace = true
 [dependencies]
 stoat_v4 = { path = "../stoat_v4" }
 stoat_text = { path = "../text" }
+stoat_rope = { path = "../rope" }
 gpui = { workspace = true }
 text = { workspace = true }
+sum_tree = { workspace = true }
 anyhow = "1.0"
 tracing = "0.1"
+rustc-hash = "2.0"
+smallvec = { workspace = true }

@@ -6577,8 +6577,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "rustc-hash 2.1.1",
+ "smallvec",
+ "stoat_rope",
  "stoat_text",
  "stoat_v4",
+ "sum_tree",
  "text",
  "tracing",
 ]
@@ -6618,12 +6622,15 @@ dependencies = [
  "ignore",
  "nucleo-matcher",
  "parking_lot 0.12.4",
+ "serde",
  "smol",
  "stoat_rope",
  "stoat_text",
  "sum_tree",
  "text",
+ "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

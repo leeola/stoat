@@ -14,10 +14,13 @@ stoat_text = { path = "../text" }
 smol = "2.0"
 nucleo-matcher = "0.3.1"
 tracing = "0.1"
+tracing-subscriber = { workspace = true }
 anyhow.workspace = true
 parking_lot = { workspace = true }
 ignore = "0.4"
 enum_dispatch = "0.3"
+toml = "0.8"
+serde = { workspace = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
