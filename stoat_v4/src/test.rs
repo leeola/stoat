@@ -76,7 +76,9 @@ impl<'a> TestStoat<'a> {
             let stoat = Stoat::new(cx);
 
             // Always update the buffer to replace welcome text (even with empty string)
+            // Use Rust language for better tokenization in tests
             stoat.buffer_item().update(cx, |item, cx| {
+                item.set_language(stoat_text::Language::Rust);
                 item.buffer().update(cx, |buffer, _| {
                     let len = buffer.len();
                     buffer.edit([(0..len, text)]);
@@ -127,6 +129,14 @@ impl<'a> TestStoat<'a> {
     pub fn mode(&self) -> String {
         self.cx
             .read_entity(&self.entity, |s, _| s.mode().to_string())
+    }
+
+    /// Get the current selection.
+    ///
+    /// Returns a copy of the current selection including start, end, and reversed flag.
+    pub fn selection(&self) -> crate::cursor::Selection {
+        self.cx
+            .read_entity(&self.entity, |s, _| s.selection().clone())
     }
 }
 

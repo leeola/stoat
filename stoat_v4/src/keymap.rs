@@ -57,17 +57,28 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "MoveRight" => Ok(KeyBinding::new(key, MoveRight, context)),
         "MoveUp" => Ok(KeyBinding::new(key, MoveUp, context)),
         "MoveDown" => Ok(KeyBinding::new(key, MoveDown, context)),
+        "MoveWordLeft" => Ok(KeyBinding::new(key, MoveWordLeft, context)),
+        "MoveWordRight" => Ok(KeyBinding::new(key, MoveWordRight, context)),
         "MoveToLineStart" => Ok(KeyBinding::new(key, MoveToLineStart, context)),
         "MoveToLineEnd" => Ok(KeyBinding::new(key, MoveToLineEnd, context)),
+        "MoveToFileStart" => Ok(KeyBinding::new(key, MoveToFileStart, context)),
+        "MoveToFileEnd" => Ok(KeyBinding::new(key, MoveToFileEnd, context)),
+        "PageUp" => Ok(KeyBinding::new(key, PageUp, context)),
+        "PageDown" => Ok(KeyBinding::new(key, PageDown, context)),
 
         // Edit actions
         "DeleteLeft" => Ok(KeyBinding::new(key, DeleteLeft, context)),
         "DeleteRight" => Ok(KeyBinding::new(key, DeleteRight, context)),
+        "DeleteWordLeft" => Ok(KeyBinding::new(key, DeleteWordLeft, context)),
+        "DeleteWordRight" => Ok(KeyBinding::new(key, DeleteWordRight, context)),
         "NewLine" => Ok(KeyBinding::new(key, NewLine, context)),
+        "DeleteLine" => Ok(KeyBinding::new(key, DeleteLine, context)),
+        "DeleteToEndOfLine" => Ok(KeyBinding::new(key, DeleteToEndOfLine, context)),
 
         // Modal actions
         "EnterInsertMode" => Ok(KeyBinding::new(key, EnterInsertMode, context)),
         "EnterNormalMode" => Ok(KeyBinding::new(key, EnterNormalMode, context)),
+        "EnterVisualMode" => Ok(KeyBinding::new(key, EnterVisualMode, context)),
 
         // File finder actions
         "OpenFileFinder" => Ok(KeyBinding::new(key, OpenFileFinder, context)),
@@ -75,6 +86,18 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FileFinderPrev" => Ok(KeyBinding::new(key, FileFinderPrev, context)),
         "FileFinderSelect" => Ok(KeyBinding::new(key, FileFinderSelect, context)),
         "FileFinderDismiss" => Ok(KeyBinding::new(key, FileFinderDismiss, context)),
+
+        // Selection actions
+        "SelectNextSymbol" => Ok(KeyBinding::new(key, SelectNextSymbol, context)),
+        "SelectPrevSymbol" => Ok(KeyBinding::new(key, SelectPrevSymbol, context)),
+        "SelectNextToken" => Ok(KeyBinding::new(key, SelectNextToken, context)),
+        "SelectPrevToken" => Ok(KeyBinding::new(key, SelectPrevToken, context)),
+        "SelectLeft" => Ok(KeyBinding::new(key, SelectLeft, context)),
+        "SelectRight" => Ok(KeyBinding::new(key, SelectRight, context)),
+        "SelectUp" => Ok(KeyBinding::new(key, SelectUp, context)),
+        "SelectDown" => Ok(KeyBinding::new(key, SelectDown, context)),
+        "SelectToLineStart" => Ok(KeyBinding::new(key, SelectToLineStart, context)),
+        "SelectToLineEnd" => Ok(KeyBinding::new(key, SelectToLineEnd, context)),
 
         // Application actions
         "ExitApp" => Ok(KeyBinding::new(key, ExitApp, context)),

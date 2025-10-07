@@ -106,6 +106,175 @@ impl Stoat {
         cx.notify();
     }
 
+    /// Delete word (symbol) before cursor.
+    ///
+    /// Deletes from the start of the previous symbol to the cursor position,
+    /// removing the previous word along with any intervening whitespace.
+    ///
+    /// # Behavior
+    ///
+    /// - Finds previous symbol boundary
+    /// - Deletes from symbol start to cursor
+    /// - Moves cursor to deletion start
+    /// - If no previous symbol, does nothing
+    /// - Triggers reparse for syntax highlighting
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::delete_word_right`] for forward word deletion.
+    pub fn delete_word_left(&mut self, cx: &mut Context<Self>) {
+        use text::ToOffset;
+
+        // Get buffer and token snapshots
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut prev_symbol_start: Option<usize> = None;
+
+        // Iterate through tokens to find the previous symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // If we've passed the cursor, we're done
+            if token_start >= cursor_offset {
+                break;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // If cursor is inside or at the end of this token, delete from start to cursor
+                if token_start < cursor_offset && cursor_offset <= token_end {
+                    prev_symbol_start = Some(token_start);
+                    break;
+                }
+
+                // Track symbols that end strictly before cursor
+                if token_end < cursor_offset {
+                    prev_symbol_start = Some(token_start);
+                }
+            }
+
+            token_cursor.next();
+        }
+
+        // Delete from symbol start to cursor if found
+        if let Some(start_offset) = prev_symbol_start {
+            let delete_start = buffer_snapshot.offset_to_point(start_offset);
+
+            // Perform deletion
+            let buffer = self.buffer_item.read(cx).buffer().clone();
+            buffer.update(cx, |buffer, _| {
+                let start = buffer.point_to_offset(delete_start);
+                let end = buffer.point_to_offset(cursor_pos);
+                buffer.edit([(start..end, "")]);
+            });
+
+            // Move cursor to deletion start
+            self.cursor.move_to(delete_start);
+
+            // Reparse
+            self.buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Delete word (symbol) after cursor.
+    ///
+    /// Deletes from the cursor position to the end of the next symbol,
+    /// removing the next word along with any intervening whitespace.
+    ///
+    /// # Behavior
+    ///
+    /// - Finds next symbol boundary
+    /// - Deletes from cursor to symbol end
+    /// - Cursor stays at current position
+    /// - If no next symbol, does nothing
+    /// - Triggers reparse for syntax highlighting
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::delete_word_left`] for backward word deletion.
+    pub fn delete_word_right(&mut self, cx: &mut Context<Self>) {
+        use text::ToOffset;
+
+        // Get buffer and token snapshots
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        // Create a cursor to iterate through tokens
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut found_symbol_end: Option<usize> = None;
+
+        // Iterate through tokens to find the next symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // Skip tokens that are entirely before the cursor
+            if token_end <= cursor_offset {
+                token_cursor.next();
+                continue;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // Found a symbol - delete to its end
+                found_symbol_end = Some(token_end);
+                break;
+            }
+
+            // Not a symbol, keep looking
+            token_cursor.next();
+        }
+
+        // Delete from cursor to symbol end if found
+        if let Some(end_offset) = found_symbol_end {
+            let delete_end = buffer_snapshot.offset_to_point(end_offset);
+
+            // Perform deletion
+            let buffer = self.buffer_item.read(cx).buffer().clone();
+            buffer.update(cx, |buffer, _| {
+                let start = buffer.point_to_offset(cursor_pos);
+                let end = buffer.point_to_offset(delete_end);
+                buffer.edit([(start..end, "")]);
+            });
+
+            // Cursor stays in place
+
+            // Reparse
+            self.buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
+        }
+    }
+
     /// Insert newline at cursor
     pub fn new_line(&mut self, cx: &mut Context<Self>) {
         let cursor = self.cursor.position();
@@ -125,6 +294,117 @@ impl Stoat {
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
+    }
+
+    /// Delete current line
+    ///
+    /// Removes the entire line where the cursor is positioned, including the trailing
+    /// newline (except for the last line). The cursor moves to the beginning of the line.
+    ///
+    /// # Behavior
+    ///
+    /// - For non-last lines: deletes from line start to next line start (includes newline)
+    /// - For last line: deletes from line start to line end (no newline to delete)
+    /// - Cursor moves to beginning of the line (or next line if not last)
+    /// - Empty buffer remains empty
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::delete_to_end_of_line`] for partial line deletion.
+    pub fn delete_line(&mut self, cx: &mut Context<Self>) {
+        let cursor = self.cursor.position();
+
+        // Get buffer snapshot to determine line boundaries
+        let (line_start, line_end) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            let row_count = buffer.row_count();
+
+            let line_start = text::Point::new(cursor.row, 0);
+
+            // Include newline if not last line
+            let line_end = if cursor.row < row_count - 1 {
+                text::Point::new(cursor.row + 1, 0)
+            } else {
+                // Last line - delete to end of line
+                let line_len = buffer.line_len(cursor.row);
+                text::Point::new(cursor.row, line_len)
+            };
+
+            (line_start, line_end)
+        };
+
+        debug!(row = cursor.row, from = ?line_start, to = ?line_end, "Deleting line");
+
+        // Perform deletion
+        let buffer = self.buffer_item.read(cx).buffer().clone();
+        buffer.update(cx, |buffer, _| {
+            let start_offset = buffer.point_to_offset(line_start);
+            let end_offset = buffer.point_to_offset(line_end);
+            buffer.edit([(start_offset..end_offset, "")]);
+        });
+
+        // Move cursor to line start
+        self.cursor.move_to(line_start);
+
+        // Reparse
+        self.buffer_item.update(cx, |item, cx| {
+            let _ = item.reparse(cx);
+        });
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Delete from cursor to end of line
+    ///
+    /// Removes all text from the cursor position to the end of the current line,
+    /// preserving the newline character. The cursor stays at its current position.
+    ///
+    /// # Behavior
+    ///
+    /// - Deletes from cursor to end of line (exclusive of newline)
+    /// - Cursor stays at current position
+    /// - If cursor is already at end of line: no effect
+    /// - Empty lines remain empty
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::delete_line`] for full line deletion.
+    pub fn delete_to_end_of_line(&mut self, cx: &mut Context<Self>) {
+        let cursor = self.cursor.position();
+
+        // Get line length
+        let line_len = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            buffer.line_len(cursor.row)
+        };
+
+        // Only delete if not already at end of line
+        if cursor.column < line_len {
+            let end = text::Point::new(cursor.row, line_len);
+
+            debug!(from = ?cursor, to = ?end, "Delete to end of line");
+
+            // Perform deletion
+            let buffer = self.buffer_item.read(cx).buffer().clone();
+            buffer.update(cx, |buffer, _| {
+                let start_offset = buffer.point_to_offset(cursor);
+                let end_offset = buffer.point_to_offset(end);
+                buffer.edit([(start_offset..end_offset, "")]);
+            });
+
+            // Reparse
+            self.buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
+        } else {
+            debug!(pos = ?cursor, "Already at end of line, nothing to delete");
+        }
     }
 
     // ==== Movement actions ====
@@ -189,6 +469,140 @@ impl Stoat {
         if pos.column < line_len {
             self.cursor
                 .move_to(text::Point::new(pos.row, pos.column + 1));
+        }
+    }
+
+    /// Move cursor left by one word (symbol).
+    ///
+    /// Moves the cursor to the start of the previous symbol, skipping whitespace,
+    /// punctuation, and operators. A symbol is an identifier, keyword, or number.
+    ///
+    /// # Behavior
+    ///
+    /// - Skips whitespace, newlines, punctuation, and operators
+    /// - Moves to start of previous symbol
+    /// - If cursor is mid-symbol, moves to start of current symbol
+    /// - If no previous symbol exists, does nothing
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::move_word_right`] for forward word movement.
+    pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
+        use text::ToOffset;
+
+        // Get buffer and token snapshots
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut prev_symbol_start: Option<usize> = None;
+
+        // Iterate through tokens to find the previous symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // If we've passed the cursor, we're done
+            if token_start >= cursor_offset {
+                break;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // If cursor is inside or at the end of this token, move to start
+                if token_start < cursor_offset && cursor_offset <= token_end {
+                    prev_symbol_start = Some(token_start);
+                    break;
+                }
+
+                // Track symbols that end strictly before cursor
+                if token_end < cursor_offset {
+                    prev_symbol_start = Some(token_start);
+                }
+            }
+
+            token_cursor.next();
+        }
+
+        // Move cursor to symbol start if found
+        if let Some(offset) = prev_symbol_start {
+            let new_pos = buffer_snapshot.offset_to_point(offset);
+            self.cursor.move_to(new_pos);
+            cx.notify();
+        }
+    }
+
+    /// Move cursor right by one word (symbol).
+    ///
+    /// Moves the cursor to the end of the next symbol, skipping whitespace,
+    /// punctuation, and operators. A symbol is an identifier, keyword, or number.
+    ///
+    /// # Behavior
+    ///
+    /// - Skips whitespace, newlines, punctuation, and operators
+    /// - Moves to end of next symbol
+    /// - If cursor is mid-symbol, moves to end of current symbol
+    /// - If no next symbol exists, does nothing
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::move_word_left`] for backward word movement.
+    pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
+        use text::ToOffset;
+
+        // Get buffer and token snapshots
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        // Create a cursor to iterate through tokens
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut found_symbol_end: Option<usize> = None;
+
+        // Iterate through tokens to find the next symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // Skip tokens that are entirely before the cursor
+            if token_end <= cursor_offset {
+                token_cursor.next();
+                continue;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // Found a symbol - move to its end
+                found_symbol_end = Some(token_end);
+                break;
+            }
+
+            // Not a symbol, keep looking
+            token_cursor.next();
+        }
+
+        // Move cursor to symbol end if found
+        if let Some(offset) = found_symbol_end {
+            let new_pos = buffer_snapshot.offset_to_point(offset);
+            self.cursor.move_to(new_pos);
+            cx.notify();
         }
     }
 
@@ -260,6 +674,29 @@ impl Stoat {
     /// Enter normal mode
     pub fn enter_normal_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = "normal".to_string();
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Enter visual mode
+    ///
+    /// Transitions to Visual mode for text selection. Movement commands extend the
+    /// selection rather than moving the cursor.
+    ///
+    /// # Behavior
+    ///
+    /// - Sets editor mode to Visual
+    /// - Selection is anchored at current cursor position
+    /// - Movement commands now extend selection
+    /// - Can transition from Normal or Insert mode
+    /// - Typically bound to 'v' key
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::enter_normal_mode`] for returning to command mode.
+    pub fn enter_visual_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode = "visual".to_string();
+        debug!("Entering visual mode");
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }
@@ -501,5 +938,827 @@ impl Stoat {
     /// Get preview data
     pub fn file_finder_preview(&self) -> Option<&PreviewData> {
         self.file_finder_preview.as_ref()
+    }
+
+    // ==== Selection actions ====
+
+    /// Select the next symbol from the current cursor position.
+    ///
+    /// Skips whitespace, punctuation, and operators to find the next alphanumeric token
+    /// (identifier, keyword, or number). The selection is created without changing editor mode.
+    ///
+    /// # Symbol Types
+    ///
+    /// Selects any of:
+    /// - Identifiers: `foo`, `bar_baz`, `MyType`
+    /// - Keywords: `fn`, `let`, `struct`
+    /// - Numbers: `42`, `3.14`
+    ///
+    /// # Behavior
+    ///
+    /// - Skips whitespace, newlines, punctuation, and operators
+    /// - Selects the entire symbol (respects token boundaries)
+    /// - If cursor is mid-symbol, selects remainder of current symbol
+    /// - If no next symbol exists, does nothing
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_next_token`] for token-level selection that
+    /// includes punctuation and operators.
+    pub fn select_next_symbol(&mut self, cx: &mut Context<Self>) {
+        use std::ops::Range;
+        use text::ToOffset;
+
+        // Get buffer and token snapshots via entity
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        // If there's already a non-empty selection with cursor on left, flip cursor to right
+        let current_selection = self.cursor.selection();
+        if !current_selection.is_empty() && current_selection.reversed {
+            // Cursor is on the left side, flip it to the right
+            let start = current_selection.start;
+            let end = current_selection.end;
+
+            // Flip cursor to the right (end) side
+            let selection = crate::cursor::Selection::new(start, end);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+            return;
+        }
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        // Create a cursor to iterate through tokens
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut found_symbol: Option<Range<usize>> = None;
+
+        // Track the first symbol we encounter at cursor position (fallback)
+        let mut symbol_at_cursor = None;
+
+        // Iterate through tokens to find the next symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // Skip tokens that are entirely before the cursor
+            if token_end <= cursor_offset {
+                token_cursor.next();
+                continue;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // If we're at the start of a symbol, remember it as fallback
+                // but try to find the next symbol first
+                if token_start == cursor_offset && symbol_at_cursor.is_none() {
+                    symbol_at_cursor = Some((token_start, token_end));
+                    token_cursor.next();
+                    continue;
+                }
+
+                // Found a symbol after the cursor position
+                let selection_start = cursor_offset.max(token_start);
+                found_symbol = Some(selection_start..token_end);
+                break;
+            }
+
+            // Not a symbol, keep looking
+            token_cursor.next();
+        }
+
+        // If we didn't find a symbol after the cursor, use the one at cursor (if any)
+        if found_symbol.is_none() {
+            if let Some((start, end)) = symbol_at_cursor {
+                found_symbol = Some(start..end);
+            }
+        }
+
+        // If we found a symbol, update the cursor and selection
+        if let Some(ref range) = found_symbol {
+            let selection_start = buffer_snapshot.offset_to_point(range.start);
+            let selection_end = buffer_snapshot.offset_to_point(range.end);
+
+            // Create the selection (cursor on right/end side by default)
+            let selection = crate::cursor::Selection::new(selection_start, selection_end);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+        }
+    }
+
+    /// Select the previous symbol from the current cursor position.
+    ///
+    /// Skips whitespace, punctuation, and operators to find the previous alphanumeric token
+    /// (identifier, keyword, or number). The selection is created without changing editor mode.
+    ///
+    /// # Symbol Types
+    ///
+    /// Selects any of:
+    /// - Identifiers: `foo`, `bar_baz`, `MyType`
+    /// - Keywords: `fn`, `let`, `struct`
+    /// - Numbers: `42`, `3.14`
+    ///
+    /// # Behavior
+    ///
+    /// - Skips whitespace, newlines, punctuation, and operators
+    /// - Selects the entire symbol (respects token boundaries)
+    /// - If cursor is mid-symbol, selects from start of symbol to cursor
+    /// - If no previous symbol exists, does nothing
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_next_symbol`] for forward symbol selection.
+    pub fn select_prev_symbol(&mut self, cx: &mut Context<Self>) {
+        use std::ops::Range;
+        use text::ToOffset;
+
+        // Get buffer and token snapshots via entity
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        // If there's already a non-empty selection with cursor on right, flip cursor to left
+        let current_selection = self.cursor.selection();
+        if !current_selection.is_empty() && !current_selection.reversed {
+            // Cursor is on the right side, flip it to the left
+            let start = current_selection.start;
+            let end = current_selection.end;
+
+            // Flip cursor to the left (start) side
+            let selection = crate::cursor::Selection::new(end, start);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+            return;
+        }
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut prev_symbol: Option<(usize, usize)> = None;
+
+        // Iterate through tokens to find the previous symbol
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // If we've passed the cursor, we're done
+            if token_start >= cursor_offset {
+                break;
+            }
+
+            // Check if this token is a symbol
+            if token.kind.is_symbol() {
+                // If cursor is strictly inside this token (mid-token), select from start to cursor
+                if token_start < cursor_offset && cursor_offset < token_end {
+                    prev_symbol = Some((token_start, cursor_offset));
+                    break;
+                }
+
+                // Track symbols that end strictly before cursor
+                if token_end < cursor_offset {
+                    prev_symbol = Some((token_start, token_end));
+                }
+            }
+
+            token_cursor.next();
+        }
+
+        let found_symbol: Option<Range<usize>> = prev_symbol.map(|(start, end)| start..end);
+
+        // If we found a symbol, update the cursor and selection
+        if let Some(ref range) = found_symbol {
+            let selection_start = buffer_snapshot.offset_to_point(range.start);
+            let selection_end = buffer_snapshot.offset_to_point(range.end);
+
+            // Create reversed selection (cursor on left/start side)
+            let selection = crate::cursor::Selection::new(selection_end, selection_start);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+        }
+    }
+
+    /// Select the next token from the current cursor position.
+    ///
+    /// Selects ANY syntactic token including punctuation, operators, brackets,
+    /// identifiers, and keywords. The selection is created without changing editor mode.
+    ///
+    /// # Token Types
+    ///
+    /// Selects any of:
+    /// - Identifiers: `foo`, `bar_baz`, `MyType`
+    /// - Keywords: `fn`, `let`, `struct`
+    /// - Numbers: `42`, `3.14`
+    /// - Operators: `+`, `-`, `->`, `==`
+    /// - Punctuation: `.`, `,`, `;`, `:`
+    /// - Brackets: `(`, `)`, `{`, `}`, `[`, `]`
+    ///
+    /// # Behavior
+    ///
+    /// - Skips only whitespace and newlines
+    /// - Selects the entire token (respects token boundaries)
+    /// - If cursor is mid-token, selects remainder of current token
+    /// - If no next token exists, does nothing
+    /// - Cursor positioned on right/end side of selection
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_next_symbol`] for symbol-level selection
+    /// that skips punctuation and operators.
+    pub fn select_next_token(&mut self, cx: &mut Context<Self>) {
+        use std::ops::Range;
+        use text::ToOffset;
+
+        // Get buffer and token snapshots via entity
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        // If there's already a non-empty selection with cursor on left, flip cursor to right
+        let current_selection = self.cursor.selection();
+        if !current_selection.is_empty() && current_selection.reversed {
+            // Cursor is on the left side, flip it to the right
+            let start = current_selection.start;
+            let end = current_selection.end;
+
+            // Flip cursor to the right (end) side
+            let selection = crate::cursor::Selection::new(start, end);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+            return;
+        }
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        // Create a cursor to iterate through tokens
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut found_token: Option<Range<usize>> = None;
+
+        // Iterate through tokens to find the next token
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // Skip tokens that are entirely before the cursor
+            if token_end <= cursor_offset {
+                token_cursor.next();
+                continue;
+            }
+
+            // Check if this token is a non-whitespace token
+            if token.kind.is_token() {
+                // Select from cursor position to end of token
+                let selection_start = cursor_offset.max(token_start);
+                found_token = Some(selection_start..token_end);
+                break;
+            }
+
+            // Not a token (whitespace), keep looking
+            token_cursor.next();
+        }
+
+        // If we found a token, update the cursor and selection
+        if let Some(ref range) = found_token {
+            let selection_start = buffer_snapshot.offset_to_point(range.start);
+            let selection_end = buffer_snapshot.offset_to_point(range.end);
+
+            // Create the selection (cursor on right/end side by default)
+            let selection = crate::cursor::Selection::new(selection_start, selection_end);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+        }
+    }
+
+    /// Select the previous token from the current cursor position.
+    ///
+    /// Selects ANY syntactic token including punctuation, operators, brackets,
+    /// identifiers, and keywords. The selection is created without changing editor mode.
+    ///
+    /// # Token Types
+    ///
+    /// Selects any of:
+    /// - Identifiers: `foo`, `bar_baz`, `MyType`
+    /// - Keywords: `fn`, `let`, `struct`
+    /// - Numbers: `42`, `3.14`
+    /// - Operators: `+`, `-`, `->`, `==`
+    /// - Punctuation: `.`, `,`, `;`, `:`
+    /// - Brackets: `(`, `)`, `{`, `}`, `[`, `]`
+    ///
+    /// # Behavior
+    ///
+    /// - Skips only whitespace and newlines
+    /// - Selects the entire token (respects token boundaries)
+    /// - If cursor is mid-token, selects from start of token to cursor
+    /// - If no previous token exists, does nothing
+    /// - Cursor positioned on left/start side of selection
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_prev_symbol`] for symbol-level selection
+    /// that skips punctuation and operators.
+    pub fn select_prev_token(&mut self, cx: &mut Context<Self>) {
+        use std::ops::Range;
+        use text::ToOffset;
+
+        // Get buffer and token snapshots via entity
+        let (buffer_snapshot, token_snapshot) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item.token_snapshot();
+            (buffer_snapshot, token_snapshot)
+        };
+
+        // If there's already a non-empty selection with cursor on right, flip cursor to left
+        let current_selection = self.cursor.selection();
+        if !current_selection.is_empty() && !current_selection.reversed {
+            // Cursor is on the right side, flip it to the left
+            let start = current_selection.start;
+            let end = current_selection.end;
+
+            // Flip cursor to the left (start) side
+            let selection = crate::cursor::Selection::new(end, start);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+            return;
+        }
+
+        let cursor_pos = self.cursor.position();
+        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
+
+        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+        token_cursor.next();
+
+        let mut prev_token: Option<(usize, usize)> = None;
+
+        // Iterate through tokens to find the previous token
+        while let Some(token) = token_cursor.item() {
+            let token_start = token.range.start.to_offset(&buffer_snapshot);
+            let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+            // If we've passed the cursor, we're done
+            if token_start >= cursor_offset {
+                break;
+            }
+
+            // Check if this token is a non-whitespace token
+            if token.kind.is_token() {
+                // If cursor is strictly inside this token (mid-token), select from start to cursor
+                if token_start < cursor_offset && cursor_offset < token_end {
+                    prev_token = Some((token_start, cursor_offset));
+                    break;
+                }
+
+                // Track tokens that end at or before cursor
+                if token_end <= cursor_offset {
+                    prev_token = Some((token_start, token_end));
+                }
+            }
+
+            token_cursor.next();
+        }
+
+        let found_token: Option<Range<usize>> = prev_token.map(|(start, end)| start..end);
+
+        // If we found a token, update the cursor and selection
+        if let Some(ref range) = found_token {
+            let selection_start = buffer_snapshot.offset_to_point(range.start);
+            let selection_end = buffer_snapshot.offset_to_point(range.end);
+
+            // Create reversed selection (cursor on left/start side)
+            let selection = crate::cursor::Selection::new(selection_end, selection_start);
+            self.cursor.set_selection(selection);
+
+            cx.notify();
+        }
+    }
+
+    // ==== Visual mode selection actions ====
+
+    /// Extend selection left by one character.
+    ///
+    /// In visual mode, moves the selection endpoint left by one character,
+    /// extending or shrinking the selection based on direction.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection left by one character
+    /// - Stops at line start
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_right`] for right selection extension.
+    pub fn select_left(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        if cursor_pos.column > 0 {
+            let new_pos = text::Point::new(cursor_pos.row, cursor_pos.column - 1);
+            let new_selection = if selection.is_empty() {
+                // First extension - create selection
+                crate::cursor::Selection::new(cursor_pos, new_pos)
+            } else {
+                // Extend existing selection
+                let anchor = selection.anchor_position();
+                crate::cursor::Selection::new(anchor, new_pos)
+            };
+            self.cursor.set_selection(new_selection);
+        }
+
+        cx.notify();
+    }
+
+    /// Extend selection right by one character.
+    ///
+    /// In visual mode, moves the selection endpoint right by one character,
+    /// extending or shrinking the selection based on direction.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection right by one character
+    /// - Stops at line end
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_left`] for left selection extension.
+    pub fn select_right(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        // Get line length
+        let line_len = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            buffer.line_len(cursor_pos.row)
+        };
+
+        if cursor_pos.column < line_len {
+            let new_pos = text::Point::new(cursor_pos.row, cursor_pos.column + 1);
+            let new_selection = if selection.is_empty() {
+                // First extension - create selection
+                crate::cursor::Selection::new(cursor_pos, new_pos)
+            } else {
+                // Extend existing selection
+                let anchor = selection.anchor_position();
+                crate::cursor::Selection::new(anchor, new_pos)
+            };
+            self.cursor.set_selection(new_selection);
+        }
+
+        cx.notify();
+    }
+
+    /// Extend selection up by one line.
+    ///
+    /// In visual mode, moves the selection endpoint up by one line,
+    /// extending or shrinking the selection based on direction.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection up by one line
+    /// - Stops at first line
+    /// - Maintains goal column when possible
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_down`] for down selection extension.
+    pub fn select_up(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        if cursor_pos.row > 0 {
+            let target_row = cursor_pos.row - 1;
+            let line_len = {
+                let buffer_item = self.buffer_item.read(cx);
+                let buffer = buffer_item.buffer().read(cx);
+                buffer.line_len(target_row)
+            };
+
+            let target_column = self.cursor.goal_column().min(line_len);
+            let new_pos = text::Point::new(target_row, target_column);
+
+            let new_selection = if selection.is_empty() {
+                // First extension - create selection
+                crate::cursor::Selection::new(cursor_pos, new_pos)
+            } else {
+                // Extend existing selection
+                let anchor = selection.anchor_position();
+                crate::cursor::Selection::new(anchor, new_pos)
+            };
+
+            self.cursor.set_selection(new_selection);
+        }
+
+        cx.notify();
+    }
+
+    /// Extend selection down by one line.
+    ///
+    /// In visual mode, moves the selection endpoint down by one line,
+    /// extending or shrinking the selection based on direction.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection down by one line
+    /// - Stops at last line
+    /// - Maintains goal column when possible
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_up`] for up selection extension.
+    pub fn select_down(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        let target_column = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            let max_row = buffer.max_point().row;
+
+            if cursor_pos.row < max_row {
+                let target_row = cursor_pos.row + 1;
+                let line_len = buffer.line_len(target_row);
+                let target_column = self.cursor.goal_column().min(line_len);
+                Some(target_column)
+            } else {
+                None
+            }
+        };
+
+        if let Some(target_column) = target_column {
+            let new_pos = text::Point::new(cursor_pos.row + 1, target_column);
+
+            let new_selection = if selection.is_empty() {
+                // First extension - create selection
+                crate::cursor::Selection::new(cursor_pos, new_pos)
+            } else {
+                // Extend existing selection
+                let anchor = selection.anchor_position();
+                crate::cursor::Selection::new(anchor, new_pos)
+            };
+
+            self.cursor.set_selection(new_selection);
+        }
+
+        cx.notify();
+    }
+
+    /// Extend selection to start of line.
+    ///
+    /// In visual mode, extends the selection to column 0 of the current line.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection to line start (column 0)
+    /// - Works from any position on the line
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_to_line_end`] for end-of-line selection.
+    pub fn select_to_line_start(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+        let new_pos = text::Point::new(cursor_pos.row, 0);
+
+        let new_selection = if selection.is_empty() {
+            // First extension - create selection
+            crate::cursor::Selection::new(cursor_pos, new_pos)
+        } else {
+            // Extend existing selection
+            let anchor = selection.anchor_position();
+            crate::cursor::Selection::new(anchor, new_pos)
+        };
+
+        self.cursor.set_selection(new_selection);
+        cx.notify();
+    }
+
+    /// Extend selection to end of line.
+    ///
+    /// In visual mode, extends the selection to the end of the current line.
+    ///
+    /// # Behavior
+    ///
+    /// - Extends selection to line end
+    /// - Works from any position on the line
+    /// - Updates selection in cursor manager
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::select_to_line_start`] for start-of-line selection.
+    pub fn select_to_line_end(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        let line_len = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            buffer.line_len(cursor_pos.row)
+        };
+
+        let new_pos = text::Point::new(cursor_pos.row, line_len);
+
+        let new_selection = if selection.is_empty() {
+            // First extension - create selection
+            crate::cursor::Selection::new(cursor_pos, new_pos)
+        } else {
+            // Extend existing selection
+            let anchor = selection.anchor_position();
+            crate::cursor::Selection::new(anchor, new_pos)
+        };
+
+        self.cursor.set_selection(new_selection);
+        cx.notify();
+    }
+
+    // ==== File navigation actions ====
+
+    /// Move cursor to the start of the file.
+    ///
+    /// Positions the cursor at the very beginning of the buffer (row 0, column 0),
+    /// regardless of current position.
+    ///
+    /// # Behavior
+    ///
+    /// - Moves cursor to (0, 0)
+    /// - Resets goal column for vertical movement
+    /// - Works from any position in the buffer
+    /// - Triggers scroll animation to make cursor visible
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::move_to_file_end`] for end-of-file movement.
+    pub fn move_to_file_start(&mut self, cx: &mut Context<Self>) {
+        self.cursor.move_to(text::Point::new(0, 0));
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Move cursor to the end of the file.
+    ///
+    /// Positions the cursor at the very end of the buffer, after the last character of
+    /// the last line.
+    ///
+    /// # Behavior
+    ///
+    /// - Moves cursor to last row, end of line
+    /// - Position is after the last character
+    /// - Resets goal column for vertical movement
+    /// - Triggers scroll animation to make cursor visible
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::move_to_file_start`] for start-of-file movement.
+    pub fn move_to_file_end(&mut self, cx: &mut Context<Self>) {
+        // Get buffer snapshot to find last line
+        let buffer_snapshot = {
+            let buffer_item = self.buffer_item.read(cx);
+            buffer_item.buffer().read(cx).snapshot()
+        };
+
+        let last_row = buffer_snapshot.row_count().saturating_sub(1);
+        let last_line_len = buffer_snapshot.line_len(last_row);
+        let new_pos = text::Point::new(last_row, last_line_len);
+
+        self.cursor.move_to(new_pos);
+        self.ensure_cursor_visible();
+        cx.notify();
+    }
+
+    /// Move cursor up by one page (approximately one viewport height).
+    ///
+    /// Moves the cursor up by the visible line count and animates the viewport to follow.
+    /// The page size is determined by the current viewport dimensions.
+    ///
+    /// # Behavior
+    ///
+    /// - Moves up by `viewport_lines` rows (defaults to 30 if not set)
+    /// - Maintains goal column across the movement
+    /// - Clamps to line length if target line is shorter
+    /// - Initiates animated scroll to keep cursor visible
+    /// - No effect if already at first line
+    ///
+    /// # Scroll Animation
+    ///
+    /// The viewport animates smoothly to position the cursor approximately 3 lines from
+    /// the top, providing context while avoiding the very top edge.
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::page_down`] for downward page movement.
+    pub fn page_up(&mut self, cx: &mut Context<Self>) {
+        let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
+
+        if lines_per_page == 0 {
+            return;
+        }
+
+        let current_pos = self.cursor.position();
+        let new_row = current_pos.row.saturating_sub(lines_per_page);
+
+        // Get buffer snapshot to clamp column
+        let buffer_snapshot = {
+            let buffer_item = self.buffer_item.read(cx);
+            buffer_item.buffer().read(cx).snapshot()
+        };
+
+        let line_len = buffer_snapshot.line_len(new_row);
+        let new_column = self.cursor.goal_column().min(line_len);
+        let new_pos = text::Point::new(new_row, new_column);
+
+        self.cursor.move_to_with_goal(new_pos);
+
+        // Start animated scroll to keep cursor visible (3 lines from top for context)
+        let target_scroll_y = new_row.saturating_sub(3) as f32;
+        self.scroll
+            .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
+
+        cx.notify();
+    }
+
+    /// Move cursor down by one page (approximately one viewport height).
+    ///
+    /// Moves the cursor down by the visible line count and animates the viewport to follow.
+    /// The page size is determined by the current viewport dimensions.
+    ///
+    /// # Behavior
+    ///
+    /// - Moves down by `viewport_lines` rows (defaults to 30 if not set)
+    /// - Maintains goal column across the movement
+    /// - Clamps to line length if target line is shorter
+    /// - Clamps to last line of buffer
+    /// - Initiates animated scroll to keep cursor visible
+    /// - No effect if already at last line
+    ///
+    /// # Scroll Animation
+    ///
+    /// The viewport animates smoothly to position the cursor approximately 3 lines from
+    /// the top, providing context while avoiding the very top edge.
+    ///
+    /// # Related
+    ///
+    /// See also [`Self::page_up`] for upward page movement.
+    pub fn page_down(&mut self, cx: &mut Context<Self>) {
+        let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
+
+        if lines_per_page == 0 {
+            return;
+        }
+
+        // Get buffer snapshot to find max row
+        let buffer_snapshot = {
+            let buffer_item = self.buffer_item.read(cx);
+            buffer_item.buffer().read(cx).snapshot()
+        };
+
+        let max_row = buffer_snapshot.row_count().saturating_sub(1);
+        let current_pos = self.cursor.position();
+
+        if max_row == 0 {
+            return;
+        }
+
+        let new_row = (current_pos.row + lines_per_page).min(max_row);
+        let line_len = buffer_snapshot.line_len(new_row);
+        let new_column = self.cursor.goal_column().min(line_len);
+        let new_pos = text::Point::new(new_row, new_column);
+
+        self.cursor.move_to_with_goal(new_pos);
+
+        // Start animated scroll to keep cursor visible (3 lines from top for context)
+        let target_scroll_y = new_row.saturating_sub(3) as f32;
+        self.scroll
+            .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
+
+        cx.notify();
     }
 }

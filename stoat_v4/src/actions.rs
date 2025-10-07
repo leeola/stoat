@@ -12,8 +12,16 @@ actions!(
         DeleteLeft,
         /// Delete character after cursor
         DeleteRight,
+        /// Delete word before cursor
+        DeleteWordLeft,
+        /// Delete word after cursor
+        DeleteWordRight,
         /// Insert newline
         NewLine,
+        /// Delete current line
+        DeleteLine,
+        /// Delete from cursor to end of line
+        DeleteToEndOfLine,
     ]
 );
 
@@ -29,10 +37,22 @@ actions!(
         MoveLeft,
         /// Move cursor right one character
         MoveRight,
+        /// Move cursor left by one word
+        MoveWordLeft,
+        /// Move cursor right by one word
+        MoveWordRight,
         /// Move cursor to start of line
         MoveToLineStart,
         /// Move cursor to end of line
         MoveToLineEnd,
+        /// Move cursor to start of file
+        MoveToFileStart,
+        /// Move cursor to end of file
+        MoveToFileEnd,
+        /// Scroll up one page
+        PageUp,
+        /// Scroll down one page
+        PageDown,
     ]
 );
 
@@ -44,6 +64,8 @@ actions!(
         EnterInsertMode,
         /// Enter normal mode
         EnterNormalMode,
+        /// Enter visual mode
+        EnterVisualMode,
     ]
 );
 
@@ -61,6 +83,33 @@ actions!(
         FileFinderSelect,
         /// Dismiss file finder
         FileFinderDismiss,
+    ]
+);
+
+// Selection actions
+actions!(
+    stoat_v4,
+    [
+        /// Select next symbol (identifier, keyword, or literal)
+        SelectNextSymbol,
+        /// Select previous symbol (identifier, keyword, or literal)
+        SelectPrevSymbol,
+        /// Select next token (including punctuation and operators)
+        SelectNextToken,
+        /// Select previous token (including punctuation and operators)
+        SelectPrevToken,
+        /// Extend selection left by one character
+        SelectLeft,
+        /// Extend selection right by one character
+        SelectRight,
+        /// Extend selection up by one line
+        SelectUp,
+        /// Extend selection down by one line
+        SelectDown,
+        /// Extend selection to start of line
+        SelectToLineStart,
+        /// Extend selection to end of line
+        SelectToLineEnd,
     ]
 );
 

@@ -105,6 +105,11 @@ impl Stoat {
         self.cursor.move_to(position);
     }
 
+    /// Get current selection
+    pub fn selection(&self) -> &crate::cursor::Selection {
+        self.cursor.selection()
+    }
+
     /// Get scroll position
     pub fn scroll_position(&self) -> gpui::Point<f32> {
         self.scroll.position
