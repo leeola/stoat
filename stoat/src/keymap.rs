@@ -144,6 +144,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FileFinderDismiss" => Ok(KeyBinding::new(key, FileFinderDismiss, context)),
         "FileFinderSelect" => Ok(KeyBinding::new(key, FileFinderSelect, context)),
 
+        // Command palette actions
+        "OpenCommandPalette" => Ok(KeyBinding::new(key, OpenCommandPalette, context)),
+        "CommandPaletteNext" => Ok(KeyBinding::new(key, CommandPaletteNext, context)),
+        "CommandPalettePrev" => Ok(KeyBinding::new(key, CommandPalettePrev, context)),
+        "CommandPaletteDismiss" => Ok(KeyBinding::new(key, CommandPaletteDismiss, context)),
+        "CommandPaletteExecute" => Ok(KeyBinding::new(key, CommandPaletteExecute, context)),
+
         _ => Err(format!("Unknown action: {}", binding_config.action)),
     }
 }

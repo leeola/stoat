@@ -298,6 +298,34 @@ impl EditorView {
         self.stoat.file_finder_select(cx);
         cx.notify();
     }
+
+    /// Command palette command handlers
+    fn handle_command_palette_next(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.command_palette_next();
+        cx.notify();
+    }
+
+    fn handle_command_palette_prev(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.command_palette_prev();
+        cx.notify();
+    }
+
+    fn handle_command_palette_dismiss(&mut self, cx: &mut Context<'_, Self>) {
+        self.stoat.command_palette_dismiss();
+        cx.notify();
+    }
+
+    fn handle_command_palette_execute(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        // Get the selected command's TypeId
+        if let Some(type_id) = self.stoat.command_palette_selected_type_id() {
+            // Dispatch the selected command
+            crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
+        }
+
+        // Dismiss the command palette
+        self.stoat.command_palette_dismiss();
+        cx.notify();
+    }
 }
 
 impl Focusable for EditorView {
@@ -458,12 +486,35 @@ impl Render for EditorView {
                     editor.handle_file_finder_select(cx);
                 },
             ))
-            // Handle text input in insert/file_finder mode as fallback (when no action matched)
+            // Command palette handlers
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &CommandPaletteNext, _window: &mut Window, cx| {
+                    editor.handle_command_palette_next(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &CommandPalettePrev, _window: &mut Window, cx| {
+                    editor.handle_command_palette_prev(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &CommandPaletteDismiss, _window: &mut Window, cx| {
+                    editor.handle_command_palette_dismiss(cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |editor: &mut EditorView, _: &CommandPaletteExecute, window: &mut Window, cx| {
+                    editor.handle_command_palette_execute(window, cx);
+                },
+            ))
+            // Handle text input in insert/file_finder/command_palette mode as fallback (when no
+            // action matched)
             .on_key_down(cx.listener(
                 |editor: &mut EditorView, event: &gpui::KeyDownEvent, _, cx| {
                     let mode = editor.stoat.mode();
-                    // Insert text in insert mode or file_finder mode when no action matched
-                    if mode == "insert" || mode == "file_finder" {
+                    // Insert text in insert mode, file_finder mode, or command_palette mode when no
+                    // action matched
+                    if mode == "insert" || mode == "file_finder" || mode == "command_palette" {
                         if let Some(ref key_char) = event.keystroke.key_char {
                             // Only insert if no control/alt modifiers
                             if !event.keystroke.modifiers.control && !event.keystroke.modifiers.alt

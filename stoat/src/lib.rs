@@ -46,11 +46,27 @@ use nucleo_matcher::{
 use pane::{BufferItem, ItemVariant};
 use parking_lot::Mutex;
 pub use scroll::{ScrollDelta, ScrollPosition};
-use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
+use std::{any::TypeId, num::NonZeroU64, path::PathBuf, sync::Arc};
 use stoat_rope::TokenSnapshot;
 use stoat_text::Language;
 use text::{Buffer, BufferId, BufferSnapshot, Point};
 use worktree::{Entry, Worktree};
+
+/// Information about an available command for the command palette.
+///
+/// This struct holds metadata about an action that can be executed via the command palette.
+/// Commands are built from the keymap bindings and displayed with fuzzy search.
+#[derive(Clone, Debug)]
+pub struct CommandInfo {
+    /// Action name (e.g., "MoveLeft", "Save")
+    pub name: String,
+    /// Short description of what the command does
+    pub description: String,
+    /// Primary keybinding for this command (e.g., "h", "Cmd-S")
+    pub keystroke: String,
+    /// TypeId for dispatching the action
+    pub type_id: TypeId,
+}
 
 pub struct Stoat {
     /// Items displayed in editor (buffers, terminals, etc.)
@@ -73,6 +89,12 @@ pub struct Stoat {
     file_finder_previous_mode: Option<String>,
     file_finder_preview: Option<String>,
     file_finder_matcher: Matcher,
+    // Command palette state
+    command_palette_input: Option<Entity<Buffer>>,
+    command_palette_commands: Vec<CommandInfo>,
+    command_palette_filtered: Vec<CommandInfo>,
+    command_palette_selected: usize,
+    command_palette_previous_mode: Option<String>,
     // Worktree (shared across cloned Stoats)
     worktree: Arc<Mutex<Worktree>>,
 }
@@ -106,6 +128,11 @@ impl Stoat {
             file_finder_previous_mode: None,
             file_finder_preview: None,
             file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            command_palette_input: None,
+            command_palette_commands: Vec::new(),
+            command_palette_filtered: Vec::new(),
+            command_palette_selected: 0,
+            command_palette_previous_mode: None,
             worktree,
         }
     }
@@ -291,6 +318,14 @@ impl Stoat {
             .unwrap_or_default()
     }
 
+    /// Get the command palette query text from the input buffer
+    pub fn command_palette_query(&self, cx: &App) -> String {
+        self.command_palette_input
+            .as_ref()
+            .map(|buf| buf.read(cx).snapshot().text())
+            .unwrap_or_default()
+    }
+
     /// Get the filtered files list
     pub fn file_finder_filtered_files(&self) -> &[PathBuf] {
         &self.file_finder_filtered
@@ -349,6 +384,62 @@ impl Stoat {
 
         // Reset selection to top when filter changes
         self.file_finder_selected = 0;
+    }
+
+    /// Filter commands based on fuzzy search query.
+    ///
+    /// Performs fuzzy matching on command names and descriptions using nucleo-matcher.
+    /// Supports non-contiguous character matching. Results are ranked by match quality score.
+    /// Updates the filtered commands list and resets selection to 0.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query string
+    pub fn filter_commands(&mut self, query: &str) {
+        if query.is_empty() {
+            // No query: show all commands
+            self.command_palette_filtered = self.command_palette_commands.clone();
+        } else {
+            // Parse pattern for smart fuzzy matching
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+
+            // Build candidate list - search in both command name and description
+            let candidates: Vec<String> = self
+                .command_palette_commands
+                .iter()
+                .map(|cmd| format!("{} {}", cmd.name, cmd.description))
+                .collect();
+
+            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+
+            // Create a temporary matcher for commands (uses default config, not path-specific)
+            let mut matcher = Matcher::new(Config::DEFAULT);
+
+            // Match and score all candidates
+            let mut matches = pattern.match_list(&candidate_refs, &mut matcher);
+
+            // Sort by score (descending - higher score = better match)
+            matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Limit to top 50 results
+            matches.truncate(50);
+
+            // Convert back to CommandInfo
+            self.command_palette_filtered = matches
+                .into_iter()
+                .filter_map(|(matched_str, _score)| {
+                    // Find the original CommandInfo by matching the search string
+                    self.command_palette_commands.iter().find(|cmd| {
+                        let search_str = format!("{} {}", cmd.name, cmd.description);
+                        search_str == *matched_str
+                    })
+                })
+                .cloned()
+                .collect();
+        }
+
+        // Reset selection to top when filter changes
+        self.command_palette_selected = 0;
     }
 
     /// Get all available modes
@@ -450,6 +541,11 @@ impl Clone for Stoat {
             file_finder_previous_mode: self.file_finder_previous_mode.clone(),
             file_finder_preview: self.file_finder_preview.clone(),
             file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            command_palette_input: self.command_palette_input.clone(),
+            command_palette_commands: self.command_palette_commands.clone(),
+            command_palette_filtered: self.command_palette_filtered.clone(),
+            command_palette_selected: self.command_palette_selected,
+            command_palette_previous_mode: self.command_palette_previous_mode.clone(),
             worktree: self.worktree.clone(),
         }
     }

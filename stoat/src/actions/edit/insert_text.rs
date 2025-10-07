@@ -69,6 +69,26 @@ impl Stoat {
             return;
         }
 
+        // Route to command palette input buffer if in command_palette mode
+        if self.mode() == "command_palette" {
+            if let Some(input_buffer) = &self.command_palette_input {
+                // Insert into input buffer at end
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _cx| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
+
+                // Re-filter commands based on new query
+                let query = self.command_palette_query(cx);
+                self.filter_commands(&query);
+
+                trace!(query = ?query, filtered_count = self.command_palette_filtered.len(), "Command palette: filtered");
+            }
+            return;
+        }
+
         // Main buffer insertion for all other modes
         let buffer_snapshot = self.buffer_snapshot(cx);
         let cursor_pos = self.cursor_manager.position();

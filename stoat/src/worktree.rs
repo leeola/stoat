@@ -29,7 +29,7 @@ mod ignore;
 
 use self::ignore::IgnoreStack;
 use crate::rel_path::RelPath;
-use ::ignore::gitignore::{Gitignore, GitignoreBuilder, gitconfig_excludes_path};
+use ::ignore::gitignore::{gitconfig_excludes_path, Gitignore, GitignoreBuilder};
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},

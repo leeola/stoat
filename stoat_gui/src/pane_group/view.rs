@@ -1,6 +1,6 @@
 use crate::{
-    command_overlay::CommandOverlay, editor::view::EditorView, file_finder::FileFinder,
-    pane_group::element::pane_axis,
+    command_overlay::CommandOverlay, command_palette::CommandPalette, editor::view::EditorView,
+    file_finder::FileFinder, pane_group::element::pane_axis,
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
@@ -9,8 +9,8 @@ use gpui::{
 use std::{collections::HashMap, rc::Rc};
 use stoat::{
     actions::{
-        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenFileFinder,
-        SplitDown, SplitLeft, SplitRight, SplitUp,
+        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenCommandPalette,
+        OpenFileFinder, SplitDown, SplitLeft, SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -84,6 +84,22 @@ impl PaneGroupView {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
                 editor.stoat_mut().open_file_finder(cx);
+            });
+            cx.notify();
+        }
+    }
+
+    /// Handle opening the command palette
+    fn handle_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Open command palette in the active editor's Stoat instance
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat_mut().open_command_palette(&self.keymap, cx);
             });
             cx.notify();
         }
@@ -494,8 +510,8 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Get the mode and file finder data from the active editor
-        let (active_mode, mode_display, file_finder_data) = self
+        // Get the mode, file finder data, and command palette data from the active editor
+        let (active_mode, mode_display, file_finder_data, command_palette_data) = self
             .pane_editors
             .get(&self.active_pane)
             .map(|editor| {
@@ -518,9 +534,20 @@ impl Render for PaneGroupView {
                     None
                 };
 
-                (mode_name, display, ff_data)
+                // Extract command palette data if in command_palette mode
+                let cp_data = if mode_name == "command_palette" {
+                    Some((
+                        stoat.command_palette_query(cx),
+                        stoat.command_palette_filtered().to_vec(),
+                        stoat.command_palette_selected(),
+                    ))
+                } else {
+                    None
+                };
+
+                (mode_name, display, ff_data, cp_data)
             })
-            .unwrap_or(("normal", "NORMAL".to_string(), None));
+            .unwrap_or(("normal", "NORMAL".to_string(), None, None));
 
         // Query keymap for bindings in the current mode
         let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
@@ -539,12 +566,21 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_left))
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .on_action(cx.listener(Self::handle_open_file_finder))
+            .on_action(cx.listener(Self::handle_open_command_palette))
             .child(self.render_member(self.pane_group.root(), 0))
             .child(CommandOverlay::new(mode_display, bindings))
             .when(active_mode == "file_finder", |div| {
                 // Render file finder overlay when in file_finder mode
                 if let Some((query, files, selected, preview)) = file_finder_data {
                     div.child(FileFinder::new(query, files, selected, preview))
+                } else {
+                    div
+                }
+            })
+            .when(active_mode == "command_palette", |div| {
+                // Render command palette overlay when in command_palette mode
+                if let Some((query, commands, selected)) = command_palette_data {
+                    div.child(CommandPalette::new(query, commands, selected))
                 } else {
                     div
                 }

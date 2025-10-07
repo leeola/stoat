@@ -28,6 +28,10 @@ display_name = "FILE FINDER"
 name = "space"
 display_name = "SPACE"
 
+[[modes]]
+name = "command_palette"
+display_name = "COMMAND"
+
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]
 key = "h"
@@ -582,3 +586,44 @@ context = "Editor && mode == space"
 key = "escape"
 action = "SetMode(normal)"
 context = "Editor && mode == space"
+
+# Command Palette Mode - Fuzzy command search
+[[bindings]]
+key = ":"
+action = "OpenCommandPalette"
+context = "Editor && mode == normal"
+
+[[bindings]]
+key = "escape"
+action = "CommandPaletteDismiss"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "up"
+action = "CommandPalettePrev"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "down"
+action = "CommandPaletteNext"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "ctrl-p"
+action = "CommandPalettePrev"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "ctrl-n"
+action = "CommandPaletteNext"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "enter"
+action = "CommandPaletteExecute"
+context = "Editor && mode == command_palette"
+
+[[bindings]]
+key = "backspace"
+action = "DeleteLeft"
+context = "Editor && mode == command_palette"

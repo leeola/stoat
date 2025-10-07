@@ -1,8 +1,10 @@
 pub mod actions;
 pub mod app;
 pub mod command_overlay;
+pub mod command_palette;
 pub mod context;
 pub mod cursor;
+mod dispatch;
 pub mod editor;
 pub mod external_input;
 pub mod file_finder;

@@ -59,6 +59,28 @@ impl Stoat {
             return;
         }
 
+        // Route to command palette input buffer if in command_palette mode
+        if self.mode() == "command_palette" {
+            if let Some(input_buffer) = &self.command_palette_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character
+                    input_buffer.update(cx, |buffer, _cx| {
+                        buffer.edit([(len - 1..len, "")]);
+                    });
+
+                    // Re-filter commands based on new query
+                    let query = self.command_palette_query(cx);
+                    self.filter_commands(&query);
+
+                    trace!(query = ?query, filtered_count = self.command_palette_filtered.len(), "Command palette: filtered after delete");
+                }
+            }
+            return;
+        }
+
         // Main buffer deletion for all other modes
         let current_pos = self.cursor_manager.position();
         if current_pos.column > 0 {
