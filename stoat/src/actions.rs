@@ -23,7 +23,7 @@ mod modal;
 mod movement;
 mod scroll;
 mod selection;
-mod shell;
+pub mod shell;
 
 use crate::ScrollDelta;
 use gpui::{actions, Action, Pixels, Point};

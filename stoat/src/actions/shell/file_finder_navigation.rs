@@ -4,11 +4,27 @@
 
 use crate::Stoat;
 use std::path::Path;
+use stoat_rope::TokenSnapshot;
+use stoat_text::{Language, Parser};
+use text::{Buffer, BufferId};
 use tracing::debug;
 
-/// Load a preview of a file's contents.
+/// Preview data containing both text and syntax highlighting tokens.
 ///
-/// Reads up to the first 1000 lines or 100KB of a file for preview display.
+/// This structure holds a file preview along with its parsed tokens for efficient
+/// syntax highlighting in the file finder preview panel.
+#[derive(Clone)]
+pub struct PreviewData {
+    /// The preview text content (up to 100KB/1000 lines)
+    pub text: String,
+    /// Parsed syntax tokens for highlighting
+    pub tokens: TokenSnapshot,
+}
+
+/// Load a preview of a file's contents with syntax highlighting.
+///
+/// Reads up to the first 1000 lines or 100KB of a file for preview display,
+/// parses it for syntax highlighting, and returns both text and tokens.
 /// Returns [`None`] if the file cannot be read, is binary, or contains invalid UTF-8.
 ///
 /// # Arguments
@@ -17,8 +33,8 @@ use tracing::debug;
 ///
 /// # Returns
 ///
-/// File contents as a string, or [`None`] if preview cannot be generated
-fn load_file_preview(path: &Path) -> Option<String> {
+/// [`PreviewData`] with text and tokens, or [`None`] if preview cannot be generated
+pub fn load_file_preview(path: &Path) -> Option<PreviewData> {
     const MAX_BYTES: usize = 100 * 1024; // 100KB
     const MAX_LINES: usize = 1000;
 
@@ -54,7 +70,24 @@ fn load_file_preview(path: &Path) -> Option<String> {
         line_count += 1;
     }
 
-    Some(result)
+    // Detect language from file extension
+    let language = Language::from_extension(path.extension()?.to_str()?);
+
+    // Parse for syntax highlighting
+    let mut parser = Parser::new(language).ok()?;
+    let buffer = Buffer::new(0, BufferId::new(1).ok()?, result.clone());
+    let snapshot = buffer.snapshot();
+    let parsed_tokens = parser.parse(&result, &snapshot).ok()?;
+
+    // Build token snapshot
+    let mut token_map = stoat_rope::TokenMap::new(&snapshot);
+    token_map.replace_tokens(parsed_tokens, &snapshot);
+    let tokens = token_map.snapshot();
+
+    Some(PreviewData {
+        text: result,
+        tokens,
+    })
 }
 
 impl Stoat {
@@ -84,9 +117,7 @@ impl Stoat {
             debug!(selected = self.file_finder_selected, "File finder: next");
 
             // Load preview for newly selected file
-            if let Some(path) = self.file_finder_filtered.get(self.file_finder_selected) {
-                self.file_finder_preview = load_file_preview(path);
-            }
+            self.load_preview_for_selected();
         }
     }
 
@@ -116,9 +147,7 @@ impl Stoat {
             debug!(selected = self.file_finder_selected, "File finder: prev");
 
             // Load preview for newly selected file
-            if let Some(path) = self.file_finder_filtered.get(self.file_finder_selected) {
-                self.file_finder_preview = load_file_preview(path);
-            }
+            self.load_preview_for_selected();
         }
     }
 

@@ -528,7 +528,7 @@ impl Render for PaneGroupView {
                         stoat.file_finder_query(cx),
                         stoat.file_finder_filtered_files().to_vec(),
                         stoat.file_finder_selected_index(),
-                        stoat.file_finder_preview_content().map(String::from),
+                        stoat.file_finder_preview_data().cloned(),
                     ))
                 } else {
                     None

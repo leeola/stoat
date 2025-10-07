@@ -36,6 +36,8 @@ impl Mode {
 }
 
 // Re-export types that the GUI layer will need
+use actions::shell::load_file_preview;
+pub use actions::shell::PreviewData;
 use cursor::CursorManager;
 pub use cursor::{Cursor, CursorManager as PublicCursorManager};
 use gpui::{App, AppContext, Entity};
@@ -85,7 +87,7 @@ pub struct Stoat {
     file_finder_filtered: Vec<PathBuf>,
     file_finder_selected: usize,
     file_finder_previous_mode: Option<String>,
-    file_finder_preview: Option<String>,
+    file_finder_preview: Option<PreviewData>,
     file_finder_matcher: Matcher,
     // Command palette state
     command_palette_input: Option<Entity<Buffer>>,
@@ -334,9 +336,26 @@ impl Stoat {
         self.file_finder_selected
     }
 
-    /// Get the file preview content for the selected file
-    pub fn file_finder_preview_content(&self) -> Option<&str> {
-        self.file_finder_preview.as_deref()
+    /// Get the file preview data for the selected file (text + syntax tokens)
+    pub fn file_finder_preview_data(&self) -> Option<&PreviewData> {
+        self.file_finder_preview.as_ref()
+    }
+
+    /// Load preview for the currently selected file in the file finder.
+    ///
+    /// Gets the path of the currently selected file and loads its preview.
+    /// Updates [`file_finder_preview`] with parsed syntax-highlighted content.
+    /// Does nothing if no file is selected or if file finder is not in use.
+    fn load_preview_for_selected(&mut self) {
+        if let Some(path) = self.file_finder_filtered.get(self.file_finder_selected) {
+            // Build absolute path from worktree root
+            let root = self.worktree.lock().snapshot().root().to_path_buf();
+            let abs_path = root.join(path);
+
+            self.file_finder_preview = load_file_preview(&abs_path);
+        } else {
+            self.file_finder_preview = None;
+        }
     }
 
     /// Filter files based on the current query.
@@ -382,6 +401,9 @@ impl Stoat {
 
         // Reset selection to top when filter changes
         self.file_finder_selected = 0;
+
+        // Load preview for the newly selected file (top of filtered list)
+        self.load_preview_for_selected();
     }
 
     /// Filter commands based on fuzzy search query.

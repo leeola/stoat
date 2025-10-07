@@ -7,3 +7,5 @@
 mod command_palette;
 mod file_finder_navigation;
 mod open_file_finder;
+
+pub use file_finder_navigation::{load_file_preview, PreviewData};
