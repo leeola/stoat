@@ -3,7 +3,7 @@
 //! Handles navigation within the file finder modal: moving selection up/down and dismissing.
 
 use crate::Stoat;
-use std::path::Path;
+use std::{fs::File, io::Read, path::Path};
 use stoat_rope::TokenSnapshot;
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferId};
@@ -36,58 +36,37 @@ pub struct PreviewData {
 /// [`PreviewData`] with text and tokens, or [`None`] if preview cannot be generated
 pub fn load_file_preview(path: &Path) -> Option<PreviewData> {
     const MAX_BYTES: usize = 100 * 1024; // 100KB
-    const MAX_LINES: usize = 1000;
 
-    // Read file with size limit
-    let contents = std::fs::read(path).ok()?;
+    // Read only first MAX_BYTES from file (not entire file!)
+    let mut file = File::open(path).ok()?;
+    let mut buffer = vec![0; MAX_BYTES];
+    let bytes_read = file.read(&mut buffer).ok()?;
+    buffer.truncate(bytes_read);
 
     // Check for binary content (null bytes in first 1KB)
-    let check_size = contents.len().min(1024);
-    if contents[..check_size].contains(&0) {
+    let check_size = buffer.len().min(1024);
+    if buffer[..check_size].contains(&0) {
         return None; // Binary file
     }
 
     // Try to decode as UTF-8
-    let text = String::from_utf8(contents).ok()?;
-
-    // Limit to first MAX_BYTES or MAX_LINES
-    let mut result = String::new();
-    let mut byte_count = 0;
-    let mut line_count = 0;
-
-    for line in text.lines() {
-        if line_count >= MAX_LINES || byte_count >= MAX_BYTES {
-            result.push_str("\n\n... (preview truncated)");
-            break;
-        }
-
-        if line_count > 0 {
-            result.push('\n');
-        }
-        result.push_str(line);
-
-        byte_count += line.len() + 1; // +1 for newline
-        line_count += 1;
-    }
+    let text = String::from_utf8(buffer).ok()?;
 
     // Detect language from file extension
     let language = Language::from_extension(path.extension()?.to_str()?);
 
     // Parse for syntax highlighting
     let mut parser = Parser::new(language).ok()?;
-    let buffer = Buffer::new(0, BufferId::new(1).ok()?, result.clone());
+    let buffer = Buffer::new(0, BufferId::new(1).ok()?, text.clone());
     let snapshot = buffer.snapshot();
-    let parsed_tokens = parser.parse(&result, &snapshot).ok()?;
+    let parsed_tokens = parser.parse(&text, &snapshot).ok()?;
 
     // Build token snapshot
     let mut token_map = stoat_rope::TokenMap::new(&snapshot);
     token_map.replace_tokens(parsed_tokens, &snapshot);
     let tokens = token_map.snapshot();
 
-    Some(PreviewData {
-        text: result,
-        tokens,
-    })
+    Some(PreviewData { text, tokens })
 }
 
 impl Stoat {
