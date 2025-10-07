@@ -1,5 +1,7 @@
 use crate::editor_view::EditorView;
-use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
+use gpui::{
+    prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
+};
 use stoat_v4::Stoat;
 
 pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
@@ -7,6 +9,11 @@ pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std
         // Register keybindings
         let keymap = stoat_v4::keymap::create_default_keymap();
         cx.bind_keys(keymap.bindings().cloned());
+
+        // Register global action handlers
+        cx.on_action(|_: &stoat_v4::actions::ExitApp, cx: &mut App| {
+            cx.quit();
+        });
 
         // Size window to 80% of screen size
         let window_size = cx
@@ -24,7 +31,7 @@ pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            move |_, cx| {
+            move |window, cx| {
                 // Create Stoat entity
                 let stoat = cx.new(|cx| Stoat::new(cx));
 
@@ -35,6 +42,9 @@ pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std
                 editor_view.update(cx, |view, _| {
                     view.set_entity(editor_view.clone());
                 });
+
+                // Focus the editor so input works immediately
+                window.focus(&editor_view.read(cx).focus_handle(cx));
 
                 editor_view
             },

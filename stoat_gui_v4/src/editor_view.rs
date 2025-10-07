@@ -1,9 +1,10 @@
-use crate::editor_element::EditorElement;
+use crate::{editor_element::EditorElement, file_finder::FileFinder};
 use gpui::{
-    div, rgb, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, Styled, Window,
+    div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
+    Window,
 };
-use stoat_v4::{actions::*, Stoat};
+use stoat_v4::{actions::*, scroll, Stoat};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -46,8 +47,47 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        let mode = self.stoat.read(cx).mode().to_string();
+
         self.stoat.update(cx, |stoat, cx| {
             stoat.delete_left(cx);
+        });
+
+        // For file finder, update the filtered list
+        if mode == "file_finder" {
+            let query = self
+                .stoat
+                .read(cx)
+                .file_finder_input()
+                .map(|buffer| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    buffer_snapshot.text()
+                })
+                .unwrap_or_default();
+
+            self.stoat.update(cx, |stoat, cx| {
+                stoat.filter_files(&query, cx);
+            });
+        }
+
+        cx.notify();
+    }
+
+    fn handle_delete_right(
+        &mut self,
+        _: &DeleteRight,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_right(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_new_line(&mut self, _: &NewLine, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.new_line(cx);
         });
         cx.notify();
     }
@@ -85,6 +125,30 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_move_to_line_start(
+        &mut self,
+        _: &MoveToLineStart,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_to_line_start(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_move_to_line_end(
+        &mut self,
+        _: &MoveToLineEnd,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_to_line_end(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_enter_insert_mode(
         &mut self,
         _: &EnterInsertMode,
@@ -109,19 +173,97 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_open_file_finder(
+        &mut self,
+        _: &OpenFileFinder,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.open_file_finder(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_file_finder_next(
+        &mut self,
+        _: &FileFinderNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.file_finder_next(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_file_finder_prev(
+        &mut self,
+        _: &FileFinderPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.file_finder_prev(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_file_finder_select(
+        &mut self,
+        _: &FileFinderSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.file_finder_select(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_file_finder_dismiss(
+        &mut self,
+        _: &FileFinderDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.file_finder_dismiss(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Only handle direct keyboard input in insert mode
+        // Handle direct keyboard input in insert and file_finder modes
         let mode = self.stoat.read(cx).mode().to_string();
-        if mode == "insert" {
+        if mode == "insert" || mode == "file_finder" {
             if let Some(key_char) = &event.keystroke.key_char {
                 self.stoat.update(cx, |stoat, cx| {
                     stoat.insert_text(key_char, cx);
                 });
+
+                // For file finder, update the filtered list
+                if mode == "file_finder" {
+                    let query = self
+                        .stoat
+                        .read(cx)
+                        .file_finder_input()
+                        .map(|buffer| {
+                            let buffer_snapshot = buffer.read(cx).snapshot();
+                            buffer_snapshot.text()
+                        })
+                        .unwrap_or_default();
+
+                    self.stoat.update(cx, |stoat, cx| {
+                        stoat.filter_files(&query, cx);
+                    });
+                }
+
                 cx.notify();
             }
         }
@@ -142,6 +284,23 @@ impl Render for EditorView {
             .clone()
             .expect("EditorView entity not set - call set_entity() after creation");
 
+        // Gather file finder data if in file_finder mode
+        let file_finder_data = if mode == "file_finder" {
+            let stoat = self.stoat.read(cx);
+            let query = stoat
+                .file_finder_input()
+                .map(|buffer| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    buffer_snapshot.text()
+                })
+                .unwrap_or_default();
+            let files = stoat.file_finder_filtered().to_vec();
+            let selected = stoat.file_finder_selected();
+            Some((query, files, selected))
+        } else {
+            None
+        };
+
         // Format mode indicator vim-style
         let mode_text = match mode.as_str() {
             "insert" => "-- INSERT --".to_string(),
@@ -160,13 +319,44 @@ impl Render for EditorView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::handle_insert_text))
             .on_action(cx.listener(Self::handle_delete_left))
+            .on_action(cx.listener(Self::handle_delete_right))
+            .on_action(cx.listener(Self::handle_new_line))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
             .on_action(cx.listener(Self::handle_move_left))
             .on_action(cx.listener(Self::handle_move_right))
+            .on_action(cx.listener(Self::handle_move_to_line_start))
+            .on_action(cx.listener(Self::handle_move_to_line_end))
             .on_action(cx.listener(Self::handle_enter_insert_mode))
             .on_action(cx.listener(Self::handle_enter_normal_mode))
+            .on_action(cx.listener(Self::handle_open_file_finder))
+            .on_action(cx.listener(Self::handle_file_finder_next))
+            .on_action(cx.listener(Self::handle_file_finder_prev))
+            .on_action(cx.listener(Self::handle_file_finder_select))
+            .on_action(cx.listener(Self::handle_file_finder_dismiss))
             .on_key_down(cx.listener(Self::handle_key_down))
+            .on_scroll_wheel(cx.listener(
+                |view: &mut EditorView,
+                 event: &ScrollWheelEvent,
+                 _window: &mut Window,
+                 cx: &mut Context<'_, EditorView>| {
+                    // Invert Y direction for natural scrolling
+                    let delta = match event.delta {
+                        gpui::ScrollDelta::Pixels(pixels) => {
+                            scroll::ScrollDelta::Pixels(point(pixels.x, -pixels.y))
+                        },
+                        gpui::ScrollDelta::Lines(lines) => {
+                            scroll::ScrollDelta::Lines(point(lines.x, -lines.y))
+                        },
+                    };
+                    let fast_scroll = event.modifiers.alt;
+
+                    view.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_scroll(&delta, fast_scroll, cx);
+                    });
+                    cx.notify();
+                },
+            ))
             .size_full()
             .relative()
             .child(EditorElement::new(view_entity))
@@ -181,5 +371,8 @@ impl Render for EditorView {
                     .bg(rgb(0x2a2a2a))
                     .child(mode_text),
             )
+            .when_some(file_finder_data, |div, (query, files, selected)| {
+                div.child(FileFinder::new(query, files, selected))
+            })
     }
 }

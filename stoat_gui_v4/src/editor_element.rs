@@ -9,9 +9,9 @@ use crate::{
     syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
 };
 use gpui::{
-    App, Bounds, Element, ElementId, Entity, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextRun, Window, point,
-    px, relative, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
+    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 
 pub struct EditorElement {
@@ -117,19 +117,33 @@ impl Element for EditorElement {
 
         // Calculate visible range
         let max_point = buffer_snapshot.max_point();
-        let max_lines = ((bounds.size.height - self.style.padding * 2.0) / self.style.line_height)
-            .floor() as u32;
+        let visible_lines =
+            ((bounds.size.height - self.style.padding * 2.0) / self.style.line_height).floor();
+        let max_lines = visible_lines as u32;
+
+        // Set viewport lines on Stoat and get scroll position
+        let stoat_entity = self.view.read(cx).stoat.clone();
+        let scroll_y = stoat_entity.update(cx, |stoat, _cx| {
+            stoat.set_viewport_lines(visible_lines as f32);
+            stoat.scroll_position().y
+        });
 
         // Calculate gutter width (for line numbers)
         let gutter_width = self.calculate_gutter_width(max_point.row + 1, window);
 
+        // Use scroll position as offset
+        let scroll_offset = scroll_y.floor() as u32;
+
         // Track line positions for cursor rendering
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
 
-        // Render visible lines (simplified - just render from start for now)
+        // Render visible lines starting from scroll_offset
         let mut y = bounds.origin.y + self.style.padding;
 
-        for line_idx in 0..max_lines.min(max_point.row + 1) {
+        let start_line = scroll_offset;
+        let end_line = (start_line + max_lines).min(max_point.row + 1);
+
+        for line_idx in start_line..end_line {
             // Store position of this line
             line_positions.push((line_idx, y));
             let line_start = buffer_snapshot.point_to_offset(text::Point::new(line_idx, 0));

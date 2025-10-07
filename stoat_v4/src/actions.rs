@@ -12,6 +12,8 @@ actions!(
         DeleteLeft,
         /// Delete character after cursor
         DeleteRight,
+        /// Insert newline
+        NewLine,
     ]
 );
 
@@ -59,6 +61,15 @@ actions!(
         FileFinderSelect,
         /// Dismiss file finder
         FileFinderDismiss,
+    ]
+);
+
+// Application actions
+actions!(
+    stoat_v4,
+    [
+        /// Exit the application
+        ExitApp,
     ]
 );
 

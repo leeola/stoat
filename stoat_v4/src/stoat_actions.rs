@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
 use gpui::{AppContext, Context};
@@ -63,14 +63,86 @@ impl Stoat {
         cx.notify();
     }
 
+    /// Delete character at cursor position (delete right)
+    pub fn delete_right(&mut self, cx: &mut Context<Self>) {
+        let cursor = self.cursor.position();
+
+        // Read buffer info in separate scope to release locks
+        let (line_len, max_row) = {
+            let buffer_item = self.buffer_item.read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            (buffer.line_len(cursor.row), buffer.max_point().row)
+        };
+
+        if cursor.column < line_len {
+            // Delete character on same line
+            let buffer = self.buffer_item.read(cx).buffer().clone();
+            buffer.update(cx, |buffer, _| {
+                let start = buffer.point_to_offset(cursor);
+                let end = buffer.point_to_offset(text::Point::new(cursor.row, cursor.column + 1));
+                buffer.edit([(start..end, "")]);
+            });
+
+            // Cursor stays in place
+        } else if cursor.row < max_row {
+            // At line end: merge with next line
+            let buffer = self.buffer_item.read(cx).buffer().clone();
+            buffer.update(cx, |buffer, _| {
+                let start = buffer.point_to_offset(cursor);
+                let end = buffer.point_to_offset(text::Point::new(cursor.row + 1, 0));
+                buffer.edit([(start..end, "")]);
+            });
+
+            // Cursor stays in place
+        }
+        // Else: at buffer end, no-op
+
+        // Reparse
+        self.buffer_item.update(cx, |item, cx| {
+            let _ = item.reparse(cx);
+        });
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Insert newline at cursor
+    pub fn new_line(&mut self, cx: &mut Context<Self>) {
+        let cursor = self.cursor.position();
+        let buffer = self.buffer_item.read(cx).buffer().clone();
+        buffer.update(cx, |buffer, _| {
+            let offset = buffer.point_to_offset(cursor);
+            buffer.edit([(offset..offset, "\n")]);
+        });
+
+        // Move cursor to next line, column 0
+        self.cursor.move_to(text::Point::new(cursor.row + 1, 0));
+
+        // Reparse
+        self.buffer_item.update(cx, |item, cx| {
+            let _ = item.reparse(cx);
+        });
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
     // ==== Movement actions ====
 
     /// Move cursor up
-    pub fn move_up(&mut self, _cx: &mut Context<Self>) {
+    pub fn move_up(&mut self, cx: &mut Context<Self>) {
         let pos = self.cursor.position();
         if pos.row > 0 {
+            let target_row = pos.row - 1;
+            let line_len = self
+                .buffer_item
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .line_len(target_row);
+            let target_column = self.cursor.goal_column().min(line_len);
             self.cursor
-                .move_to(text::Point::new(pos.row - 1, pos.column));
+                .move_to_with_goal(text::Point::new(target_row, target_column));
             self.ensure_cursor_visible();
         }
     }
@@ -81,8 +153,16 @@ impl Stoat {
         let max_row = self.buffer_item.read(cx).buffer().read(cx).max_point().row;
 
         if pos.row < max_row {
+            let target_row = pos.row + 1;
+            let line_len = self
+                .buffer_item
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .line_len(target_row);
+            let target_column = self.cursor.goal_column().min(line_len);
             self.cursor
-                .move_to(text::Point::new(pos.row + 1, pos.column));
+                .move_to_with_goal(text::Point::new(target_row, target_column));
             self.ensure_cursor_visible();
         }
     }
@@ -110,6 +190,62 @@ impl Stoat {
             self.cursor
                 .move_to(text::Point::new(pos.row, pos.column + 1));
         }
+    }
+
+    /// Move cursor to start of line (column 0)
+    pub fn move_to_line_start(&mut self, _cx: &mut Context<Self>) {
+        let pos = self.cursor.position();
+        self.cursor.move_to(text::Point::new(pos.row, 0));
+    }
+
+    /// Move cursor to end of line
+    pub fn move_to_line_end(&mut self, cx: &mut Context<Self>) {
+        let pos = self.cursor.position();
+        let line_len = self
+            .buffer_item
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .line_len(pos.row);
+        self.cursor.move_to(text::Point::new(pos.row, line_len));
+    }
+
+    /// Handle scroll wheel/trackpad events
+    pub fn handle_scroll(
+        &mut self,
+        delta: &crate::scroll::ScrollDelta,
+        fast_scroll: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // Scroll sensitivity values
+        let base_sensitivity = 1.0;
+        let fast_multiplier = 3.0;
+
+        // Line height for delta conversion
+        let line_height = 20.0; // Default line height in pixels
+
+        // Calculate new scroll position using existing infrastructure
+        let new_position = self.scroll.apply_scroll_delta(
+            delta,
+            line_height,
+            base_sensitivity,
+            fast_multiplier,
+            fast_scroll,
+        );
+
+        // Apply bounds checking
+        let buffer_item = self.buffer_item.read(cx);
+        let buffer = buffer_item.buffer().read(cx);
+        let max_point = buffer.max_point();
+        let max_scroll_y = (max_point.row as f32).max(0.0);
+
+        let bounded_position = gpui::point(
+            new_position.x.max(0.0),
+            new_position.y.max(0.0).min(max_scroll_y),
+        );
+
+        // Update scroll position
+        self.scroll.scroll_to(bounded_position);
     }
 
     // ==== Mode actions ====
