@@ -700,3 +700,134 @@ pub fn action_name(action: &dyn Action) -> Option<&'static str> {
 pub fn description(action: &dyn Action) -> Option<&'static str> {
     DESCRIPTIONS.get(&action.type_id()).copied()
 }
+
+/// Map from TypeId to action help text
+pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(|| {
+    let mut help = HashMap::new();
+
+    // Movement actions
+    help.insert(TypeId::of::<MoveLeft>(), MoveLeft::help_text());
+    help.insert(TypeId::of::<MoveRight>(), MoveRight::help_text());
+    help.insert(TypeId::of::<MoveUp>(), MoveUp::help_text());
+    help.insert(TypeId::of::<MoveDown>(), MoveDown::help_text());
+    help.insert(
+        TypeId::of::<MoveToLineStart>(),
+        MoveToLineStart::help_text(),
+    );
+    help.insert(TypeId::of::<MoveToLineEnd>(), MoveToLineEnd::help_text());
+    help.insert(
+        TypeId::of::<MoveToFileStart>(),
+        MoveToFileStart::help_text(),
+    );
+    help.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::help_text());
+    help.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::help_text());
+    help.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::help_text());
+    help.insert(TypeId::of::<PageUp>(), PageUp::help_text());
+    help.insert(TypeId::of::<PageDown>(), PageDown::help_text());
+
+    // Editing actions
+    help.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::help_text());
+    help.insert(TypeId::of::<DeleteRight>(), DeleteRight::help_text());
+    help.insert(TypeId::of::<DeleteWordLeft>(), DeleteWordLeft::help_text());
+    help.insert(
+        TypeId::of::<DeleteWordRight>(),
+        DeleteWordRight::help_text(),
+    );
+    help.insert(TypeId::of::<NewLine>(), NewLine::help_text());
+    help.insert(TypeId::of::<DeleteLine>(), DeleteLine::help_text());
+    help.insert(
+        TypeId::of::<DeleteToEndOfLine>(),
+        DeleteToEndOfLine::help_text(),
+    );
+
+    // Mode actions
+    help.insert(
+        TypeId::of::<EnterInsertMode>(),
+        EnterInsertMode::help_text(),
+    );
+    help.insert(
+        TypeId::of::<EnterNormalMode>(),
+        EnterNormalMode::help_text(),
+    );
+    help.insert(
+        TypeId::of::<EnterVisualMode>(),
+        EnterVisualMode::help_text(),
+    );
+    help.insert(TypeId::of::<EnterSpaceMode>(), EnterSpaceMode::help_text());
+    help.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::help_text());
+
+    // Selection actions
+    help.insert(
+        TypeId::of::<SelectNextSymbol>(),
+        SelectNextSymbol::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SelectPrevSymbol>(),
+        SelectPrevSymbol::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SelectNextToken>(),
+        SelectNextToken::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SelectPrevToken>(),
+        SelectPrevToken::help_text(),
+    );
+    help.insert(TypeId::of::<SelectLeft>(), SelectLeft::help_text());
+    help.insert(TypeId::of::<SelectRight>(), SelectRight::help_text());
+    help.insert(TypeId::of::<SelectUp>(), SelectUp::help_text());
+    help.insert(TypeId::of::<SelectDown>(), SelectDown::help_text());
+    help.insert(
+        TypeId::of::<SelectToLineStart>(),
+        SelectToLineStart::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SelectToLineEnd>(),
+        SelectToLineEnd::help_text(),
+    );
+
+    // File finder actions
+    help.insert(TypeId::of::<OpenFileFinder>(), OpenFileFinder::help_text());
+    help.insert(TypeId::of::<FileFinderNext>(), FileFinderNext::help_text());
+    help.insert(TypeId::of::<FileFinderPrev>(), FileFinderPrev::help_text());
+    help.insert(
+        TypeId::of::<FileFinderSelect>(),
+        FileFinderSelect::help_text(),
+    );
+    help.insert(
+        TypeId::of::<FileFinderDismiss>(),
+        FileFinderDismiss::help_text(),
+    );
+
+    // Command palette actions
+    help.insert(
+        TypeId::of::<OpenCommandPalette>(),
+        OpenCommandPalette::help_text(),
+    );
+    help.insert(
+        TypeId::of::<CommandPaletteNext>(),
+        CommandPaletteNext::help_text(),
+    );
+    help.insert(
+        TypeId::of::<CommandPalettePrev>(),
+        CommandPalettePrev::help_text(),
+    );
+    help.insert(
+        TypeId::of::<CommandPaletteExecute>(),
+        CommandPaletteExecute::help_text(),
+    );
+    help.insert(
+        TypeId::of::<CommandPaletteDismiss>(),
+        CommandPaletteDismiss::help_text(),
+    );
+
+    // Application actions
+    help.insert(TypeId::of::<ExitApp>(), ExitApp::help_text());
+
+    help
+});
+
+/// Get the help text for a given action.
+pub fn help_text(action: &dyn Action) -> Option<&'static str> {
+    HELP_TEXT.get(&action.type_id()).copied()
+}

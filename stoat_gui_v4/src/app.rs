@@ -1,6 +1,6 @@
 use crate::editor_view::EditorView;
 use gpui::{
-    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size,
+    prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
 };
 use stoat_v4::Stoat;
 

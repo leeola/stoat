@@ -1,12 +1,13 @@
 use crate::{
-    command_palette::CommandPalette, editor_element::EditorElement, file_finder::FileFinder,
+    command_overlay::CommandOverlay, command_palette::CommandPalette,
+    editor_element::EditorElement, file_finder::FileFinder, keymap_query,
 };
 use gpui::{
-    div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
-    ScrollWheelEvent, Styled, Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollHandle, ScrollWheelEvent, Styled, Window, div, point,
+    prelude::FluentBuilder,
 };
-use stoat_v4::{actions::*, scroll, Stoat};
+use stoat_v4::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -517,12 +518,18 @@ impl Render for EditorView {
             None
         };
 
-        // Format mode indicator vim-style
-        let mode_text = match mode.as_str() {
-            "insert" => "-- INSERT --".to_string(),
-            "normal" => "-- NORMAL --".to_string(),
-            _ => format!("-- {} --", mode.to_uppercase()),
+        // Get mode display name and query keybindings
+        let mode_display = match mode.as_str() {
+            "insert" => "INSERT",
+            "normal" => "NORMAL",
+            "visual" => "VISUAL",
+            "pane" => "PANE",
+            "file_finder" => "FILE FINDER",
+            "space" => "SPACE",
+            "command_palette" => "COMMAND",
+            _ => mode.as_str(),
         };
+        let bindings = keymap_query::bindings_for_mode(&self.keymap, mode.as_str());
 
         div()
             .id("editor")
@@ -589,17 +596,7 @@ impl Render for EditorView {
             .size_full()
             .relative()
             .child(EditorElement::new(view_entity))
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .right_0()
-                    .p_2()
-                    .text_xs()
-                    .text_color(rgb(0xcccccc))
-                    .bg(rgb(0x2a2a2a))
-                    .child(mode_text),
-            )
+            .child(CommandOverlay::new(mode_display.to_string(), bindings))
             .when_some(
                 file_finder_data,
                 |div, (query, files, selected, preview)| {
