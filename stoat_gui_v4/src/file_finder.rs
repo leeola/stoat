@@ -5,9 +5,10 @@
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    ParentElement, Pixels, RenderOnce, ShapedLine, SharedString, Style, Styled, TextRun, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
+    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
+    Window, div, point, prelude::FluentBuilder, px, relative, rgb, rgba,
 };
 use std::{path::PathBuf, sync::OnceLock};
 use stoat_v4::PreviewData;
@@ -22,6 +23,7 @@ pub struct FileFinder {
     files: Vec<PathBuf>,
     selected: usize,
     preview: Option<PreviewData>,
+    scroll_handle: ScrollHandle,
 }
 
 impl FileFinder {
@@ -31,12 +33,14 @@ impl FileFinder {
         files: Vec<PathBuf>,
         selected: usize,
         preview: Option<PreviewData>,
+        scroll_handle: ScrollHandle,
     ) -> Self {
         Self {
             query,
             files,
             selected,
             preview,
+            scroll_handle,
         }
     }
 
@@ -63,10 +67,12 @@ impl FileFinder {
         let selected = self.selected;
 
         div()
+            .id("file-list")
             .flex()
             .flex_col()
             .flex_1()
-            .overflow_hidden()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .children(files.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(8.0))

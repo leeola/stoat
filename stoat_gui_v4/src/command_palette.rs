@@ -5,8 +5,8 @@
 //! mode system.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, IntoElement, ParentElement,
-    RenderOnce, Styled, Window,
+    div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
 };
 use stoat_v4::CommandInfo;
 
@@ -29,15 +29,22 @@ pub struct CommandPalette {
     query: String,
     commands: Vec<CommandInfo>,
     selected: usize,
+    scroll_handle: ScrollHandle,
 }
 
 impl CommandPalette {
     /// Create a new command palette renderer with the given state.
-    pub fn new(query: String, commands: Vec<CommandInfo>, selected: usize) -> Self {
+    pub fn new(
+        query: String,
+        commands: Vec<CommandInfo>,
+        selected: usize,
+        scroll_handle: ScrollHandle,
+    ) -> Self {
         Self {
             query,
             commands,
             selected,
+            scroll_handle,
         }
     }
 
@@ -63,8 +70,14 @@ impl CommandPalette {
         let commands = &self.commands;
         let selected = self.selected;
 
-        div().flex().flex_col().flex_1().overflow_hidden().children(
-            commands.iter().enumerate().map(|(i, cmd)| {
+        div()
+            .id("command-list")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
+            .children(commands.iter().enumerate().map(|(i, cmd)| {
                 div()
                     .flex()
                     .flex_col()
@@ -87,8 +100,7 @@ impl CommandPalette {
                             .text_size(px(10.0))
                             .child(cmd.description.clone()),
                     )
-            }),
-        )
+            }))
     }
 }
 

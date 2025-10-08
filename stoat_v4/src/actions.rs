@@ -2,7 +2,7 @@
 //!
 //! Actions are dispatched through GPUI's action system and handled by [`crate::Stoat`].
 
-use gpui::{Action, actions};
+use gpui::{actions, Action};
 use std::{any::TypeId, collections::HashMap, sync::LazyLock};
 
 // Editing actions

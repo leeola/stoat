@@ -3,8 +3,8 @@ use crate::{
 };
 use gpui::{
     div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
-    Window,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
+    ScrollWheelEvent, Styled, Window,
 };
 use stoat_v4::{actions::*, scroll, Stoat};
 
@@ -13,6 +13,8 @@ pub struct EditorView {
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
     keymap: gpui::Keymap,
+    file_finder_scroll: ScrollHandle,
+    command_palette_scroll: ScrollHandle,
 }
 
 impl EditorView {
@@ -25,6 +27,8 @@ impl EditorView {
             focus_handle,
             this: None,
             keymap,
+            file_finder_scroll: ScrollHandle::new(),
+            command_palette_scroll: ScrollHandle::new(),
         }
     }
 
@@ -223,6 +227,10 @@ impl EditorView {
         self.stoat.update(cx, |stoat, cx| {
             stoat.file_finder_next(cx);
         });
+
+        let selected = self.stoat.read(cx).file_finder_selected();
+        self.file_finder_scroll.scroll_to_item(selected);
+
         cx.notify();
     }
 
@@ -235,6 +243,10 @@ impl EditorView {
         self.stoat.update(cx, |stoat, cx| {
             stoat.file_finder_prev(cx);
         });
+
+        let selected = self.stoat.read(cx).file_finder_selected();
+        self.file_finder_scroll.scroll_to_item(selected);
+
         cx.notify();
     }
 
@@ -283,6 +295,10 @@ impl EditorView {
         self.stoat.update(cx, |stoat, cx| {
             stoat.command_palette_next(cx);
         });
+
+        let selected = self.stoat.read(cx).command_palette_selected();
+        self.command_palette_scroll.scroll_to_item(selected);
+
         cx.notify();
     }
 
@@ -295,6 +311,10 @@ impl EditorView {
         self.stoat.update(cx, |stoat, cx| {
             stoat.command_palette_prev(cx);
         });
+
+        let selected = self.stoat.read(cx).command_palette_selected();
+        self.command_palette_scroll.scroll_to_item(selected);
+
         cx.notify();
     }
 
@@ -385,6 +405,10 @@ impl Render for EditorView {
             .this
             .clone()
             .expect("EditorView entity not set - call set_entity() after creation");
+
+        // Clone scroll handles for use in closures
+        let file_finder_scroll = self.file_finder_scroll.clone();
+        let command_palette_scroll = self.command_palette_scroll.clone();
 
         // Gather file finder data if in file_finder mode
         let file_finder_data = if mode == "file_finder" {
@@ -501,11 +525,22 @@ impl Render for EditorView {
             .when_some(
                 file_finder_data,
                 |div, (query, files, selected, preview)| {
-                    div.child(FileFinder::new(query, files, selected, preview))
+                    div.child(FileFinder::new(
+                        query,
+                        files,
+                        selected,
+                        preview,
+                        file_finder_scroll.clone(),
+                    ))
                 },
             )
             .when_some(command_palette_data, |div, (query, commands, selected)| {
-                div.child(CommandPalette::new(query, commands, selected))
+                div.child(CommandPalette::new(
+                    query,
+                    commands,
+                    selected,
+                    command_palette_scroll.clone(),
+                ))
             })
     }
 }
