@@ -1,7 +1,9 @@
 //! Buffer item for text editing with syntax highlighting.
 //!
-//! Wraps [`text::Buffer`] with syntax highlighting tokens from tree-sitter.
+//! Wraps [`text::Buffer`] with syntax highlighting tokens from tree-sitter and optional git diff
+//! state.
 
+use crate::git_diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -9,9 +11,10 @@ use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot};
 
-/// A text buffer with syntax highlighting.
+/// A text buffer with syntax highlighting and git diff support.
 ///
-/// Combines text buffer, token map for syntax highlighting, and parser for language support.
+/// Combines text buffer, token map for syntax highlighting, parser for language support,
+/// and optional git diff state for visualization.
 pub struct BufferItem {
     /// Text buffer entity
     buffer: Entity<Buffer>,
@@ -24,6 +27,9 @@ pub struct BufferItem {
 
     /// Current language setting
     language: Language,
+
+    /// Git diff state (None if not in git repo or diff disabled)
+    diff: Option<BufferDiff>,
 }
 
 impl BufferItem {
@@ -40,6 +46,7 @@ impl BufferItem {
             token_map,
             parser,
             language,
+            diff: None,
         }
     }
 
@@ -92,5 +99,21 @@ impl BufferItem {
             self.language = language;
             self.parser = Parser::new(language).expect("Failed to create parser");
         }
+    }
+
+    /// Get the git diff state for this buffer.
+    ///
+    /// Returns [`None`] if the file is not in a git repository or if diff
+    /// computation hasn't been performed yet.
+    pub fn diff(&self) -> Option<&BufferDiff> {
+        self.diff.as_ref()
+    }
+
+    /// Set the git diff state for this buffer.
+    ///
+    /// Call this after computing the diff between HEAD and the current buffer state.
+    /// Pass [`None`] to clear the diff state.
+    pub fn set_diff(&mut self, diff: Option<BufferDiff>) {
+        self.diff = diff;
     }
 }

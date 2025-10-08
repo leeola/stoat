@@ -6618,6 +6618,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "enum_dispatch",
+ "git2",
  "gpui",
  "ignore",
  "nucleo-matcher",
@@ -6627,6 +6628,7 @@ dependencies = [
  "stoat_rope",
  "stoat_text",
  "sum_tree",
+ "tempfile",
  "text",
  "thiserror 1.0.69",
  "toml",

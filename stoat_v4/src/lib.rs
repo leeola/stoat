@@ -7,6 +7,8 @@ pub mod actions;
 pub mod buffer_item;
 pub mod cursor;
 pub mod file_finder;
+pub mod git_diff;
+pub mod git_repository;
 pub mod keymap;
 pub mod log;
 pub mod rel_path;

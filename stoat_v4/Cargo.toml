@@ -21,7 +21,12 @@ ignore = "0.4"
 enum_dispatch = "0.3"
 toml = "0.8"
 serde = { workspace = true }
+thiserror = { workspace = true }
+git2 = { version = "0.20", default-features = false, features = [
+  "vendored-libgit2",
+  "vendored-openssl",
+] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-thiserror = { workspace = true }
+tempfile = "3.12"
