@@ -2097,19 +2097,19 @@ fn build_command_list(keymap: &gpui::Keymap) -> Vec<crate::stoat::CommandInfo> {
             continue;
         }
 
-        // Get action name
-        let name = action.name().to_string();
-
-        // Get description - use action name as fallback
-        let description = get_action_description(type_id)
-            .unwrap_or(name.as_str())
-            .to_string();
+        // Get action name and description, skip if either unavailable
+        let Some(name) = crate::actions::action_name(action) else {
+            continue;
+        };
+        let Some(description) = crate::actions::description(action) else {
+            continue;
+        };
 
         commands_by_type_id.insert(
             type_id,
             crate::stoat::CommandInfo {
-                name,
-                description,
+                name: name.to_string(),
+                description: description.to_string(),
                 type_id,
             },
         );
@@ -2120,40 +2120,4 @@ fn build_command_list(keymap: &gpui::Keymap) -> Vec<crate::stoat::CommandInfo> {
     commands.sort_by(|a, b| a.name.cmp(&b.name));
 
     commands
-}
-
-/// Get description for an action by TypeId.
-///
-/// Returns a short description of what the action does, used in the command palette.
-/// This is a minimal implementation - can be expanded with more action descriptions.
-fn get_action_description(type_id: std::any::TypeId) -> Option<&'static str> {
-    use crate::actions::*;
-    use std::any::TypeId;
-
-    // Map TypeId to description
-    if type_id == TypeId::of::<MoveLeft>() {
-        Some("Move cursor left one character")
-    } else if type_id == TypeId::of::<MoveRight>() {
-        Some("Move cursor right one character")
-    } else if type_id == TypeId::of::<MoveUp>() {
-        Some("Move cursor up one line")
-    } else if type_id == TypeId::of::<MoveDown>() {
-        Some("Move cursor down one line")
-    } else if type_id == TypeId::of::<DeleteLeft>() {
-        Some("Delete character before cursor")
-    } else if type_id == TypeId::of::<DeleteRight>() {
-        Some("Delete character after cursor")
-    } else if type_id == TypeId::of::<EnterInsertMode>() {
-        Some("Enter insert mode for text editing")
-    } else if type_id == TypeId::of::<EnterNormalMode>() {
-        Some("Return to normal mode")
-    } else if type_id == TypeId::of::<EnterVisualMode>() {
-        Some("Enter visual mode for selection")
-    } else if type_id == TypeId::of::<OpenFileFinder>() {
-        Some("Open file finder for quick navigation")
-    } else if type_id == TypeId::of::<OpenCommandPalette>() {
-        Some("Open command palette for fuzzy command search")
-    } else {
-        None
-    }
 }

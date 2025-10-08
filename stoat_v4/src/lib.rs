@@ -23,6 +23,8 @@ mod tests;
 
 // Re-exports
 pub use actions::*;
+// Re-export action metadata helpers
+pub use actions::{action_name, description};
 pub use buffer_item::BufferItem;
 pub use cursor::{Cursor, CursorManager};
 pub use file_finder::PreviewData;
