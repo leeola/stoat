@@ -1,4 +1,6 @@
-use crate::{editor_element::EditorElement, file_finder::FileFinder};
+use crate::{
+    command_palette::CommandPalette, editor_element::EditorElement, file_finder::FileFinder,
+};
 use gpui::{
     div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
@@ -10,16 +12,19 @@ pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
+    keymap: gpui::Keymap,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let keymap = stoat_v4::keymap::create_default_keymap();
 
         Self {
             stoat,
             focus_handle,
             this: None,
+            keymap,
         }
     }
 
@@ -257,15 +262,85 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_open_command_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.open_command_palette(&self.keymap, cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_command_palette_next(
+        &mut self,
+        _: &CommandPaletteNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.command_palette_next(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_command_palette_prev(
+        &mut self,
+        _: &CommandPalettePrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.command_palette_prev(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_command_palette_execute(
+        &mut self,
+        _: &CommandPaletteExecute,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Get the selected command's TypeId
+        let type_id = self.stoat.read(cx).command_palette_selected_type_id();
+
+        // Dismiss the command palette first
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.command_palette_dismiss(cx);
+        });
+
+        // Dispatch the selected command
+        if let Some(type_id) = type_id {
+            crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
+        }
+
+        cx.notify();
+    }
+
+    fn handle_command_palette_dismiss(
+        &mut self,
+        _: &CommandPaletteDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.command_palette_dismiss(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Handle direct keyboard input in insert and file_finder modes
+        // Handle direct keyboard input in insert, file_finder, and command_palette modes
         let mode = self.stoat.read(cx).mode().to_string();
-        if mode == "insert" || mode == "file_finder" {
+        if mode == "insert" || mode == "file_finder" || mode == "command_palette" {
             if let Some(key_char) = &event.keystroke.key_char {
                 self.stoat.update(cx, |stoat, cx| {
                     stoat.insert_text(key_char, cx);
@@ -287,6 +362,9 @@ impl EditorView {
                         stoat.filter_files(&query, cx);
                     });
                 }
+
+                // For command palette, filtering already happens in insert_text
+                // No additional action needed here
 
                 cx.notify();
             }
@@ -326,6 +404,23 @@ impl Render for EditorView {
             None
         };
 
+        // Gather command palette data if in command_palette mode
+        let command_palette_data = if mode == "command_palette" {
+            let stoat = self.stoat.read(cx);
+            let query = stoat
+                .command_palette_input()
+                .map(|buffer| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    buffer_snapshot.text()
+                })
+                .unwrap_or_default();
+            let commands = stoat.command_palette_filtered().to_vec();
+            let selected = stoat.command_palette_selected();
+            Some((query, commands, selected))
+        } else {
+            None
+        };
+
         // Format mode indicator vim-style
         let mode_text = match mode.as_str() {
             "insert" => "-- INSERT --".to_string(),
@@ -361,6 +456,11 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))
             .on_action(cx.listener(Self::handle_file_finder_dismiss))
+            .on_action(cx.listener(Self::handle_open_command_palette))
+            .on_action(cx.listener(Self::handle_command_palette_next))
+            .on_action(cx.listener(Self::handle_command_palette_prev))
+            .on_action(cx.listener(Self::handle_command_palette_execute))
+            .on_action(cx.listener(Self::handle_command_palette_dismiss))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_scroll_wheel(cx.listener(
                 |view: &mut EditorView,
@@ -404,5 +504,8 @@ impl Render for EditorView {
                     div.child(FileFinder::new(query, files, selected, preview))
                 },
             )
+            .when_some(command_palette_data, |div, (query, commands, selected)| {
+                div.child(CommandPalette::new(query, commands, selected))
+            })
     }
 }

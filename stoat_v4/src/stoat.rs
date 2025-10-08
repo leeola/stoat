@@ -17,6 +17,20 @@ use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
 use stoat_text::Language;
 use text::{Buffer, BufferId, Point};
 
+/// Command information for command palette.
+///
+/// Contains metadata about an action that can be executed through the command palette.
+/// Used for fuzzy searching and dynamic dispatch via [`std::any::TypeId`].
+#[derive(Clone, Debug)]
+pub struct CommandInfo {
+    /// Action name (e.g., "MoveLeft", "Save")
+    pub name: String,
+    /// Description of what the command does
+    pub description: String,
+    /// TypeId for dispatching the action
+    pub type_id: std::any::TypeId,
+}
+
 /// Events emitted by Stoat
 #[derive(Clone, Debug)]
 pub enum StoatEvent {
@@ -54,6 +68,13 @@ pub struct Stoat {
     pub(crate) file_finder_preview_task: Option<Task<()>>,
     pub(crate) file_finder_matcher: Matcher,
 
+    // Command palette state
+    pub(crate) command_palette_input: Option<Entity<Buffer>>,
+    pub(crate) command_palette_commands: Vec<CommandInfo>,
+    pub(crate) command_palette_filtered: Vec<CommandInfo>,
+    pub(crate) command_palette_selected: usize,
+    pub(crate) command_palette_previous_mode: Option<String>,
+
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
 }
@@ -86,6 +107,11 @@ impl Stoat {
             file_finder_preview: None,
             file_finder_preview_task: None,
             file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            command_palette_input: None,
+            command_palette_commands: Vec::new(),
+            command_palette_filtered: Vec::new(),
+            command_palette_selected: 0,
+            command_palette_previous_mode: None,
             worktree,
         }
     }

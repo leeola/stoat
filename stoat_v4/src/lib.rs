@@ -27,4 +27,4 @@ pub use buffer_item::BufferItem;
 pub use cursor::{Cursor, CursorManager};
 pub use file_finder::PreviewData;
 pub use scroll::{ScrollDelta, ScrollPosition};
-pub use stoat::{Stoat, StoatEvent};
+pub use stoat::{CommandInfo, Stoat, StoatEvent};

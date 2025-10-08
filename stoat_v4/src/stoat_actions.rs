@@ -35,6 +35,23 @@ impl Stoat {
             return;
         }
 
+        // Route to command palette input buffer if in command_palette mode
+        if self.mode == "command_palette" {
+            if let Some(input_buffer) = &self.command_palette_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
+
+                // Re-filter commands based on new query
+                let query = input_buffer.read(cx).snapshot().text();
+                self.filter_commands(&query);
+            }
+            return;
+        }
+
         // Main buffer insertion for all other modes
         let cursor = self.cursor.position();
         let buffer = self.buffer_item.read(cx).buffer().clone();
@@ -73,6 +90,25 @@ impl Stoat {
                     // Re-filter files based on new query
                     let query = input_buffer.read(cx).snapshot().text();
                     self.filter_files(&query, cx);
+                }
+            }
+            return;
+        }
+
+        // Route to command palette input buffer if in command_palette mode
+        if self.mode == "command_palette" {
+            if let Some(input_buffer) = &self.command_palette_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(len - 1..len, "")]);
+                    });
+
+                    // Re-filter commands based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_commands(&query);
                 }
             }
             return;
@@ -1816,5 +1852,308 @@ impl Stoat {
             .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
 
         cx.notify();
+    }
+
+    // ==== Command palette actions ====
+
+    /// Open the command palette modal.
+    ///
+    /// Builds a list of all available commands from the keymap bindings and creates
+    /// an input buffer for fuzzy search. Transitions to command_palette mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `keymap` - The keymap to extract commands from
+    ///
+    /// # Behavior
+    ///
+    /// - Saves current mode to restore later
+    /// - Builds command list from all keymap bindings
+    /// - Creates empty input buffer for search query
+    /// - Initializes filtered commands list (initially all commands)
+    /// - Sets mode to "command_palette"
+    ///
+    /// # Related
+    ///
+    /// See also:
+    /// - [`Self::command_palette_dismiss`] - close command palette
+    /// - [`Self::command_palette_next`] - navigate down
+    /// - [`Self::command_palette_prev`] - navigate up
+    /// - [`Self::command_palette_execute`] - execute selected command
+    pub fn open_command_palette(&mut self, keymap: &gpui::Keymap, cx: &mut Context<Self>) {
+        debug!(from_mode = self.mode(), "Opening command palette");
+
+        // Save current mode to restore later
+        self.command_palette_previous_mode = Some(self.mode.clone());
+
+        // Build command list from keymap
+        let commands = build_command_list(keymap);
+        debug!(command_count = commands.len(), "Built command list");
+
+        // Create input buffer for search query
+        let buffer_id = BufferId::from(NonZeroU64::new(3).unwrap()); // Use ID 3 for command palette
+        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+
+        // Initialize command palette state
+        self.command_palette_input = Some(input_buffer);
+        self.command_palette_commands = commands.clone();
+        self.command_palette_filtered = commands;
+        self.command_palette_selected = 0;
+
+        // Enter command_palette mode
+        self.mode = "command_palette".into();
+        debug!("Entered command_palette mode");
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Filter commands based on fuzzy search query.
+    ///
+    /// Uses nucleo fuzzy matching to filter the command list based on the query string.
+    /// Searches both command name and description for matches.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The search query string
+    ///
+    /// # Behavior
+    ///
+    /// - If query is empty, shows all commands
+    /// - Otherwise, fuzzy matches against "name description" for each command
+    /// - Sorts results by match score (best matches first)
+    /// - Limits to top 50 results
+    /// - Resets selection to first item
+    pub fn filter_commands(&mut self, query: &str) {
+        if query.is_empty() {
+            // No query: show all commands
+            self.command_palette_filtered = self.command_palette_commands.clone();
+        } else {
+            // Parse pattern for smart fuzzy matching
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+
+            // Create a temporary matcher for commands (uses default config, not path-specific)
+            let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+
+            // Build indexed search strings
+            let indexed_strings: Vec<(usize, String)> = self
+                .command_palette_commands
+                .iter()
+                .enumerate()
+                .map(|(idx, cmd)| (idx, format!("{} {}", cmd.name, cmd.description)))
+                .collect();
+
+            // Match and score all candidates, keeping track of indices
+            let mut scored_commands: Vec<(usize, u32)> = indexed_strings
+                .iter()
+                .filter_map(|(idx, search_text)| {
+                    // Create references for matching
+                    let candidates = vec![search_text.as_str()];
+                    let matches = pattern.match_list(&candidates, &mut matcher);
+                    matches.first().map(|(_, score)| (*idx, *score))
+                })
+                .collect();
+
+            // Sort by score (descending - higher score = better match)
+            scored_commands.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Limit to top 50 results
+            scored_commands.truncate(50);
+
+            // Convert back to CommandInfo
+            self.command_palette_filtered = scored_commands
+                .into_iter()
+                .map(|(idx, _score)| self.command_palette_commands[idx].clone())
+                .collect();
+        }
+
+        // Reset selection to first item
+        self.command_palette_selected = 0;
+    }
+
+    /// Move to the next command in the command palette list.
+    ///
+    /// Moves the selection highlight down to the next command in the filtered list.
+    /// If at the end of the list, stays at the last command.
+    pub fn command_palette_next(&mut self, cx: &mut Context<Self>) {
+        if self.mode() != "command_palette" {
+            return;
+        }
+
+        if self.command_palette_selected + 1 < self.command_palette_filtered.len() {
+            self.command_palette_selected += 1;
+            debug!(
+                selected = self.command_palette_selected,
+                "Command palette: next"
+            );
+        }
+
+        cx.notify();
+    }
+
+    /// Move to the previous command in the command palette list.
+    ///
+    /// Moves the selection highlight up to the previous command in the filtered list.
+    /// If at the beginning of the list, stays at the first command.
+    pub fn command_palette_prev(&mut self, cx: &mut Context<Self>) {
+        if self.mode() != "command_palette" {
+            return;
+        }
+
+        if self.command_palette_selected > 0 {
+            self.command_palette_selected -= 1;
+            debug!(
+                selected = self.command_palette_selected,
+                "Command palette: prev"
+            );
+        }
+
+        cx.notify();
+    }
+
+    /// Dismiss the command palette and return to the previous mode.
+    ///
+    /// Closes the command palette modal, clears all state, and returns
+    /// to the mode that was active before opening the palette.
+    pub fn command_palette_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.mode() != "command_palette" {
+            return;
+        }
+
+        debug!("Dismissing command palette");
+
+        // Restore previous mode or default to normal
+        let previous_mode = self
+            .command_palette_previous_mode
+            .take()
+            .unwrap_or_else(|| "normal".to_string());
+        self.mode = previous_mode;
+
+        // Clear command palette state
+        self.command_palette_input = None;
+        self.command_palette_commands.clear();
+        self.command_palette_filtered.clear();
+        self.command_palette_selected = 0;
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Get the TypeId of the currently selected command.
+    ///
+    /// Returns the TypeId of the selected command's action for dispatch,
+    /// or None if the command palette is not open or no command is selected.
+    pub fn command_palette_selected_type_id(&self) -> Option<std::any::TypeId> {
+        if self.mode() != "command_palette" {
+            return None;
+        }
+
+        self.command_palette_filtered
+            .get(self.command_palette_selected)
+            .map(|cmd| cmd.type_id)
+    }
+
+    /// Accessor for command palette input buffer (for GUI layer).
+    pub fn command_palette_input(&self) -> Option<&gpui::Entity<Buffer>> {
+        self.command_palette_input.as_ref()
+    }
+
+    /// Accessor for filtered commands list (for GUI layer).
+    pub fn command_palette_filtered(&self) -> &[crate::stoat::CommandInfo] {
+        &self.command_palette_filtered
+    }
+
+    /// Accessor for selected command index (for GUI layer).
+    pub fn command_palette_selected(&self) -> usize {
+        self.command_palette_selected
+    }
+}
+
+/// Build the list of all available commands from the keymap.
+///
+/// Iterates through all bindings in the keymap and extracts command information
+/// including name, description, and TypeId for dispatch.
+///
+/// # Arguments
+///
+/// * `keymap` - The keymap to extract commands from
+///
+/// # Returns
+///
+/// A vector of [`CommandInfo`] structs representing all available commands
+fn build_command_list(keymap: &gpui::Keymap) -> Vec<crate::stoat::CommandInfo> {
+    use std::collections::HashMap;
+
+    let mut commands_by_type_id: HashMap<std::any::TypeId, crate::stoat::CommandInfo> =
+        HashMap::new();
+
+    // Iterate through all bindings
+    for binding in keymap.bindings() {
+        let action = binding.action();
+        let type_id = action.type_id();
+
+        // Skip if we've already seen this action type
+        if commands_by_type_id.contains_key(&type_id) {
+            continue;
+        }
+
+        // Get action name
+        let name = action.name().to_string();
+
+        // Get description - use action name as fallback
+        let description = get_action_description(type_id)
+            .unwrap_or(name.as_str())
+            .to_string();
+
+        commands_by_type_id.insert(
+            type_id,
+            crate::stoat::CommandInfo {
+                name,
+                description,
+                type_id,
+            },
+        );
+    }
+
+    // Convert to sorted vector
+    let mut commands: Vec<crate::stoat::CommandInfo> = commands_by_type_id.into_values().collect();
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+
+    commands
+}
+
+/// Get description for an action by TypeId.
+///
+/// Returns a short description of what the action does, used in the command palette.
+/// This is a minimal implementation - can be expanded with more action descriptions.
+fn get_action_description(type_id: std::any::TypeId) -> Option<&'static str> {
+    use crate::actions::*;
+    use std::any::TypeId;
+
+    // Map TypeId to description
+    if type_id == TypeId::of::<MoveLeft>() {
+        Some("Move cursor left one character")
+    } else if type_id == TypeId::of::<MoveRight>() {
+        Some("Move cursor right one character")
+    } else if type_id == TypeId::of::<MoveUp>() {
+        Some("Move cursor up one line")
+    } else if type_id == TypeId::of::<MoveDown>() {
+        Some("Move cursor down one line")
+    } else if type_id == TypeId::of::<DeleteLeft>() {
+        Some("Delete character before cursor")
+    } else if type_id == TypeId::of::<DeleteRight>() {
+        Some("Delete character after cursor")
+    } else if type_id == TypeId::of::<EnterInsertMode>() {
+        Some("Enter insert mode for text editing")
+    } else if type_id == TypeId::of::<EnterNormalMode>() {
+        Some("Return to normal mode")
+    } else if type_id == TypeId::of::<EnterVisualMode>() {
+        Some("Enter visual mode for selection")
+    } else if type_id == TypeId::of::<OpenFileFinder>() {
+        Some("Open file finder for quick navigation")
+    } else if type_id == TypeId::of::<OpenCommandPalette>() {
+        Some("Open command palette for fuzzy command search")
+    } else {
+        None
     }
 }

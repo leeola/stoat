@@ -5,9 +5,9 @@
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ShapedLine, SharedString,
-    Style, Styled, TextRun, Window, div, point, prelude::FluentBuilder, px, relative, rgb, rgba,
+    div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
+    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad,
+    ParentElement, Pixels, RenderOnce, ShapedLine, SharedString, Style, Styled, TextRun, Window,
 };
 use std::{path::PathBuf, sync::OnceLock};
 use stoat_v4::PreviewData;

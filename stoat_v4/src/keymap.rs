@@ -90,6 +90,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FileFinderSelect" => Ok(KeyBinding::new(key, FileFinderSelect, context)),
         "FileFinderDismiss" => Ok(KeyBinding::new(key, FileFinderDismiss, context)),
 
+        // Command palette actions
+        "OpenCommandPalette" => Ok(KeyBinding::new(key, OpenCommandPalette, context)),
+        "CommandPaletteNext" => Ok(KeyBinding::new(key, CommandPaletteNext, context)),
+        "CommandPalettePrev" => Ok(KeyBinding::new(key, CommandPalettePrev, context)),
+        "CommandPaletteExecute" => Ok(KeyBinding::new(key, CommandPaletteExecute, context)),
+        "CommandPaletteDismiss" => Ok(KeyBinding::new(key, CommandPaletteDismiss, context)),
+
         // Selection actions
         "SelectNextSymbol" => Ok(KeyBinding::new(key, SelectNextSymbol, context)),
         "SelectPrevSymbol" => Ok(KeyBinding::new(key, SelectPrevSymbol, context)),

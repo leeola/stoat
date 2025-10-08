@@ -90,6 +90,23 @@ actions!(
     ]
 );
 
+// Command palette actions
+actions!(
+    stoat_v4,
+    [
+        /// Open command palette
+        OpenCommandPalette,
+        /// Move to next command in palette
+        CommandPaletteNext,
+        /// Move to previous command in palette
+        CommandPalettePrev,
+        /// Execute selected command
+        CommandPaletteExecute,
+        /// Dismiss command palette
+        CommandPaletteDismiss,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat_v4,

@@ -1,4 +1,6 @@
 pub mod app;
+pub mod command_palette;
+pub mod dispatch;
 pub mod editor_element;
 pub mod editor_style;
 pub mod editor_view;
