@@ -1,10 +1,10 @@
 use crate::{editor_element::EditorElement, file_finder::FileFinder};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point, prelude::FluentBuilder,
-    rgb,
+    div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
+    Window,
 };
-use stoat_v4::{Stoat, actions::*, scroll};
+use stoat_v4::{actions::*, scroll, Stoat};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,

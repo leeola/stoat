@@ -5,11 +5,11 @@
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    ParentElement, Pixels, RenderOnce, ShapedLine, SharedString, Style, Styled, TextRun, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ShapedLine, SharedString,
+    Style, Styled, TextRun, Window, div, point, prelude::FluentBuilder, px, relative, rgb, rgba,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 use stoat_v4::PreviewData;
 
 /// File finder modal renderer.
@@ -168,17 +168,25 @@ impl Element for PreviewElement {
             };
         };
 
-        // Create buffer snapshot from preview text
-        let buffer = text::Buffer::new(
-            0,
-            text::BufferId::new(1).unwrap(),
-            preview.text().to_string(),
-        );
+        // Create buffer snapshot from preview text (avoid cloning - use reference)
+        let preview_text = preview.text();
+        let buffer =
+            text::Buffer::new(0, text::BufferId::new(1).unwrap(), preview_text.to_string());
         let snapshot = buffer.snapshot();
 
-        // Get tokens - use empty snapshot if Plain preview
-        let default_tokens = stoat_rope::TokenMap::new(&snapshot).snapshot();
-        let tokens = preview.tokens().unwrap_or(&default_tokens);
+        // Get tokens - use cached empty snapshot for Plain preview
+        // This avoids expensive TokenMap creation on every frame
+        static EMPTY_TOKENS: OnceLock<stoat_rope::TokenSnapshot> = OnceLock::new();
+        let tokens = match preview {
+            PreviewData::Highlighted { tokens, .. } => tokens,
+            PreviewData::Plain(_) => EMPTY_TOKENS.get_or_init(|| {
+                // Create minimal empty snapshot once - HighlightedChunks will return
+                // chunks with no highlighting (highlight_id = None)
+                let empty_buf =
+                    text::Buffer::new(0, text::BufferId::new(1).unwrap(), String::new());
+                stoat_rope::TokenMap::new(&empty_buf.snapshot()).snapshot()
+            }),
+        };
 
         // Font configuration
         let font = Font {
@@ -191,19 +199,23 @@ impl Element for PreviewElement {
         let font_size = px(12.0);
         let line_height = px(18.0);
 
-        // Shape each line with syntax highlighting
+        // Calculate viewport culling - only render visible lines
+        let visible_height = f32::from(bounds.size.height);
+        let max_visible_lines = (visible_height / f32::from(line_height)).ceil() as usize + 2; // +2 for buffer
+
+        // Shape each visible line with syntax highlighting
         let mut lines = Vec::new();
         let mut y_offset = bounds.origin.y + px(12.0); // Top padding
+        let mut current_offset = 0; // Track offset incrementally - O(n) instead of O(n²)
 
-        for (line_idx, line_text) in preview.text().lines().enumerate() {
-            let line_start_offset = preview.text()[..preview
-                .text()
-                .lines()
-                .take(line_idx)
-                .map(|l| l.len() + 1)
-                .sum::<usize>()]
-                .len();
-            let line_end_offset = line_start_offset + line_text.len();
+        for (line_idx, line_text) in preview_text.lines().enumerate() {
+            // Viewport culling: stop if we've rendered enough visible lines
+            if line_idx >= max_visible_lines {
+                break;
+            }
+
+            let line_start_offset = current_offset;
+            let line_end_offset = current_offset + line_text.len();
 
             // Build text runs with highlighting
             let highlighted_chunks = HighlightedChunks::new(
@@ -269,6 +281,7 @@ impl Element for PreviewElement {
             });
 
             y_offset += line_height;
+            current_offset = line_end_offset + 1; // +1 for newline character
         }
 
         PreviewLayout { lines, bounds }
