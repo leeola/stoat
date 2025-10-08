@@ -2,11 +2,11 @@ use crate::{
     command_palette::CommandPalette, editor_element::EditorElement, file_finder::FileFinder,
 };
 use gpui::{
-    div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
-    ScrollWheelEvent, Styled, Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollHandle, ScrollWheelEvent, Styled, Window, div, point,
+    prelude::FluentBuilder, rgb,
 };
-use stoat_v4::{actions::*, scroll, Stoat};
+use stoat_v4::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -90,6 +90,78 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.delete_right(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_word_left(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_word_right(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_next_symbol(
+        &mut self,
+        _: &SelectNextSymbol,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_next_symbol(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_prev_symbol(
+        &mut self,
+        _: &SelectPrevSymbol,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_prev_symbol(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_next_token(
+        &mut self,
+        _: &SelectNextToken,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_next_token(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_prev_token(
+        &mut self,
+        _: &SelectPrevToken,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_prev_token(cx);
         });
         cx.notify();
     }
@@ -464,6 +536,12 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_insert_text))
             .on_action(cx.listener(Self::handle_delete_left))
             .on_action(cx.listener(Self::handle_delete_right))
+            .on_action(cx.listener(Self::handle_delete_word_left))
+            .on_action(cx.listener(Self::handle_delete_word_right))
+            .on_action(cx.listener(Self::handle_select_next_symbol))
+            .on_action(cx.listener(Self::handle_select_prev_symbol))
+            .on_action(cx.listener(Self::handle_select_next_token))
+            .on_action(cx.listener(Self::handle_select_prev_token))
             .on_action(cx.listener(Self::handle_new_line))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
