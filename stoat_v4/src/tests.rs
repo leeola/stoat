@@ -239,6 +239,51 @@ fn mode_switching_insert_to_normal(cx: &mut TestAppContext) {
     assert_eq!(stoat.mode(), "normal");
 }
 
+#[gpui::test]
+fn mode_switching_to_space_mode(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    assert_eq!(stoat.mode(), "normal");
+
+    stoat.update(|s, cx| {
+        s.enter_space_mode(cx);
+    });
+
+    assert_eq!(stoat.mode(), "space");
+}
+
+#[gpui::test]
+fn mode_switching_to_pane_mode(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    assert_eq!(stoat.mode(), "normal");
+
+    stoat.update(|s, cx| {
+        s.enter_pane_mode(cx);
+    });
+
+    assert_eq!(stoat.mode(), "pane");
+}
+
+#[gpui::test]
+fn space_mode_enables_file_finder(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        // Start in normal mode
+        assert_eq!(s.mode(), "normal");
+
+        // Enter space mode
+        s.enter_space_mode(cx);
+        assert_eq!(s.mode(), "space");
+
+        // Open file finder (typically triggered by 'p' key in space mode)
+        s.open_file_finder(cx);
+        assert_eq!(s.mode(), "file_finder");
+        assert!(s.file_finder_input().is_some());
+    });
+}
+
 // ===== Entity Pattern Tests =====
 
 #[gpui::test]
@@ -1125,4 +1170,157 @@ fn delete_word_right_no_next_symbol(cx: &mut TestAppContext) {
 
     assert_eq!(stoat.buffer_text(), "hello"); // No change
     assert_eq!(stoat.cursor_position(), Point::new(0, 5));
+}
+
+// ===== File Finder Tests =====
+
+#[gpui::test]
+fn open_file_finder_creates_state(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        assert_eq!(s.mode(), "normal");
+        assert!(s.file_finder_input().is_none());
+
+        s.open_file_finder(cx);
+
+        assert_eq!(s.mode(), "file_finder");
+        assert!(s.file_finder_input().is_some());
+        assert_eq!(s.file_finder_selected(), 0);
+    });
+}
+
+#[gpui::test]
+fn file_finder_dismiss_clears_state(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.open_file_finder(cx);
+        assert_eq!(s.mode(), "file_finder");
+        assert!(s.file_finder_input().is_some());
+
+        s.file_finder_dismiss(cx);
+
+        assert_eq!(s.mode(), "normal");
+        assert!(s.file_finder_input().is_none());
+        assert_eq!(s.file_finder_filtered().len(), 0);
+        assert_eq!(s.file_finder_selected(), 0);
+    });
+}
+
+#[gpui::test]
+fn file_finder_next_increments(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.open_file_finder(cx);
+
+        // Assume worktree has files
+        let file_count = s.file_finder_filtered().len();
+        if file_count > 1 {
+            assert_eq!(s.file_finder_selected(), 0);
+
+            s.file_finder_next(cx);
+            assert_eq!(s.file_finder_selected(), 1);
+        }
+    });
+}
+
+#[gpui::test]
+fn file_finder_prev_decrements(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.open_file_finder(cx);
+
+        // Manually set selection to test prev
+        let file_count = s.file_finder_filtered().len();
+        if file_count > 1 {
+            s.file_finder_next(cx);
+            assert_eq!(s.file_finder_selected(), 1);
+
+            s.file_finder_prev(cx);
+            assert_eq!(s.file_finder_selected(), 0);
+        }
+    });
+}
+
+#[gpui::test]
+fn file_finder_insert_filters(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.open_file_finder(cx);
+
+        let initial_count = s.file_finder_filtered().len();
+
+        // Insert text to filter
+        s.insert_text("src", cx);
+
+        // Should filter the list (unless no files match)
+        let filtered_count = s.file_finder_filtered().len();
+
+        // Selection should reset to 0 after filtering
+        assert_eq!(s.file_finder_selected(), 0);
+
+        // Files are either filtered or same if all match
+        assert!(filtered_count <= initial_count);
+    });
+}
+
+#[gpui::test]
+fn file_finder_backspace_refilters(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.open_file_finder(cx);
+
+        // Type something
+        s.insert_text("xyz", cx);
+        let after_insert = s.file_finder_filtered().len();
+
+        // Delete one character
+        s.delete_left(cx);
+
+        // Should re-filter with "xy"
+        let after_delete = s.file_finder_filtered().len();
+
+        // Should have reset selection
+        assert_eq!(s.file_finder_selected(), 0);
+
+        // Count may have changed (likely increased)
+        assert!(after_delete >= after_insert);
+    });
+}
+
+#[gpui::test]
+fn file_finder_actions_noop_outside_mode(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        assert_eq!(s.mode(), "normal");
+
+        // These should be no-ops in normal mode
+        s.file_finder_next(cx);
+        s.file_finder_prev(cx);
+        s.file_finder_dismiss(cx);
+
+        assert_eq!(s.mode(), "normal");
+    });
+}
+
+#[gpui::test]
+fn file_finder_preserves_previous_mode(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test(cx);
+
+    stoat.update(|s, cx| {
+        s.enter_insert_mode(cx);
+        assert_eq!(s.mode(), "insert");
+
+        s.open_file_finder(cx);
+        assert_eq!(s.mode(), "file_finder");
+
+        s.file_finder_dismiss(cx);
+        assert_eq!(s.mode(), "insert");
+    });
 }

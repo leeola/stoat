@@ -46,6 +46,9 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
             return match mode_name {
                 "insert" => Ok(KeyBinding::new(key, EnterInsertMode, context)),
                 "normal" => Ok(KeyBinding::new(key, EnterNormalMode, context)),
+                "visual" => Ok(KeyBinding::new(key, EnterVisualMode, context)),
+                "space" => Ok(KeyBinding::new(key, EnterSpaceMode, context)),
+                "pane" => Ok(KeyBinding::new(key, EnterPaneMode, context)),
                 _ => Err(format!("Unsupported mode in SetMode: {}", mode_name)),
             };
         }

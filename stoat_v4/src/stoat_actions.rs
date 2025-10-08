@@ -17,6 +17,25 @@ impl Stoat {
 
     /// Insert text at cursor
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // Route to file finder input buffer if in file_finder mode
+        if self.mode == "file_finder" {
+            if let Some(input_buffer) = &self.file_finder_input {
+                // Insert at end of input buffer
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
+
+                // Re-filter files based on new query
+                let query = input_buffer.read(cx).snapshot().text();
+                self.filter_files(&query, cx);
+            }
+            return;
+        }
+
+        // Main buffer insertion for all other modes
         let cursor = self.cursor.position();
         let buffer = self.buffer_item.read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
@@ -39,6 +58,27 @@ impl Stoat {
 
     /// Delete character before cursor
     pub fn delete_left(&mut self, cx: &mut Context<Self>) {
+        // Route to file finder input buffer if in file_finder mode
+        if self.mode == "file_finder" {
+            if let Some(input_buffer) = &self.file_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character from input buffer
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(len - 1..len, "")]);
+                    });
+
+                    // Re-filter files based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_files(&query, cx);
+                }
+            }
+            return;
+        }
+
+        // Main buffer deletion for all other modes
         let cursor = self.cursor.position();
         if cursor.column == 0 {
             return; // At start of line
@@ -697,6 +737,22 @@ impl Stoat {
     pub fn enter_visual_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = "visual".to_string();
         debug!("Entering visual mode");
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Enter space mode (leader key)
+    pub fn enter_space_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode = "space".to_string();
+        debug!("Entering space mode");
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Enter pane mode (window management)
+    pub fn enter_pane_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode = "pane".to_string();
+        debug!("Entering pane mode");
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }

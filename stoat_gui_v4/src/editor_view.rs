@@ -1,10 +1,10 @@
 use crate::{editor_element::EditorElement, file_finder::FileFinder};
 use gpui::{
-    div, point, prelude::FluentBuilder, rgb, App, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
-    Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point, prelude::FluentBuilder,
+    rgb,
 };
-use stoat_v4::{actions::*, scroll, Stoat};
+use stoat_v4::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -173,6 +173,30 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_enter_space_mode(
+        &mut self,
+        _: &EnterSpaceMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.enter_space_mode(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_enter_pane_mode(
+        &mut self,
+        _: &EnterPaneMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.enter_pane_mode(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_open_file_finder(
         &mut self,
         _: &OpenFileFinder,
@@ -296,7 +320,8 @@ impl Render for EditorView {
                 .unwrap_or_default();
             let files = stoat.file_finder_filtered().to_vec();
             let selected = stoat.file_finder_selected();
-            Some((query, files, selected))
+            let preview = stoat.file_finder_preview().cloned();
+            Some((query, files, selected, preview))
         } else {
             None
         };
@@ -329,6 +354,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_move_to_line_end))
             .on_action(cx.listener(Self::handle_enter_insert_mode))
             .on_action(cx.listener(Self::handle_enter_normal_mode))
+            .on_action(cx.listener(Self::handle_enter_space_mode))
+            .on_action(cx.listener(Self::handle_enter_pane_mode))
             .on_action(cx.listener(Self::handle_open_file_finder))
             .on_action(cx.listener(Self::handle_file_finder_next))
             .on_action(cx.listener(Self::handle_file_finder_prev))
@@ -371,8 +398,11 @@ impl Render for EditorView {
                     .bg(rgb(0x2a2a2a))
                     .child(mode_text),
             )
-            .when_some(file_finder_data, |div, (query, files, selected)| {
-                div.child(FileFinder::new(query, files, selected))
-            })
+            .when_some(
+                file_finder_data,
+                |div, (query, files, selected, preview)| {
+                    div.child(FileFinder::new(query, files, selected, preview))
+                },
+            )
     }
 }

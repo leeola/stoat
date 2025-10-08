@@ -66,6 +66,10 @@ actions!(
         EnterNormalMode,
         /// Enter visual mode
         EnterVisualMode,
+        /// Enter space mode (leader key)
+        EnterSpaceMode,
+        /// Enter pane mode (window management)
+        EnterPaneMode,
     ]
 );
 

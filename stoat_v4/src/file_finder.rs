@@ -19,6 +19,24 @@ pub enum PreviewData {
     Highlighted { text: String, tokens: TokenSnapshot },
 }
 
+impl PreviewData {
+    /// Get the text content of this preview
+    pub fn text(&self) -> &str {
+        match self {
+            PreviewData::Plain(text) => text,
+            PreviewData::Highlighted { text, .. } => text,
+        }
+    }
+
+    /// Get the token snapshot if this is a highlighted preview
+    pub fn tokens(&self) -> Option<&TokenSnapshot> {
+        match self {
+            PreviewData::Plain(_) => None,
+            PreviewData::Highlighted { tokens, .. } => Some(tokens),
+        }
+    }
+}
+
 /// Load plain text preview without syntax highlighting.
 ///
 /// Fast operation suitable for immediate display. Reads up to 100KB.
