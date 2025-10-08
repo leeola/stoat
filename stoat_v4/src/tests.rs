@@ -90,6 +90,49 @@ fn delete_right_at_line_end_merges_lines(cx: &mut TestAppContext) {
     assert_eq!(stoat.cursor_position(), Point::new(0, 5));
 }
 
+#[gpui::test]
+fn delete_left_handles_multibyte_utf8_characters(cx: &mut TestAppContext) {
+    // Test 2-byte character (non-breaking space U+00A0)
+    // "test" = 4 bytes, "\u{00A0}" = 2 bytes, total = 6 bytes
+    let mut stoat = Stoat::test_with_text("test\u{00A0}", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 6)); // After all bytes
+        s.delete_left(cx);
+    });
+    assert_eq!(stoat.buffer_text(), "test");
+    assert_eq!(stoat.cursor_position(), Point::new(0, 4)); // Cursor at byte 4
+
+    // Test 2-byte character (Latin accented)
+    // "caf" = 3 bytes, "é" = 2 bytes, total = 5 bytes
+    let mut stoat = Stoat::test_with_text("café", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 5)); // After all bytes
+        s.delete_left(cx);
+    });
+    assert_eq!(stoat.buffer_text(), "caf");
+    assert_eq!(stoat.cursor_position(), Point::new(0, 3)); // Cursor at byte 3
+
+    // Test 3-byte character (Chinese)
+    // "hello" = 5 bytes, "中" = 3 bytes, total = 8 bytes
+    let mut stoat = Stoat::test_with_text("hello中", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 8)); // After all bytes
+        s.delete_left(cx);
+    });
+    assert_eq!(stoat.buffer_text(), "hello");
+    assert_eq!(stoat.cursor_position(), Point::new(0, 5)); // Cursor at byte 5
+
+    // Test 4-byte character (mathematical symbol U+1D400)
+    // "test" = 4 bytes, "\u{1D400}" = 4 bytes, total = 8 bytes
+    let mut stoat = Stoat::test_with_text("test\u{1D400}", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 8)); // After all bytes
+        s.delete_left(cx);
+    });
+    assert_eq!(stoat.buffer_text(), "test");
+    assert_eq!(stoat.cursor_position(), Point::new(0, 4)); // Cursor at byte 4
+}
+
 // ===== Movement Tests =====
 
 #[gpui::test]
@@ -138,6 +181,45 @@ fn move_right_at_line_end_is_noop(cx: &mut TestAppContext) {
     });
 
     assert_eq!(stoat.cursor_position(), Point::new(0, 5));
+}
+
+#[gpui::test]
+fn move_left_handles_multibyte_utf8_characters(cx: &mut TestAppContext) {
+    // Test 2-byte character (non-breaking space U+00A0)
+    // "test" = 4 bytes, "\u{00A0}" = 2 bytes, total = 6 bytes
+    let mut stoat = Stoat::test_with_text("test\u{00A0}", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 6)); // After all bytes
+        s.move_left(cx);
+    });
+    assert_eq!(stoat.cursor_position(), Point::new(0, 4)); // Should move to before the 2-byte char
+
+    // Test 3-byte character (Chinese)
+    let mut stoat = Stoat::test_with_text("hello中", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 8)); // After 3-byte char
+        s.move_left(cx);
+    });
+    assert_eq!(stoat.cursor_position(), Point::new(0, 5)); // Should move to before the 3-byte char
+}
+
+#[gpui::test]
+fn move_right_handles_multibyte_utf8_characters(cx: &mut TestAppContext) {
+    // Test 2-byte character (non-breaking space U+00A0)
+    let mut stoat = Stoat::test_with_text("test\u{00A0}", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 4)); // Before 2-byte char
+        s.move_right(cx);
+    });
+    assert_eq!(stoat.cursor_position(), Point::new(0, 6)); // Should move to after the 2-byte char
+
+    // Test 3-byte character (Chinese)
+    let mut stoat = Stoat::test_with_text("hello中", cx);
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 5)); // Before 3-byte char
+        s.move_right(cx);
+    });
+    assert_eq!(stoat.cursor_position(), Point::new(0, 8)); // Should move to after the 3-byte char
 }
 
 #[gpui::test]

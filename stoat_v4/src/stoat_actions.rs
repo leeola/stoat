@@ -9,7 +9,7 @@ use crate::{
 use gpui::{AppContext, Context};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use std::{num::NonZeroU64, path::PathBuf};
-use text::{Buffer, BufferId};
+use text::{Bias, Buffer, BufferId};
 use tracing::debug;
 
 impl Stoat {
@@ -83,8 +83,15 @@ impl Stoat {
 
                 if len > 0 {
                     // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
                     input_buffer.update(cx, |buffer, _| {
-                        buffer.edit([(len - 1..len, "")]);
+                        buffer.edit([(char_boundary..len, "")]);
                     });
 
                     // Re-filter files based on new query
@@ -102,8 +109,16 @@ impl Stoat {
                 let len = snapshot.len();
 
                 if len > 0 {
+                    // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
                     input_buffer.update(cx, |buffer, _| {
-                        buffer.edit([(len - 1..len, "")]);
+                        buffer.edit([(char_boundary..len, "")]);
                     });
 
                     // Re-filter commands based on new query
@@ -120,15 +135,28 @@ impl Stoat {
             return; // At start of line
         }
 
+        // Naive calculation: one position to the left
+        let target_point = text::Point::new(cursor.row, cursor.column.saturating_sub(1));
+
+        // Clip to valid character boundary
+        let (clipped_point, clipped_offset, cursor_offset) = {
+            let buffer = self.buffer_item.read(cx).buffer();
+            let buffer_read = buffer.read(cx);
+            let snapshot = buffer_read.snapshot();
+            let clipped = snapshot.clip_point(target_point, Bias::Left);
+            let clipped_offset = buffer_read.point_to_offset(clipped);
+            let cursor_offset = buffer_read.point_to_offset(cursor);
+            (clipped, clipped_offset, cursor_offset)
+        };
+
+        // Perform the edit
         let buffer = self.buffer_item.read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
-            let offset = buffer.point_to_offset(cursor);
-            buffer.edit([(offset - 1..offset, "")]);
+            buffer.edit([(clipped_offset..cursor_offset, "")]);
         });
 
-        // Move cursor back
-        self.cursor
-            .move_to(text::Point::new(cursor.row, cursor.column - 1));
+        // Move cursor to clipped position
+        self.cursor.move_to(clipped_point);
 
         // Reparse
         self.buffer_item.update(cx, |item, cx| {
@@ -524,11 +552,13 @@ impl Stoat {
     }
 
     /// Move cursor left
-    pub fn move_left(&mut self, _cx: &mut Context<Self>) {
+    pub fn move_left(&mut self, cx: &mut Context<Self>) {
         let pos = self.cursor.position();
         if pos.column > 0 {
-            self.cursor
-                .move_to(text::Point::new(pos.row, pos.column - 1));
+            let target = text::Point::new(pos.row, pos.column - 1);
+            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let clipped = snapshot.clip_point(target, Bias::Left);
+            self.cursor.move_to(clipped);
         }
     }
 
@@ -543,8 +573,10 @@ impl Stoat {
             .line_len(pos.row);
 
         if pos.column < line_len {
-            self.cursor
-                .move_to(text::Point::new(pos.row, pos.column + 1));
+            let target = text::Point::new(pos.row, pos.column + 1);
+            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let clipped = snapshot.clip_point(target, Bias::Right);
+            self.cursor.move_to(clipped);
         }
     }
 
@@ -1470,7 +1502,10 @@ impl Stoat {
         let cursor_pos = selection.cursor_position();
 
         if cursor_pos.column > 0 {
-            let new_pos = text::Point::new(cursor_pos.row, cursor_pos.column - 1);
+            let target = text::Point::new(cursor_pos.row, cursor_pos.column - 1);
+            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let new_pos = snapshot.clip_point(target, Bias::Left);
+
             let new_selection = if selection.is_empty() {
                 // First extension - create selection
                 crate::cursor::Selection::new(cursor_pos, new_pos)
@@ -1511,7 +1546,9 @@ impl Stoat {
         };
 
         if cursor_pos.column < line_len {
-            let new_pos = text::Point::new(cursor_pos.row, cursor_pos.column + 1);
+            let target = text::Point::new(cursor_pos.row, cursor_pos.column + 1);
+            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let new_pos = snapshot.clip_point(target, Bias::Right);
             let new_selection = if selection.is_empty() {
                 // First extension - create selection
                 crate::cursor::Selection::new(cursor_pos, new_pos)
