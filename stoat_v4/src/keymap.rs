@@ -109,6 +109,17 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "SelectToLineStart" => Ok(KeyBinding::new(key, SelectToLineStart, context)),
         "SelectToLineEnd" => Ok(KeyBinding::new(key, SelectToLineEnd, context)),
 
+        // Pane management actions
+        "SplitUp" => Ok(KeyBinding::new(key, SplitUp, context)),
+        "SplitDown" => Ok(KeyBinding::new(key, SplitDown, context)),
+        "SplitLeft" => Ok(KeyBinding::new(key, SplitLeft, context)),
+        "SplitRight" => Ok(KeyBinding::new(key, SplitRight, context)),
+        "ClosePane" => Ok(KeyBinding::new(key, ClosePane, context)),
+        "FocusPaneUp" => Ok(KeyBinding::new(key, FocusPaneUp, context)),
+        "FocusPaneDown" => Ok(KeyBinding::new(key, FocusPaneDown, context)),
+        "FocusPaneLeft" => Ok(KeyBinding::new(key, FocusPaneLeft, context)),
+        "FocusPaneRight" => Ok(KeyBinding::new(key, FocusPaneRight, context)),
+
         // Application actions
         "ExitApp" => Ok(KeyBinding::new(key, ExitApp, context)),
 

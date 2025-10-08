@@ -8,6 +8,7 @@ pub mod editor_view;
 pub mod file_finder;
 pub mod keybinding_hint;
 pub mod keymap_query;
+pub mod pane_group;
 pub mod syntax;
 
 pub use app::run_with_paths;

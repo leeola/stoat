@@ -13,9 +13,31 @@ use crate::{
 use gpui::{AppContext, Context, Entity, EventEmitter, Task};
 use nucleo_matcher::{Config, Matcher};
 use parking_lot::Mutex;
-use std::{num::NonZeroU64, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, num::NonZeroU64, path::PathBuf, sync::Arc};
 use stoat_text::Language;
 use text::{Buffer, BufferId, Point};
+
+/// Mode metadata for editor modes.
+///
+/// Contains display information for a mode. Modes define different editor behaviors
+/// (normal, insert, visual, etc.) and have associated keybindings and display names.
+#[derive(Clone, Debug)]
+pub struct Mode {
+    /// Internal identifier for the mode (e.g., "normal", "insert")
+    pub name: String,
+    /// Display name shown to users (e.g., "NORMAL", "INSERT")
+    pub display_name: String,
+}
+
+impl Mode {
+    /// Create a new mode with the given name and display name.
+    pub fn new(name: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            display_name: display_name.into(),
+        }
+    }
+}
 
 /// Command information for command palette.
 ///
@@ -58,6 +80,9 @@ pub struct Stoat {
     /// Current mode (normal, insert, file_finder)
     pub(crate) mode: String,
 
+    /// Registry of available modes
+    pub(crate) modes: HashMap<String, Mode>,
+
     // File finder state
     pub(crate) file_finder_input: Option<Entity<Buffer>>,
     pub(crate) file_finder_files: Vec<Entry>,
@@ -93,12 +118,29 @@ impl Stoat {
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
+        // Initialize mode registry
+        let mut modes = HashMap::new();
+        modes.insert("normal".to_string(), Mode::new("normal", "NORMAL"));
+        modes.insert("insert".to_string(), Mode::new("insert", "INSERT"));
+        modes.insert("visual".to_string(), Mode::new("visual", "VISUAL"));
+        modes.insert("pane".to_string(), Mode::new("pane", "PANE"));
+        modes.insert(
+            "file_finder".to_string(),
+            Mode::new("file_finder", "FILE FINDER"),
+        );
+        modes.insert("space".to_string(), Mode::new("space", "SPACE"));
+        modes.insert(
+            "command_palette".to_string(),
+            Mode::new("command_palette", "COMMAND"),
+        );
+
         Self {
             buffer_item,
             cursor: CursorManager::new(),
             scroll: ScrollPosition::new(),
             viewport_lines: None,
             mode: "normal".into(),
+            modes,
             file_finder_input: None,
             file_finder_files: Vec::new(),
             file_finder_filtered: Vec::new(),
@@ -149,6 +191,14 @@ impl Stoat {
     /// Set mode
     pub fn set_mode(&mut self, mode: &str) {
         self.mode = mode.to_string();
+    }
+
+    /// Get mode metadata by name.
+    ///
+    /// Returns the [`Mode`] struct containing display name and other metadata
+    /// for the given mode name, or `None` if the mode is not registered.
+    pub fn get_mode(&self, name: &str) -> Option<&Mode> {
+        self.modes.get(name)
     }
 
     /// Set viewport height in lines

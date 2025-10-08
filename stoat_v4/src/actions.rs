@@ -135,6 +135,31 @@ actions!(
     ]
 );
 
+// Pane management actions
+actions!(
+    stoat_v4,
+    [
+        /// Split the active pane upward
+        SplitUp,
+        /// Split the active pane downward
+        SplitDown,
+        /// Split the active pane to the left
+        SplitLeft,
+        /// Split the active pane to the right
+        SplitRight,
+        /// Close the active pane
+        ClosePane,
+        /// Focus the pane above the current one
+        FocusPaneUp,
+        /// Focus the pane below the current one
+        FocusPaneDown,
+        /// Focus the pane to the left of the current one
+        FocusPaneLeft,
+        /// Focus the pane to the right of the current one
+        FocusPaneRight,
+    ]
+);
+
 // Application actions
 actions!(
     stoat_v4,
@@ -404,6 +429,53 @@ action_metadata!(
     "Close the command palette without executing a command"
 );
 
+// Pane management actions
+action_metadata!(
+    SplitRight,
+    "split right",
+    "Split the current pane vertically, creating a new empty pane to the right"
+);
+action_metadata!(
+    SplitDown,
+    "split down",
+    "Split the current pane horizontally, creating a new empty pane below"
+);
+action_metadata!(
+    SplitLeft,
+    "split left",
+    "Split the current pane vertically, creating a new empty pane to the left"
+);
+action_metadata!(
+    SplitUp,
+    "split up",
+    "Split the current pane horizontally, creating a new empty pane above"
+);
+action_metadata!(
+    ClosePane,
+    "close pane",
+    "Close the currently focused pane and remove it from the layout"
+);
+action_metadata!(
+    FocusPaneLeft,
+    "focus left",
+    "Move keyboard focus to the pane immediately to the left of the current pane"
+);
+action_metadata!(
+    FocusPaneRight,
+    "focus right",
+    "Move keyboard focus to the pane immediately to the right of the current pane"
+);
+action_metadata!(
+    FocusPaneUp,
+    "focus up",
+    "Move keyboard focus to the pane immediately above the current pane"
+);
+action_metadata!(
+    FocusPaneDown,
+    "focus down",
+    "Move keyboard focus to the pane immediately below the current pane"
+);
+
 // Application actions
 action_metadata!(ExitApp, "exit", "Exit the application");
 
@@ -542,6 +614,20 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::action_name(),
+    );
+
+    // Pane management actions
+    names.insert(TypeId::of::<SplitUp>(), SplitUp::action_name());
+    names.insert(TypeId::of::<SplitDown>(), SplitDown::action_name());
+    names.insert(TypeId::of::<SplitLeft>(), SplitLeft::action_name());
+    names.insert(TypeId::of::<SplitRight>(), SplitRight::action_name());
+    names.insert(TypeId::of::<ClosePane>(), ClosePane::action_name());
+    names.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::action_name());
+    names.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::action_name());
+    names.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::action_name());
+    names.insert(
+        TypeId::of::<FocusPaneRight>(),
+        FocusPaneRight::action_name(),
     );
 
     // Application actions
@@ -685,6 +771,20 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         CommandPaletteDismiss::description(),
     );
 
+    // Pane management actions
+    descriptions.insert(TypeId::of::<SplitUp>(), SplitUp::description());
+    descriptions.insert(TypeId::of::<SplitDown>(), SplitDown::description());
+    descriptions.insert(TypeId::of::<SplitLeft>(), SplitLeft::description());
+    descriptions.insert(TypeId::of::<SplitRight>(), SplitRight::description());
+    descriptions.insert(TypeId::of::<ClosePane>(), ClosePane::description());
+    descriptions.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::description());
+    descriptions.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::description());
+    descriptions.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::description());
+    descriptions.insert(
+        TypeId::of::<FocusPaneRight>(),
+        FocusPaneRight::description(),
+    );
+
     // Application actions
     descriptions.insert(TypeId::of::<ExitApp>(), ExitApp::description());
 
@@ -820,6 +920,17 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::help_text(),
     );
+
+    // Pane management actions
+    help.insert(TypeId::of::<SplitUp>(), SplitUp::help_text());
+    help.insert(TypeId::of::<SplitDown>(), SplitDown::help_text());
+    help.insert(TypeId::of::<SplitLeft>(), SplitLeft::help_text());
+    help.insert(TypeId::of::<SplitRight>(), SplitRight::help_text());
+    help.insert(TypeId::of::<ClosePane>(), ClosePane::help_text());
+    help.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::help_text());
+    help.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::help_text());
+    help.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::help_text());
+    help.insert(TypeId::of::<FocusPaneRight>(), FocusPaneRight::help_text());
 
     // Application actions
     help.insert(TypeId::of::<ExitApp>(), ExitApp::help_text());

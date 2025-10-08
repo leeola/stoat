@@ -472,12 +472,12 @@ context = "Editor"
 # Pane Mode - Window management
 [[bindings]]
 key = "v"
-action = "SplitRight"
+action = "SplitDown"
 context = "Editor && mode == pane"
 
 [[bindings]]
 key = "s"
-action = "SplitDown"
+action = "SplitRight"
 context = "Editor && mode == pane"
 
 [[bindings]]

@@ -1,35 +1,25 @@
-use crate::{
-    command_overlay::CommandOverlay, command_palette::CommandPalette,
-    editor_element::EditorElement, file_finder::FileFinder, keymap_query,
-};
+use crate::editor_element::EditorElement;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Render, ScrollHandle, ScrollWheelEvent, Styled, Window, div, point,
-    prelude::FluentBuilder,
+    div, point, prelude::FluentBuilder, App, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
+    ScrollWheelEvent, Styled, Window,
 };
-use stoat_v4::{Stoat, actions::*, scroll};
+use stoat_v4::{actions::*, scroll, Stoat};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
-    keymap: gpui::Keymap,
-    file_finder_scroll: ScrollHandle,
-    command_palette_scroll: ScrollHandle,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let keymap = stoat_v4::keymap::create_default_keymap();
 
         Self {
             stoat,
             focus_handle,
             this: None,
-            keymap,
-            file_finder_scroll: ScrollHandle::new(),
-            command_palette_scroll: ScrollHandle::new(),
         }
     }
 
@@ -279,18 +269,6 @@ impl EditorView {
         cx.notify();
     }
 
-    fn handle_open_file_finder(
-        &mut self,
-        _: &OpenFileFinder,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.open_file_finder(cx);
-        });
-        cx.notify();
-    }
-
     fn handle_file_finder_next(
         &mut self,
         _: &FileFinderNext,
@@ -301,9 +279,7 @@ impl EditorView {
             stoat.file_finder_next(cx);
         });
 
-        let selected = self.stoat.read(cx).file_finder_selected();
-        self.file_finder_scroll.scroll_to_item(selected);
-
+        let _selected = self.stoat.read(cx).file_finder_selected();
         cx.notify();
     }
 
@@ -317,9 +293,7 @@ impl EditorView {
             stoat.file_finder_prev(cx);
         });
 
-        let selected = self.stoat.read(cx).file_finder_selected();
-        self.file_finder_scroll.scroll_to_item(selected);
-
+        let _selected = self.stoat.read(cx).file_finder_selected();
         cx.notify();
     }
 
@@ -347,18 +321,6 @@ impl EditorView {
         cx.notify();
     }
 
-    fn handle_open_command_palette(
-        &mut self,
-        _: &OpenCommandPalette,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.open_command_palette(&self.keymap, cx);
-        });
-        cx.notify();
-    }
-
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -369,8 +331,7 @@ impl EditorView {
             stoat.command_palette_next(cx);
         });
 
-        let selected = self.stoat.read(cx).command_palette_selected();
-        self.command_palette_scroll.scroll_to_item(selected);
+        let _selected = self.stoat.read(cx).command_palette_selected();
 
         cx.notify();
     }
@@ -385,8 +346,7 @@ impl EditorView {
             stoat.command_palette_prev(cx);
         });
 
-        let selected = self.stoat.read(cx).command_palette_selected();
-        self.command_palette_scroll.scroll_to_item(selected);
+        let _selected = self.stoat.read(cx).command_palette_selected();
 
         cx.notify();
     }
@@ -479,58 +439,6 @@ impl Render for EditorView {
             .clone()
             .expect("EditorView entity not set - call set_entity() after creation");
 
-        // Clone scroll handles for use in closures
-        let file_finder_scroll = self.file_finder_scroll.clone();
-        let command_palette_scroll = self.command_palette_scroll.clone();
-
-        // Gather file finder data if in file_finder mode
-        let file_finder_data = if mode == "file_finder" {
-            let stoat = self.stoat.read(cx);
-            let query = stoat
-                .file_finder_input()
-                .map(|buffer| {
-                    let buffer_snapshot = buffer.read(cx).snapshot();
-                    buffer_snapshot.text()
-                })
-                .unwrap_or_default();
-            let files = stoat.file_finder_filtered().to_vec();
-            let selected = stoat.file_finder_selected();
-            let preview = stoat.file_finder_preview().cloned();
-            Some((query, files, selected, preview))
-        } else {
-            None
-        };
-
-        // Gather command palette data if in command_palette mode
-        let command_palette_data = if mode == "command_palette" {
-            let stoat = self.stoat.read(cx);
-            let query = stoat
-                .command_palette_input()
-                .map(|buffer| {
-                    let buffer_snapshot = buffer.read(cx).snapshot();
-                    buffer_snapshot.text()
-                })
-                .unwrap_or_default();
-            let commands = stoat.command_palette_filtered().to_vec();
-            let selected = stoat.command_palette_selected();
-            Some((query, commands, selected))
-        } else {
-            None
-        };
-
-        // Get mode display name and query keybindings
-        let mode_display = match mode.as_str() {
-            "insert" => "INSERT",
-            "normal" => "NORMAL",
-            "visual" => "VISUAL",
-            "pane" => "PANE",
-            "file_finder" => "FILE FINDER",
-            "space" => "SPACE",
-            "command_palette" => "COMMAND",
-            _ => mode.as_str(),
-        };
-        let bindings = keymap_query::bindings_for_mode(&self.keymap, mode.as_str());
-
         div()
             .id("editor")
             .key_context({
@@ -560,12 +468,10 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_normal_mode))
             .on_action(cx.listener(Self::handle_enter_space_mode))
             .on_action(cx.listener(Self::handle_enter_pane_mode))
-            .on_action(cx.listener(Self::handle_open_file_finder))
             .on_action(cx.listener(Self::handle_file_finder_next))
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))
             .on_action(cx.listener(Self::handle_file_finder_dismiss))
-            .on_action(cx.listener(Self::handle_open_command_palette))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))
             .on_action(cx.listener(Self::handle_command_palette_execute))
@@ -594,28 +500,6 @@ impl Render for EditorView {
                 },
             ))
             .size_full()
-            .relative()
             .child(EditorElement::new(view_entity))
-            .child(CommandOverlay::new(mode_display.to_string(), bindings))
-            .when_some(
-                file_finder_data,
-                |div, (query, files, selected, preview)| {
-                    div.child(FileFinder::new(
-                        query,
-                        files,
-                        selected,
-                        preview,
-                        file_finder_scroll.clone(),
-                    ))
-                },
-            )
-            .when_some(command_palette_data, |div, (query, commands, selected)| {
-                div.child(CommandPalette::new(
-                    query,
-                    commands,
-                    selected,
-                    command_palette_scroll.clone(),
-                ))
-            })
     }
 }

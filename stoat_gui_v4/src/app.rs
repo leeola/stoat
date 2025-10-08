@@ -1,13 +1,14 @@
-use crate::editor_view::EditorView;
+use crate::{editor_view::EditorView, pane_group::PaneGroupView};
 use gpui::{
     prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
 };
+use std::rc::Rc;
 use stoat_v4::Stoat;
 
 pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
         // Register keybindings
-        let keymap = stoat_v4::keymap::create_default_keymap();
+        let keymap = Rc::new(stoat_v4::keymap::create_default_keymap());
         cx.bind_keys(keymap.bindings().cloned());
 
         // Register global action handlers
@@ -54,10 +55,14 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
                     view.set_entity(editor_view.clone());
                 });
 
-                // Focus the editor so input works immediately
+                // Create PaneGroupView wrapping the editor
+                let pane_group_view =
+                    cx.new(|cx| PaneGroupView::new(editor_view.clone(), keymap.clone(), cx));
+
+                // Focus the initial editor so input works immediately
                 window.focus(&editor_view.read(cx).focus_handle(cx));
 
-                editor_view
+                pane_group_view
             },
         )
         .expect("failed to open window");
