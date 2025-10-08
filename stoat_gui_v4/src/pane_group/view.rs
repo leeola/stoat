@@ -139,9 +139,9 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat.clone()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
@@ -181,9 +181,9 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat.clone()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
@@ -223,9 +223,9 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat.clone()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
@@ -265,9 +265,9 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat.clone()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };

@@ -158,6 +158,42 @@ impl Stoat {
         }
     }
 
+    /// Clone this Stoat for a split pane.
+    ///
+    /// Creates a new Stoat instance that shares the same [`BufferItem`] (text buffer)
+    /// but has independent cursor position, scroll position, and viewport state.
+    /// This follows Zed's performant pattern: share expensive buffer data via [`Entity`],
+    /// but maintain independent view state per pane.
+    ///
+    /// The cursor and scroll positions are copied to the new instance, so the split starts
+    /// at the same view, but subsequent movements are independent.
+    ///
+    /// Used by [`PaneGroupView`] when splitting panes to create multiple views of the same buffer.
+    pub fn clone_for_split(&self) -> Self {
+        Self {
+            buffer_item: self.buffer_item.clone(),
+            cursor: self.cursor.clone(),
+            scroll: self.scroll.clone(),
+            viewport_lines: self.viewport_lines,
+            mode: self.mode.clone(),
+            modes: self.modes.clone(),
+            file_finder_input: None,
+            file_finder_files: Vec::new(),
+            file_finder_filtered: Vec::new(),
+            file_finder_selected: 0,
+            file_finder_previous_mode: None,
+            file_finder_preview: None,
+            file_finder_preview_task: None,
+            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            command_palette_input: None,
+            command_palette_commands: Vec::new(),
+            command_palette_filtered: Vec::new(),
+            command_palette_selected: 0,
+            command_palette_previous_mode: None,
+            worktree: self.worktree.clone(),
+        }
+    }
+
     /// Get buffer item entity (caller can access buffer via this)
     pub fn buffer_item(&self) -> &Entity<BufferItem> {
         &self.buffer_item
