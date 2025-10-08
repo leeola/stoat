@@ -3,17 +3,18 @@ use crate::{
     file_finder::FileFinder, pane_group::element::pane_axis,
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
+    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Window,
 };
 use std::{collections::HashMap, rc::Rc};
 use stoat_v4::{
-    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenCommandPalette,
         OpenFileFinder, SplitDown, SplitLeft, SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    Stoat,
 };
 use tracing::debug;
 

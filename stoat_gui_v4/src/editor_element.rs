@@ -348,6 +348,11 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Only paint cursor if the editor view is focused
+        if !self.view.read(cx).is_focused(window) {
+            return;
+        }
+
         // Get cursor position from stoat
         let stoat = self.view.read(cx).stoat.read(cx);
         let cursor_position = stoat.cursor_position();

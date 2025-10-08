@@ -27,6 +27,10 @@ impl EditorView {
         self.this = Some(entity);
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
+    }
+
     // ==== Action handlers ====
 
     fn handle_insert_text(
