@@ -239,7 +239,7 @@ impl Stoat {
                                     item.set_diff(Some(diff));
                                 },
                                 Err(e) => {
-                                    tracing::warn!("Failed to compute diff: {}", e);
+                                    tracing::error!("Failed to compute diff: {}", e);
                                 },
                             }
                         }

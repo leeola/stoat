@@ -7,6 +7,8 @@ use crate::{
     buffer_item::BufferItem,
     cursor::CursorManager,
     file_finder::PreviewData,
+    git_diff::BufferDiff,
+    git_repository::Repository,
     scroll::ScrollPosition,
     worktree::{Entry, Worktree},
 };
@@ -309,6 +311,22 @@ impl Stoat {
                 buffer.edit([(0..len, contents.as_str())]);
             });
             let _ = item.reparse(cx);
+
+            // Compute git diff if in a repository
+            if let Ok(repo) = Repository::discover(path) {
+                if let Ok(head_content) = repo.head_content(path) {
+                    let buffer_snapshot = item.buffer().read(cx).snapshot();
+                    let buffer_id = buffer_snapshot.remote_id();
+                    match BufferDiff::new(buffer_id, head_content, &buffer_snapshot) {
+                        Ok(diff) => {
+                            item.set_diff(Some(diff));
+                        },
+                        Err(e) => {
+                            tracing::error!("Failed to compute diff for {:?}: {}", path, e);
+                        },
+                    }
+                }
+            }
         });
 
         self.cursor.move_to(text::Point::new(0, 0));

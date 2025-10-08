@@ -908,27 +908,9 @@ impl Stoat {
             let root = self.worktree.lock().snapshot().root().to_path_buf();
             let abs_path = root.join(relative_path);
 
-            // Load file (simplified - just read text for now)
-            if let Ok(contents) = std::fs::read_to_string(&abs_path) {
-                // Detect language
-                let language = abs_path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(stoat_text::Language::from_extension)
-                    .unwrap_or(stoat_text::Language::PlainText);
-
-                // Update buffer
-                self.buffer_item.update(cx, |item, cx| {
-                    item.set_language(language);
-                    item.buffer().update(cx, |buffer, _| {
-                        let len = buffer.len();
-                        buffer.edit([(0..len, contents.as_str())]);
-                    });
-                    let _ = item.reparse(cx);
-                });
-
-                // Reset cursor
-                self.cursor.move_to(text::Point::new(0, 0));
+            // Load file (uses load_file to ensure diff computation)
+            if let Err(e) = self.load_file(&abs_path, cx) {
+                tracing::error!("Failed to load file {:?}: {}", abs_path, e);
             }
         }
 

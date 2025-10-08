@@ -6,6 +6,7 @@
 use crate::{
     editor_style::EditorStyle,
     editor_view::EditorView,
+    gutter::GutterLayout,
     syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
 };
 use gpui::{
@@ -217,7 +218,7 @@ impl Element for EditorElement {
 
                     let x = bounds.origin.x + gutter_width + self.style.padding;
                     if let Err(e) = shaped.paint(point(x, y), self.style.line_height, window, cx) {
-                        tracing::warn!("Failed to paint line {}: {:?}", line_idx, e);
+                        tracing::error!("Failed to paint line {}: {:?}", line_idx, e);
                     }
                 }
             }
@@ -229,6 +230,9 @@ impl Element for EditorElement {
                 break;
             }
         }
+
+        // Paint git diff indicators in gutter (behind line numbers)
+        self.paint_gutter(bounds, start_line..end_line, gutter_width, window, cx);
 
         // Paint line numbers in gutter
         self.paint_line_numbers(bounds, &line_positions, gutter_width, window, cx);
@@ -294,7 +298,7 @@ impl EditorElement {
             let x = bounds.origin.x + gutter_width - shaped.width - px(8.0);
 
             if let Err(e) = shaped.paint(point(x, *y), self.style.line_height, window, cx) {
-                tracing::warn!("Failed to paint line number {}: {:?}", line_idx + 1, e);
+                tracing::error!("Failed to paint line number {}: {:?}", line_idx + 1, e);
             }
         }
     }
@@ -434,6 +438,69 @@ impl EditorElement {
             border_widths: 0.0.into(),
             border_style: gpui::BorderStyle::default(),
         });
+    }
+
+    /// Paint git diff indicators in the gutter
+    fn paint_gutter(
+        &self,
+        bounds: Bounds<Pixels>,
+        visible_rows: std::ops::Range<u32>,
+        gutter_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if !self.style.show_diff_indicators || gutter_width == Pixels::ZERO {
+            return;
+        }
+
+        // Get diff from buffer item
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let buffer_item = stoat.buffer_item();
+        let diff = buffer_item.read(cx).diff();
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+        // Create gutter bounds (left portion of editor)
+        let gutter_bounds = Bounds {
+            origin: bounds.origin,
+            size: size(gutter_width, bounds.size.height),
+        };
+
+        // Create gutter layout with diff indicators
+        let gutter_layout = GutterLayout::new(
+            gutter_bounds,
+            visible_rows,
+            diff,
+            &buffer_snapshot,
+            gutter_width,
+            self.style.padding,
+            self.style.line_height,
+        );
+
+        // Paint diff indicators
+        for indicator in &gutter_layout.diff_indicators {
+            let diff_color = match indicator.status {
+                stoat_v4::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
+                stoat_v4::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
+                stoat_v4::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+            };
+
+            // Blend with background for subtle appearance (60% opacity)
+            let blended_color = gpui::Hsla {
+                h: diff_color.h,
+                s: diff_color.s,
+                l: diff_color.l,
+                a: diff_color.a * 0.6,
+            };
+
+            window.paint_quad(gpui::PaintQuad {
+                bounds: indicator.bounds,
+                corner_radii: indicator.corner_radii,
+                background: blended_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
+        }
     }
 }
 
