@@ -189,6 +189,48 @@ impl Stoat {
         }
     }
 
+    /// Load a file into the buffer.
+    ///
+    /// Reads file content, detects language from extension, updates buffer,
+    /// and reparses for syntax highlighting.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to file to load
+    /// * `cx` - GPUI context
+    ///
+    /// # Errors
+    ///
+    /// Returns error if file cannot be read.
+    pub fn load_file(
+        &mut self,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+        let language = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(stoat_text::Language::from_extension)
+            .unwrap_or(stoat_text::Language::PlainText);
+
+        self.buffer_item.update(cx, |item, cx| {
+            item.set_language(language);
+            item.buffer().update(cx, |buffer, _| {
+                let len = buffer.len();
+                buffer.edit([(0..len, contents.as_str())]);
+            });
+            let _ = item.reparse(cx);
+        });
+
+        self.cursor.move_to(text::Point::new(0, 0));
+        cx.notify();
+
+        Ok(())
+    }
+
     /// Create a Stoat instance for testing with an empty buffer.
     ///
     /// Returns a [`TestStoat`] wrapper that provides test-oriented helper methods.

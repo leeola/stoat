@@ -1,10 +1,10 @@
 use crate::editor_view::EditorView;
 use gpui::{
-    prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
+    App, Application, Bounds, Focusable, WindowBounds, WindowOptions, prelude::*, px, size,
 };
 use stoat_v4::Stoat;
 
-pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
         // Register keybindings
         let keymap = stoat_v4::keymap::create_default_keymap();
@@ -33,7 +33,18 @@ pub fn run_with_paths(_paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std
             },
             move |window, cx| {
                 // Create Stoat entity
-                let stoat = cx.new(|cx| Stoat::new(cx));
+                let stoat = cx.new(|cx| {
+                    let mut stoat = Stoat::new(cx);
+
+                    // Load first file if provided
+                    if !paths.is_empty() {
+                        if let Err(e) = stoat.load_file(&paths[0], cx) {
+                            tracing::error!("Failed to load file: {}", e);
+                        }
+                    }
+
+                    stoat
+                });
 
                 // Create EditorView that renders the Stoat entity
                 let editor_view = cx.new(|cx| EditorView::new(stoat, cx));
