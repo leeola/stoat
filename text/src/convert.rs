@@ -86,6 +86,8 @@ fn map_node_kind_with_context(
     match language {
         Language::Rust => map_rust_kind_with_context(ts_kind, parent, source, node),
         Language::Markdown => map_markdown_kind(ts_kind),
+        Language::Json => map_json_kind(ts_kind),
+        Language::Toml => map_toml_kind(ts_kind),
         Language::PlainText => SyntaxKind::Text,
     }
 }
@@ -266,10 +268,54 @@ fn map_markdown_kind(ts_kind: &str) -> SyntaxKind {
     }
 }
 
+fn map_json_kind(ts_kind: &str) -> SyntaxKind {
+    match ts_kind {
+        "string" | "string_content" => SyntaxKind::String,
+        "escape_sequence" => SyntaxKind::StringEscape,
+        "number" => SyntaxKind::Number,
+        "true" | "false" => SyntaxKind::Boolean,
+        "null" => SyntaxKind::Keyword,
+        "pair" => SyntaxKind::Property,
+        "{" => SyntaxKind::OpenBrace,
+        "}" => SyntaxKind::CloseBrace,
+        "[" => SyntaxKind::OpenBracket,
+        "]" => SyntaxKind::CloseBracket,
+        "," => SyntaxKind::Comma,
+        ":" => SyntaxKind::Colon,
+        "\"" => SyntaxKind::PunctuationDelimiter,
+        _ => SyntaxKind::Text,
+    }
+}
+
+fn map_toml_kind(ts_kind: &str) -> SyntaxKind {
+    match ts_kind {
+        "string"
+        | "basic_string"
+        | "literal_string"
+        | "multiline_basic_string"
+        | "multiline_literal_string" => SyntaxKind::String,
+        "integer" | "float" | "inf" | "nan" => SyntaxKind::Number,
+        "boolean" => SyntaxKind::Boolean,
+        "bare_key" | "quoted_key" => SyntaxKind::Property,
+        "table" | "table_array_element" => SyntaxKind::Module,
+        "[" => SyntaxKind::OpenBracket,
+        "]" => SyntaxKind::CloseBracket,
+        "{" => SyntaxKind::OpenBrace,
+        "}" => SyntaxKind::CloseBrace,
+        "=" => SyntaxKind::Operator,
+        "," => SyntaxKind::Comma,
+        "." => SyntaxKind::Dot,
+        "comment" => SyntaxKind::LineComment,
+        _ => SyntaxKind::Text,
+    }
+}
+
 fn map_language(language: Language) -> RopeLanguage {
     match language {
         Language::Rust => RopeLanguage::Rust,
         Language::Markdown => RopeLanguage::Markdown,
+        Language::Json => RopeLanguage::Json,
+        Language::Toml => RopeLanguage::Toml,
         Language::PlainText => RopeLanguage::Unknown,
     }
 }

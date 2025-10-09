@@ -36,6 +36,20 @@ impl Parser {
                     .map_err(|e| anyhow::anyhow!("Failed to set Markdown language: {e}"))?;
                 Some(parser)
             },
+            Language::Json => {
+                let mut parser = TsParser::new();
+                parser
+                    .set_language(tree_sitter_json::language())
+                    .map_err(|e| anyhow::anyhow!("Failed to set JSON language: {e}"))?;
+                Some(parser)
+            },
+            Language::Toml => {
+                let mut parser = TsParser::new();
+                parser
+                    .set_language(tree_sitter_toml::language())
+                    .map_err(|e| anyhow::anyhow!("Failed to set TOML language: {e}"))?;
+                Some(parser)
+            },
             Language::PlainText => None, // No tree-sitter for plain text
         };
 
@@ -56,7 +70,7 @@ impl Parser {
                 // Simple tokenization for plain text
                 Ok(convert::tokenize_plain_text(text, buffer))
             },
-            Language::Rust | Language::Markdown => {
+            Language::Rust | Language::Markdown | Language::Json | Language::Toml => {
                 let tree = self
                     .ts_parser
                     .as_mut()

@@ -7,6 +7,10 @@ pub enum Language {
     Rust,
     /// Markdown formatted text
     Markdown,
+    /// JSON data format
+    Json,
+    /// TOML configuration format
+    Toml,
     /// Plain text (no tree-sitter parsing)
     PlainText,
 }
@@ -17,6 +21,8 @@ impl Language {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
             "md" | "markdown" | "mdown" | "mkdn" | "mkd" => Language::Markdown,
+            "json" => Language::Json,
+            "toml" => Language::Toml,
             _ => Language::PlainText,
         }
     }
@@ -26,6 +32,8 @@ impl Language {
         match self {
             Language::Rust => &["rs"],
             Language::Markdown => &["md", "markdown"],
+            Language::Json => &["json"],
+            Language::Toml => &["toml"],
             Language::PlainText => &["txt"],
         }
     }
@@ -35,6 +43,8 @@ impl Language {
         match self {
             Language::Rust => "Rust",
             Language::Markdown => "Markdown",
+            Language::Json => "JSON",
+            Language::Toml => "TOML",
             Language::PlainText => "Plain Text",
         }
     }
