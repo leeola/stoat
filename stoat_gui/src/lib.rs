@@ -6,6 +6,7 @@ pub mod editor_element;
 pub mod editor_style;
 pub mod editor_view;
 pub mod file_finder;
+pub mod git_status;
 pub mod gutter;
 pub mod keybinding_hint;
 pub mod keymap_query;

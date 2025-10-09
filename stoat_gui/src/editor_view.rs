@@ -325,6 +325,54 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_git_status_next(
+        &mut self,
+        _: &GitStatusNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_next(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_prev(
+        &mut self,
+        _: &GitStatusPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_prev(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_select(
+        &mut self,
+        _: &GitStatusSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_select(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_dismiss(
+        &mut self,
+        _: &GitStatusDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_dismiss(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -476,6 +524,10 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))
             .on_action(cx.listener(Self::handle_file_finder_dismiss))
+            .on_action(cx.listener(Self::handle_git_status_next))
+            .on_action(cx.listener(Self::handle_git_status_prev))
+            .on_action(cx.listener(Self::handle_git_status_select))
+            .on_action(cx.listener(Self::handle_git_status_dismiss))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))
             .on_action(cx.listener(Self::handle_command_palette_execute))

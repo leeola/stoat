@@ -108,6 +108,23 @@ actions!(
     ]
 );
 
+// Git status actions
+actions!(
+    stoat,
+    [
+        /// Open git status modal
+        OpenGitStatus,
+        /// Move to next file in git status
+        GitStatusNext,
+        /// Move to previous file in git status
+        GitStatusPrev,
+        /// Open selected file from git status
+        GitStatusSelect,
+        /// Dismiss git status modal
+        GitStatusDismiss,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat,
@@ -429,6 +446,33 @@ action_metadata!(
     "Close the command palette without executing a command"
 );
 
+// Git status actions
+action_metadata!(
+    OpenGitStatus,
+    "git status",
+    "Open git status modal to view modified files"
+);
+action_metadata!(
+    GitStatusNext,
+    "next file",
+    "Move to the next file in the git status list"
+);
+action_metadata!(
+    GitStatusPrev,
+    "prev file",
+    "Move to the previous file in the git status list"
+);
+action_metadata!(
+    GitStatusSelect,
+    "select file",
+    "Open the currently selected file from git status"
+);
+action_metadata!(
+    GitStatusDismiss,
+    "dismiss status",
+    "Close the git status modal without opening a file"
+);
+
 // Pane management actions
 action_metadata!(
     SplitRight,
@@ -616,6 +660,19 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         CommandPaletteDismiss::action_name(),
     );
 
+    // Git status actions
+    names.insert(TypeId::of::<OpenGitStatus>(), OpenGitStatus::action_name());
+    names.insert(TypeId::of::<GitStatusNext>(), GitStatusNext::action_name());
+    names.insert(TypeId::of::<GitStatusPrev>(), GitStatusPrev::action_name());
+    names.insert(
+        TypeId::of::<GitStatusSelect>(),
+        GitStatusSelect::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusDismiss>(),
+        GitStatusDismiss::action_name(),
+    );
+
     // Pane management actions
     names.insert(TypeId::of::<SplitUp>(), SplitUp::action_name());
     names.insert(TypeId::of::<SplitDown>(), SplitDown::action_name());
@@ -771,6 +828,19 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         CommandPaletteDismiss::description(),
     );
 
+    // Git status actions
+    descriptions.insert(TypeId::of::<OpenGitStatus>(), OpenGitStatus::description());
+    descriptions.insert(TypeId::of::<GitStatusNext>(), GitStatusNext::description());
+    descriptions.insert(TypeId::of::<GitStatusPrev>(), GitStatusPrev::description());
+    descriptions.insert(
+        TypeId::of::<GitStatusSelect>(),
+        GitStatusSelect::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusDismiss>(),
+        GitStatusDismiss::description(),
+    );
+
     // Pane management actions
     descriptions.insert(TypeId::of::<SplitUp>(), SplitUp::description());
     descriptions.insert(TypeId::of::<SplitDown>(), SplitDown::description());
@@ -919,6 +989,19 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::help_text(),
+    );
+
+    // Git status actions
+    help.insert(TypeId::of::<OpenGitStatus>(), OpenGitStatus::help_text());
+    help.insert(TypeId::of::<GitStatusNext>(), GitStatusNext::help_text());
+    help.insert(TypeId::of::<GitStatusPrev>(), GitStatusPrev::help_text());
+    help.insert(
+        TypeId::of::<GitStatusSelect>(),
+        GitStatusSelect::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusDismiss>(),
+        GitStatusDismiss::help_text(),
     );
 
     // Pane management actions

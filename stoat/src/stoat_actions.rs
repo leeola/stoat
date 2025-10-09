@@ -2103,6 +2103,144 @@ impl Stoat {
     pub fn command_palette_selected(&self) -> usize {
         self.command_palette_selected
     }
+
+    // ==== Git status actions ====
+
+    /// Open git status modal.
+    ///
+    /// Discovers the git repository for the current file, gathers status information
+    /// for all modified files, and enters git_status mode to display them.
+    pub fn open_git_status(&mut self, cx: &mut Context<Self>) {
+        debug!("Opening git status");
+
+        // Save current mode to restore later
+        self.git_status_previous_mode = Some(self.mode.clone());
+
+        // Use worktree root to discover repository
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match crate::git_repository::Repository::discover(&root_path).ok() {
+            Some(repo) => repo,
+            None => {
+                debug!("No git repository found");
+                return;
+            },
+        };
+
+        // Gather git status
+        let entries = match crate::git_status::gather_git_status(repo.inner()) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::error!("Failed to gather git status: {}", e);
+                return;
+            },
+        };
+
+        debug!(file_count = entries.len(), "Gathered git status");
+
+        // Initialize git status state
+        self.git_status_files = entries;
+        self.git_status_selected = 0;
+
+        // Enter git_status mode
+        self.mode = "git_status".into();
+        debug!("Entered git_status mode");
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Move to next file in git status list.
+    pub fn git_status_next(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_status" {
+            return;
+        }
+
+        if self.git_status_selected + 1 < self.git_status_files.len() {
+            self.git_status_selected += 1;
+            debug!(selected = self.git_status_selected, "Git status: next");
+            cx.notify();
+        }
+    }
+
+    /// Move to previous file in git status list.
+    pub fn git_status_prev(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_status" {
+            return;
+        }
+
+        if self.git_status_selected > 0 {
+            self.git_status_selected -= 1;
+            debug!(selected = self.git_status_selected, "Git status: prev");
+            cx.notify();
+        }
+    }
+
+    /// Open selected file from git status.
+    pub fn git_status_select(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_status" {
+            return;
+        }
+
+        if self.git_status_selected < self.git_status_files.len() {
+            let entry = &self.git_status_files[self.git_status_selected];
+            let relative_path = &entry.path;
+            debug!(file = ?relative_path, "Git status: select");
+
+            // Build absolute path from repository root
+            let root_path = self.worktree.lock().root().to_path_buf();
+            if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
+                let abs_path = repo.workdir().join(relative_path);
+
+                // Load the file
+                if let Err(e) = self.load_file(&abs_path, cx) {
+                    tracing::error!("Failed to load file {:?}: {}", abs_path, e);
+                }
+            }
+        }
+
+        self.git_status_dismiss(cx);
+    }
+
+    /// Dismiss git status modal.
+    pub fn git_status_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_status" {
+            return;
+        }
+
+        debug!("Dismissing git status");
+
+        // Restore previous mode - check if mode has configured previous override
+        self.mode = if let Some(mode_def) = self.modes.get("git_status") {
+            if let Some(previous) = &mode_def.previous {
+                previous.clone()
+            } else {
+                self.git_status_previous_mode
+                    .take()
+                    .unwrap_or_else(|| "normal".to_string())
+            }
+        } else {
+            self.git_status_previous_mode
+                .take()
+                .unwrap_or_else(|| "normal".to_string())
+        };
+
+        // Clear git status state
+        self.git_status_files.clear();
+        self.git_status_selected = 0;
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Accessor for git status files (for GUI layer).
+    pub fn git_status_files(&self) -> &[crate::git_status::GitStatusEntry] {
+        &self.git_status_files
+    }
+
+    /// Accessor for selected file index (for GUI layer).
+    pub fn git_status_selected(&self) -> usize {
+        self.git_status_selected
+    }
 }
 
 /// Build the list of all available commands from the keymap.

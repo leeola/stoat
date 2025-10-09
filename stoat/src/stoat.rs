@@ -122,6 +122,11 @@ pub struct Stoat {
     pub(crate) command_palette_selected: usize,
     pub(crate) command_palette_previous_mode: Option<String>,
 
+    // Git status state
+    pub(crate) git_status_files: Vec<crate::git_status::GitStatusEntry>,
+    pub(crate) git_status_selected: usize,
+    pub(crate) git_status_previous_mode: Option<String>,
+
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
 }
@@ -163,6 +168,9 @@ impl Stoat {
             command_palette_filtered: Vec::new(),
             command_palette_selected: 0,
             command_palette_previous_mode: None,
+            git_status_files: Vec::new(),
+            git_status_selected: 0,
+            git_status_previous_mode: None,
             worktree,
         }
     }
@@ -199,6 +207,9 @@ impl Stoat {
             command_palette_filtered: Vec::new(),
             command_palette_selected: 0,
             command_palette_previous_mode: None,
+            git_status_files: Vec::new(),
+            git_status_selected: 0,
+            git_status_previous_mode: None,
             worktree: self.worktree.clone(),
         }
     }

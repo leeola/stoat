@@ -1,6 +1,6 @@
 use crate::{
     command_overlay::CommandOverlay, command_palette::CommandPalette, editor_view::EditorView,
-    file_finder::FileFinder, pane_group::element::pane_axis,
+    file_finder::FileFinder, git_status::GitStatus, pane_group::element::pane_axis,
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
@@ -11,7 +11,7 @@ use std::{collections::HashMap, rc::Rc};
 use stoat::{
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenCommandPalette,
-        OpenFileFinder, SplitDown, SplitLeft, SplitRight, SplitUp,
+        OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight, SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -31,6 +31,7 @@ pub struct PaneGroupView {
     keymap: Rc<gpui::Keymap>,
     file_finder_scroll: ScrollHandle,
     command_palette_scroll: ScrollHandle,
+    git_status_scroll: ScrollHandle,
 }
 
 impl PaneGroupView {
@@ -56,6 +57,7 @@ impl PaneGroupView {
             keymap,
             file_finder_scroll: ScrollHandle::new(),
             command_palette_scroll: ScrollHandle::new(),
+            git_status_scroll: ScrollHandle::new(),
         }
     }
 
@@ -112,6 +114,24 @@ impl PaneGroupView {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
                     stoat.open_command_palette(&keymap, cx);
+                });
+            });
+            cx.notify();
+        }
+    }
+
+    /// Handle opening the git status modal
+    fn handle_open_git_status(
+        &mut self,
+        _: &OpenGitStatus,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Open git status in the active editor's Stoat instance
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_git_status(cx);
                 });
             });
             cx.notify();
@@ -547,59 +567,70 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Get the mode, file finder data, and command palette data from the active editor
-        let (active_mode, mode_display, file_finder_data, command_palette_data) = self
-            .pane_editors
-            .get(&self.active_pane)
-            .map(|editor| {
-                let stoat_entity = editor.read(cx).stoat.clone();
-                let stoat = stoat_entity.read(cx);
-                let mode_name = stoat.mode();
-                let display = stoat
-                    .get_mode(mode_name)
-                    .map(|m| m.display_name.clone())
-                    .unwrap_or_else(|| mode_name.to_uppercase());
+        // Get the mode, file finder data, command palette data, and git status data from the active
+        // editor
+        let (active_mode, mode_display, file_finder_data, command_palette_data, git_status_data) =
+            self.pane_editors
+                .get(&self.active_pane)
+                .map(|editor| {
+                    let stoat_entity = editor.read(cx).stoat.clone();
+                    let stoat = stoat_entity.read(cx);
+                    let mode_name = stoat.mode();
+                    let display = stoat
+                        .get_mode(mode_name)
+                        .map(|m| m.display_name.clone())
+                        .unwrap_or_else(|| mode_name.to_uppercase());
 
-                // Extract file finder data if in file_finder mode
-                let ff_data = if mode_name == "file_finder" {
-                    let query = stoat
-                        .file_finder_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-                    Some((
-                        query,
-                        stoat.file_finder_filtered().to_vec(),
-                        stoat.file_finder_selected(),
-                        stoat.file_finder_preview().cloned(),
-                    ))
-                } else {
-                    None
-                };
+                    // Extract file finder data if in file_finder mode
+                    let ff_data = if mode_name == "file_finder" {
+                        let query = stoat
+                            .file_finder_input()
+                            .map(|buffer| {
+                                let buffer_snapshot = buffer.read(cx).snapshot();
+                                buffer_snapshot.text()
+                            })
+                            .unwrap_or_default();
+                        Some((
+                            query,
+                            stoat.file_finder_filtered().to_vec(),
+                            stoat.file_finder_selected(),
+                            stoat.file_finder_preview().cloned(),
+                        ))
+                    } else {
+                        None
+                    };
 
-                // Extract command palette data if in command_palette mode
-                let cp_data = if mode_name == "command_palette" {
-                    let query = stoat
-                        .command_palette_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-                    Some((
-                        query,
-                        stoat.command_palette_filtered().to_vec(),
-                        stoat.command_palette_selected(),
-                    ))
-                } else {
-                    None
-                };
+                    // Extract command palette data if in command_palette mode
+                    let cp_data = if mode_name == "command_palette" {
+                        let query = stoat
+                            .command_palette_input()
+                            .map(|buffer| {
+                                let buffer_snapshot = buffer.read(cx).snapshot();
+                                buffer_snapshot.text()
+                            })
+                            .unwrap_or_default();
+                        Some((
+                            query,
+                            stoat.command_palette_filtered().to_vec(),
+                            stoat.command_palette_selected(),
+                        ))
+                    } else {
+                        None
+                    };
 
-                (mode_name, display, ff_data, cp_data)
-            })
-            .unwrap_or(("normal", "NORMAL".to_string(), None, None));
+                    // Extract git status data if in git_status mode
+                    let gs_data = if mode_name == "git_status" {
+                        Some((
+                            stoat.git_status_files().to_vec(),
+                            stoat.git_status_selected(),
+                        ))
+                    } else {
+                        None
+                    };
+
+                    (mode_name, display, ff_data, cp_data, gs_data)
+                })
+                .unwrap_or(("normal", "NORMAL".to_string(), None, None, None));
 
         // Query keymap for bindings in the current mode
         let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
@@ -619,6 +650,7 @@ impl Render for PaneGroupView {
             .on_action(cx.listener(Self::handle_focus_pane_right))
             .on_action(cx.listener(Self::handle_open_file_finder))
             .on_action(cx.listener(Self::handle_open_command_palette))
+            .on_action(cx.listener(Self::handle_open_git_status))
             .child(self.render_member(self.pane_group.root(), 0))
             .child(CommandOverlay::new(mode_display, bindings))
             .when(active_mode == "file_finder", |div| {
@@ -643,6 +675,18 @@ impl Render for PaneGroupView {
                         commands,
                         selected,
                         self.command_palette_scroll.clone(),
+                    ))
+                } else {
+                    div
+                }
+            })
+            .when(active_mode == "git_status", |div| {
+                // Render git status overlay when in git_status mode
+                if let Some((files, selected)) = git_status_data {
+                    div.child(GitStatus::new(
+                        files,
+                        selected,
+                        self.git_status_scroll.clone(),
                     ))
                 } else {
                     div

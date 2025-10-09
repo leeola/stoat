@@ -128,5 +128,17 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<CommandPaletteDismiss>() {
         window.dispatch_action(Box::new(CommandPaletteDismiss), cx);
     }
+    // Git status actions
+    else if type_id == TypeId::of::<OpenGitStatus>() {
+        window.dispatch_action(Box::new(OpenGitStatus), cx);
+    } else if type_id == TypeId::of::<GitStatusNext>() {
+        window.dispatch_action(Box::new(GitStatusNext), cx);
+    } else if type_id == TypeId::of::<GitStatusPrev>() {
+        window.dispatch_action(Box::new(GitStatusPrev), cx);
+    } else if type_id == TypeId::of::<GitStatusDismiss>() {
+        window.dispatch_action(Box::new(GitStatusDismiss), cx);
+    } else if type_id == TypeId::of::<GitStatusSelect>() {
+        window.dispatch_action(Box::new(GitStatusSelect), cx);
+    }
     // Add more actions as they become available
 }

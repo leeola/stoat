@@ -99,6 +99,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "CommandPaletteExecute" => Ok(KeyBinding::new(key, CommandPaletteExecute, context)),
         "CommandPaletteDismiss" => Ok(KeyBinding::new(key, CommandPaletteDismiss, context)),
 
+        // Git status actions
+        "OpenGitStatus" => Ok(KeyBinding::new(key, OpenGitStatus, context)),
+        "GitStatusNext" => Ok(KeyBinding::new(key, GitStatusNext, context)),
+        "GitStatusPrev" => Ok(KeyBinding::new(key, GitStatusPrev, context)),
+        "GitStatusSelect" => Ok(KeyBinding::new(key, GitStatusSelect, context)),
+        "GitStatusDismiss" => Ok(KeyBinding::new(key, GitStatusDismiss, context)),
+
         // Selection actions
         "SelectNextSymbol" => Ok(KeyBinding::new(key, SelectNextSymbol, context)),
         "SelectPrevSymbol" => Ok(KeyBinding::new(key, SelectPrevSymbol, context)),

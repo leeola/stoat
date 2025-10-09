@@ -243,6 +243,18 @@ impl Repository {
         &self.workdir
     }
 
+    /// Get a reference to the inner git2 repository.
+    ///
+    /// Provides access to the underlying [`git2::Repository`] for operations
+    /// not directly exposed by this wrapper.
+    ///
+    /// # Returns
+    ///
+    /// Reference to the underlying git2 repository
+    pub fn inner(&self) -> &git2::Repository {
+        &self.repo
+    }
+
     /// Convert an absolute or relative path to a path relative to the repository root.
     ///
     /// Helper method for converting file paths to the format expected by libgit2.
