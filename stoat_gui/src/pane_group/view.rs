@@ -1,7 +1,7 @@
 use crate::{
-    command_overlay::CommandOverlay, command_palette::CommandPalette, editor_view::EditorView,
-    file_finder::FileFinder, git_status::GitStatus, pane_group::element::pane_axis,
-    status_bar::StatusBar,
+    buffer_finder::BufferFinder, command_overlay::CommandOverlay, command_palette::CommandPalette,
+    editor_view::EditorView, file_finder::FileFinder, git_status::GitStatus,
+    pane_group::element::pane_axis, status_bar::StatusBar,
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
@@ -11,8 +11,9 @@ use gpui::{
 use std::{collections::HashMap, rc::Rc};
 use stoat::{
     actions::{
-        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenCommandPalette,
-        OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight, SplitUp,
+        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
+        OpenCommandPalette, OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight,
+        SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -32,6 +33,7 @@ pub struct PaneGroupView {
     keymap: Rc<gpui::Keymap>,
     file_finder_scroll: ScrollHandle,
     command_palette_scroll: ScrollHandle,
+    buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
 }
 
@@ -58,6 +60,7 @@ impl PaneGroupView {
             keymap,
             file_finder_scroll: ScrollHandle::new(),
             command_palette_scroll: ScrollHandle::new(),
+            buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
         }
     }
@@ -115,6 +118,24 @@ impl PaneGroupView {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
                     stoat.open_command_palette(&keymap, cx);
+                });
+            });
+            cx.notify();
+        }
+    }
+
+    /// Handle opening the buffer finder
+    fn handle_open_buffer_finder(
+        &mut self,
+        _: &OpenBufferFinder,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Open buffer finder in the active editor's Stoat instance
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_buffer_finder(cx);
                 });
             });
             cx.notify();
@@ -568,13 +589,14 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // Get the mode, file finder data, command palette data, git status data, and status bar
-        // data from the active editor
+        // Get the mode, file finder data, command palette data, buffer finder data,
+        // git status data, and status bar data from the active editor
         let (
             active_mode,
             mode_display,
             file_finder_data,
             command_palette_data,
+            buffer_finder_data,
             git_status_data,
             status_bar_data,
         ) = self
@@ -626,6 +648,24 @@ impl Render for PaneGroupView {
                     None
                 };
 
+                // Extract buffer finder data if in buffer_finder mode
+                let bf_data = if mode_name == "buffer_finder" {
+                    let query = stoat
+                        .buffer_finder_input()
+                        .map(|buffer| {
+                            let buffer_snapshot = buffer.read(cx).snapshot();
+                            buffer_snapshot.text()
+                        })
+                        .unwrap_or_default();
+                    Some((
+                        query,
+                        stoat.buffer_finder_filtered().to_vec(),
+                        stoat.buffer_finder_selected(),
+                    ))
+                } else {
+                    None
+                };
+
                 // Extract git status data if in git_status mode
                 let gs_data = if mode_name == "git_status" {
                     Some((
@@ -646,9 +686,17 @@ impl Render for PaneGroupView {
                     stoat.current_file_path().map(|p| p.display().to_string()),
                 );
 
-                (mode_name, display, ff_data, cp_data, gs_data, Some(sb_data))
+                (
+                    mode_name,
+                    display,
+                    ff_data,
+                    cp_data,
+                    bf_data,
+                    gs_data,
+                    Some(sb_data),
+                )
             })
-            .unwrap_or(("normal", "NORMAL".to_string(), None, None, None, None));
+            .unwrap_or(("normal", "NORMAL".to_string(), None, None, None, None, None));
 
         // Query keymap for bindings in the current mode
         let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
@@ -673,6 +721,7 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_focus_pane_right))
                     .on_action(cx.listener(Self::handle_open_file_finder))
                     .on_action(cx.listener(Self::handle_open_command_palette))
+                    .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))
                     .child(self.render_member(self.pane_group.root(), 0))
                     .child(CommandOverlay::new(mode_display, bindings))
@@ -698,6 +747,19 @@ impl Render for PaneGroupView {
                                 commands,
                                 selected,
                                 self.command_palette_scroll.clone(),
+                            ))
+                        } else {
+                            div
+                        }
+                    })
+                    .when(active_mode == "buffer_finder", |div| {
+                        // Render buffer finder overlay when in buffer_finder mode
+                        if let Some((query, buffers, selected)) = buffer_finder_data {
+                            div.child(BufferFinder::new(
+                                query,
+                                buffers,
+                                selected,
+                                self.buffer_finder_scroll.clone(),
                             ))
                         } else {
                             div

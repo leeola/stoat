@@ -52,6 +52,23 @@ impl Stoat {
             return;
         }
 
+        // Route to buffer finder input buffer if in buffer_finder mode
+        if self.mode == "buffer_finder" {
+            if let Some(input_buffer) = &self.buffer_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
+
+                // Re-filter buffers based on new query
+                let query = input_buffer.read(cx).snapshot().text();
+                self.filter_buffers(&query, cx);
+            }
+            return;
+        }
+
         // Main buffer insertion for all other modes
         let cursor = self.cursor.position();
         let buffer = self.buffer_item.read(cx).buffer().clone();
@@ -124,6 +141,33 @@ impl Stoat {
                     // Re-filter commands based on new query
                     let query = input_buffer.read(cx).snapshot().text();
                     self.filter_commands(&query);
+                }
+            }
+            return;
+        }
+
+        // Route to buffer finder input buffer if in buffer_finder mode
+        if self.mode == "buffer_finder" {
+            if let Some(input_buffer) = &self.buffer_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(char_boundary..len, "")]);
+                    });
+
+                    // Re-filter buffers based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_buffers(&query, cx);
                 }
             }
             return;
@@ -2317,6 +2361,165 @@ impl Stoat {
     /// Accessor for current file path (for status bar).
     pub fn current_file_path(&self) -> Option<&std::path::Path> {
         self.current_file_path.as_deref()
+    }
+
+    // ==== Buffer finder actions ====
+
+    /// Open buffer finder modal.
+    ///
+    /// Initializes buffer list with currently open buffers and creates input buffer for searching.
+    pub fn open_buffer_finder(&mut self, cx: &mut Context<Self>) {
+        debug!("Opening buffer finder");
+
+        // Save current mode
+        self.buffer_finder_previous_mode = Some(self.mode.clone());
+        self.mode = "buffer_finder".to_string();
+
+        // Create input buffer
+        let buffer_id = BufferId::from(NonZeroU64::new(3).unwrap());
+        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        self.buffer_finder_input = Some(input_buffer);
+
+        // For now, just add the current buffer if it has a file path
+        let buffers = if let Some(path) = &self.current_file_path {
+            vec![path.clone()]
+        } else {
+            Vec::new()
+        };
+
+        debug!(buffer_count = buffers.len(), "Loaded buffers");
+
+        self.buffer_finder_buffers = buffers.clone();
+        self.buffer_finder_filtered = buffers;
+        self.buffer_finder_selected = 0;
+
+        cx.notify();
+    }
+
+    /// Move to next buffer in finder.
+    pub fn buffer_finder_next(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "buffer_finder" {
+            return;
+        }
+
+        if self.buffer_finder_selected + 1 < self.buffer_finder_filtered.len() {
+            self.buffer_finder_selected += 1;
+            debug!(
+                selected = self.buffer_finder_selected,
+                "Buffer finder: next"
+            );
+            cx.notify();
+        }
+    }
+
+    /// Move to previous buffer in finder.
+    pub fn buffer_finder_prev(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "buffer_finder" {
+            return;
+        }
+
+        if self.buffer_finder_selected > 0 {
+            self.buffer_finder_selected -= 1;
+            debug!(
+                selected = self.buffer_finder_selected,
+                "Buffer finder: prev"
+            );
+            cx.notify();
+        }
+    }
+
+    /// Select buffer in finder.
+    ///
+    /// Since we currently have single buffer architecture, this just dismisses the finder.
+    /// When multi-buffer support is added, this will switch to the selected buffer.
+    pub fn buffer_finder_select(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "buffer_finder" {
+            return;
+        }
+
+        // With single buffer, nothing to switch to - just dismiss
+        debug!("Buffer finder: select (no-op with single buffer)");
+        self.buffer_finder_dismiss(cx);
+    }
+
+    /// Dismiss buffer finder.
+    pub fn buffer_finder_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "buffer_finder" {
+            return;
+        }
+
+        debug!("Dismissing buffer finder");
+
+        // Restore previous mode
+        self.mode = if let Some(mode_def) = self.modes.get("buffer_finder") {
+            if let Some(previous) = &mode_def.previous {
+                previous.clone()
+            } else {
+                self.buffer_finder_previous_mode
+                    .take()
+                    .unwrap_or_else(|| "normal".to_string())
+            }
+        } else {
+            self.buffer_finder_previous_mode
+                .take()
+                .unwrap_or_else(|| "normal".to_string())
+        };
+
+        // Clear buffer finder state
+        self.buffer_finder_input = None;
+        self.buffer_finder_buffers.clear();
+        self.buffer_finder_filtered.clear();
+        self.buffer_finder_selected = 0;
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Filter buffers based on query string.
+    pub fn filter_buffers(&mut self, query: &str, cx: &mut Context<Self>) {
+        if query.is_empty() {
+            // No query: show all buffers
+            self.buffer_finder_filtered = self.buffer_finder_buffers.clone();
+        } else {
+            // Fuzzy match on buffer paths
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+
+            let candidates: Vec<&str> = self
+                .buffer_finder_buffers
+                .iter()
+                .map(|p| p.to_str().unwrap_or(""))
+                .collect();
+
+            let mut matches = pattern.match_list(candidates, &mut self.file_finder_matcher);
+            matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+            self.buffer_finder_filtered = matches
+                .into_iter()
+                .map(|(path, _score)| PathBuf::from(path))
+                .collect();
+        }
+
+        // Reset selection
+        self.buffer_finder_selected = 0;
+
+        cx.notify();
+    }
+
+    // ==== Buffer finder state accessors ====
+
+    /// Get buffer finder input buffer.
+    pub fn buffer_finder_input(&self) -> Option<&gpui::Entity<Buffer>> {
+        self.buffer_finder_input.as_ref()
+    }
+
+    /// Get filtered buffer list.
+    pub fn buffer_finder_filtered(&self) -> &[PathBuf] {
+        &self.buffer_finder_filtered
+    }
+
+    /// Get selected buffer index.
+    pub fn buffer_finder_selected(&self) -> usize {
+        self.buffer_finder_selected
     }
 }
 

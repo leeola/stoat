@@ -325,6 +325,54 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_buffer_finder_next(
+        &mut self,
+        _: &BufferFinderNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.buffer_finder_next(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_buffer_finder_prev(
+        &mut self,
+        _: &BufferFinderPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.buffer_finder_prev(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_buffer_finder_select(
+        &mut self,
+        _: &BufferFinderSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.buffer_finder_select(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_buffer_finder_dismiss(
+        &mut self,
+        _: &BufferFinderDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.buffer_finder_dismiss(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_git_status_next(
         &mut self,
         _: &GitStatusNext,
@@ -524,6 +572,10 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))
             .on_action(cx.listener(Self::handle_file_finder_dismiss))
+            .on_action(cx.listener(Self::handle_buffer_finder_next))
+            .on_action(cx.listener(Self::handle_buffer_finder_prev))
+            .on_action(cx.listener(Self::handle_buffer_finder_select))
+            .on_action(cx.listener(Self::handle_buffer_finder_dismiss))
             .on_action(cx.listener(Self::handle_git_status_next))
             .on_action(cx.listener(Self::handle_git_status_prev))
             .on_action(cx.listener(Self::handle_git_status_select))

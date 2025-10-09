@@ -92,6 +92,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FileFinderSelect" => Ok(KeyBinding::new(key, FileFinderSelect, context)),
         "FileFinderDismiss" => Ok(KeyBinding::new(key, FileFinderDismiss, context)),
 
+        // Buffer finder actions
+        "OpenBufferFinder" => Ok(KeyBinding::new(key, OpenBufferFinder, context)),
+        "BufferFinderNext" => Ok(KeyBinding::new(key, BufferFinderNext, context)),
+        "BufferFinderPrev" => Ok(KeyBinding::new(key, BufferFinderPrev, context)),
+        "BufferFinderSelect" => Ok(KeyBinding::new(key, BufferFinderSelect, context)),
+        "BufferFinderDismiss" => Ok(KeyBinding::new(key, BufferFinderDismiss, context)),
+
         // Command palette actions
         "OpenCommandPalette" => Ok(KeyBinding::new(key, OpenCommandPalette, context)),
         "CommandPaletteNext" => Ok(KeyBinding::new(key, CommandPaletteNext, context)),

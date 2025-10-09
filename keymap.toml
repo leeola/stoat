@@ -26,6 +26,11 @@ display_name = "FILE FINDER"
 previous = "normal"
 
 [[modes]]
+name = "buffer_finder"
+display_name = "BUFFER FINDER"
+previous = "normal"
+
+[[modes]]
 name = "space"
 display_name = "SPACE"
 
@@ -578,6 +583,42 @@ key = "enter"
 action = "FileFinderSelect"
 context = "Editor && mode == file_finder"
 
+# Buffer Finder Mode - Quick buffer switching
+[[bindings]]
+key = "escape"
+action = "BufferFinderDismiss"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "up"
+action = "BufferFinderPrev"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "down"
+action = "BufferFinderNext"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "ctrl-p"
+action = "BufferFinderPrev"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "ctrl-n"
+action = "BufferFinderNext"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "backspace"
+action = "DeleteLeft"
+context = "Editor && mode == buffer_finder"
+
+[[bindings]]
+key = "enter"
+action = "BufferFinderSelect"
+context = "Editor && mode == buffer_finder"
+
 # Space Mode - Leader key for commands
 [[bindings]]
 key = "a"
@@ -587,6 +628,11 @@ context = "Editor && mode == space"
 [[bindings]]
 key = "p"
 action = "OpenFileFinder"
+context = "Editor && mode == space"
+
+[[bindings]]
+key = "b"
+action = "OpenBufferFinder"
 context = "Editor && mode == space"
 
 [[bindings]]

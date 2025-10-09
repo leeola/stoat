@@ -122,6 +122,13 @@ pub struct Stoat {
     pub(crate) command_palette_selected: usize,
     pub(crate) command_palette_previous_mode: Option<String>,
 
+    // Buffer finder state
+    pub(crate) buffer_finder_input: Option<Entity<Buffer>>,
+    pub(crate) buffer_finder_buffers: Vec<PathBuf>,
+    pub(crate) buffer_finder_filtered: Vec<PathBuf>,
+    pub(crate) buffer_finder_selected: usize,
+    pub(crate) buffer_finder_previous_mode: Option<String>,
+
     // Git status state
     pub(crate) git_status_files: Vec<crate::git_status::GitStatusEntry>,
     pub(crate) git_status_selected: usize,
@@ -187,6 +194,11 @@ impl Stoat {
             command_palette_filtered: Vec::new(),
             command_palette_selected: 0,
             command_palette_previous_mode: None,
+            buffer_finder_input: None,
+            buffer_finder_buffers: Vec::new(),
+            buffer_finder_filtered: Vec::new(),
+            buffer_finder_selected: 0,
+            buffer_finder_previous_mode: None,
             git_status_files,
             git_status_selected: 0,
             git_status_previous_mode: None,
@@ -231,6 +243,11 @@ impl Stoat {
             command_palette_filtered: Vec::new(),
             command_palette_selected: 0,
             command_palette_previous_mode: None,
+            buffer_finder_input: None,
+            buffer_finder_buffers: Vec::new(),
+            buffer_finder_filtered: Vec::new(),
+            buffer_finder_selected: 0,
+            buffer_finder_previous_mode: None,
             git_status_files: Vec::new(),
             git_status_selected: 0,
             git_status_previous_mode: None,

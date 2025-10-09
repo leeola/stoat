@@ -91,6 +91,23 @@ actions!(
     ]
 );
 
+// Buffer finder actions
+actions!(
+    stoat,
+    [
+        /// Open buffer finder
+        OpenBufferFinder,
+        /// Move to next buffer in finder
+        BufferFinderNext,
+        /// Move to previous buffer in finder
+        BufferFinderPrev,
+        /// Select current buffer in finder
+        BufferFinderSelect,
+        /// Dismiss buffer finder
+        BufferFinderDismiss,
+    ]
+);
+
 // Command palette actions
 actions!(
     stoat,
@@ -419,6 +436,33 @@ action_metadata!(
     "Close the file finder without opening a file"
 );
 
+// Buffer finder actions
+action_metadata!(
+    OpenBufferFinder,
+    "buffer finder",
+    "Open the buffer finder to quickly switch between open buffers"
+);
+action_metadata!(
+    BufferFinderNext,
+    "next buffer",
+    "Move to the next buffer in the buffer finder list"
+);
+action_metadata!(
+    BufferFinderPrev,
+    "prev buffer",
+    "Move to the previous buffer in the buffer finder list"
+);
+action_metadata!(
+    BufferFinderSelect,
+    "select buffer",
+    "Switch to the currently selected buffer from the buffer finder"
+);
+action_metadata!(
+    BufferFinderDismiss,
+    "dismiss finder",
+    "Close the buffer finder without switching buffers"
+);
+
 // Command palette actions
 action_metadata!(
     OpenCommandPalette,
@@ -673,6 +717,28 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitStatusDismiss::action_name(),
     );
 
+    // Buffer finder actions
+    names.insert(
+        TypeId::of::<OpenBufferFinder>(),
+        OpenBufferFinder::action_name(),
+    );
+    names.insert(
+        TypeId::of::<BufferFinderNext>(),
+        BufferFinderNext::action_name(),
+    );
+    names.insert(
+        TypeId::of::<BufferFinderPrev>(),
+        BufferFinderPrev::action_name(),
+    );
+    names.insert(
+        TypeId::of::<BufferFinderSelect>(),
+        BufferFinderSelect::action_name(),
+    );
+    names.insert(
+        TypeId::of::<BufferFinderDismiss>(),
+        BufferFinderDismiss::action_name(),
+    );
+
     // Pane management actions
     names.insert(TypeId::of::<SplitUp>(), SplitUp::action_name());
     names.insert(TypeId::of::<SplitDown>(), SplitDown::action_name());
@@ -841,6 +907,28 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitStatusDismiss::description(),
     );
 
+    // Buffer finder actions
+    descriptions.insert(
+        TypeId::of::<OpenBufferFinder>(),
+        OpenBufferFinder::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<BufferFinderNext>(),
+        BufferFinderNext::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<BufferFinderPrev>(),
+        BufferFinderPrev::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<BufferFinderSelect>(),
+        BufferFinderSelect::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<BufferFinderDismiss>(),
+        BufferFinderDismiss::description(),
+    );
+
     // Pane management actions
     descriptions.insert(TypeId::of::<SplitUp>(), SplitUp::description());
     descriptions.insert(TypeId::of::<SplitDown>(), SplitDown::description());
@@ -1002,6 +1090,28 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<GitStatusDismiss>(),
         GitStatusDismiss::help_text(),
+    );
+
+    // Buffer finder actions
+    help.insert(
+        TypeId::of::<OpenBufferFinder>(),
+        OpenBufferFinder::help_text(),
+    );
+    help.insert(
+        TypeId::of::<BufferFinderNext>(),
+        BufferFinderNext::help_text(),
+    );
+    help.insert(
+        TypeId::of::<BufferFinderPrev>(),
+        BufferFinderPrev::help_text(),
+    );
+    help.insert(
+        TypeId::of::<BufferFinderSelect>(),
+        BufferFinderSelect::help_text(),
+    );
+    help.insert(
+        TypeId::of::<BufferFinderDismiss>(),
+        BufferFinderDismiss::help_text(),
     );
 
     // Pane management actions

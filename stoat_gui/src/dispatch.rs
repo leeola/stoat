@@ -118,6 +118,18 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<FileFinderSelect>() {
         window.dispatch_action(Box::new(FileFinderSelect), cx);
     }
+    // Buffer finder actions
+    else if type_id == TypeId::of::<OpenBufferFinder>() {
+        window.dispatch_action(Box::new(OpenBufferFinder), cx);
+    } else if type_id == TypeId::of::<BufferFinderNext>() {
+        window.dispatch_action(Box::new(BufferFinderNext), cx);
+    } else if type_id == TypeId::of::<BufferFinderPrev>() {
+        window.dispatch_action(Box::new(BufferFinderPrev), cx);
+    } else if type_id == TypeId::of::<BufferFinderDismiss>() {
+        window.dispatch_action(Box::new(BufferFinderDismiss), cx);
+    } else if type_id == TypeId::of::<BufferFinderSelect>() {
+        window.dispatch_action(Box::new(BufferFinderSelect), cx);
+    }
     // Command palette actions
     else if type_id == TypeId::of::<OpenCommandPalette>() {
         window.dispatch_action(Box::new(OpenCommandPalette), cx);
