@@ -126,6 +126,8 @@ pub struct Stoat {
     pub(crate) git_status_files: Vec<crate::git_status::GitStatusEntry>,
     pub(crate) git_status_selected: usize,
     pub(crate) git_status_previous_mode: Option<String>,
+    pub(crate) git_status_preview: Option<crate::git_status::DiffPreviewData>,
+    pub(crate) git_status_preview_task: Option<Task<()>>,
 
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
@@ -171,6 +173,8 @@ impl Stoat {
             git_status_files: Vec::new(),
             git_status_selected: 0,
             git_status_previous_mode: None,
+            git_status_preview: None,
+            git_status_preview_task: None,
             worktree,
         }
     }
@@ -210,6 +214,8 @@ impl Stoat {
             git_status_files: Vec::new(),
             git_status_selected: 0,
             git_status_previous_mode: None,
+            git_status_preview: None,
+            git_status_preview_task: None,
             worktree: self.worktree.clone(),
         }
     }

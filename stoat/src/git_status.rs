@@ -49,7 +49,7 @@
 //! - [`git_repository::Repository`](crate::git_repository::Repository) - Git repository wrapper
 //! - [`Stoat`](crate::Stoat) - Uses this for git status modal state
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Errors that can occur during git status gathering.
@@ -180,4 +180,104 @@ pub fn gather_git_status(repo: &git2::Repository) -> Result<Vec<GitStatusEntry>,
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(entries)
+}
+
+/// Git diff preview data for the status modal.
+///
+/// Contains the diff patch text for a file, showing what has changed.
+/// Similar to [`crate::file_finder::PreviewData`] but for git diffs instead of file content.
+#[derive(Clone)]
+pub struct DiffPreviewData {
+    /// The diff patch text in unified diff format
+    pub text: String,
+}
+
+impl DiffPreviewData {
+    /// Create a new diff preview with the given patch text.
+    pub fn new(text: String) -> Self {
+        Self { text }
+    }
+
+    /// Get the diff text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// Load git diff preview for a file.
+///
+/// Computes the diff between HEAD and working tree for the specified file,
+/// returning the patch in unified diff format. Both git operations and diff
+/// computation run on thread pool via `smol::unblock` to avoid blocking executor.
+///
+/// # Arguments
+///
+/// * `repo_path` - Path to repository root (used to discover repository)
+/// * `file_path` - Path to file relative to repository root
+///
+/// # Returns
+///
+/// Optional diff preview containing patch text, or None if diff computation fails.
+pub async fn load_git_diff(repo_path: &Path, file_path: &Path) -> Option<DiffPreviewData> {
+    let repo_path = repo_path.to_path_buf();
+    let file_path = file_path.to_path_buf();
+
+    smol::unblock(move || {
+        // Open repository
+        let repo = git2::Repository::open(&repo_path).ok()?;
+
+        // Get HEAD tree
+        let head = repo.head().ok()?;
+        let head_tree = head.peel_to_tree().ok()?;
+
+        // Get working tree diff
+        let mut diff_options = git2::DiffOptions::new();
+        diff_options.pathspec(&file_path);
+
+        let diff = repo
+            .diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut diff_options))
+            .ok()?;
+
+        // Convert diff to patch text
+        let mut patch_text = String::new();
+        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            let origin = line.origin();
+            let content = std::str::from_utf8(line.content()).unwrap_or("");
+
+            match origin {
+                '+' | '-' | ' ' => {
+                    patch_text.push(origin);
+                    patch_text.push_str(content);
+                },
+                '>' | '<' => {
+                    // File mode changes, context markers
+                    patch_text.push_str(content);
+                },
+                'F' => {
+                    // File header
+                    patch_text.push_str("diff --git ");
+                    patch_text.push_str(content);
+                },
+                'H' => {
+                    // Hunk header
+                    patch_text.push_str("@@ ");
+                    patch_text.push_str(content);
+                },
+                _ => {
+                    // Other lines (index, file names, etc)
+                    patch_text.push_str(content);
+                },
+            }
+
+            true // Continue iteration
+        })
+        .ok()?;
+
+        if patch_text.is_empty() {
+            None
+        } else {
+            Some(DiffPreviewData::new(patch_text))
+        }
+    })
+    .await
 }

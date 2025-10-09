@@ -2145,8 +2145,45 @@ impl Stoat {
         self.mode = "git_status".into();
         debug!("Entered git_status mode");
 
+        // Load preview for first file
+        self.load_git_diff_preview(cx);
+
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
+    }
+
+    /// Load git diff preview for the currently selected file.
+    ///
+    /// Spawns an async task to load the diff patch for the selected file.
+    /// The task updates the preview state when the diff is ready.
+    pub fn load_git_diff_preview(&mut self, cx: &mut Context<Self>) {
+        // Cancel existing task
+        self.git_status_preview_task = None;
+
+        // Get selected file entry
+        let entry = match self.git_status_files.get(self.git_status_selected) {
+            Some(entry) => entry.clone(),
+            None => {
+                self.git_status_preview = None;
+                return;
+            },
+        };
+
+        // Get repository root path
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let file_path = entry.path.clone();
+
+        // Spawn async task to load diff
+        self.git_status_preview_task = Some(cx.spawn(async move |this, cx| {
+            // Load git diff
+            if let Some(diff) = crate::git_status::load_git_diff(&root_path, &file_path).await {
+                // Update self through entity handle
+                let _ = this.update(cx, |stoat, cx| {
+                    stoat.git_status_preview = Some(diff);
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     /// Move to next file in git status list.
@@ -2158,6 +2195,7 @@ impl Stoat {
         if self.git_status_selected + 1 < self.git_status_files.len() {
             self.git_status_selected += 1;
             debug!(selected = self.git_status_selected, "Git status: next");
+            self.load_git_diff_preview(cx);
             cx.notify();
         }
     }
@@ -2171,6 +2209,7 @@ impl Stoat {
         if self.git_status_selected > 0 {
             self.git_status_selected -= 1;
             debug!(selected = self.git_status_selected, "Git status: prev");
+            self.load_git_diff_preview(cx);
             cx.notify();
         }
     }
@@ -2240,6 +2279,11 @@ impl Stoat {
     /// Accessor for selected file index (for GUI layer).
     pub fn git_status_selected(&self) -> usize {
         self.git_status_selected
+    }
+
+    /// Accessor for git diff preview (for GUI layer).
+    pub fn git_status_preview(&self) -> Option<&crate::git_status::DiffPreviewData> {
+        self.git_status_preview.as_ref()
     }
 }
 

@@ -1,45 +1,50 @@
 //! Git status modal for viewing modified files.
 //!
-//! Renders a modal overlay for git status viewing. All state management and input handling
-//! happens in [`stoat::Stoat`] core - this is just the presentation layer.
+//! Renders a modal overlay for git status viewing with diff preview. All state management
+//! and input handling happens in [`stoat::Stoat`] core - this is just the presentation layer.
+//!
+//! Layout matches [`FileFinder`] with two panels: file list on left, diff preview on right.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
+    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
+    Window, div, point, prelude::FluentBuilder, px, rgb, rgba,
 };
-use stoat::git_status::GitStatusEntry;
+use stoat::git_status::{DiffPreviewData, GitStatusEntry};
 
 /// Git status modal renderer.
 ///
-/// Stateless component that renders git status UI. All interaction is handled through
-/// the action system in git_status mode:
-///
-/// - Up/Down keys navigate via [`stoat::Stoat::git_status_next`]/[`stoat::Stoat::git_status_prev`]
-/// - Escape dismisses via [`stoat::Stoat::git_status_dismiss`]
-/// - Enter opens file via git_status_select handler in GUI
-///
-/// The git status modal is displayed when [`stoat::Stoat::mode`] returns `"git_status"`.
+/// Stateless component that renders git status UI similar to FileFinder.
+/// Two-panel layout: file list on left (45%), diff preview on right (55%).
 #[derive(IntoElement)]
 pub struct GitStatus {
     files: Vec<GitStatusEntry>,
     selected: usize,
+    preview: Option<DiffPreviewData>,
     scroll_handle: ScrollHandle,
 }
 
 impl GitStatus {
     /// Create a new git status renderer with the given state.
-    pub fn new(files: Vec<GitStatusEntry>, selected: usize, scroll_handle: ScrollHandle) -> Self {
+    pub fn new(
+        files: Vec<GitStatusEntry>,
+        selected: usize,
+        preview: Option<DiffPreviewData>,
+        scroll_handle: ScrollHandle,
+    ) -> Self {
         Self {
             files,
             selected,
+            preview,
             scroll_handle,
         }
     }
 
-    /// Render the header showing git status title.
+    /// Render the header bar showing title.
     fn render_header(&self) -> impl IntoElement {
         div()
-            .p(px(6.0))
+            .p(px(8.0))
             .border_b_1()
             .border_color(rgb(0x3e3e42))
             .bg(rgb(0x252526))
@@ -48,7 +53,7 @@ impl GitStatus {
             .child("Git Status")
     }
 
-    /// Render the list of modified files.
+    /// Render the list of modified files with status indicators.
     fn render_file_list(&self) -> impl IntoElement {
         let files = &self.files;
         let selected = self.selected;
@@ -74,8 +79,8 @@ impl GitStatus {
                 div()
                     .flex()
                     .gap_2()
-                    .px(px(12.0))
-                    .py(px(4.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
                     .when(i == selected, |div| {
                         div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected file
                     })
@@ -95,11 +100,199 @@ impl GitStatus {
                     )
             }))
     }
+
+    /// Render the diff preview panel.
+    fn render_preview(&self) -> DiffPreviewElement {
+        DiffPreviewElement::new(self.preview.clone())
+    }
+}
+
+/// Custom element for rendering git diff preview with colored lines.
+///
+/// Implements GPUI's low-level Element trait to render diff text with proper coloring:
+/// - Lines starting with '+' in green
+/// - Lines starting with '-' in red
+/// - Hunk headers (@@) in gray
+/// - Context lines in default color
+struct DiffPreviewElement {
+    preview: Option<DiffPreviewData>,
+}
+
+struct DiffPreviewLayout {
+    lines: Vec<ShapedLineWithPosition>,
+    bounds: Bounds<Pixels>,
+}
+
+struct ShapedLineWithPosition {
+    shaped: ShapedLine,
+    position: gpui::Point<Pixels>,
+}
+
+impl DiffPreviewElement {
+    fn new(preview: Option<DiffPreviewData>) -> Self {
+        Self { preview }
+    }
+}
+
+impl Element for DiffPreviewElement {
+    type RequestLayoutState = ();
+    type PrepaintState = DiffPreviewLayout;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        // Request full-size layout
+        let mut style = Style::default();
+        style.size.width = gpui::relative(1.).into();
+        style.size.height = gpui::relative(1.).into();
+        let layout_id = window.request_layout(style, [], cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        let Some(preview) = &self.preview else {
+            return DiffPreviewLayout {
+                lines: Vec::new(),
+                bounds,
+            };
+        };
+
+        // Font configuration
+        let font = Font {
+            family: ".AppleSystemUIFontMonospaced".into(),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+        let font_size = px(12.0);
+        let line_height = px(18.0);
+
+        // Calculate viewport culling
+        let visible_height = f32::from(bounds.size.height);
+        let max_visible_lines = (visible_height / f32::from(line_height)).ceil() as usize + 2;
+
+        // Diff colors
+        let color_added = rgb(0x6a9955); // Green for +
+        let color_removed = rgb(0xf14c4c); // Red for -
+        let color_hunk = rgb(0x808080); // Gray for @@
+        let color_default = rgb(0xd4d4d4); // White for context
+
+        // Shape each line with appropriate color
+        let mut lines = Vec::new();
+        let mut y_offset = bounds.origin.y + px(12.0);
+
+        for (line_idx, line_text) in preview.text().lines().enumerate() {
+            if line_idx >= max_visible_lines {
+                break;
+            }
+
+            // Determine color based on line prefix
+            let color = if line_text.starts_with('+') {
+                color_added
+            } else if line_text.starts_with('-') {
+                color_removed
+            } else if line_text.starts_with("@@") {
+                color_hunk
+            } else {
+                color_default
+            };
+
+            let text = if line_text.is_empty() {
+                SharedString::from(" ")
+            } else {
+                SharedString::from(line_text.to_string())
+            };
+
+            let text_run = TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+
+            let shaped = window
+                .text_system()
+                .shape_line(text, font_size, &[text_run], None);
+
+            lines.push(ShapedLineWithPosition {
+                shaped,
+                position: point(bounds.origin.x + px(12.0), y_offset),
+            });
+
+            y_offset += line_height;
+        }
+
+        DiffPreviewLayout { lines, bounds }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        layout: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // Paint background
+        window.paint_quad(PaintQuad {
+            bounds: layout.bounds,
+            corner_radii: Default::default(),
+            background: rgb(0x1e1e1e).into(),
+            border_color: Default::default(),
+            border_widths: Default::default(),
+            border_style: Default::default(),
+        });
+
+        // Paint each shaped line
+        let line_height = px(18.0);
+        for line in &layout.lines {
+            line.shaped
+                .paint(line.position, line_height, window, cx)
+                .unwrap_or_else(|err| {
+                    eprintln!("Failed to paint diff line: {err:?}");
+                });
+        }
+    }
+}
+
+impl IntoElement for DiffPreviewElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 impl RenderOnce for GitStatus {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
+        let show_preview = viewport_width > 1000.0 && self.preview.is_some();
 
         div()
             .absolute()
@@ -107,7 +300,7 @@ impl RenderOnce for GitStatus {
             .left_0()
             .right_0()
             .bottom_0()
-            .bg(rgba(0x00000030)) // Light dimmed background overlay
+            .bg(rgba(0x00000030)) // Dimmed background overlay
             .flex()
             .items_center()
             .justify_center()
@@ -116,15 +309,48 @@ impl RenderOnce for GitStatus {
                     .flex()
                     .flex_col()
                     .w_3_4()
-                    .max_w(px(800.0))
-                    .h(px(viewport_height * 0.6))
-                    .bg(rgb(0x1e1e1e)) // Dark background matching VS Code theme
+                    .h(px(viewport_height * 0.85))
+                    .bg(rgb(0x1e1e1e))
                     .border_1()
-                    .border_color(rgb(0x3e3e42)) // Subtle border
+                    .border_color(rgb(0x3e3e42))
                     .rounded(px(8.0))
                     .overflow_hidden()
                     .child(self.render_header())
-                    .child(self.render_file_list()),
+                    .child(if show_preview {
+                        // Two-panel layout: file list on left, preview on right
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(
+                                // Left panel: file list (45%)
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w(px(viewport_width * 0.75 * 0.45))
+                                    .border_r_1()
+                                    .border_color(rgb(0x3e3e42))
+                                    .child(self.render_file_list()),
+                            )
+                            .child(
+                                // Right panel: diff preview (55%)
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .child(self.render_preview()),
+                            )
+                    } else {
+                        // Single panel: just file list
+                        div().flex().flex_row().flex_1().overflow_hidden().child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .child(self.render_file_list()),
+                        )
+                    }),
             )
     }
 }

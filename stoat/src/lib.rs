@@ -32,7 +32,7 @@ pub use actions::{action_name, description};
 pub use buffer_item::BufferItem;
 pub use cursor::{Cursor, CursorManager};
 pub use file_finder::PreviewData;
-pub use git_status::{gather_git_status, GitStatusEntry};
+pub use git_status::{gather_git_status, load_git_diff, DiffPreviewData, GitStatusEntry};
 pub use pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection};
 pub use scroll::{ScrollDelta, ScrollPosition};
 pub use stoat::{CommandInfo, Mode, Stoat, StoatEvent};
