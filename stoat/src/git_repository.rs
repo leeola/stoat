@@ -32,7 +32,7 @@
 //! # Related
 //!
 //! - [`git_diff`](crate::git_diff) - Uses this to get base content for diff computation
-//! - [`BufferItem`](crate::pane::BufferItem) - Stores computed diffs
+//! - [`BufferItem`](crate::BufferItem) - Stores computed diffs
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;

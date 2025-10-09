@@ -1,4 +1,4 @@
-//! Minimal EditorElement for stoat_v4
+//! Minimal EditorElement for stoat
 //!
 //! Simplified version that just renders text with syntax highlighting.
 //! No gutter, no mouse handling, no complex layout - just get text visible.
@@ -479,9 +479,9 @@ impl EditorElement {
         // Paint diff indicators
         for indicator in &gutter_layout.diff_indicators {
             let diff_color = match indicator.status {
-                stoat_v4::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
-                stoat_v4::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
-                stoat_v4::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+                stoat::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
+                stoat::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
+                stoat::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
             };
 
             // Blend with background for subtle appearance (60% opacity)

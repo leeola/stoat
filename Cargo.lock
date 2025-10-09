@@ -2447,17 +2447,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuzzy"
-version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed.git?rev=46b6adadf908fd673d2f37d83c9247b44bc81465#46b6adadf908fd673d2f37d83c9247b44bc81465"
-dependencies = [
- "gpui",
- "log",
- "util",
- "workspace-hack",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6494,17 +6483,14 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "enum_dispatch",
- "fuzzy",
  "git2",
  "gpui",
  "ignore",
  "nucleo-matcher",
- "once_cell",
  "parking_lot 0.12.4",
  "serde",
- "smallvec",
+ "smol",
  "stoat_rope",
  "stoat_text",
  "sum_tree",
@@ -6545,8 +6531,8 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "clap",
- "stoat_gui_v4",
- "stoat_v4",
+ "stoat",
+ "stoat_gui",
  "tempfile",
  "tokio",
  "tracing",
@@ -6558,7 +6544,6 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clock",
  "gpui",
  "parking_lot 0.12.4",
  "rustc-hash 2.1.1",
@@ -6566,23 +6551,6 @@ dependencies = [
  "stoat",
  "stoat_rope",
  "stoat_text",
- "sum_tree",
- "text",
- "tracing",
-]
-
-[[package]]
-name = "stoat_gui_v4"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gpui",
- "parking_lot 0.12.4",
- "rustc-hash 2.1.1",
- "smallvec",
- "stoat_rope",
- "stoat_text",
- "stoat_v4",
  "sum_tree",
  "text",
  "tracing",
@@ -6611,30 +6579,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-md",
  "tree-sitter-rust",
-]
-
-[[package]]
-name = "stoat_v4"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "enum_dispatch",
- "git2",
- "gpui",
- "ignore",
- "nucleo-matcher",
- "parking_lot 0.12.4",
- "serde",
- "smol",
- "stoat_rope",
- "stoat_text",
- "sum_tree",
- "tempfile",
- "text",
- "thiserror 1.0.69",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

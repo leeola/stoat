@@ -9,19 +9,17 @@
 //!
 //! 1. [`GutterDimensions`] - Size and position of the gutter area
 //! 2. [`DiffIndicator`] - Individual colored bar for a changed line
-//! 3. [`GutterLayout`] - Complete gutter layout computed during prepaint
+//! 3. [`GutterLayout`] - Complete gutter layout computed during paint
 //!
 //! ## Rendering Flow
 //!
-//! During editor prepaint:
+//! During editor paint:
 //! 1. Reserve space on left side for gutter
 //! 2. Query [`BufferDiff`](stoat::git_diff::BufferDiff) for hunks
 //! 3. Convert hunk anchors to visible row numbers
 //! 4. Create [`DiffIndicator`] for each changed line
-//!
-//! During editor paint:
-//! 1. Paint gutter background
-//! 2. Paint each [`DiffIndicator`] with appropriate color
+//! 5. Paint gutter background
+//! 6. Paint each [`DiffIndicator`] with appropriate color
 //!
 //! # Colors
 //!
@@ -31,8 +29,8 @@
 //!
 //! # Related
 //!
-//! - [`EditorElement`](super::element::EditorElement) - Renders the gutter
-//! - [`EditorStyle`](super::style::EditorStyle) - Configures gutter appearance
+//! - [`EditorElement`](super::editor_element::EditorElement) - Renders the gutter
+//! - [`EditorStyle`](super::editor_style::EditorStyle) - Configures gutter appearance
 //! - [`BufferDiff`](stoat::git_diff::BufferDiff) - Source of diff data
 
 use gpui::{point, px, size, Bounds, Corners, Pixels, Point};
@@ -74,14 +72,8 @@ pub struct DiffIndicator {
 
 /// Complete gutter layout for rendering.
 ///
-/// Computed during prepaint phase and contains all information needed to paint
+/// Computed during paint phase and contains all information needed to paint
 /// the gutter, including dimensions and diff indicators for visible lines.
-///
-/// # Lifecycle
-///
-/// 1. Created in [`EditorElement::prepaint`](super::element::EditorElement::prepaint)
-/// 2. Stored in [`EditorLayout`](super::layout::EditorLayout)
-/// 3. Used in [`EditorElement::paint`](super::element::EditorElement::paint)
 ///
 /// # Example
 ///
@@ -92,6 +84,7 @@ pub struct DiffIndicator {
 ///     Some(&diff),
 ///     &buffer_snapshot,
 ///     px(40.0),
+///     px(20.0),
 ///     px(20.0),
 /// );
 ///
@@ -134,8 +127,8 @@ impl GutterLayout {
     ///    - Convert anchor range to row range
     ///    - Check if hunk intersects visible rows
     ///    - Create indicator for each visible row in hunk
-    /// 2. Position indicators at right edge of gutter
-    /// 3. Size indicators to match line height
+    /// 2. Position indicators at left edge of gutter
+    /// 3. Size indicators to match line height (following Zed's 0.275 ratio)
     pub fn new(
         gutter_bounds: Bounds<Pixels>,
         visible_rows: Range<u32>,
@@ -215,7 +208,7 @@ impl GutterLayout {
 
     /// Check if a pixel position is within the gutter bounds.
     ///
-    /// Used for mouse interaction (future Phase 3 feature).
+    /// Used for mouse interaction (future feature).
     ///
     /// # Arguments
     ///

@@ -5,33 +5,27 @@ edition = "2021"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
-[features]
-gui = []
-
 [dependencies]
-clap = { workspace = true, features = ["derive"] }
-smallvec = { workspace = true }
-parking_lot = { workspace = true }
+gpui = { workspace = true }
+text = { workspace = true }
+sum_tree = { workspace = true }
 stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
-text = { workspace = true }
-gpui = { workspace = true }
-enum_dispatch = "0.3"
-sum_tree = { workspace = true }
-fuzzy = { workspace = true }
-ignore = "0.4"
-thiserror = { workspace = true }
+smol = "2.0"
+nucleo-matcher = "0.3.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { workspace = true }
 anyhow.workspace = true
-once_cell = "1.20"
-serde = { version = "1.0", features = ["derive"] }
+parking_lot = { workspace = true }
+ignore = "0.4"
+enum_dispatch = "0.3"
 toml = "0.8"
+serde = { workspace = true }
+thiserror = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [
   "vendored-libgit2",
   "vendored-openssl",
 ] }
-nucleo-matcher = "0.3.1"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

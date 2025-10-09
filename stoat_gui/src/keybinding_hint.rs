@@ -3,15 +3,22 @@ use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
 /// A single keybinding hint showing a key combination and its description.
 ///
 /// Displays keyboard shortcuts in a styled format with the key in a bordered box
-/// followed by a description label. Used within [`CommandOverlay`] to show available
-/// commands for the current editor mode.
+/// followed by a description label. Used within [`crate::command_overlay::CommandOverlay`]
+/// to show available commands for the current editor mode.
+///
+/// # Layout
+///
+/// The component renders as: `[key]` description
+/// - Key in bordered box with padding
+/// - Description in muted text color
+/// - Horizontal flex layout with gap between elements
 #[derive(IntoElement)]
 pub struct KeybindingHint {
     /// The keyboard shortcut (e.g., "h", "Esc", "Ctrl-w")
     key: SharedString,
     /// Description of what the key does (e.g., "move left", "normal mode")
     description: SharedString,
-    /// Background color for the component
+    /// Background color for the key box
     bg_color: Hsla,
 }
 

@@ -19,7 +19,7 @@ pub enum Command {
 
 fn main() {
     // Initialize logging with STOAT_LOG support
-    if let Err(e) = stoat_v4::log::init() {
+    if let Err(e) = stoat::log::init() {
         eprintln!("Failed to initialize logging: {e}");
         std::process::exit(1);
     }
@@ -31,8 +31,8 @@ fn main() {
     // Handle subcommands
     match cli.command {
         Some(Command::Gui { paths }) => {
-            // Launch GUI v4
-            if let Err(e) = stoat_bin::commands::gui_v4::run(paths) {
+            // Launch GUI
+            if let Err(e) = stoat_bin::commands::gui::run(paths) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }

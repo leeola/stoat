@@ -21,15 +21,15 @@
 //! # Examples
 //!
 //! ```ignore
-//! use stoat::test::markers;
+//! use stoat::test::cursor_notation;
 //!
 //! // Cursor only
-//! let p = markers::parse("hello |world").unwrap();
+//! let p = cursor_notation::parse("hello |world").unwrap();
 //! assert_eq!(p.text, "hello world");
 //! assert_eq!(p.cursors, vec![6]);
 //!
 //! // Selection with cursor at end
-//! let p = markers::parse("<|hello||>").unwrap();
+//! let p = cursor_notation::parse("<|hello||>").unwrap();
 //! assert_eq!(p.text, "hello");
 //! assert_eq!(p.selections[0].range, 0..5);
 //! assert!(!p.selections[0].cursor_at_start);

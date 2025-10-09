@@ -7,8 +7,11 @@ use std::collections::HashSet;
 /// the given mode's context. Prioritizes mode-specific bindings over global ones
 /// and limits the total number shown to keep the overlay manageable.
 ///
+/// Used by [`crate::command_overlay::CommandOverlay`] to display relevant keybindings
+/// for the current editor mode.
+///
 /// # Arguments
-/// * `keymap` - The keymap to query
+/// * `keymap` - The keymap to query (from [`stoat::keymap::create_default_keymap`])
 /// * `mode` - The editor mode name to get bindings for
 ///
 /// # Returns
@@ -84,7 +87,15 @@ fn is_binding_mode_specific(keymap: &Keymap, binding: &KeyBinding) -> bool {
     let keystrokes = binding.keystrokes();
 
     // Test against all modes
-    let modes = ["normal", "insert", "visual", "pane", "file_finder", "space"];
+    let modes = [
+        "normal",
+        "insert",
+        "visual",
+        "pane",
+        "file_finder",
+        "space",
+        "command_palette",
+    ];
     let mut active_in_count = 0;
 
     for mode_name in modes {

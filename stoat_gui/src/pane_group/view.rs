@@ -1,10 +1,11 @@
 use crate::{
-    command_overlay::CommandOverlay, command_palette::CommandPalette, editor::view::EditorView,
+    command_overlay::CommandOverlay, command_palette::CommandPalette, editor_view::EditorView,
     file_finder::FileFinder, pane_group::element::pane_axis,
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, Styled, Window,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Window,
 };
 use std::{collections::HashMap, rc::Rc};
 use stoat::{
@@ -28,6 +29,8 @@ pub struct PaneGroupView {
     active_pane: PaneId,
     focus_handle: FocusHandle,
     keymap: Rc<gpui::Keymap>,
+    file_finder_scroll: ScrollHandle,
+    command_palette_scroll: ScrollHandle,
 }
 
 impl PaneGroupView {
@@ -51,6 +54,8 @@ impl PaneGroupView {
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
             keymap,
+            file_finder_scroll: ScrollHandle::new(),
+            command_palette_scroll: ScrollHandle::new(),
         }
     }
 
@@ -65,9 +70,9 @@ impl PaneGroupView {
     fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(editor) = self.pane_editors.get_mut(&self.active_pane) {
             editor.update(cx, |editor, cx| {
-                let mode = editor.stoat().read(cx).mode().to_string();
+                let mode = editor.stoat.read(cx).mode().to_string();
                 if mode == "pane" {
-                    editor.stoat().update(cx, |stoat, _| {
+                    editor.stoat.update(cx, |stoat, _| {
                         stoat.set_mode("normal");
                     });
                     cx.notify();
@@ -86,7 +91,7 @@ impl PaneGroupView {
         // Open file finder in the active editor's Stoat instance
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
-                editor.stoat().update(cx, |stoat, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
                     stoat.open_file_finder(cx);
                 });
             });
@@ -105,7 +110,7 @@ impl PaneGroupView {
         if let Some(editor) = self.active_editor() {
             let keymap = self.keymap.clone();
             editor.update(cx, |editor, cx| {
-                editor.stoat().update(cx, |stoat, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
                     stoat.open_command_palette(&keymap, cx);
                 });
             });
@@ -135,13 +140,19 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+
+        // Set entity reference so EditorView can pass it to EditorElement
+        new_editor.update(cx, |view, _| {
+            view.set_entity(new_editor.clone());
+        });
+
         self.split(SplitDirection::Up, new_editor.clone(), cx);
 
         debug!(
@@ -171,13 +182,19 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+
+        // Set entity reference so EditorView can pass it to EditorElement
+        new_editor.update(cx, |view, _| {
+            view.set_entity(new_editor.clone());
+        });
+
         self.split(SplitDirection::Down, new_editor.clone(), cx);
 
         debug!(
@@ -207,13 +224,19 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+
+        // Set entity reference so EditorView can pass it to EditorElement
+        new_editor.update(cx, |view, _| {
+            view.set_entity(new_editor.clone());
+        });
+
         self.split(SplitDirection::Left, new_editor.clone(), cx);
 
         debug!(
@@ -243,13 +266,19 @@ impl PaneGroupView {
             "Splitting pane"
         );
 
-        // Clone the Stoat Entity from the active pane so the new split shows the same buffer
+        // Create new Stoat that shares the buffer but has independent cursor/scroll state
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
-            active_editor.read(cx).stoat()
+            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+
+        // Set entity reference so EditorView can pass it to EditorElement
+        new_editor.update(cx, |view, _| {
+            view.set_entity(new_editor.clone());
+        });
+
         self.split(SplitDirection::Right, new_editor.clone(), cx);
 
         debug!(
@@ -523,7 +552,7 @@ impl Render for PaneGroupView {
             .pane_editors
             .get(&self.active_pane)
             .map(|editor| {
-                let stoat_entity = editor.read(cx).stoat();
+                let stoat_entity = editor.read(cx).stoat.clone();
                 let stoat = stoat_entity.read(cx);
                 let mode_name = stoat.mode();
                 let display = stoat
@@ -533,11 +562,18 @@ impl Render for PaneGroupView {
 
                 // Extract file finder data if in file_finder mode
                 let ff_data = if mode_name == "file_finder" {
+                    let query = stoat
+                        .file_finder_input()
+                        .map(|buffer| {
+                            let buffer_snapshot = buffer.read(cx).snapshot();
+                            buffer_snapshot.text()
+                        })
+                        .unwrap_or_default();
                     Some((
-                        stoat.file_finder_query(cx),
-                        stoat.file_finder_filtered_files().to_vec(),
-                        stoat.file_finder_selected_index(),
-                        stoat.file_finder_preview_data().cloned(),
+                        query,
+                        stoat.file_finder_filtered().to_vec(),
+                        stoat.file_finder_selected(),
+                        stoat.file_finder_preview().cloned(),
                     ))
                 } else {
                     None
@@ -545,8 +581,15 @@ impl Render for PaneGroupView {
 
                 // Extract command palette data if in command_palette mode
                 let cp_data = if mode_name == "command_palette" {
+                    let query = stoat
+                        .command_palette_input()
+                        .map(|buffer| {
+                            let buffer_snapshot = buffer.read(cx).snapshot();
+                            buffer_snapshot.text()
+                        })
+                        .unwrap_or_default();
                     Some((
-                        stoat.command_palette_query(cx),
+                        query,
                         stoat.command_palette_filtered().to_vec(),
                         stoat.command_palette_selected(),
                     ))
@@ -581,7 +624,13 @@ impl Render for PaneGroupView {
             .when(active_mode == "file_finder", |div| {
                 // Render file finder overlay when in file_finder mode
                 if let Some((query, files, selected, preview)) = file_finder_data {
-                    div.child(FileFinder::new(query, files, selected, preview))
+                    div.child(FileFinder::new(
+                        query,
+                        files,
+                        selected,
+                        preview,
+                        self.file_finder_scroll.clone(),
+                    ))
                 } else {
                     div
                 }
@@ -589,7 +638,12 @@ impl Render for PaneGroupView {
             .when(active_mode == "command_palette", |div| {
                 // Render command palette overlay when in command_palette mode
                 if let Some((query, commands, selected)) = command_palette_data {
-                    div.child(CommandPalette::new(query, commands, selected))
+                    div.child(CommandPalette::new(
+                        query,
+                        commands,
+                        selected,
+                        self.command_palette_scroll.clone(),
+                    ))
                 } else {
                     div
                 }

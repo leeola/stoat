@@ -2,7 +2,7 @@
 name = "stoat_gui"
 version = "0.1.0"
 edition = "2021"
-description = "GUI for the Stoat text editor using GPUI"
+description = "GUI for Stoat editor using GPUI"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
@@ -11,14 +11,13 @@ workspace = true
 
 [dependencies]
 stoat = { path = "../stoat" }
-stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
+stoat_rope = { path = "../rope" }
 gpui = { workspace = true }
 text = { workspace = true }
 sum_tree = { workspace = true }
-clock = { workspace = true }
 anyhow = "1.0"
-smallvec = "1.13"
-parking_lot = { workspace = true }
 tracing = "0.1"
 rustc-hash = "2.0"
+smallvec = { workspace = true }
+parking_lot = { workspace = true }

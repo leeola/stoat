@@ -1,35 +1,29 @@
-//! File finder modal for quick file navigation
+//! File finder modal for quick file navigation.
 //!
-//! Renders the file finder modal overlay based on state from [`stoat::Stoat`]. This component
-//! is stateless - all state management and input handling happens in the core via the mode system.
+//! Renders a modal overlay for fuzzy file finding. All state management and input handling
+//! happens in [`stoat::Stoat`] core - this is just the presentation layer.
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
     div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintQuad,
-    ParentElement, Pixels, RenderOnce, ShapedLine, SharedString, Style, Styled, TextRun, Window,
+    FontStyle, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
+    StatefulInteractiveElement, Style, Styled, TextRun, Window,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 use stoat::PreviewData;
 
 /// File finder modal renderer.
 ///
-/// This is a stateless component that renders the file finder UI based on state from
-/// [`stoat::Stoat`]. All interaction is handled through the normal action system in file_finder
-/// mode:
-///
-/// - Text input goes to the input buffer via [`stoat::Stoat::insert_text`]
-/// - Backspace deletes from input buffer via [`stoat::Stoat::delete_left`]
-/// - Arrow keys navigate via [`stoat::Stoat::file_finder_next`]/[`stoat::Stoat::file_finder_prev`]
-/// - Escape dismisses via [`stoat::Stoat::file_finder_dismiss`]
-///
-/// The file finder is displayed when [`stoat::Stoat::mode`] returns `"file_finder"`.
+/// Stateless component that renders file finder UI. All interaction is handled through
+/// the action system in file_finder mode.
 #[derive(IntoElement)]
 pub struct FileFinder {
     query: String,
     files: Vec<PathBuf>,
     selected: usize,
     preview: Option<PreviewData>,
+    scroll_handle: ScrollHandle,
 }
 
 impl FileFinder {
@@ -39,12 +33,14 @@ impl FileFinder {
         files: Vec<PathBuf>,
         selected: usize,
         preview: Option<PreviewData>,
+        scroll_handle: ScrollHandle,
     ) -> Self {
         Self {
             query,
             files,
             selected,
             preview,
+            scroll_handle,
         }
     }
 
@@ -53,7 +49,7 @@ impl FileFinder {
         let query = self.query.clone();
 
         div()
-            .p(px(6.0))
+            .p(px(8.0))
             .border_b_1()
             .border_color(rgb(0x3e3e42))
             .bg(rgb(0x252526))
@@ -71,9 +67,12 @@ impl FileFinder {
         let selected = self.selected;
 
         div()
+            .id("file-list")
             .flex()
             .flex_col()
             .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .children(files.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(8.0))
@@ -175,9 +174,25 @@ impl Element for PreviewElement {
             };
         };
 
-        // Create buffer snapshot from preview text
-        let buffer = text::Buffer::new(0, text::BufferId::new(1).unwrap(), preview.text.clone());
+        // Create buffer snapshot from preview text (avoid cloning - use reference)
+        let preview_text = preview.text();
+        let buffer =
+            text::Buffer::new(0, text::BufferId::new(1).unwrap(), preview_text.to_string());
         let snapshot = buffer.snapshot();
+
+        // Get tokens - use cached empty snapshot for Plain preview
+        // This avoids expensive TokenMap creation on every frame
+        static EMPTY_TOKENS: OnceLock<stoat_rope::TokenSnapshot> = OnceLock::new();
+        let tokens = match preview {
+            PreviewData::Highlighted { tokens, .. } => tokens,
+            PreviewData::Plain(_) => EMPTY_TOKENS.get_or_init(|| {
+                // Create minimal empty snapshot once - HighlightedChunks will return
+                // chunks with no highlighting (highlight_id = None)
+                let empty_buf =
+                    text::Buffer::new(0, text::BufferId::new(1).unwrap(), String::new());
+                stoat_rope::TokenMap::new(&empty_buf.snapshot()).snapshot()
+            }),
+        };
 
         // Font configuration
         let font = Font {
@@ -190,25 +205,29 @@ impl Element for PreviewElement {
         let font_size = px(12.0);
         let line_height = px(18.0);
 
-        // Shape each line with syntax highlighting
+        // Calculate viewport culling - only render visible lines
+        let visible_height = f32::from(bounds.size.height);
+        let max_visible_lines = (visible_height / f32::from(line_height)).ceil() as usize + 2; // +2 for buffer
+
+        // Shape each visible line with syntax highlighting
         let mut lines = Vec::new();
         let mut y_offset = bounds.origin.y + px(12.0); // Top padding
+        let mut current_offset = 0; // Track offset incrementally - O(n) instead of O(n²)
 
-        for (line_idx, line_text) in preview.text.lines().enumerate() {
-            let line_start_offset = preview.text[..preview
-                .text
-                .lines()
-                .take(line_idx)
-                .map(|l| l.len() + 1)
-                .sum::<usize>()]
-                .len();
-            let line_end_offset = line_start_offset + line_text.len();
+        for (line_idx, line_text) in preview_text.lines().enumerate() {
+            // Viewport culling: stop if we've rendered enough visible lines
+            if line_idx >= max_visible_lines {
+                break;
+            }
+
+            let line_start_offset = current_offset;
+            let line_end_offset = current_offset + line_text.len();
 
             // Build text runs with highlighting
             let highlighted_chunks = HighlightedChunks::new(
                 line_start_offset..line_end_offset,
                 &snapshot,
-                &preview.tokens,
+                tokens,
                 &self.highlight_map,
             );
 
@@ -268,6 +287,7 @@ impl Element for PreviewElement {
             });
 
             y_offset += line_height;
+            current_offset = line_end_offset + 1; // +1 for newline character
         }
 
         PreviewLayout { lines, bounds }
@@ -318,7 +338,7 @@ impl RenderOnce for FileFinder {
         // Check window width to determine if we should show preview
         let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
-        let show_preview = viewport_width > 1000.0;
+        let show_preview = viewport_width > 1000.0 && self.preview.is_some();
 
         div()
             .absolute()
@@ -326,7 +346,7 @@ impl RenderOnce for FileFinder {
             .left_0()
             .right_0()
             .bottom_0()
-            .bg(rgba(0x00000030)) // Light dimmed background overlay
+            .bg(rgba(0x00000030)) // Dimmed background overlay
             .flex()
             .items_center()
             .justify_center()
@@ -336,9 +356,9 @@ impl RenderOnce for FileFinder {
                     .flex_col()
                     .w_3_4()
                     .h(px(viewport_height * 0.85))
-                    .bg(rgb(0x1e1e1e)) // Dark background matching VS Code theme
+                    .bg(rgb(0x1e1e1e))
                     .border_1()
-                    .border_color(rgb(0x3e3e42)) // Subtle border
+                    .border_color(rgb(0x3e3e42))
                     .rounded(px(8.0))
                     .overflow_hidden()
                     .child(self.render_input())

@@ -4,7 +4,7 @@ use gpui::{
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
     ScrollWheelEvent, Styled, Window,
 };
-use stoat_v4::{actions::*, scroll, Stoat};
+use stoat::{actions::*, scroll, Stoat};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,

@@ -1,3 +1,3 @@
 pub mod commands {
-    pub mod gui_v4;
+    pub mod gui;
 }

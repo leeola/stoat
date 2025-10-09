@@ -1,17 +1,13 @@
-/// Launch the GUI application
-pub fn run(
-    paths: Vec<std::path::PathBuf>,
-    input_sequence: Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Launching Stoat GUI...");
+use std::path::PathBuf;
 
-    if let Some(input) = &input_sequence {
-        tracing::info!("Input sequence provided: {}", input);
-    }
+#[cfg(feature = "gui")]
+pub fn run(paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    stoat_gui::run_with_paths(paths)
+}
 
-    // Run the GUI application - it will create Stoat with proper App context
-    stoat_gui::run_with_paths(paths, input_sequence)
-        .map_err(|e| format!("Failed to run GUI: {e}"))?;
-
-    Ok(())
+#[cfg(not(feature = "gui"))]
+pub fn run(_paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Error: gui feature not enabled");
+    eprintln!("Run with: cargo run --features gui --bin stoat -- gui");
+    std::process::exit(1);
 }

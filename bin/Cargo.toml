@@ -16,15 +16,15 @@ name = "stoat_bin"
 path = "src/lib.rs"
 
 [features]
-default = ["gui_v4"]
-gui_v4 = ["stoat_v4", "stoat_gui_v4"]
+default = ["gui"]
+gui = ["stoat", "stoat_gui"]
 
 [lints]
 workspace = true
 
 [dependencies]
-stoat_v4 = { path = "../stoat_v4", optional = true }
-stoat_gui_v4 = { path = "../stoat_gui_v4", optional = true }
+stoat = { path = "../stoat", optional = true }
+stoat_gui = { path = "../stoat_gui", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap = { workspace = true, features = ["derive"] }
 tracing.workspace = true

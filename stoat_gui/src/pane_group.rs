@@ -1,4 +1,4 @@
-mod element;
-mod view;
+pub mod element;
+pub mod view;
 
 pub use view::PaneGroupView;

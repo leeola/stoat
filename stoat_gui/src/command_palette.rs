@@ -1,11 +1,12 @@
 //! Command palette modal for fuzzy command search
 //!
-//! Renders the command palette modal overlay based on state from [`stoat::Stoat`]. This component
-//! is stateless - all state management and input handling happens in the core via the mode system.
+//! Renders the command palette modal overlay based on state from [`stoat::Stoat`]. This
+//! component is stateless - all state management and input handling happens in the core via the
+//! mode system.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, rgb, rgba, App, IntoElement, ParentElement, RenderOnce,
-    Styled, Window,
+    div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
 };
 use stoat::CommandInfo;
 
@@ -20,7 +21,7 @@ use stoat::CommandInfo;
 /// - Arrow keys navigate via
 ///   [`stoat::Stoat::command_palette_next`]/[`stoat::Stoat::command_palette_prev`]
 /// - Escape dismisses via [`stoat::Stoat::command_palette_dismiss`]
-/// - Enter executes via [`stoat::Stoat::command_palette_execute`]
+/// - Enter executes via command_palette_execute handler in GUI
 ///
 /// The command palette is displayed when [`stoat::Stoat::mode`] returns `"command_palette"`.
 #[derive(IntoElement)]
@@ -28,15 +29,22 @@ pub struct CommandPalette {
     query: String,
     commands: Vec<CommandInfo>,
     selected: usize,
+    scroll_handle: ScrollHandle,
 }
 
 impl CommandPalette {
     /// Create a new command palette renderer with the given state.
-    pub fn new(query: String, commands: Vec<CommandInfo>, selected: usize) -> Self {
+    pub fn new(
+        query: String,
+        commands: Vec<CommandInfo>,
+        selected: usize,
+        scroll_handle: ScrollHandle,
+    ) -> Self {
         Self {
             query,
             commands,
             selected,
+            scroll_handle,
         }
     }
 
@@ -63,9 +71,12 @@ impl CommandPalette {
         let selected = self.selected;
 
         div()
+            .id("command-list")
             .flex()
             .flex_col()
             .flex_1()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle)
             .children(commands.iter().enumerate().map(|(i, cmd)| {
                 div()
                     .flex()
@@ -80,7 +91,7 @@ impl CommandPalette {
                         div()
                             .text_color(rgb(0xd4d4d4))
                             .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(cmd.name.clone()),
                     )
                     .child(

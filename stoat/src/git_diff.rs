@@ -53,7 +53,7 @@
 //! # Related
 //!
 //! - [`git_repository`](crate::git_repository) - Provides access to git HEAD content
-//! - [`BufferItem`](crate::pane::BufferItem) - Stores computed diffs for display
+//! - [`BufferItem`](crate::BufferItem) - Stores computed diffs for display
 
 use std::ops::Range;
 use sum_tree::Bias;
@@ -143,7 +143,7 @@ pub struct DiffHunk {
 /// # Lifecycle
 ///
 /// 1. Created via [`new`](Self::new) when a file is opened
-/// 2. Stored in [`BufferItem`](crate::pane::BufferItem)
+/// 2. Stored in [`BufferItem`](crate::BufferItem)
 /// 3. Updated when buffer is saved or on-demand
 /// 4. Queried during rendering to show gutter indicators
 ///

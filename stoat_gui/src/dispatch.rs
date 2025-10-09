@@ -3,7 +3,7 @@
 //! Provides type-safe dispatch of actions from TypeId, enabling the command palette
 //! to execute arbitrary commands selected by the user.
 
-use crate::editor::view::EditorView;
+use crate::editor_view::EditorView;
 use gpui::{Context, Window};
 use std::any::TypeId;
 use stoat::actions::*;
@@ -39,6 +39,10 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(MoveUp), cx);
     } else if type_id == TypeId::of::<MoveDown>() {
         window.dispatch_action(Box::new(MoveDown), cx);
+    } else if type_id == TypeId::of::<MoveWordLeft>() {
+        window.dispatch_action(Box::new(MoveWordLeft), cx);
+    } else if type_id == TypeId::of::<MoveWordRight>() {
+        window.dispatch_action(Box::new(MoveWordRight), cx);
     } else if type_id == TypeId::of::<MoveToLineStart>() {
         window.dispatch_action(Box::new(MoveToLineStart), cx);
     } else if type_id == TypeId::of::<MoveToLineEnd>() {
@@ -57,6 +61,12 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(DeleteLeft), cx);
     } else if type_id == TypeId::of::<DeleteRight>() {
         window.dispatch_action(Box::new(DeleteRight), cx);
+    } else if type_id == TypeId::of::<DeleteWordLeft>() {
+        window.dispatch_action(Box::new(DeleteWordLeft), cx);
+    } else if type_id == TypeId::of::<DeleteWordRight>() {
+        window.dispatch_action(Box::new(DeleteWordRight), cx);
+    } else if type_id == TypeId::of::<NewLine>() {
+        window.dispatch_action(Box::new(NewLine), cx);
     } else if type_id == TypeId::of::<DeleteLine>() {
         window.dispatch_action(Box::new(DeleteLine), cx);
     } else if type_id == TypeId::of::<DeleteToEndOfLine>() {
@@ -71,22 +81,30 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(SelectNextToken), cx);
     } else if type_id == TypeId::of::<SelectPrevToken>() {
         window.dispatch_action(Box::new(SelectPrevToken), cx);
+    } else if type_id == TypeId::of::<SelectLeft>() {
+        window.dispatch_action(Box::new(SelectLeft), cx);
+    } else if type_id == TypeId::of::<SelectRight>() {
+        window.dispatch_action(Box::new(SelectRight), cx);
+    } else if type_id == TypeId::of::<SelectUp>() {
+        window.dispatch_action(Box::new(SelectUp), cx);
+    } else if type_id == TypeId::of::<SelectDown>() {
+        window.dispatch_action(Box::new(SelectDown), cx);
+    } else if type_id == TypeId::of::<SelectToLineStart>() {
+        window.dispatch_action(Box::new(SelectToLineStart), cx);
+    } else if type_id == TypeId::of::<SelectToLineEnd>() {
+        window.dispatch_action(Box::new(SelectToLineEnd), cx);
     }
-    // Pane actions
-    else if type_id == TypeId::of::<SplitRight>() {
-        window.dispatch_action(Box::new(SplitRight), cx);
-    } else if type_id == TypeId::of::<SplitDown>() {
-        window.dispatch_action(Box::new(SplitDown), cx);
-    } else if type_id == TypeId::of::<ClosePane>() {
-        window.dispatch_action(Box::new(ClosePane), cx);
-    } else if type_id == TypeId::of::<FocusPaneLeft>() {
-        window.dispatch_action(Box::new(FocusPaneLeft), cx);
-    } else if type_id == TypeId::of::<FocusPaneRight>() {
-        window.dispatch_action(Box::new(FocusPaneRight), cx);
-    } else if type_id == TypeId::of::<FocusPaneUp>() {
-        window.dispatch_action(Box::new(FocusPaneUp), cx);
-    } else if type_id == TypeId::of::<FocusPaneDown>() {
-        window.dispatch_action(Box::new(FocusPaneDown), cx);
+    // Mode actions
+    else if type_id == TypeId::of::<EnterInsertMode>() {
+        window.dispatch_action(Box::new(EnterInsertMode), cx);
+    } else if type_id == TypeId::of::<EnterNormalMode>() {
+        window.dispatch_action(Box::new(EnterNormalMode), cx);
+    } else if type_id == TypeId::of::<EnterVisualMode>() {
+        window.dispatch_action(Box::new(EnterVisualMode), cx);
+    } else if type_id == TypeId::of::<EnterSpaceMode>() {
+        window.dispatch_action(Box::new(EnterSpaceMode), cx);
+    } else if type_id == TypeId::of::<EnterPaneMode>() {
+        window.dispatch_action(Box::new(EnterPaneMode), cx);
     }
     // File finder actions
     else if type_id == TypeId::of::<OpenFileFinder>() {
@@ -99,6 +117,16 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(FileFinderDismiss), cx);
     } else if type_id == TypeId::of::<FileFinderSelect>() {
         window.dispatch_action(Box::new(FileFinderSelect), cx);
+    }
+    // Command palette actions
+    else if type_id == TypeId::of::<OpenCommandPalette>() {
+        window.dispatch_action(Box::new(OpenCommandPalette), cx);
+    } else if type_id == TypeId::of::<CommandPaletteNext>() {
+        window.dispatch_action(Box::new(CommandPaletteNext), cx);
+    } else if type_id == TypeId::of::<CommandPalettePrev>() {
+        window.dispatch_action(Box::new(CommandPalettePrev), cx);
+    } else if type_id == TypeId::of::<CommandPaletteDismiss>() {
+        window.dispatch_action(Box::new(CommandPaletteDismiss), cx);
     }
     // Add more actions as they become available
 }
