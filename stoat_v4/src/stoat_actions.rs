@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
 use gpui::{AppContext, Context};
@@ -925,11 +925,20 @@ impl Stoat {
 
         debug!("Dismissing file finder");
 
-        // Restore previous mode
-        self.mode = self
-            .file_finder_previous_mode
-            .take()
-            .unwrap_or_else(|| "normal".to_string());
+        // Restore previous mode - check if mode has configured previous override
+        self.mode = if let Some(mode_def) = self.modes.get("file_finder") {
+            if let Some(previous) = &mode_def.previous {
+                previous.clone()
+            } else {
+                self.file_finder_previous_mode
+                    .take()
+                    .unwrap_or_else(|| "normal".to_string())
+            }
+        } else {
+            self.file_finder_previous_mode
+                .take()
+                .unwrap_or_else(|| "normal".to_string())
+        };
 
         // Clear state
         self.file_finder_input = None;
@@ -2041,12 +2050,20 @@ impl Stoat {
 
         debug!("Dismissing command palette");
 
-        // Restore previous mode or default to normal
-        let previous_mode = self
-            .command_palette_previous_mode
-            .take()
-            .unwrap_or_else(|| "normal".to_string());
-        self.mode = previous_mode;
+        // Restore previous mode - check if mode has configured previous override
+        self.mode = if let Some(mode_def) = self.modes.get("command_palette") {
+            if let Some(previous) = &mode_def.previous {
+                previous.clone()
+            } else {
+                self.command_palette_previous_mode
+                    .take()
+                    .unwrap_or_else(|| "normal".to_string())
+            }
+        } else {
+            self.command_palette_previous_mode
+                .take()
+                .unwrap_or_else(|| "normal".to_string())
+        };
 
         // Clear command palette state
         self.command_palette_input = None;

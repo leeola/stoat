@@ -29,6 +29,12 @@ pub struct Mode {
     pub name: String,
     /// Display name shown to users (e.g., "NORMAL", "INSERT")
     pub display_name: String,
+    /// Override mode to return to when this mode is dismissed.
+    ///
+    /// If set, this mode will always return to the specified mode when dismissed,
+    /// ignoring the actual previous mode. Used for overlay modes like file_finder
+    /// and command_palette that should always return to normal.
+    pub previous: Option<String>,
 }
 
 impl Mode {
@@ -37,6 +43,20 @@ impl Mode {
         Self {
             name: name.into(),
             display_name: display_name.into(),
+            previous: None,
+        }
+    }
+
+    /// Create a new mode with an explicit previous mode override.
+    pub fn with_previous(
+        name: impl Into<String>,
+        display_name: impl Into<String>,
+        previous: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            display_name: display_name.into(),
+            previous: Some(previous.into()),
         }
     }
 }
@@ -120,21 +140,8 @@ impl Stoat {
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
-        // Initialize mode registry
-        let mut modes = HashMap::new();
-        modes.insert("normal".to_string(), Mode::new("normal", "NORMAL"));
-        modes.insert("insert".to_string(), Mode::new("insert", "INSERT"));
-        modes.insert("visual".to_string(), Mode::new("visual", "VISUAL"));
-        modes.insert("pane".to_string(), Mode::new("pane", "PANE"));
-        modes.insert(
-            "file_finder".to_string(),
-            Mode::new("file_finder", "FILE FINDER"),
-        );
-        modes.insert("space".to_string(), Mode::new("space", "SPACE"));
-        modes.insert(
-            "command_palette".to_string(),
-            Mode::new("command_palette", "COMMAND"),
-        );
+        // Initialize mode registry from keymap.toml
+        let modes = crate::keymap::parse_modes_from_config();
 
         Self {
             buffer_item,

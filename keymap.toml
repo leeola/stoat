@@ -23,6 +23,7 @@ display_name = "PANE"
 [[modes]]
 name = "file_finder"
 display_name = "FILE FINDER"
+previous = "normal"
 
 [[modes]]
 name = "space"
@@ -31,6 +32,7 @@ display_name = "SPACE"
 [[modes]]
 name = "command_palette"
 display_name = "COMMAND"
+previous = "normal"
 
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]

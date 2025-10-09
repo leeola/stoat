@@ -3,9 +3,10 @@
 //! Provides default key bindings for the implemented v4 actions, using GPUI's
 //! [`KeyBinding`] and context predicate system.
 
-use crate::actions::*;
+use crate::{actions::*, stoat::Mode};
 use gpui::{KeyBinding, Keymap};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Embedded default keymap TOML configuration
 const DEFAULT_KEYMAP_TOML: &str = include_str!("../../keymap.toml");
@@ -22,6 +23,7 @@ struct KeymapConfig {
 struct ModeConfig {
     name: String,
     display_name: String,
+    previous: Option<String>,
 }
 
 /// Individual key binding configuration
@@ -152,6 +154,35 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
 /// let keymap = create_default_keymap();
 /// cx.bind_keys(keymap.bindings());
 /// ```
+
+/// Parse mode definitions from keymap.toml.
+///
+/// Reads the embedded keymap configuration and constructs a [`HashMap`] of mode
+/// definitions with their display names and optional previous mode overrides.
+///
+/// # Returns
+///
+/// HashMap mapping mode names to [`Mode`] structs.
+pub fn parse_modes_from_config() -> HashMap<String, Mode> {
+    // Parse the embedded TOML configuration
+    let config: KeymapConfig =
+        toml::from_str(DEFAULT_KEYMAP_TOML).expect("Failed to parse embedded keymap.toml");
+
+    // Convert mode configs to Mode structs
+    config
+        .modes
+        .into_iter()
+        .map(|mode_config| {
+            let mode = if let Some(previous) = mode_config.previous {
+                Mode::with_previous(mode_config.name.clone(), mode_config.display_name, previous)
+            } else {
+                Mode::new(mode_config.name.clone(), mode_config.display_name)
+            };
+            (mode_config.name, mode)
+        })
+        .collect()
+}
+
 pub fn create_default_keymap() -> Keymap {
     // Parse the embedded TOML configuration
     let config: KeymapConfig =
