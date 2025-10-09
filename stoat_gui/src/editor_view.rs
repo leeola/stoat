@@ -1,8 +1,7 @@
 use crate::editor_element::EditorElement;
 use gpui::{
-    div, point, prelude::FluentBuilder, App, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
-    ScrollWheelEvent, Styled, Window,
+    div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
 use stoat::{actions::*, scroll, Stoat};
 

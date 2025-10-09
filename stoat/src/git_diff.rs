@@ -310,10 +310,10 @@ fn compute_diff(
             .map_err(|e| DiffError::HunkParseFailed(e.message().to_string()))?;
 
         // Extract hunk info
-        let old_start = hunk.old_start() as u32; // 1-indexed
-        let old_lines = hunk.old_lines() as u32;
-        let new_start = hunk.new_start() as u32; // 1-indexed
-        let new_lines = hunk.new_lines() as u32;
+        let old_start = hunk.old_start(); // 1-indexed
+        let old_lines = hunk.old_lines();
+        let new_start = hunk.new_start(); // 1-indexed
+        let new_lines = hunk.new_lines();
 
         // Determine status
         let status = if old_lines == 0 {
@@ -337,7 +337,7 @@ fn compute_diff(
             // Deleted hunk - point to the line where deletion happened
             let point = text::Point::new(buffer_start_row, 0);
             let anchor = buffer_snapshot.anchor_at(point, Bias::Left);
-            anchor.clone()..anchor
+            anchor..anchor
         };
 
         // Compute byte range in base text

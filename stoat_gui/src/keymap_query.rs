@@ -18,7 +18,7 @@ use std::collections::HashSet;
 /// A vector of (keystroke_string, description) tuples, limited to ~15 entries
 pub fn bindings_for_mode(keymap: &Keymap, mode: &str) -> Vec<(String, String)> {
     // Build context for the given mode
-    let context_str = format!("Editor mode={}", mode);
+    let context_str = format!("Editor mode={mode}");
     let this_contexts = vec![
         KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
         KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
@@ -99,7 +99,7 @@ fn is_binding_mode_specific(keymap: &Keymap, binding: &KeyBinding) -> bool {
     let mut active_in_count = 0;
 
     for mode_name in modes {
-        let context_str = format!("Editor mode={}", mode_name);
+        let context_str = format!("Editor mode={mode_name}");
         let contexts = vec![
             KeyContext::parse("Workspace").unwrap_or_else(|_| KeyContext::default()),
             KeyContext::parse(&context_str).unwrap_or_else(|_| KeyContext::default()),
@@ -125,7 +125,7 @@ fn format_keystrokes(binding: &KeyBinding) -> String {
         .iter()
         .map(|k| {
             // Use GPUI's Display impl
-            format!("{}", k)
+            format!("{k}")
         })
         .collect::<Vec<_>>()
         .join(" ")

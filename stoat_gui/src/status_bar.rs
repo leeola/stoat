@@ -86,13 +86,13 @@ impl StatusBar {
 
         let mut parts = Vec::new();
         if staged > 0 {
-            parts.push(format!("{} staged", staged));
+            parts.push(format!("{staged} staged"));
         }
         if unstaged > 0 {
-            parts.push(format!("{} unstaged", unstaged));
+            parts.push(format!("{unstaged} unstaged"));
         }
         if untracked > 0 {
-            parts.push(format!("{} untracked", untracked));
+            parts.push(format!("{untracked} untracked"));
         }
 
         parts.join(", ")

@@ -208,8 +208,11 @@ impl Element for PreviewElement {
 
         // Create buffer snapshot from preview text (avoid cloning - use reference)
         let preview_text = preview.text();
-        let buffer =
-            text::Buffer::new(0, text::BufferId::new(1).unwrap(), preview_text.to_string());
+        let buffer = text::Buffer::new(
+            0,
+            text::BufferId::new(1).expect("BufferId::new(1) should never fail"),
+            preview_text.to_string(),
+        );
         let snapshot = buffer.snapshot();
 
         // Get tokens - use cached empty snapshot for Plain preview
@@ -220,8 +223,11 @@ impl Element for PreviewElement {
             PreviewData::Plain(_) => EMPTY_TOKENS.get_or_init(|| {
                 // Create minimal empty snapshot once - HighlightedChunks will return
                 // chunks with no highlighting (highlight_id = None)
-                let empty_buf =
-                    text::Buffer::new(0, text::BufferId::new(1).unwrap(), String::new());
+                let empty_buf = text::Buffer::new(
+                    0,
+                    text::BufferId::new(1).expect("BufferId::new(1) should never fail"),
+                    String::new(),
+                );
                 stoat_rope::TokenMap::new(&empty_buf.snapshot()).snapshot()
             }),
         };

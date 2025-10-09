@@ -63,7 +63,6 @@ impl PaneAxisElement {
         child_start: Point<Pixels>,
         container_size: Size<Pixels>,
         window: &mut Window,
-        _cx: &mut App,
     ) {
         let min_size = match axis {
             Axis::Horizontal => px(HORIZONTAL_MIN_SIZE),
@@ -212,7 +211,7 @@ impl Element for PaneAxisElement {
         cx: &mut App,
     ) -> PaneAxisLayout {
         let dragged_handle = window.with_element_state::<Rc<RefCell<Option<usize>>>, _>(
-            global_id.unwrap(),
+            global_id.expect("PaneAxisElement should have a global_id"),
             |state, _cx| {
                 let state = state.unwrap_or_else(|| Rc::new(RefCell::new(None)));
                 (state.clone(), state)
@@ -352,7 +351,6 @@ impl Element for PaneAxisElement {
                                 child_bounds.origin,
                                 bounds.size,
                                 window,
-                                cx,
                             );
                             cx.stop_propagation();
                         }

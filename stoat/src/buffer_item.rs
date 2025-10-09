@@ -86,7 +86,7 @@ impl BufferItem {
             },
             Err(e) => {
                 tracing::debug!("Failed to parse buffer: {}", e);
-                Err(format!("Parse error: {}", e))
+                Err(format!("Parse error: {e}"))
             },
         }
     }

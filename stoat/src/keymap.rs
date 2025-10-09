@@ -51,7 +51,7 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
                 "visual" => Ok(KeyBinding::new(key, EnterVisualMode, context)),
                 "space" => Ok(KeyBinding::new(key, EnterSpaceMode, context)),
                 "pane" => Ok(KeyBinding::new(key, EnterPaneMode, context)),
-                _ => Err(format!("Unsupported mode in SetMode: {}", mode_name)),
+                _ => Err(format!("Unsupported mode in SetMode: {mode_name}")),
             };
         }
     }
@@ -168,7 +168,6 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
 /// let keymap = create_default_keymap();
 /// cx.bind_keys(keymap.bindings());
 /// ```
-
 /// Parse mode definitions from keymap.toml.
 ///
 /// Reads the embedded keymap configuration and constructs a [`HashMap`] of mode

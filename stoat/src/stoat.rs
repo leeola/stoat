@@ -335,8 +335,7 @@ impl Stoat {
                         .collect::<Vec<_>>()
                 );
                 panic!(
-                    "No active buffer - weak reference upgrade failed for buffer_id {:?}",
-                    buffer_id
+                    "No active buffer - weak reference upgrade failed for buffer_id {buffer_id:?}"
                 );
             },
         }
@@ -437,7 +436,7 @@ impl Stoat {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let contents =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
 
         let language = path
             .extension()

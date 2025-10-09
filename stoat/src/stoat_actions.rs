@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{PreviewData, load_file_preview, load_text_only},
+    file_finder::{load_file_preview, load_text_only, PreviewData},
     stoat::Stoat,
 };
 use gpui::{AppContext, Context};
@@ -379,7 +379,6 @@ impl Stoat {
 
         // Iterate through tokens to find the next symbol
         while let Some(token) = token_cursor.item() {
-            let token_start = token.range.start.to_offset(&buffer_snapshot);
             let token_end = token.range.end.to_offset(&buffer_snapshot);
 
             // Skip tokens that are entirely before the cursor
@@ -736,7 +735,6 @@ impl Stoat {
 
         // Iterate through tokens to find the next symbol
         while let Some(token) = token_cursor.item() {
-            let token_start = token.range.start.to_offset(&buffer_snapshot);
             let token_end = token.range.end.to_offset(&buffer_snapshot);
 
             // Skip tokens that are entirely before the cursor
@@ -1961,7 +1959,7 @@ impl Stoat {
     /// - [`Self::command_palette_next`] - navigate down
     /// - [`Self::command_palette_prev`] - navigate up
     /// - [`Self::command_palette_execute`] - execute selected command
-    pub fn open_command_palette(&mut self, keymap: &gpui::Keymap, cx: &mut Context<Self>) {
+    pub fn open_command_palette(&mut self, _keymap: &gpui::Keymap, cx: &mut Context<Self>) {
         debug!(from_mode = self.mode(), "Opening command palette");
 
         // Save current mode to restore later

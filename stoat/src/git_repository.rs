@@ -173,11 +173,11 @@ impl Repository {
         let head = self
             .repo
             .head()
-            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD: {}", e)))?;
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD: {e}")))?;
 
         let tree = head
             .peel_to_tree()
-            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get tree: {}", e)))?;
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get tree: {e}")))?;
 
         let entry = tree
             .get_path(&relative_path)
@@ -185,14 +185,14 @@ impl Repository {
 
         let object = entry
             .to_object(&self.repo)
-            .map_err(|e| GitError::ReadFailed(format!("Failed to get object: {}", e)))?;
+            .map_err(|e| GitError::ReadFailed(format!("Failed to get object: {e}")))?;
 
         let blob = object
             .as_blob()
             .ok_or_else(|| GitError::ReadFailed("Object is not a blob".to_string()))?;
 
         String::from_utf8(blob.content().to_vec())
-            .map_err(|e| GitError::ReadFailed(format!("Invalid UTF-8: {}", e)))
+            .map_err(|e| GitError::ReadFailed(format!("Invalid UTF-8: {e}")))
     }
 
     /// Read file content from the index (staging area).
@@ -213,7 +213,7 @@ impl Repository {
         let index = self
             .repo
             .index()
-            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get index: {}", e)))?;
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get index: {e}")))?;
 
         let entry = index
             .get_path(&relative_path, 0)
@@ -222,14 +222,14 @@ impl Repository {
         let object = self
             .repo
             .find_object(entry.id, Some(git2::ObjectType::Blob))
-            .map_err(|e| GitError::ReadFailed(format!("Failed to find object: {}", e)))?;
+            .map_err(|e| GitError::ReadFailed(format!("Failed to find object: {e}")))?;
 
         let blob = object
             .as_blob()
             .ok_or_else(|| GitError::ReadFailed("Object is not a blob".to_string()))?;
 
         String::from_utf8(blob.content().to_vec())
-            .map_err(|e| GitError::ReadFailed(format!("Invalid UTF-8: {}", e)))
+            .map_err(|e| GitError::ReadFailed(format!("Invalid UTF-8: {e}")))
     }
 
     /// Get the working directory path of this repository.
@@ -271,7 +271,7 @@ impl Repository {
             path.to_path_buf()
         } else {
             std::env::current_dir()
-                .map_err(|e| GitError::GitOperationFailed(format!("Failed to get cwd: {}", e)))?
+                .map_err(|e| GitError::GitOperationFailed(format!("Failed to get cwd: {e}")))?
                 .join(path)
         };
 
@@ -305,8 +305,7 @@ impl Repository {
             .map(|p| p.to_path_buf())
             .map_err(|_| {
                 GitError::GitOperationFailed(format!(
-                    "Path {:?} is not in repository {:?}",
-                    absolute_canonical, workdir_canonical
+                    "Path {absolute_canonical:?} is not in repository {workdir_canonical:?}"
                 ))
             })
     }

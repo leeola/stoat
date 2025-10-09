@@ -54,6 +54,12 @@ pub struct BufferStore {
     next_buffer_id: u64,
 }
 
+impl Default for BufferStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BufferStore {
     /// Create a new empty buffer store.
     pub fn new() -> Self {

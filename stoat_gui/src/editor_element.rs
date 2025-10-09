@@ -125,7 +125,7 @@ impl Element for EditorElement {
         // Set viewport lines on Stoat and get scroll position
         let stoat_entity = self.view.read(cx).stoat.clone();
         let scroll_y = stoat_entity.update(cx, |stoat, _cx| {
-            stoat.set_viewport_lines(visible_lines as f32);
+            stoat.set_viewport_lines(visible_lines);
             stoat.scroll_position().y
         });
 
@@ -310,7 +310,7 @@ impl EditorElement {
         }
 
         // Format the maximum line number to measure its width
-        let max_line_text = format!("{}", max_line_number);
+        let max_line_text = format!("{max_line_number}");
 
         // Create font for line numbers (same as code font)
         let font = Font {
