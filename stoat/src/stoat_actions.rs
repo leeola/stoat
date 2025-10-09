@@ -2006,6 +2006,7 @@ impl Stoat {
     /// - Limits to top 50 results
     /// - Resets selection to first item
     pub fn filter_commands(&mut self, query: &str) {
+        tracing::info!("filter_commands called with query: '{}'", query);
         if query.is_empty() {
             // No query: show all commands
             self.command_palette_filtered = self.command_palette_commands.clone();
@@ -2016,22 +2017,60 @@ impl Stoat {
             // Create a temporary matcher for commands (uses default config, not path-specific)
             let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
 
-            // Build indexed search strings
+            // Build indexed search strings, including aliases
             let indexed_strings: Vec<(usize, String)> = self
                 .command_palette_commands
                 .iter()
                 .enumerate()
-                .map(|(idx, cmd)| (idx, format!("{} {}", cmd.name, cmd.description)))
+                .map(|(idx, cmd)| {
+                    let mut search_text = format!("{} {}", cmd.name, cmd.description);
+                    // Include aliases in search text
+                    for alias in &cmd.aliases {
+                        search_text.push(' ');
+                        search_text.push_str(alias);
+                    }
+                    (idx, search_text)
+                })
                 .collect();
 
-            // Match and score all candidates, keeping track of indices
+            // Match and score all candidates, checking for exact alias matches
             let mut scored_commands: Vec<(usize, u32)> = indexed_strings
                 .iter()
                 .filter_map(|(idx, search_text)| {
-                    // Create references for matching
-                    let candidates = vec![search_text.as_str()];
-                    let matches = pattern.match_list(&candidates, &mut matcher);
-                    matches.first().map(|(_, score)| (*idx, *score))
+                    let cmd = &self.command_palette_commands[*idx];
+
+                    // Check for exact alias match (case-insensitive)
+                    let query_lower = query.to_lowercase();
+                    let has_exact_alias_match = cmd
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_lowercase() == query_lower);
+
+                    if has_exact_alias_match {
+                        // Perfect match - use maximum score to ensure it appears first
+                        tracing::info!(
+                            "Exact alias match for '{}': {} (aliases: {:?})",
+                            query,
+                            cmd.name,
+                            cmd.aliases
+                        );
+                        Some((*idx, u32::MAX))
+                    } else {
+                        // Regular fuzzy matching
+                        let candidates = vec![search_text.as_str()];
+                        let matches = pattern.match_list(&candidates, &mut matcher);
+                        let result = matches.first().map(|(_, score)| (*idx, *score));
+                        if result.is_some() && query == ":q" {
+                            tracing::info!(
+                                "Fuzzy match for '{}': {} (score: {:?}, aliases: {:?})",
+                                query,
+                                cmd.name,
+                                result.as_ref().map(|(_, s)| s),
+                                cmd.aliases
+                            );
+                        }
+                        result
+                    }
                 })
                 .collect();
 
@@ -2588,11 +2627,19 @@ fn build_command_list(keymap: &gpui::Keymap) -> Vec<crate::stoat::CommandInfo> {
             continue;
         };
 
+        // Get aliases (empty vec if none)
+        let aliases = crate::actions::aliases(action).to_vec();
+
+        if !aliases.is_empty() {
+            tracing::info!("Command {} has aliases: {:?}", name, aliases);
+        }
+
         commands_by_type_id.insert(
             type_id,
             crate::stoat::CommandInfo {
                 name: name.to_string(),
                 description: description.to_string(),
+                aliases,
                 type_id,
             },
         );

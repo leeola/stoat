@@ -137,7 +137,7 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "FocusPaneRight" => Ok(KeyBinding::new(key, FocusPaneRight, context)),
 
         // Application actions
-        "ExitApp" => Ok(KeyBinding::new(key, ExitApp, context)),
+        "QuitApp" => Ok(KeyBinding::new(key, QuitApp, context)),
 
         _ => Err(format!("Unknown action: {}", binding_config.action)),
     }

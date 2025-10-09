@@ -12,7 +12,7 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
         cx.bind_keys(keymap.bindings().cloned());
 
         // Register global action handlers
-        cx.on_action(|_: &stoat::actions::ExitApp, cx: &mut App| {
+        cx.on_action(|_: &stoat::actions::QuitApp, cx: &mut App| {
             cx.quit();
         });
 

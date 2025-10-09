@@ -198,8 +198,8 @@ actions!(
 actions!(
     stoat,
     [
-        /// Exit the application
-        ExitApp,
+        /// Quit the application
+        QuitApp,
     ]
 );
 
@@ -232,10 +232,19 @@ pub trait ActionMetadata {
 
     /// Detailed description for command palette (1-2 sentences).
     fn description() -> &'static str;
+
+    /// Command aliases for the action (e.g., ["q", "quit"] for QuitApp).
+    ///
+    /// Aliases provide alternative ways to invoke the action in the command palette.
+    /// They are matched both exactly (for perfect matches) and via fuzzy matching.
+    fn aliases() -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Helper macro to implement [`ActionMetadata`] for an action type.
 macro_rules! action_metadata {
+    // Without aliases (backward compatible)
     ($type:ty, $help:expr, $desc:expr) => {
         impl ActionMetadata for $type {
             fn action_name() -> &'static str {
@@ -248,6 +257,26 @@ macro_rules! action_metadata {
 
             fn description() -> &'static str {
                 $desc
+            }
+        }
+    };
+    // With aliases
+    ($type:ty, $help:expr, $desc:expr, [$($alias:expr),* $(,)?]) => {
+        impl ActionMetadata for $type {
+            fn action_name() -> &'static str {
+                stringify!($type)
+            }
+
+            fn help_text() -> &'static str {
+                $help
+            }
+
+            fn description() -> &'static str {
+                $desc
+            }
+
+            fn aliases() -> &'static [&'static str] {
+                &[$($alias),*]
             }
         }
     };
@@ -565,7 +594,7 @@ action_metadata!(
 );
 
 // Application actions
-action_metadata!(ExitApp, "exit", "Exit the application");
+action_metadata!(QuitApp, "quit", "Quit the application", ["q", "quit"]);
 
 // Static maps for looking up action metadata by TypeId
 
@@ -754,7 +783,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     );
 
     // Application actions
-    names.insert(TypeId::of::<ExitApp>(), ExitApp::action_name());
+    names.insert(TypeId::of::<QuitApp>(), QuitApp::action_name());
 
     names
 });
@@ -944,7 +973,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     );
 
     // Application actions
-    descriptions.insert(TypeId::of::<ExitApp>(), ExitApp::description());
+    descriptions.insert(TypeId::of::<QuitApp>(), QuitApp::description());
 
     descriptions
 });
@@ -1126,7 +1155,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<FocusPaneRight>(), FocusPaneRight::help_text());
 
     // Application actions
-    help.insert(TypeId::of::<ExitApp>(), ExitApp::help_text());
+    help.insert(TypeId::of::<QuitApp>(), QuitApp::help_text());
 
     help
 });
@@ -1134,4 +1163,21 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
 /// Get the help text for a given action.
 pub fn help_text(action: &dyn Action) -> Option<&'static str> {
     HELP_TEXT.get(&action.type_id()).copied()
+}
+
+/// Map from TypeId to action aliases
+pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLock::new(|| {
+    let mut aliases = HashMap::new();
+
+    // Application actions
+    aliases.insert(TypeId::of::<QuitApp>(), QuitApp::aliases());
+
+    // Add more aliases here as needed
+
+    aliases
+});
+
+/// Get the aliases for a given action.
+pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
+    ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }

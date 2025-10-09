@@ -168,7 +168,7 @@ context = "Editor && mode == normal"
 
 [[bindings]]
 key = "escape"
-action = "ExitApp"
+action = "QuitApp"
 context = "Editor && mode == normal"
 
 # Editing in normal mode

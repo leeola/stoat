@@ -152,5 +152,9 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<GitStatusSelect>() {
         window.dispatch_action(Box::new(GitStatusSelect), cx);
     }
+    // Application actions
+    else if type_id == TypeId::of::<QuitApp>() {
+        window.dispatch_action(Box::new(QuitApp), cx);
+    }
     // Add more actions as they become available
 }

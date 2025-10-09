@@ -72,6 +72,8 @@ pub struct CommandInfo {
     pub name: String,
     /// Description of what the command does
     pub description: String,
+    /// Command aliases (e.g., ["q", "quit"] for QuitApp)
+    pub aliases: Vec<&'static str>,
     /// TypeId for dispatching the action
     pub type_id: std::any::TypeId,
 }
