@@ -166,11 +166,6 @@ key = "space"
 action = "SetMode(space)"
 context = "Editor && mode == normal"
 
-[[bindings]]
-key = "escape"
-action = "QuitApp"
-context = "Editor && mode == normal"
-
 # Editing in normal mode
 [[bindings]]
 key = "x"

@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
 use gpui::{AppContext, Context};
@@ -1967,8 +1967,8 @@ impl Stoat {
         // Save current mode to restore later
         self.command_palette_previous_mode = Some(self.mode.clone());
 
-        // Build command list from keymap
-        let commands = build_command_list(keymap);
+        // Build command list from action metadata
+        let commands = build_command_list();
         debug!(command_count = commands.len(), "Built command list");
 
         // Create input buffer for search query
@@ -2591,62 +2591,45 @@ impl Stoat {
     }
 }
 
-/// Build the list of all available commands from the keymap.
+/// Build the list of all available commands from action metadata.
 ///
-/// Iterates through all bindings in the keymap and extracts command information
-/// including name, description, and TypeId for dispatch.
-///
-/// # Arguments
-///
-/// * `keymap` - The keymap to extract commands from
+/// Iterates through all registered actions with metadata and builds command information
+/// including name, description, aliases, and TypeId for dispatch. This includes all
+/// actions with metadata, regardless of whether they have keybindings.
 ///
 /// # Returns
 ///
 /// A vector of [`CommandInfo`] structs representing all available commands
-fn build_command_list(keymap: &gpui::Keymap) -> Vec<crate::stoat::CommandInfo> {
-    use std::collections::HashMap;
+fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
+    let mut commands = Vec::new();
 
-    let mut commands_by_type_id: HashMap<std::any::TypeId, crate::stoat::CommandInfo> =
-        HashMap::new();
-
-    // Iterate through all bindings
-    for binding in keymap.bindings() {
-        let action = binding.action();
-        let type_id = action.type_id();
-
-        // Skip if we've already seen this action type
-        if commands_by_type_id.contains_key(&type_id) {
-            continue;
-        }
-
-        // Get action name and description, skip if either unavailable
-        let Some(name) = crate::actions::action_name(action) else {
-            continue;
-        };
-        let Some(description) = crate::actions::description(action) else {
+    // Iterate through all actions with metadata
+    for (type_id, name) in crate::actions::ACTION_NAMES.iter() {
+        // Get description - skip if not available
+        let Some(description) = crate::actions::DESCRIPTIONS.get(type_id) else {
             continue;
         };
 
-        // Get aliases (empty vec if none)
-        let aliases = crate::actions::aliases(action).to_vec();
+        // Get aliases (empty slice if none)
+        let aliases = crate::actions::ALIASES
+            .get(type_id)
+            .copied()
+            .unwrap_or(&[])
+            .to_vec();
 
         if !aliases.is_empty() {
             tracing::info!("Command {} has aliases: {:?}", name, aliases);
         }
 
-        commands_by_type_id.insert(
-            type_id,
-            crate::stoat::CommandInfo {
-                name: name.to_string(),
-                description: description.to_string(),
-                aliases,
-                type_id,
-            },
-        );
+        commands.push(crate::stoat::CommandInfo {
+            name: name.to_string(),
+            description: description.to_string(),
+            aliases,
+            type_id: *type_id,
+        });
     }
 
-    // Convert to sorted vector
-    let mut commands: Vec<crate::stoat::CommandInfo> = commands_by_type_id.into_values().collect();
+    // Sort alphabetically by name
     commands.sort_by(|a, b| a.name.cmp(&b.name));
 
     commands
