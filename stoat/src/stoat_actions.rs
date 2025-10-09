@@ -71,7 +71,7 @@ impl Stoat {
 
         // Main buffer insertion for all other modes
         let cursor = self.cursor.position();
-        let buffer = self.buffer_item.read(cx).buffer().clone();
+        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
             let offset = buffer.point_to_offset(cursor);
             buffer.edit([(offset..offset, text)]);
@@ -82,7 +82,7 @@ impl Stoat {
         self.cursor.move_to(text::Point::new(cursor.row, new_col));
 
         // Reparse for syntax highlighting
-        self.buffer_item.update(cx, |item, cx| {
+        self.active_buffer(cx).update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -184,7 +184,7 @@ impl Stoat {
 
         // Clip to valid character boundary
         let (clipped_point, clipped_offset, cursor_offset) = {
-            let buffer = self.buffer_item.read(cx).buffer();
+            let buffer = self.active_buffer(cx).read(cx).buffer();
             let buffer_read = buffer.read(cx);
             let snapshot = buffer_read.snapshot();
             let clipped = snapshot.clip_point(target_point, Bias::Left);
@@ -194,7 +194,7 @@ impl Stoat {
         };
 
         // Perform the edit
-        let buffer = self.buffer_item.read(cx).buffer().clone();
+        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
             buffer.edit([(clipped_offset..cursor_offset, "")]);
         });
@@ -203,7 +203,7 @@ impl Stoat {
         self.cursor.move_to(clipped_point);
 
         // Reparse
-        self.buffer_item.update(cx, |item, cx| {
+        self.active_buffer(cx).update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -217,14 +217,14 @@ impl Stoat {
 
         // Read buffer info in separate scope to release locks
         let (line_len, max_row) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             (buffer.line_len(cursor.row), buffer.max_point().row)
         };
 
         if cursor.column < line_len {
             // Delete character on same line
-            let buffer = self.buffer_item.read(cx).buffer().clone();
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
             buffer.update(cx, |buffer, _| {
                 let start = buffer.point_to_offset(cursor);
                 let end = buffer.point_to_offset(text::Point::new(cursor.row, cursor.column + 1));
@@ -234,7 +234,7 @@ impl Stoat {
             // Cursor stays in place
         } else if cursor.row < max_row {
             // At line end: merge with next line
-            let buffer = self.buffer_item.read(cx).buffer().clone();
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
             buffer.update(cx, |buffer, _| {
                 let start = buffer.point_to_offset(cursor);
                 let end = buffer.point_to_offset(text::Point::new(cursor.row + 1, 0));
@@ -246,7 +246,7 @@ impl Stoat {
         // Else: at buffer end, no-op
 
         // Reparse
-        self.buffer_item.update(cx, |item, cx| {
+        self.active_buffer(cx).update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -275,7 +275,7 @@ impl Stoat {
 
         // Get buffer and token snapshots
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -321,7 +321,7 @@ impl Stoat {
             let delete_start = buffer_snapshot.offset_to_point(start_offset);
 
             // Perform deletion
-            let buffer = self.buffer_item.read(cx).buffer().clone();
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
             buffer.update(cx, |buffer, _| {
                 let start = buffer.point_to_offset(delete_start);
                 let end = buffer.point_to_offset(cursor_pos);
@@ -332,7 +332,7 @@ impl Stoat {
             self.cursor.move_to(delete_start);
 
             // Reparse
-            self.buffer_item.update(cx, |item, cx| {
+            self.active_buffer(cx).update(cx, |item, cx| {
                 let _ = item.reparse(cx);
             });
 
@@ -362,7 +362,7 @@ impl Stoat {
 
         // Get buffer and token snapshots
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -404,7 +404,7 @@ impl Stoat {
             let delete_end = buffer_snapshot.offset_to_point(end_offset);
 
             // Perform deletion
-            let buffer = self.buffer_item.read(cx).buffer().clone();
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
             buffer.update(cx, |buffer, _| {
                 let start = buffer.point_to_offset(cursor_pos);
                 let end = buffer.point_to_offset(delete_end);
@@ -414,7 +414,7 @@ impl Stoat {
             // Cursor stays in place
 
             // Reparse
-            self.buffer_item.update(cx, |item, cx| {
+            self.active_buffer(cx).update(cx, |item, cx| {
                 let _ = item.reparse(cx);
             });
 
@@ -426,7 +426,7 @@ impl Stoat {
     /// Insert newline at cursor
     pub fn new_line(&mut self, cx: &mut Context<Self>) {
         let cursor = self.cursor.position();
-        let buffer = self.buffer_item.read(cx).buffer().clone();
+        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
             let offset = buffer.point_to_offset(cursor);
             buffer.edit([(offset..offset, "\n")]);
@@ -436,7 +436,7 @@ impl Stoat {
         self.cursor.move_to(text::Point::new(cursor.row + 1, 0));
 
         // Reparse
-        self.buffer_item.update(cx, |item, cx| {
+        self.active_buffer(cx).update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -464,7 +464,7 @@ impl Stoat {
 
         // Get buffer snapshot to determine line boundaries
         let (line_start, line_end) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             let row_count = buffer.row_count();
 
@@ -485,7 +485,7 @@ impl Stoat {
         debug!(row = cursor.row, from = ?line_start, to = ?line_end, "Deleting line");
 
         // Perform deletion
-        let buffer = self.buffer_item.read(cx).buffer().clone();
+        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
         buffer.update(cx, |buffer, _| {
             let start_offset = buffer.point_to_offset(line_start);
             let end_offset = buffer.point_to_offset(line_end);
@@ -496,7 +496,7 @@ impl Stoat {
         self.cursor.move_to(line_start);
 
         // Reparse
-        self.buffer_item.update(cx, |item, cx| {
+        self.active_buffer(cx).update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -524,7 +524,7 @@ impl Stoat {
 
         // Get line length
         let line_len = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             buffer.line_len(cursor.row)
         };
@@ -536,7 +536,7 @@ impl Stoat {
             debug!(from = ?cursor, to = ?end, "Delete to end of line");
 
             // Perform deletion
-            let buffer = self.buffer_item.read(cx).buffer().clone();
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
             buffer.update(cx, |buffer, _| {
                 let start_offset = buffer.point_to_offset(cursor);
                 let end_offset = buffer.point_to_offset(end);
@@ -544,7 +544,7 @@ impl Stoat {
             });
 
             // Reparse
-            self.buffer_item.update(cx, |item, cx| {
+            self.active_buffer(cx).update(cx, |item, cx| {
                 let _ = item.reparse(cx);
             });
 
@@ -578,7 +578,13 @@ impl Stoat {
     /// Move cursor down
     pub fn move_down(&mut self, cx: &mut Context<Self>) {
         let pos = self.cursor.position();
-        let max_row = self.buffer_item.read(cx).buffer().read(cx).max_point().row;
+        let max_row = self
+            .active_buffer(cx)
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .max_point()
+            .row;
 
         if pos.row < max_row {
             let target_row = pos.row + 1;
@@ -600,7 +606,7 @@ impl Stoat {
         let pos = self.cursor.position();
         if pos.column > 0 {
             let target = text::Point::new(pos.row, pos.column - 1);
-            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let clipped = snapshot.clip_point(target, Bias::Left);
             self.cursor.move_to(clipped);
         }
@@ -618,7 +624,7 @@ impl Stoat {
 
         if pos.column < line_len {
             let target = text::Point::new(pos.row, pos.column + 1);
-            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let clipped = snapshot.clip_point(target, Bias::Right);
             self.cursor.move_to(clipped);
         }
@@ -644,7 +650,7 @@ impl Stoat {
 
         // Get buffer and token snapshots
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -713,7 +719,7 @@ impl Stoat {
 
         // Get buffer and token snapshots
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -800,7 +806,7 @@ impl Stoat {
         );
 
         // Apply bounds checking
-        let buffer_item = self.buffer_item.read(cx);
+        let buffer_item = self.active_buffer(cx).read(cx);
         let buffer = buffer_item.buffer().read(cx);
         let max_point = buffer.max_point();
         let max_scroll_y = (max_point.row as f32).max(0.0);
@@ -1133,7 +1139,7 @@ impl Stoat {
 
         // Get buffer and token snapshots via entity
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -1245,7 +1251,7 @@ impl Stoat {
 
         // Get buffer and token snapshots via entity
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -1349,7 +1355,7 @@ impl Stoat {
 
         // Get buffer and token snapshots via entity
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -1448,7 +1454,7 @@ impl Stoat {
 
         // Get buffer and token snapshots via entity
         let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
             (buffer_snapshot, token_snapshot)
@@ -1541,7 +1547,7 @@ impl Stoat {
 
         if cursor_pos.column > 0 {
             let target = text::Point::new(cursor_pos.row, cursor_pos.column - 1);
-            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let new_pos = snapshot.clip_point(target, Bias::Left);
 
             let new_selection = if selection.is_empty() {
@@ -1578,14 +1584,14 @@ impl Stoat {
 
         // Get line length
         let line_len = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             buffer.line_len(cursor_pos.row)
         };
 
         if cursor_pos.column < line_len {
             let target = text::Point::new(cursor_pos.row, cursor_pos.column + 1);
-            let snapshot = self.buffer_item.read(cx).buffer().read(cx).snapshot();
+            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let new_pos = snapshot.clip_point(target, Bias::Right);
             let new_selection = if selection.is_empty() {
                 // First extension - create selection
@@ -1623,7 +1629,7 @@ impl Stoat {
         if cursor_pos.row > 0 {
             let target_row = cursor_pos.row - 1;
             let line_len = {
-                let buffer_item = self.buffer_item.read(cx);
+                let buffer_item = self.active_buffer(cx).read(cx);
                 let buffer = buffer_item.buffer().read(cx);
                 buffer.line_len(target_row)
             };
@@ -1666,7 +1672,7 @@ impl Stoat {
         let cursor_pos = selection.cursor_position();
 
         let target_column = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             let max_row = buffer.max_point().row;
 
@@ -1747,7 +1753,7 @@ impl Stoat {
         let cursor_pos = selection.cursor_position();
 
         let line_len = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             let buffer = buffer_item.buffer().read(cx);
             buffer.line_len(cursor_pos.row)
         };
@@ -1808,7 +1814,7 @@ impl Stoat {
     pub fn move_to_file_end(&mut self, cx: &mut Context<Self>) {
         // Get buffer snapshot to find last line
         let buffer_snapshot = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()
         };
 
@@ -1854,7 +1860,7 @@ impl Stoat {
 
         // Get buffer snapshot to clamp column
         let buffer_snapshot = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()
         };
 
@@ -1903,7 +1909,7 @@ impl Stoat {
 
         // Get buffer snapshot to find max row
         let buffer_snapshot = {
-            let buffer_item = self.buffer_item.read(cx);
+            let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()
         };
 

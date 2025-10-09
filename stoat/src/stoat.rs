@@ -308,6 +308,18 @@ impl Stoat {
         self.buffer_store.read(cx).get_buffer(buffer_id)
     }
 
+    /// Get the currently active buffer (convenience wrapper).
+    ///
+    /// This is a convenience method that unwraps the result from [`active_buffer_item`].
+    /// Panics if no buffer is active (should never happen in practice since buffer_item
+    /// is kept synchronized with the active buffer).
+    ///
+    /// This method is used internally to migrate away from the legacy buffer_item field.
+    pub(crate) fn active_buffer(&self, cx: &App) -> Entity<BufferItem> {
+        self.active_buffer_item(cx)
+            .expect("No active buffer - this should never happen")
+    }
+
     /// Get cursor position
     pub fn cursor_position(&self) -> Point {
         self.cursor.position()

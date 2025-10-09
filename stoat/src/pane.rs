@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use gpui::{Axis, Bounds, Pixels};
 use parking_lot::Mutex;
 use std::sync::Arc;
