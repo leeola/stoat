@@ -129,6 +129,10 @@ pub struct Stoat {
     pub(crate) git_status_preview: Option<crate::git_status::DiffPreviewData>,
     pub(crate) git_status_preview_task: Option<Task<()>>,
     pub(crate) git_status_branch_info: Option<crate::git_status::GitBranchInfo>,
+    pub(crate) git_dirty_count: usize,
+
+    /// Current file path (for status bar display)
+    pub(crate) current_file_path: Option<PathBuf>,
 
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
@@ -151,6 +155,18 @@ impl Stoat {
         // Initialize mode registry from keymap.toml
         let modes = crate::keymap::parse_modes_from_config();
 
+        // Initialize git status for status bar
+        let (git_branch_info, git_status_files, git_dirty_count) =
+            if let Ok(repo) = Repository::open(std::path::Path::new(".")) {
+                let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
+                let status_files = crate::git_status::gather_git_status(repo.inner())
+                    .unwrap_or_else(|_| Vec::new());
+                let dirty_count = status_files.len();
+                (branch_info, status_files, dirty_count)
+            } else {
+                (None, Vec::new(), 0)
+            };
+
         Self {
             buffer_item,
             cursor: CursorManager::new(),
@@ -171,12 +187,14 @@ impl Stoat {
             command_palette_filtered: Vec::new(),
             command_palette_selected: 0,
             command_palette_previous_mode: None,
-            git_status_files: Vec::new(),
+            git_status_files,
             git_status_selected: 0,
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
-            git_status_branch_info: None,
+            git_status_branch_info: git_branch_info,
+            git_dirty_count,
+            current_file_path: None,
             worktree,
         }
     }
@@ -219,6 +237,8 @@ impl Stoat {
             git_status_preview: None,
             git_status_preview_task: None,
             git_status_branch_info: None,
+            git_dirty_count: self.git_dirty_count,
+            current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
         }
     }

@@ -146,34 +146,47 @@ pub fn gather_git_status(repo: &git2::Repository) -> Result<Vec<GitStatusEntry>,
             .path()
             .ok_or_else(|| GitStatusError::GitError("Invalid UTF-8 path".to_string()))?;
 
-        // Determine primary status and staging
-        let (status_char, staged) = if status.is_index_new() {
-            ("A", true)
-        } else if status.is_index_modified() {
-            ("M", true)
-        } else if status.is_index_deleted() {
-            ("D", true)
-        } else if status.is_index_renamed() {
-            ("R", true)
-        } else if status.is_wt_new() {
-            ("??", false)
-        } else if status.is_wt_modified() {
-            ("M", false)
-        } else if status.is_wt_deleted() {
-            ("D", false)
-        } else if status.is_wt_renamed() {
-            ("R", false)
-        } else if status.is_conflicted() {
-            ("!", false)
-        } else {
-            continue; // Skip clean files
-        };
+        let path_buf = PathBuf::from(path);
 
-        entries.push(GitStatusEntry::new(
-            PathBuf::from(path),
-            status_char.to_string(),
-            staged,
-        ));
+        // Check for staged changes
+        if status.is_index_new() {
+            entries.push(GitStatusEntry::new(path_buf.clone(), "A".to_string(), true));
+        } else if status.is_index_modified() {
+            entries.push(GitStatusEntry::new(path_buf.clone(), "M".to_string(), true));
+        } else if status.is_index_deleted() {
+            entries.push(GitStatusEntry::new(path_buf.clone(), "D".to_string(), true));
+        } else if status.is_index_renamed() {
+            entries.push(GitStatusEntry::new(path_buf.clone(), "R".to_string(), true));
+        }
+
+        // Check for unstaged changes (can happen in addition to staged changes)
+        if status.is_wt_new() {
+            entries.push(GitStatusEntry::new(
+                path_buf.clone(),
+                "??".to_string(),
+                false,
+            ));
+        } else if status.is_wt_modified() {
+            entries.push(GitStatusEntry::new(
+                path_buf.clone(),
+                "M".to_string(),
+                false,
+            ));
+        } else if status.is_wt_deleted() {
+            entries.push(GitStatusEntry::new(
+                path_buf.clone(),
+                "D".to_string(),
+                false,
+            ));
+        } else if status.is_wt_renamed() {
+            entries.push(GitStatusEntry::new(
+                path_buf.clone(),
+                "R".to_string(),
+                false,
+            ));
+        } else if status.is_conflicted() {
+            entries.push(GitStatusEntry::new(path_buf, "!".to_string(), false));
+        }
     }
 
     // Sort by path for consistent display

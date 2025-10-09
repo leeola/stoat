@@ -908,6 +908,9 @@ impl Stoat {
             let root = self.worktree.lock().snapshot().root().to_path_buf();
             let abs_path = root.join(relative_path);
 
+            // Store file path for status bar
+            self.current_file_path = Some(relative_path.clone());
+
             // Load file (uses load_file to ensure diff computation)
             if let Err(e) = self.load_file(&abs_path, cx) {
                 tracing::error!("Failed to load file {:?}: {}", abs_path, e);
@@ -2135,7 +2138,8 @@ impl Stoat {
             },
         };
 
-        debug!(file_count = entries.len(), "Gathered git status");
+        let dirty_count = entries.len();
+        debug!(file_count = dirty_count, "Gathered git status");
 
         // Gather branch info
         let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
@@ -2152,6 +2156,7 @@ impl Stoat {
         self.git_status_files = entries;
         self.git_status_selected = 0;
         self.git_status_branch_info = branch_info;
+        self.git_dirty_count = dirty_count;
 
         // Enter git_status mode
         self.mode = "git_status".into();
@@ -2302,6 +2307,16 @@ impl Stoat {
     /// Accessor for git diff preview (for GUI layer).
     pub fn git_status_preview(&self) -> Option<&crate::git_status::DiffPreviewData> {
         self.git_status_preview.as_ref()
+    }
+
+    /// Accessor for git dirty count (number of modified files).
+    pub fn git_dirty_count(&self) -> usize {
+        self.git_dirty_count
+    }
+
+    /// Accessor for current file path (for status bar).
+    pub fn current_file_path(&self) -> Option<&std::path::Path> {
+        self.current_file_path.as_deref()
     }
 }
 
