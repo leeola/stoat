@@ -98,12 +98,12 @@ impl Element for EditorElement {
         // Get buffer and tokens - clone snapshots to avoid holding borrows of cx
         let buffer_snapshot = {
             let stoat = self.view.read(cx).stoat.read(cx);
-            let buffer_item = stoat.buffer_item();
+            let buffer_item = stoat.active_buffer(cx);
             buffer_item.read(cx).buffer().read(cx).snapshot()
         };
         let token_snapshot = {
             let stoat = self.view.read(cx).stoat.read(cx);
-            let buffer_item = stoat.buffer_item();
+            let buffer_item = stoat.active_buffer(cx);
             buffer_item.read(cx).token_snapshot()
         };
 
@@ -373,7 +373,7 @@ impl EditorElement {
         };
 
         // Get the buffer snapshot to measure text before cursor
-        let buffer_item = stoat.buffer_item();
+        let buffer_item = stoat.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().read(cx);
         let buffer_snapshot = buffer.snapshot();
 
@@ -455,7 +455,7 @@ impl EditorElement {
 
         // Get diff from buffer item
         let stoat = self.view.read(cx).stoat.read(cx);
-        let buffer_item = stoat.buffer_item();
+        let buffer_item = stoat.active_buffer(cx);
         let diff = buffer_item.read(cx).diff();
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 

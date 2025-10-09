@@ -106,6 +106,7 @@ impl BufferStore {
 
         // Create new buffer
         let buffer_id = self.allocate_buffer_id();
+        tracing::trace!("open_buffer: buffer_id={:?}", buffer_id);
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, language, cx));
 
@@ -161,7 +162,11 @@ impl BufferStore {
     /// Attempts to upgrade the weak reference. Returns [`None`] if the buffer doesn't exist
     /// or if the weak reference couldn't be upgraded (buffer was dropped).
     pub fn get_buffer(&self, buffer_id: BufferId) -> Option<Entity<BufferItem>> {
-        self.buffers.get(&buffer_id)?.buffer_item.upgrade()
+        let result = self.buffers.get(&buffer_id)?.buffer_item.upgrade();
+        if result.is_none() {
+            tracing::trace!("Failed to upgrade weak ref for buffer_id: {:?}", buffer_id);
+        }
+        result
     }
 
     /// Get a buffer by path.
@@ -216,7 +221,11 @@ impl BufferStore {
     }
 
     /// Allocate a new unique buffer ID.
-    fn allocate_buffer_id(&mut self) -> BufferId {
+    ///
+    /// This ensures no BufferID collisions by incrementing an internal counter.
+    /// Public so that external code (like Stoat::new) can allocate IDs before
+    /// creating buffers to register them properly.
+    pub fn allocate_buffer_id(&mut self) -> BufferId {
         let id = self.next_buffer_id;
         self.next_buffer_id += 1;
         BufferId::from(NonZeroU64::new(id).unwrap())

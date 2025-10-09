@@ -563,7 +563,7 @@ impl Stoat {
         if pos.row > 0 {
             let target_row = pos.row - 1;
             let line_len = self
-                .buffer_item
+                .active_buffer(cx)
                 .read(cx)
                 .buffer()
                 .read(cx)
@@ -589,7 +589,7 @@ impl Stoat {
         if pos.row < max_row {
             let target_row = pos.row + 1;
             let line_len = self
-                .buffer_item
+                .active_buffer(cx)
                 .read(cx)
                 .buffer()
                 .read(cx)
@@ -616,7 +616,7 @@ impl Stoat {
     pub fn move_right(&mut self, cx: &mut Context<Self>) {
         let pos = self.cursor.position();
         let line_len = self
-            .buffer_item
+            .active_buffer(cx)
             .read(cx)
             .buffer()
             .read(cx)
@@ -774,7 +774,7 @@ impl Stoat {
     pub fn move_to_line_end(&mut self, cx: &mut Context<Self>) {
         let pos = self.cursor.position();
         let line_len = self
-            .buffer_item
+            .active_buffer(cx)
             .read(cx)
             .buffer()
             .read(cx)
@@ -2448,9 +2448,6 @@ impl Stoat {
             // Get buffer from BufferStore and switch to it
             if let Some(buffer_item) = self.buffer_store.read(cx).get_buffer_by_path(path) {
                 let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
-
-                // Update legacy buffer_item
-                self.buffer_item = buffer_item.clone();
 
                 // Update active_buffer_id
                 self.active_buffer_id = Some(buffer_id);

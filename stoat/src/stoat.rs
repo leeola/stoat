@@ -16,7 +16,7 @@ use crate::{
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task};
 use nucleo_matcher::{Config, Matcher};
 use parking_lot::Mutex;
-use std::{collections::HashMap, num::NonZeroU64, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
 use text::{Buffer, BufferId, Point};
 
@@ -88,9 +88,6 @@ pub enum StoatEvent {
 /// Key difference from old stoat: methods take `&mut Context<Self>` instead of `&mut App`.
 /// This enables spawning self-updating async tasks.
 pub struct Stoat {
-    /// Active buffer item (legacy - being replaced by buffer_store)
-    pub(crate) buffer_item: Entity<BufferItem>,
-
     /// Buffer storage and management (tracks with WeakEntity)
     pub(crate) buffer_store: Entity<BufferStore>,
 
@@ -169,8 +166,10 @@ impl Stoat {
         // Create buffer store
         let buffer_store = cx.new(|_| BufferStore::new());
 
+        // Allocate buffer ID from BufferStore to prevent collisions
+        let buffer_id = buffer_store.update(cx, |store, _cx| store.allocate_buffer_id());
+
         // Create initial welcome buffer
-        let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let welcome_text = "Welcome to Stoat v4!\n\nPress 'i' to enter insert mode.\nType some text.\nPress Esc to return to normal mode.\n\nPress 'h', 'j', 'k', 'l' to move in normal mode.";
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, welcome_text));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
@@ -200,7 +199,6 @@ impl Stoat {
             };
 
         Self {
-            buffer_item,
             buffer_store,
             open_buffers,
             active_buffer_id,
@@ -252,7 +250,6 @@ impl Stoat {
     /// Used by [`PaneGroupView`] when splitting panes to create multiple views of the same buffer.
     pub fn clone_for_split(&self) -> Self {
         Self {
-            buffer_item: self.buffer_item.clone(),
             buffer_store: self.buffer_store.clone(),
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
@@ -291,11 +288,6 @@ impl Stoat {
         }
     }
 
-    /// Get buffer item entity (caller can access buffer via this)
-    pub fn buffer_item(&self) -> &Entity<BufferItem> {
-        &self.buffer_item
-    }
-
     /// Get the currently active buffer item.
     ///
     /// Looks up the active buffer by `active_buffer_id` in BufferStore and upgrades
@@ -311,13 +303,41 @@ impl Stoat {
     /// Get the currently active buffer (convenience wrapper).
     ///
     /// This is a convenience method that unwraps the result from [`active_buffer_item`].
-    /// Panics if no buffer is active (should never happen in practice since buffer_item
-    /// is kept synchronized with the active buffer).
-    ///
-    /// This method is used internally to migrate away from the legacy buffer_item field.
-    pub(crate) fn active_buffer(&self, cx: &App) -> Entity<BufferItem> {
-        self.active_buffer_item(cx)
-            .expect("No active buffer - this should never happen")
+    /// Panics if no buffer is active (should never happen in practice).
+    pub fn active_buffer(&self, cx: &App) -> Entity<BufferItem> {
+        let buffer_id = match self.active_buffer_id {
+            Some(id) => id,
+            None => {
+                tracing::error!(
+                    "active_buffer called but active_buffer_id is None! open_buffers.len={}",
+                    self.open_buffers.len()
+                );
+                panic!("No active buffer - active_buffer_id is None");
+            },
+        };
+
+        match self.buffer_store.read(cx).get_buffer(buffer_id) {
+            Some(item) => item,
+            None => {
+                tracing::error!(
+                    "Failed to get buffer for id {:?}!\n\
+                     active_buffer_id: {:?}\n\
+                     open_buffers.len: {}\n\
+                     open_buffers buffer_ids: {:?}",
+                    buffer_id,
+                    self.active_buffer_id,
+                    self.open_buffers.len(),
+                    self.open_buffers
+                        .iter()
+                        .map(|b| b.read(cx).buffer().read(cx).remote_id())
+                        .collect::<Vec<_>>()
+                );
+                panic!(
+                    "No active buffer - weak reference upgrade failed for buffer_id {:?}",
+                    buffer_id
+                );
+            },
+        }
     }
 
     /// Get cursor position
@@ -457,9 +477,6 @@ impl Stoat {
         {
             self.open_buffers.push(buffer_item_entity.clone());
         }
-
-        // Update legacy buffer_item to point to the buffer from BufferStore
-        self.buffer_item = buffer_item_entity.clone();
 
         // Compute git diff
         buffer_item_entity.update(cx, |item, cx| {

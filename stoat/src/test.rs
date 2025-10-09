@@ -77,7 +77,7 @@ impl<'a> TestStoat<'a> {
 
             // Always update the buffer to replace welcome text (even with empty string)
             // Use Rust language for better tokenization in tests
-            stoat.buffer_item().update(cx, |item, cx| {
+            stoat.active_buffer(cx).update(cx, |item, cx| {
                 item.set_language(stoat_text::Language::Rust);
                 item.buffer().update(cx, |buffer, _| {
                     let len = buffer.len();
@@ -111,7 +111,7 @@ impl<'a> TestStoat<'a> {
     /// No need to pass `cx` - it's stored in the wrapper!
     pub fn buffer_text(&self) -> String {
         self.cx.read_entity(&self.entity, |s, cx| {
-            cx.read_entity(s.buffer_item(), |item, cx| {
+            cx.read_entity(&s.active_buffer(cx), |item, cx| {
                 cx.read_entity(item.buffer(), |buffer, _| buffer.text())
             })
         })
