@@ -5,6 +5,7 @@
 
 pub mod actions;
 pub mod buffer_item;
+pub mod buffer_store;
 pub mod cursor;
 pub mod file_finder;
 pub mod git_diff;
@@ -30,6 +31,7 @@ pub use actions::*;
 // Re-export action metadata helpers
 pub use actions::{action_name, description};
 pub use buffer_item::BufferItem;
+pub use buffer_store::{BufferStore, OpenBuffer};
 pub use cursor::{Cursor, CursorManager};
 pub use file_finder::PreviewData;
 pub use git_status::{gather_git_status, load_git_diff, DiffPreviewData, GitStatusEntry};

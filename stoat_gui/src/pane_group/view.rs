@@ -1,22 +1,21 @@
 use crate::{
-    buffer_finder::BufferFinder, command_overlay::CommandOverlay, command_palette::CommandPalette,
-    editor_view::EditorView, file_finder::FileFinder, git_status::GitStatus,
-    pane_group::element::pane_axis, status_bar::StatusBar,
+    command_overlay::CommandOverlay, command_palette::CommandPalette, editor_view::EditorView,
+    file_finder::Finder, git_status::GitStatus, pane_group::element::pane_axis,
+    status_bar::StatusBar,
 };
 use gpui::{
-    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Window,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
 };
 use std::{collections::HashMap, rc::Rc};
 use stoat::{
+    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
         OpenCommandPalette, OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight,
         SplitUp,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
-    Stoat,
 };
 use tracing::debug;
 
@@ -728,7 +727,7 @@ impl Render for PaneGroupView {
                     .when(active_mode == "file_finder", |div| {
                         // Render file finder overlay when in file_finder mode
                         if let Some((query, files, selected, preview)) = file_finder_data {
-                            div.child(FileFinder::new(
+                            div.child(Finder::new_file_finder(
                                 query,
                                 files,
                                 selected,
@@ -755,7 +754,7 @@ impl Render for PaneGroupView {
                     .when(active_mode == "buffer_finder", |div| {
                         // Render buffer finder overlay when in buffer_finder mode
                         if let Some((query, buffers, selected)) = buffer_finder_data {
-                            div.child(BufferFinder::new(
+                            div.child(Finder::new_buffer_finder(
                                 query,
                                 buffers,
                                 selected,

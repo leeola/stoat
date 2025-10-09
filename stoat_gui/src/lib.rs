@@ -1,5 +1,4 @@
 pub mod app;
-pub mod buffer_finder;
 pub mod command_overlay;
 pub mod command_palette;
 pub mod dispatch;

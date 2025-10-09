@@ -1,6 +1,6 @@
-//! File finder modal for quick file navigation.
+//! Unified finder modal for files and buffers.
 //!
-//! Renders a modal overlay for fuzzy file finding. All state management and input handling
+//! Renders a modal overlay for fuzzy file/buffer finding. All state management and input handling
 //! happens in [`stoat::Stoat`] core - this is just the presentation layer.
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
@@ -13,22 +13,32 @@ use gpui::{
 use std::{path::PathBuf, sync::OnceLock};
 use stoat::PreviewData;
 
-/// File finder modal renderer.
+/// Finder mode - determines what the finder searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderMode {
+    /// Search for files in worktree
+    Files,
+    /// Search for open buffers
+    Buffers,
+}
+
+/// Unified finder modal renderer for files and buffers.
 ///
-/// Stateless component that renders file finder UI. All interaction is handled through
-/// the action system in file_finder mode.
+/// Stateless component that renders finder UI. All interaction is handled through
+/// the action system in file_finder or buffer_finder mode.
 #[derive(IntoElement)]
-pub struct FileFinder {
+pub struct Finder {
+    mode: FinderMode,
     query: String,
-    files: Vec<PathBuf>,
+    items: Vec<PathBuf>,
     selected: usize,
     preview: Option<PreviewData>,
     scroll_handle: ScrollHandle,
 }
 
-impl FileFinder {
+impl Finder {
     /// Create a new file finder renderer with the given state.
-    pub fn new(
+    pub fn new_file_finder(
         query: String,
         files: Vec<PathBuf>,
         selected: usize,
@@ -36,10 +46,28 @@ impl FileFinder {
         scroll_handle: ScrollHandle,
     ) -> Self {
         Self {
+            mode: FinderMode::Files,
             query,
-            files,
+            items: files,
             selected,
             preview,
+            scroll_handle,
+        }
+    }
+
+    /// Create a new buffer finder renderer with the given state.
+    pub fn new_buffer_finder(
+        query: String,
+        buffers: Vec<PathBuf>,
+        selected: usize,
+        scroll_handle: ScrollHandle,
+    ) -> Self {
+        Self {
+            mode: FinderMode::Buffers,
+            query,
+            items: buffers,
+            selected,
+            preview: None,
             scroll_handle,
         }
     }
@@ -47,6 +75,10 @@ impl FileFinder {
     /// Render the input box showing the current query.
     fn render_input(&self) -> impl IntoElement {
         let query = self.query.clone();
+        let placeholder = match self.mode {
+            FinderMode::Files => "Type to search files...",
+            FinderMode::Buffers => "Type to search buffers...",
+        };
 
         div()
             .p(px(8.0))
@@ -55,30 +87,30 @@ impl FileFinder {
             .bg(rgb(0x252526))
             .text_color(rgb(0xd4d4d4))
             .child(if query.is_empty() {
-                "Type to search files...".to_string()
+                placeholder.to_string()
             } else {
                 query
             })
     }
 
-    /// Render the list of filtered files.
-    fn render_file_list(&self) -> impl IntoElement {
-        let files = &self.files;
+    /// Render the list of filtered items (files or buffers).
+    fn render_item_list(&self) -> impl IntoElement {
+        let items = &self.items;
         let selected = self.selected;
 
         div()
-            .id("file-list")
+            .id("item-list")
             .flex()
             .flex_col()
             .flex_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
-            .children(files.iter().enumerate().map(|(i, path)| {
+            .children(items.iter().enumerate().map(|(i, path)| {
                 div()
                     .px(px(8.0))
                     .py(px(3.0))
                     .when(i == selected, |div| {
-                        div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected file
+                        div.bg(rgb(0x3b4261)) // Blue-gray highlight for selected item
                     })
                     .text_color(rgb(0xd4d4d4))
                     .text_size(px(11.0))
@@ -333,12 +365,14 @@ impl IntoElement for PreviewElement {
     }
 }
 
-impl RenderOnce for FileFinder {
+impl RenderOnce for Finder {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         // Check window width to determine if we should show preview
+        // Only show preview for file finder mode, not buffer finder
         let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
-        let show_preview = viewport_width > 1000.0 && self.preview.is_some();
+        let show_preview =
+            self.mode == FinderMode::Files && viewport_width > 1000.0 && self.preview.is_some();
 
         div()
             .absolute()
@@ -370,14 +404,14 @@ impl RenderOnce for FileFinder {
                             .flex_1()
                             .overflow_hidden()
                             .child(
-                                // Left panel: file list (45%)
+                                // Left panel: item list (45%)
                                 div()
                                     .flex()
                                     .flex_col()
                                     .w(px(viewport_width * 0.75 * 0.45))
                                     .border_r_1()
                                     .border_color(rgb(0x3e3e42))
-                                    .child(self.render_file_list()),
+                                    .child(self.render_item_list()),
                             )
                             .child(
                                 // Right panel: preview (55%)
@@ -388,13 +422,13 @@ impl RenderOnce for FileFinder {
                                     .child(self.render_preview()),
                             )
                     } else {
-                        // Single panel: just file list
+                        // Single panel: just item list
                         div().flex().flex_row().flex_1().overflow_hidden().child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
-                                .child(self.render_file_list()),
+                                .child(self.render_item_list()),
                         )
                     }),
             )

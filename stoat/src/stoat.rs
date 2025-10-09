@@ -5,6 +5,7 @@
 
 use crate::{
     buffer_item::BufferItem,
+    buffer_store::BufferStore,
     cursor::CursorManager,
     file_finder::PreviewData,
     git_diff::BufferDiff,
@@ -87,8 +88,14 @@ pub enum StoatEvent {
 /// Key difference from old stoat: methods take `&mut Context<Self>` instead of `&mut App`.
 /// This enables spawning self-updating async tasks.
 pub struct Stoat {
-    /// Active buffer item
+    /// Active buffer item (legacy - being replaced by buffer_store)
     pub(crate) buffer_item: Entity<BufferItem>,
+
+    /// Buffer storage and management
+    pub(crate) buffer_store: Entity<BufferStore>,
+
+    /// Currently active buffer ID
+    pub(crate) active_buffer_id: Option<BufferId>,
 
     /// Cursor position management
     pub(crate) cursor: CursorManager,
@@ -152,6 +159,10 @@ impl Stoat {
     ///
     /// Takes `&mut Context<Self>` to follow Zed's Buffer pattern.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        // Create buffer store
+        let buffer_store = cx.new(|_| BufferStore::new());
+
+        // Create initial welcome buffer (legacy field - will be migrated)
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let welcome_text = "Welcome to Stoat v4!\n\nPress 'i' to enter insert mode.\nType some text.\nPress Esc to return to normal mode.\n\nPress 'h', 'j', 'k', 'l' to move in normal mode.";
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, welcome_text));
@@ -176,6 +187,8 @@ impl Stoat {
 
         Self {
             buffer_item,
+            buffer_store,
+            active_buffer_id: None,
             cursor: CursorManager::new(),
             scroll: ScrollPosition::new(),
             viewport_lines: None,
@@ -225,6 +238,8 @@ impl Stoat {
     pub fn clone_for_split(&self) -> Self {
         Self {
             buffer_item: self.buffer_item.clone(),
+            buffer_store: self.buffer_store.clone(),
+            active_buffer_id: self.active_buffer_id,
             cursor: self.cursor.clone(),
             scroll: self.scroll.clone(),
             viewport_lines: self.viewport_lines,
@@ -368,15 +383,56 @@ impl Stoat {
             .map(stoat_text::Language::from_extension)
             .unwrap_or(stoat_text::Language::PlainText);
 
-        self.buffer_item.update(cx, |item, cx| {
-            item.set_language(language);
-            item.buffer().update(cx, |buffer, _| {
-                let len = buffer.len();
-                buffer.edit([(0..len, contents.as_str())]);
-            });
-            let _ = item.reparse(cx);
+        let path_buf = path.to_path_buf();
 
-            // Compute git diff if in a repository
+        // Check if buffer already exists in BufferStore
+        let buffer_id = self.buffer_store.update(cx, |store, cx| {
+            if let Some(open_buffer) = store.get_buffer_by_path(&path_buf) {
+                // Buffer exists, update its content
+                let buffer_id = open_buffer
+                    .buffer_item
+                    .read(cx)
+                    .buffer()
+                    .read(cx)
+                    .remote_id();
+
+                open_buffer.buffer_item.update(cx, |item, cx| {
+                    item.buffer().update(cx, |buffer, _| {
+                        let len = buffer.len();
+                        buffer.edit([(0..len, contents.as_str())]);
+                    });
+                    let _ = item.reparse(cx);
+                });
+
+                buffer_id
+            } else {
+                // Create new buffer in BufferStore
+                let buffer_id = store.open_buffer(Some(path_buf.clone()), language, cx);
+
+                // Update the buffer content
+                if let Some(open_buffer) = store.get_buffer(buffer_id) {
+                    open_buffer.buffer_item.update(cx, |item, cx| {
+                        item.buffer().update(cx, |buffer, _| {
+                            let len = buffer.len();
+                            buffer.edit([(0..len, contents.as_str())]);
+                        });
+                        let _ = item.reparse(cx);
+                    });
+                }
+
+                buffer_id
+            }
+        });
+
+        // Update legacy buffer_item to point to the buffer from BufferStore
+        self.buffer_store.update(cx, |store, cx| {
+            if let Some(open_buffer) = store.get_buffer(buffer_id) {
+                self.buffer_item = open_buffer.buffer_item.clone();
+            }
+        });
+
+        // Compute git diff
+        self.buffer_item.update(cx, |item, cx| {
             if let Ok(repo) = Repository::discover(path) {
                 if let Ok(head_content) = repo.head_content(path) {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
@@ -392,6 +448,9 @@ impl Stoat {
                 }
             }
         });
+
+        // Update active_buffer_id
+        self.active_buffer_id = Some(buffer_id);
 
         self.cursor.move_to(text::Point::new(0, 0));
         cx.notify();

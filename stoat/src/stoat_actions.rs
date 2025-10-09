@@ -2380,14 +2380,13 @@ impl Stoat {
         let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         self.buffer_finder_input = Some(input_buffer);
 
-        // For now, just add the current buffer if it has a file path
-        let buffers = if let Some(path) = &self.current_file_path {
-            vec![path.clone()]
-        } else {
-            Vec::new()
-        };
+        // Get all open buffers from BufferStore
+        let buffers = self.buffer_store.read(cx).buffer_paths();
 
-        debug!(buffer_count = buffers.len(), "Loaded buffers");
+        debug!(
+            buffer_count = buffers.len(),
+            "Loaded buffers from BufferStore"
+        );
 
         self.buffer_finder_buffers = buffers.clone();
         self.buffer_finder_filtered = buffers;
@@ -2430,15 +2429,47 @@ impl Stoat {
 
     /// Select buffer in finder.
     ///
-    /// Since we currently have single buffer architecture, this just dismisses the finder.
-    /// When multi-buffer support is added, this will switch to the selected buffer.
+    /// Switches to the selected buffer from BufferStore.
     pub fn buffer_finder_select(&mut self, cx: &mut Context<Self>) {
         if self.mode != "buffer_finder" {
             return;
         }
 
-        // With single buffer, nothing to switch to - just dismiss
-        debug!("Buffer finder: select (no-op with single buffer)");
+        if self.buffer_finder_selected < self.buffer_finder_filtered.len() {
+            let path = &self.buffer_finder_filtered[self.buffer_finder_selected];
+            debug!(buffer = ?path, "Buffer finder: switching to buffer");
+
+            // Get buffer from BufferStore and switch to it
+            if let Some(open_buffer) = self.buffer_store.read(cx).get_buffer_by_path(path) {
+                let buffer_id = open_buffer
+                    .buffer_item
+                    .read(cx)
+                    .buffer()
+                    .read(cx)
+                    .remote_id();
+
+                // Update legacy buffer_item
+                self.buffer_item = open_buffer.buffer_item.clone();
+
+                // Update active_buffer_id
+                self.active_buffer_id = Some(buffer_id);
+
+                // Update current_file_path for status bar
+                self.current_file_path = Some(path.clone());
+
+                // Update activation history
+                self.buffer_store
+                    .update(cx, |store, _cx| store.activate_buffer(buffer_id));
+
+                // Reset cursor to beginning (could be improved to save/restore per-buffer cursor)
+                self.cursor.move_to(text::Point::new(0, 0));
+
+                debug!(buffer_id = ?buffer_id, "Switched to buffer");
+            } else {
+                tracing::error!("Buffer not found in BufferStore: {:?}", path);
+            }
+        }
+
         self.buffer_finder_dismiss(cx);
     }
 
