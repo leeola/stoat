@@ -128,6 +128,7 @@ pub struct Stoat {
     pub(crate) git_status_previous_mode: Option<String>,
     pub(crate) git_status_preview: Option<crate::git_status::DiffPreviewData>,
     pub(crate) git_status_preview_task: Option<Task<()>>,
+    pub(crate) git_status_branch_info: Option<crate::git_status::GitBranchInfo>,
 
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
@@ -175,6 +176,7 @@ impl Stoat {
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
+            git_status_branch_info: None,
             worktree,
         }
     }
@@ -216,6 +218,7 @@ impl Stoat {
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
+            git_status_branch_info: None,
             worktree: self.worktree.clone(),
         }
     }

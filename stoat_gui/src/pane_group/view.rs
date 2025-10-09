@@ -624,6 +624,7 @@ impl Render for PaneGroupView {
                             stoat.git_status_files().to_vec(),
                             stoat.git_status_selected(),
                             stoat.git_status_preview().cloned(),
+                            stoat.git_status_branch_info().cloned(),
                         ))
                     } else {
                         None
@@ -683,11 +684,12 @@ impl Render for PaneGroupView {
             })
             .when(active_mode == "git_status", |div| {
                 // Render git status overlay when in git_status mode
-                if let Some((files, selected, preview)) = git_status_data {
+                if let Some((files, selected, preview, branch_info)) = git_status_data {
                     div.child(GitStatus::new(
                         files,
                         selected,
                         preview,
+                        branch_info,
                         self.git_status_scroll.clone(),
                     ))
                 } else {

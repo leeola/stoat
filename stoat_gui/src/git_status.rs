@@ -6,12 +6,12 @@
 //! Layout matches [`FileFinder`] with two panels: file list on left, diff preview on right.
 
 use gpui::{
-    div, point, prelude::FluentBuilder, px, rgb, rgba, App, Bounds, Element, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
+    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
+    Window, div, point, prelude::FluentBuilder, px, rgb, rgba,
 };
-use stoat::git_status::{DiffPreviewData, GitStatusEntry};
+use stoat::git_status::{DiffPreviewData, GitBranchInfo, GitStatusEntry};
 
 /// Git status modal renderer.
 ///
@@ -22,6 +22,7 @@ pub struct GitStatus {
     files: Vec<GitStatusEntry>,
     selected: usize,
     preview: Option<DiffPreviewData>,
+    branch_info: Option<GitBranchInfo>,
     scroll_handle: ScrollHandle,
 }
 
@@ -31,12 +32,14 @@ impl GitStatus {
         files: Vec<GitStatusEntry>,
         selected: usize,
         preview: Option<DiffPreviewData>,
+        branch_info: Option<GitBranchInfo>,
         scroll_handle: ScrollHandle,
     ) -> Self {
         Self {
             files,
             selected,
             preview,
+            branch_info,
             scroll_handle,
         }
     }
@@ -53,10 +56,68 @@ impl GitStatus {
             .child("Git Status")
     }
 
+    /// Render branch information section (git-style formatting).
+    fn render_branch_info(&self) -> Option<impl IntoElement> {
+        let branch_info = self.branch_info.as_ref()?;
+
+        let mut lines = vec![format!("On branch {}", branch_info.branch_name)];
+
+        if branch_info.ahead > 0 && branch_info.behind > 0 {
+            lines.push(format!(
+                "Your branch is ahead by {} and behind by {} commits.",
+                branch_info.ahead, branch_info.behind
+            ));
+        } else if branch_info.ahead > 0 {
+            lines.push(format!(
+                "Your branch is ahead of 'origin/{}' by {} commit{}.",
+                branch_info.branch_name,
+                branch_info.ahead,
+                if branch_info.ahead == 1 { "" } else { "s" }
+            ));
+        } else if branch_info.behind > 0 {
+            lines.push(format!(
+                "Your branch is behind 'origin/{}' by {} commit{}.",
+                branch_info.branch_name,
+                branch_info.behind,
+                if branch_info.behind == 1 { "" } else { "s" }
+            ));
+        }
+
+        Some(
+            div()
+                .p(px(12.0))
+                .border_b_1()
+                .border_color(rgb(0x3e3e42))
+                .bg(rgb(0x1e1e1e))
+                .text_color(rgb(0x808080))
+                .text_size(px(12.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(lines.into_iter().map(|line| div().child(line))),
+        )
+    }
+
     /// Render the list of modified files with status indicators.
     fn render_file_list(&self) -> impl IntoElement {
         let files = &self.files;
         let selected = self.selected;
+
+        if files.is_empty() {
+            return div()
+                .id("git-status-list")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_color(rgb(0x808080))
+                        .text_size(px(13.0))
+                        .child("nothing to commit, working tree clean"),
+                );
+        }
 
         div()
             .id("git-status-list")
@@ -293,6 +354,9 @@ impl RenderOnce for GitStatus {
         let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
         let show_preview = viewport_width > 1000.0 && self.preview.is_some();
+        let is_clean = self.files.is_empty();
+
+        let branch_info_elem = self.render_branch_info();
 
         div()
             .absolute()
@@ -308,14 +372,15 @@ impl RenderOnce for GitStatus {
                 div()
                     .flex()
                     .flex_col()
-                    .w_3_4()
-                    .h(px(viewport_height * 0.85))
+                    .when(is_clean, |div| div.w(px(500.0)).h(px(200.0)))
+                    .when(!is_clean, |div| div.w_3_4().h(px(viewport_height * 0.85)))
                     .bg(rgb(0x1e1e1e))
                     .border_1()
                     .border_color(rgb(0x3e3e42))
                     .rounded(px(8.0))
                     .overflow_hidden()
                     .child(self.render_header())
+                    .when_some(branch_info_elem, |div, elem| div.child(elem))
                     .child(if show_preview {
                         // Two-panel layout: file list on left, preview on right
                         div()

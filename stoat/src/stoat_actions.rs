@@ -2137,9 +2137,21 @@ impl Stoat {
 
         debug!(file_count = entries.len(), "Gathered git status");
 
+        // Gather branch info
+        let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
+        if let Some(ref info) = branch_info {
+            debug!(
+                branch = %info.branch_name,
+                ahead = info.ahead,
+                behind = info.behind,
+                "Gathered git branch info"
+            );
+        }
+
         // Initialize git status state
         self.git_status_files = entries;
         self.git_status_selected = 0;
+        self.git_status_branch_info = branch_info;
 
         // Enter git_status mode
         self.mode = "git_status".into();
@@ -2266,6 +2278,7 @@ impl Stoat {
         // Clear git status state
         self.git_status_files.clear();
         self.git_status_selected = 0;
+        self.git_status_branch_info = None;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -2274,6 +2287,11 @@ impl Stoat {
     /// Accessor for git status files (for GUI layer).
     pub fn git_status_files(&self) -> &[crate::git_status::GitStatusEntry] {
         &self.git_status_files
+    }
+
+    /// Accessor for git branch info (for GUI layer).
+    pub fn git_status_branch_info(&self) -> Option<&crate::git_status::GitBranchInfo> {
+        self.git_status_branch_info.as_ref()
     }
 
     /// Accessor for selected file index (for GUI layer).

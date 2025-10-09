@@ -204,6 +204,77 @@ impl DiffPreviewData {
     }
 }
 
+/// Git branch information for the status modal.
+///
+/// Contains the current branch name and tracking information (ahead/behind upstream).
+/// Used by the git status modal to display branch context alongside file changes.
+#[derive(Clone, Debug)]
+pub struct GitBranchInfo {
+    /// Name of the current branch
+    pub branch_name: String,
+    /// Number of commits ahead of upstream
+    pub ahead: u32,
+    /// Number of commits behind upstream
+    pub behind: u32,
+}
+
+impl GitBranchInfo {
+    /// Create new branch info.
+    pub fn new(branch_name: String, ahead: u32, behind: u32) -> Self {
+        Self {
+            branch_name,
+            ahead,
+            behind,
+        }
+    }
+}
+
+/// Gather git branch information from a repository.
+///
+/// Queries the current branch name and upstream tracking status (ahead/behind).
+/// Returns [`None`] if the repository is in detached HEAD state or if branch
+/// information cannot be determined.
+///
+/// # Arguments
+///
+/// * `repo` - Git repository to query
+///
+/// # Returns
+///
+/// [`Some(GitBranchInfo)`] if on a branch with tracking info, [`None`] otherwise.
+pub fn gather_git_branch_info(repo: &git2::Repository) -> Option<GitBranchInfo> {
+    let head = repo.head().ok()?;
+
+    if !head.is_branch() {
+        return None;
+    }
+
+    let branch_name = head.shorthand()?.to_string();
+
+    let (ahead, behind) = if let Some(local_oid) = head.target() {
+        let branch = repo
+            .find_branch(&branch_name, git2::BranchType::Local)
+            .ok()?;
+
+        if let Ok(upstream) = branch.upstream() {
+            if let Some(upstream_oid) = upstream.get().target() {
+                repo.graph_ahead_behind(local_oid, upstream_oid)
+                    .ok()
+                    .map(|(a, b)| (a as u32, b as u32))
+                    .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    Some(GitBranchInfo::new(branch_name, ahead, behind))
+}
+
 /// Load git diff preview for a file.
 ///
 /// Computes the diff between HEAD and working tree for the specified file,
