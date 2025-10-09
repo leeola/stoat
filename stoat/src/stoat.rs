@@ -137,8 +137,8 @@ pub struct Stoat {
 
     // Buffer finder state
     pub(crate) buffer_finder_input: Option<Entity<Buffer>>,
-    pub(crate) buffer_finder_buffers: Vec<PathBuf>,
-    pub(crate) buffer_finder_filtered: Vec<PathBuf>,
+    pub(crate) buffer_finder_buffers: Vec<crate::buffer_store::BufferListEntry>,
+    pub(crate) buffer_finder_filtered: Vec<crate::buffer_store::BufferListEntry>,
     pub(crate) buffer_finder_selected: usize,
     pub(crate) buffer_finder_previous_mode: Option<String>,
 

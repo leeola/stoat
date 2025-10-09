@@ -10,6 +10,21 @@ use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 use stoat_text::Language;
 use text::{Buffer, BufferId};
 
+/// Buffer list entry for UI display.
+///
+/// Represents a buffer in the buffer finder list, providing both display information
+/// and lookup keys. Used by [`BufferStore::buffer_list`] to return all buffers
+/// including unnamed/scratch buffers.
+#[derive(Clone, Debug)]
+pub struct BufferListEntry {
+    /// Display name for UI (file path or "[Untitled]" for unnamed buffers)
+    pub display_name: String,
+    /// Buffer ID for lookup in [`BufferStore`]
+    pub buffer_id: BufferId,
+    /// Optional file path (None for unnamed/scratch buffers)
+    pub path: Option<PathBuf>,
+}
+
 /// Open buffer state.
 ///
 /// Uses [`WeakEntity<BufferItem>`] following Zed's pattern to avoid memory leaks.
@@ -213,6 +228,35 @@ impl BufferStore {
         self.buffers
             .values()
             .filter_map(|b| b.path.clone())
+            .collect()
+    }
+
+    /// Get all open buffers as list entries for UI display.
+    ///
+    /// Returns all buffers including unnamed/scratch buffers. Unnamed buffers
+    /// get display name "[Untitled]". Only includes buffers whose weak references
+    /// can be upgraded (alive buffers).
+    ///
+    /// Used by buffer finder to show all open buffers.
+    pub fn buffer_list(&self) -> Vec<BufferListEntry> {
+        self.buffers
+            .iter()
+            .filter_map(|(buffer_id, open_buffer)| {
+                // Only include buffers that are still alive (can upgrade weak ref)
+                open_buffer.buffer_item.upgrade()?;
+
+                let (display_name, path) = if let Some(path) = &open_buffer.path {
+                    (path.display().to_string(), Some(path.clone()))
+                } else {
+                    ("[Untitled]".to_string(), None)
+                };
+
+                Some(BufferListEntry {
+                    display_name,
+                    buffer_id: *buffer_id,
+                    path,
+                })
+            })
             .collect()
     }
 

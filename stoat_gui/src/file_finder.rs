@@ -5,10 +5,10 @@
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
-    FontStyle, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
-    LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
+    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
+    Window, div, point, prelude::FluentBuilder, px, relative, rgb, rgba,
 };
 use std::{path::PathBuf, sync::OnceLock};
 use stoat::PreviewData;
@@ -30,7 +30,7 @@ pub enum FinderMode {
 pub struct Finder {
     mode: FinderMode,
     query: String,
-    items: Vec<PathBuf>,
+    items: Vec<String>,
     selected: usize,
     preview: Option<PreviewData>,
     scroll_handle: ScrollHandle,
@@ -45,10 +45,12 @@ impl Finder {
         preview: Option<PreviewData>,
         scroll_handle: ScrollHandle,
     ) -> Self {
+        let items = files.iter().map(|p| p.display().to_string()).collect();
+
         Self {
             mode: FinderMode::Files,
             query,
-            items: files,
+            items,
             selected,
             preview,
             scroll_handle,
@@ -58,14 +60,19 @@ impl Finder {
     /// Create a new buffer finder renderer with the given state.
     pub fn new_buffer_finder(
         query: String,
-        buffers: Vec<PathBuf>,
+        buffers: Vec<stoat::BufferListEntry>,
         selected: usize,
         scroll_handle: ScrollHandle,
     ) -> Self {
+        let items = buffers
+            .iter()
+            .map(|entry| entry.display_name.clone())
+            .collect();
+
         Self {
             mode: FinderMode::Buffers,
             query,
-            items: buffers,
+            items,
             selected,
             preview: None,
             scroll_handle,
@@ -105,7 +112,10 @@ impl Finder {
             .flex_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
-            .children(items.iter().enumerate().map(|(i, path)| {
+            .children(items.iter().enumerate().map(|(i, display_name)| {
+                // Strip "./" prefix from file paths for cleaner display
+                let display_text = display_name.strip_prefix("./").unwrap_or(display_name);
+
                 div()
                     .px(px(8.0))
                     .py(px(3.0))
@@ -114,12 +124,7 @@ impl Finder {
                     })
                     .text_color(rgb(0xd4d4d4))
                     .text_size(px(11.0))
-                    .child(
-                        path.strip_prefix("./")
-                            .unwrap_or(path)
-                            .to_string_lossy()
-                            .to_string(),
-                    )
+                    .child(display_text.to_string())
             }))
     }
 

@@ -2424,7 +2424,7 @@ impl Stoat {
         self.buffer_finder_input = Some(input_buffer);
 
         // Get all open buffers from BufferStore
-        let buffers = self.buffer_store.read(cx).buffer_paths();
+        let buffers = self.buffer_store.read(cx).buffer_list();
 
         debug!(
             buffer_count = buffers.len(),
@@ -2479,18 +2479,18 @@ impl Stoat {
         }
 
         if self.buffer_finder_selected < self.buffer_finder_filtered.len() {
-            let path = &self.buffer_finder_filtered[self.buffer_finder_selected];
-            debug!(buffer = ?path, "Buffer finder: switching to buffer");
+            let entry = &self.buffer_finder_filtered[self.buffer_finder_selected];
+            debug!(buffer = ?entry.display_name, buffer_id = ?entry.buffer_id, "Buffer finder: switching to buffer");
 
-            // Get buffer from BufferStore and switch to it
-            if let Some(buffer_item) = self.buffer_store.read(cx).get_buffer_by_path(path) {
+            // Get buffer from BufferStore by ID
+            if let Some(buffer_item) = self.buffer_store.read(cx).get_buffer(entry.buffer_id) {
                 let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
 
                 // Update active_buffer_id
                 self.active_buffer_id = Some(buffer_id);
 
-                // Update current_file_path for status bar
-                self.current_file_path = Some(path.clone());
+                // Update current_file_path for status bar (None for unnamed buffers)
+                self.current_file_path = entry.path.clone();
 
                 // Update activation history
                 self.buffer_store
@@ -2501,7 +2501,7 @@ impl Stoat {
 
                 debug!(buffer_id = ?buffer_id, "Switched to buffer");
             } else {
-                tracing::error!("Buffer not found in BufferStore: {:?}", path);
+                tracing::error!("Buffer not found in BufferStore: {:?}", entry.buffer_id);
             }
         }
 
@@ -2547,13 +2547,13 @@ impl Stoat {
             // No query: show all buffers
             self.buffer_finder_filtered = self.buffer_finder_buffers.clone();
         } else {
-            // Fuzzy match on buffer paths
+            // Fuzzy match on buffer display names
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
             let candidates: Vec<&str> = self
                 .buffer_finder_buffers
                 .iter()
-                .map(|p| p.to_str().unwrap_or(""))
+                .map(|entry| entry.display_name.as_str())
                 .collect();
 
             let mut matches = pattern.match_list(candidates, &mut self.file_finder_matcher);
@@ -2561,7 +2561,14 @@ impl Stoat {
 
             self.buffer_finder_filtered = matches
                 .into_iter()
-                .map(|(path, _score)| PathBuf::from(path))
+                .map(|(display_name, _score)| {
+                    // Find the original BufferListEntry by display_name
+                    self.buffer_finder_buffers
+                        .iter()
+                        .find(|entry| entry.display_name == display_name)
+                        .cloned()
+                        .expect("Matched entry should exist in buffer_finder_buffers")
+                })
                 .collect();
         }
 
@@ -2579,7 +2586,7 @@ impl Stoat {
     }
 
     /// Get filtered buffer list.
-    pub fn buffer_finder_filtered(&self) -> &[PathBuf] {
+    pub fn buffer_finder_filtered(&self) -> &[crate::buffer_store::BufferListEntry] {
         &self.buffer_finder_filtered
     }
 
