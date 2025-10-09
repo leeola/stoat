@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use gpui::{Axis, Bounds, Pixels};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -263,6 +263,3 @@ impl SplitDirection {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

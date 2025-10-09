@@ -2440,16 +2440,11 @@ impl Stoat {
             debug!(buffer = ?path, "Buffer finder: switching to buffer");
 
             // Get buffer from BufferStore and switch to it
-            if let Some(open_buffer) = self.buffer_store.read(cx).get_buffer_by_path(path) {
-                let buffer_id = open_buffer
-                    .buffer_item
-                    .read(cx)
-                    .buffer()
-                    .read(cx)
-                    .remote_id();
+            if let Some(buffer_item) = self.buffer_store.read(cx).get_buffer_by_path(path) {
+                let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
 
                 // Update legacy buffer_item
-                self.buffer_item = open_buffer.buffer_item.clone();
+                self.buffer_item = buffer_item.clone();
 
                 // Update active_buffer_id
                 self.active_buffer_id = Some(buffer_id);

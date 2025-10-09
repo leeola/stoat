@@ -5,18 +5,19 @@
 //! path-to-buffer mapping, and buffer activation history.
 
 use crate::buffer_item::BufferItem;
-use gpui::{App, AppContext, Entity};
+use gpui::{App, AppContext, Entity, WeakEntity};
 use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 use stoat_text::Language;
 use text::{Buffer, BufferId};
 
 /// Open buffer state.
 ///
-/// Wraps [`Entity<BufferItem>`] and associated metadata. Buffers are stored
-/// by BufferId and can be looked up by path.
+/// Uses [`WeakEntity<BufferItem>`] following Zed's pattern to avoid memory leaks.
+/// Strong references are held by [`Stoat::open_buffers`], while BufferStore tracks
+/// buffers weakly. This allows automatic cleanup when all strong references are dropped.
 pub struct OpenBuffer {
-    /// The buffer item entity
-    pub buffer_item: Entity<BufferItem>,
+    /// Weak reference to buffer item (prevents memory leaks)
+    pub buffer_item: WeakEntity<BufferItem>,
     /// File path (None for scratch buffers)
     pub path: Option<PathBuf>,
 }
@@ -66,8 +67,9 @@ impl BufferStore {
 
     /// Open or create a buffer.
     ///
-    /// If a buffer for the given path already exists, returns its BufferId.
-    /// Otherwise creates a new buffer and returns its BufferId.
+    /// If a buffer for the given path already exists, attempts to upgrade its weak reference.
+    /// Otherwise creates a new buffer. Returns both the BufferId and the strong Entity reference
+    /// that the caller must store to keep the buffer alive.
     ///
     /// # Arguments
     ///
@@ -77,20 +79,28 @@ impl BufferStore {
     ///
     /// # Returns
     ///
-    /// BufferId of the opened or created buffer
+    /// `Option<(BufferId, Entity<BufferItem>)>` - BufferId and strong reference. Returns `None`
+    /// if buffer existed but weak reference couldn't be upgraded (buffer was dropped).
     pub fn open_buffer(
         &mut self,
         path: Option<PathBuf>,
         language: Language,
         cx: &mut App,
-    ) -> BufferId {
+    ) -> Option<(BufferId, Entity<BufferItem>)> {
         // Check if buffer already exists for this path
         if let Some(path) = &path {
             if let Some(&buffer_id) = self.path_to_buffer.get(path) {
-                // Update activation history
-                self.activation_history.retain(|&id| id != buffer_id);
-                self.activation_history.push(buffer_id);
-                return buffer_id;
+                // Try to upgrade existing buffer
+                if let Some(buffer_item) = self.get_buffer(buffer_id) {
+                    // Update activation history
+                    self.activation_history.retain(|&id| id != buffer_id);
+                    self.activation_history.push(buffer_id);
+                    return Some((buffer_id, buffer_item));
+                } else {
+                    // Weak reference is dead, clean it up
+                    self.buffers.remove(&buffer_id);
+                    self.path_to_buffer.remove(path);
+                }
             }
         }
 
@@ -99,9 +109,9 @@ impl BufferStore {
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, language, cx));
 
-        // Store buffer
+        // Store buffer with weak reference (strong ref must be held by caller)
         let open_buffer = OpenBuffer {
-            buffer_item,
+            buffer_item: buffer_item.downgrade(),
             path: path.clone(),
         };
         self.buffers.insert(buffer_id, open_buffer);
@@ -114,23 +124,53 @@ impl BufferStore {
         // Update activation history
         self.activation_history.push(buffer_id);
 
-        buffer_id
+        Some((buffer_id, buffer_item))
+    }
+
+    /// Register an existing buffer item.
+    ///
+    /// Stores a weak reference to an already-created buffer. Useful when buffers are created
+    /// outside BufferStore (e.g., initial welcome buffer).
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_id` - BufferId of the buffer
+    /// * `buffer_item` - The buffer item to register
+    /// * `path` - Optional file path
+    pub fn register_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        buffer_item: &Entity<BufferItem>,
+        path: Option<PathBuf>,
+    ) {
+        let open_buffer = OpenBuffer {
+            buffer_item: buffer_item.downgrade(),
+            path: path.clone(),
+        };
+        self.buffers.insert(buffer_id, open_buffer);
+
+        if let Some(path) = path {
+            self.path_to_buffer.insert(path, buffer_id);
+        }
+
+        self.activation_history.push(buffer_id);
     }
 
     /// Get a buffer by ID.
     ///
-    /// Returns [`None`] if the buffer doesn't exist.
-    pub fn get_buffer(&self, buffer_id: BufferId) -> Option<&OpenBuffer> {
-        self.buffers.get(&buffer_id)
+    /// Attempts to upgrade the weak reference. Returns [`None`] if the buffer doesn't exist
+    /// or if the weak reference couldn't be upgraded (buffer was dropped).
+    pub fn get_buffer(&self, buffer_id: BufferId) -> Option<Entity<BufferItem>> {
+        self.buffers.get(&buffer_id)?.buffer_item.upgrade()
     }
 
     /// Get a buffer by path.
     ///
-    /// Returns [`None`] if no buffer exists for the path.
-    pub fn get_buffer_by_path(&self, path: &PathBuf) -> Option<&OpenBuffer> {
-        self.path_to_buffer
-            .get(path)
-            .and_then(|id| self.buffers.get(id))
+    /// Attempts to upgrade the weak reference. Returns [`None`] if no buffer exists for the path
+    /// or if the weak reference couldn't be upgraded (buffer was dropped).
+    pub fn get_buffer_by_path(&self, path: &PathBuf) -> Option<Entity<BufferItem>> {
+        let buffer_id = self.path_to_buffer.get(path)?;
+        self.get_buffer(*buffer_id)
     }
 
     /// Close a buffer.

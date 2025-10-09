@@ -13,7 +13,7 @@ use crate::{
     scroll::ScrollPosition,
     worktree::{Entry, Worktree},
 };
-use gpui::{AppContext, Context, Entity, EventEmitter, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Task};
 use nucleo_matcher::{Config, Matcher};
 use parking_lot::Mutex;
 use std::{collections::HashMap, num::NonZeroU64, path::PathBuf, sync::Arc};
@@ -91,8 +91,15 @@ pub struct Stoat {
     /// Active buffer item (legacy - being replaced by buffer_store)
     pub(crate) buffer_item: Entity<BufferItem>,
 
-    /// Buffer storage and management
+    /// Buffer storage and management (tracks with WeakEntity)
     pub(crate) buffer_store: Entity<BufferStore>,
+
+    /// Open buffer items (holds strong references following Zed's pattern)
+    ///
+    /// This vec holds strong `Entity<BufferItem>` references to keep buffers alive.
+    /// BufferStore tracks buffers weakly, so without these strong refs, buffers would
+    /// be immediately dropped. This matches Zed's Pane architecture at a simpler scale.
+    pub(crate) open_buffers: Vec<Entity<BufferItem>>,
 
     /// Currently active buffer ID
     pub(crate) active_buffer_id: Option<BufferId>,
@@ -162,11 +169,18 @@ impl Stoat {
         // Create buffer store
         let buffer_store = cx.new(|_| BufferStore::new());
 
-        // Create initial welcome buffer (legacy field - will be migrated)
+        // Create initial welcome buffer
         let buffer_id = BufferId::from(NonZeroU64::new(1).unwrap());
         let welcome_text = "Welcome to Stoat v4!\n\nPress 'i' to enter insert mode.\nType some text.\nPress Esc to return to normal mode.\n\nPress 'h', 'j', 'k', 'l' to move in normal mode.";
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, welcome_text));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
+
+        // Register buffer in BufferStore (weak ref) and store strong ref in open_buffers
+        buffer_store.update(cx, |store, _cx| {
+            store.register_buffer(buffer_id, &buffer_item, None);
+        });
+        let open_buffers = vec![buffer_item.clone()];
+        let active_buffer_id = Some(buffer_id);
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
@@ -188,7 +202,8 @@ impl Stoat {
         Self {
             buffer_item,
             buffer_store,
-            active_buffer_id: None,
+            open_buffers,
+            active_buffer_id,
             cursor: CursorManager::new(),
             scroll: ScrollPosition::new(),
             viewport_lines: None,
@@ -239,6 +254,7 @@ impl Stoat {
         Self {
             buffer_item: self.buffer_item.clone(),
             buffer_store: self.buffer_store.clone(),
+            open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
             cursor: self.cursor.clone(),
             scroll: self.scroll.clone(),
@@ -278,6 +294,18 @@ impl Stoat {
     /// Get buffer item entity (caller can access buffer via this)
     pub fn buffer_item(&self) -> &Entity<BufferItem> {
         &self.buffer_item
+    }
+
+    /// Get the currently active buffer item.
+    ///
+    /// Looks up the active buffer by `active_buffer_id` in BufferStore and upgrades
+    /// the weak reference. Returns `None` if no buffer is active or if the weak
+    /// reference couldn't be upgraded (buffer was dropped).
+    ///
+    /// This is the new way to access buffers - it will replace direct `buffer_item` access.
+    pub fn active_buffer_item(&self, cx: &App) -> Option<Entity<BufferItem>> {
+        let buffer_id = self.active_buffer_id?;
+        self.buffer_store.read(cx).get_buffer(buffer_id)
     }
 
     /// Get cursor position
@@ -385,54 +413,44 @@ impl Stoat {
 
         let path_buf = path.to_path_buf();
 
-        // Check if buffer already exists in BufferStore
-        let buffer_id = self.buffer_store.update(cx, |store, cx| {
-            if let Some(open_buffer) = store.get_buffer_by_path(&path_buf) {
-                // Buffer exists, update its content
-                let buffer_id = open_buffer
-                    .buffer_item
-                    .read(cx)
-                    .buffer()
-                    .read(cx)
-                    .remote_id();
-
-                open_buffer.buffer_item.update(cx, |item, cx| {
-                    item.buffer().update(cx, |buffer, _| {
-                        let len = buffer.len();
-                        buffer.edit([(0..len, contents.as_str())]);
-                    });
-                    let _ = item.reparse(cx);
-                });
-
-                buffer_id
-            } else {
-                // Create new buffer in BufferStore
-                let buffer_id = store.open_buffer(Some(path_buf.clone()), language, cx);
-
-                // Update the buffer content
-                if let Some(open_buffer) = store.get_buffer(buffer_id) {
-                    open_buffer.buffer_item.update(cx, |item, cx| {
-                        item.buffer().update(cx, |buffer, _| {
-                            let len = buffer.len();
-                            buffer.edit([(0..len, contents.as_str())]);
-                        });
-                        let _ = item.reparse(cx);
-                    });
+        // Check if buffer already exists in BufferStore, or create new one
+        let (buffer_id, buffer_item_entity) = self
+            .buffer_store
+            .update(cx, |store, cx| {
+                if let Some(buffer_item) = store.get_buffer_by_path(&path_buf) {
+                    // Buffer exists, get its ID and return it
+                    let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
+                    Some((buffer_id, buffer_item))
+                } else {
+                    // Create new buffer in BufferStore
+                    store.open_buffer(Some(path_buf.clone()), language, cx)
                 }
+            })
+            .ok_or_else(|| "Failed to create buffer".to_string())?;
 
-                buffer_id
-            }
+        // Update the buffer content
+        buffer_item_entity.update(cx, |item, cx| {
+            item.buffer().update(cx, |buffer, _| {
+                let len = buffer.len();
+                buffer.edit([(0..len, contents.as_str())]);
+            });
+            let _ = item.reparse(cx);
         });
+
+        // Store strong reference in open_buffers if not already present
+        if !self
+            .open_buffers
+            .iter()
+            .any(|item| item.read(cx).buffer().read(cx).remote_id() == buffer_id)
+        {
+            self.open_buffers.push(buffer_item_entity.clone());
+        }
 
         // Update legacy buffer_item to point to the buffer from BufferStore
-        self.buffer_store.update(cx, |store, cx| {
-            if let Some(open_buffer) = store.get_buffer(buffer_id) {
-                self.buffer_item = open_buffer.buffer_item.clone();
-            }
-        });
+        self.buffer_item = buffer_item_entity.clone();
 
         // Compute git diff
-        self.buffer_item.update(cx, |item, cx| {
+        buffer_item_entity.update(cx, |item, cx| {
             if let Ok(repo) = Repository::discover(path) {
                 if let Ok(head_content) = repo.head_content(path) {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
@@ -451,6 +469,9 @@ impl Stoat {
 
         // Update active_buffer_id
         self.active_buffer_id = Some(buffer_id);
+
+        // Update current file path for status bar
+        self.current_file_path = Some(path_buf);
 
         self.cursor.move_to(text::Point::new(0, 0));
         cx.notify();
