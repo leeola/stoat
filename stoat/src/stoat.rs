@@ -413,12 +413,14 @@ impl Stoat {
 
         const PADDING: f32 = 3.0;
 
-        if cursor_row < scroll_y {
-            let target_scroll_y = (cursor_row - viewport_lines + PADDING).max(0.0);
+        if cursor_row < scroll_y + PADDING {
+            // Scrolling up: position cursor PADDING lines from top
+            let target_scroll_y = (cursor_row - PADDING).max(0.0);
             self.scroll
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
-        } else if cursor_row >= last_visible_line {
-            let target_scroll_y = (cursor_row - PADDING).max(0.0);
+        } else if cursor_row >= last_visible_line - PADDING {
+            // Scrolling down: position cursor PADDING lines from bottom
+            let target_scroll_y = (cursor_row - viewport_lines + PADDING + 1.0).max(0.0);
             self.scroll
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }

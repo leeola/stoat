@@ -122,12 +122,21 @@ impl Element for EditorElement {
             ((bounds.size.height - self.style.padding * 2.0) / self.style.line_height).floor();
         let max_lines = visible_lines as u32;
 
-        // Set viewport lines on Stoat and get scroll position
+        // Set viewport lines on Stoat, update scroll animation, and get scroll position
         let stoat_entity = self.view.read(cx).stoat.clone();
-        let scroll_y = stoat_entity.update(cx, |stoat, _cx| {
+        let (scroll_y, is_animating) = stoat_entity.update(cx, |stoat, _cx| {
             stoat.set_viewport_lines(visible_lines);
-            stoat.scroll_position().y
+            stoat.update_scroll_animation();
+            (stoat.scroll_position().y, stoat.is_scroll_animating())
         });
+
+        // Request another frame if scroll animation is in progress
+        if is_animating {
+            let view = self.view.clone();
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |_, cx| cx.notify());
+            });
+        }
 
         // Calculate gutter width (for line numbers)
         let gutter_width = self.calculate_gutter_width(max_point.row + 1, window);
