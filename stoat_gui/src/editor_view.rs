@@ -1,9 +1,9 @@
 use crate::editor_element::EditorElement;
 use gpui::{
-    div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
 };
-use stoat::{actions::*, scroll, Stoat};
+use stoat::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -220,6 +220,20 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.move_to_line_end(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_page_up(&mut self, _: &PageUp, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.page_up(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_page_down(&mut self, _: &PageDown, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.page_down(cx);
         });
         cx.notify();
     }
@@ -568,6 +582,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_move_right))
             .on_action(cx.listener(Self::handle_move_to_line_start))
             .on_action(cx.listener(Self::handle_move_to_line_end))
+            .on_action(cx.listener(Self::handle_page_up))
+            .on_action(cx.listener(Self::handle_page_down))
             .on_action(cx.listener(Self::handle_enter_insert_mode))
             .on_action(cx.listener(Self::handle_enter_normal_mode))
             .on_action(cx.listener(Self::handle_enter_space_mode))
