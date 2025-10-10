@@ -106,12 +106,12 @@ action = "MoveToFileEnd"
 context = "Editor && mode == normal"
 
 [[bindings]]
-key = "ctrl-u"
+key = "ctrl-b"
 action = "PageUp"
 context = "Editor && mode == normal"
 
 [[bindings]]
-key = "ctrl-d"
+key = "ctrl-f"
 action = "PageDown"
 context = "Editor && mode == normal"
 
