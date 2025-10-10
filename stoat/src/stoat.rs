@@ -386,6 +386,11 @@ impl Stoat {
         self.modes.get(name)
     }
 
+    /// Get viewport height in lines
+    pub fn viewport_lines(&self) -> Option<f32> {
+        self.viewport_lines
+    }
+
     /// Set viewport height in lines
     pub fn set_viewport_lines(&mut self, lines: f32) {
         self.viewport_lines = Some(lines);

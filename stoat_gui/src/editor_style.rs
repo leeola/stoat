@@ -23,6 +23,14 @@ pub struct EditorStyle {
     pub diff_modified_color: Hsla,
     /// Color for deleted line indicators (red)
     pub diff_deleted_color: Hsla,
+    /// Whether to show the minimap
+    pub show_minimap: bool,
+    /// Color for the minimap viewport thumb
+    pub minimap_thumb_color: Hsla,
+    /// Border color for the minimap viewport thumb
+    pub minimap_thumb_border_color: Hsla,
+    /// Maximum width of minimap in columns
+    pub minimap_max_columns: f32,
 }
 
 impl Default for EditorStyle {
@@ -42,6 +50,20 @@ impl Default for EditorStyle {
             diff_added_color: rgb(0x4ec9b0).into(), // Green (VS Code green)
             diff_modified_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diff_deleted_color: rgb(0xf44747).into(), // Red (VS Code red)
+            show_minimap: true,
+            minimap_thumb_color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.15, // 15% opacity - subtle but visible
+            },
+            minimap_thumb_border_color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.25, // Slightly more opaque for visibility
+            },
+            minimap_max_columns: 120.0, // Reasonable max width
         }
     }
 }
