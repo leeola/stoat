@@ -160,9 +160,100 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_select_left(
+        &mut self,
+        _: &SelectLeft,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_left(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_right(
+        &mut self,
+        _: &SelectRight,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_right(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_up(&mut self, _: &SelectUp, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_up(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_down(
+        &mut self,
+        _: &SelectDown,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_down(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_to_line_start(
+        &mut self,
+        _: &SelectToLineStart,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_to_line_start(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_to_line_end(
+        &mut self,
+        _: &SelectToLineEnd,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_to_line_end(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_new_line(&mut self, _: &NewLine, _window: &mut Window, cx: &mut Context<'_, Self>) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.new_line(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_delete_line(
+        &mut self,
+        _: &DeleteLine,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_line(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_delete_to_end_of_line(
+        &mut self,
+        _: &DeleteToEndOfLine,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.delete_to_end_of_line(cx);
         });
         cx.notify();
     }
@@ -220,6 +311,54 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.move_to_line_end(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_move_word_left(
+        &mut self,
+        _: &MoveWordLeft,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_word_left(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_move_word_right(
+        &mut self,
+        _: &MoveWordRight,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_word_right(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_move_to_file_start(
+        &mut self,
+        _: &MoveToFileStart,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_to_file_start(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_move_to_file_end(
+        &mut self,
+        _: &MoveToFileEnd,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.move_to_file_end(cx);
         });
         cx.notify();
     }
@@ -575,13 +714,25 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_select_prev_symbol))
             .on_action(cx.listener(Self::handle_select_next_token))
             .on_action(cx.listener(Self::handle_select_prev_token))
+            .on_action(cx.listener(Self::handle_select_left))
+            .on_action(cx.listener(Self::handle_select_right))
+            .on_action(cx.listener(Self::handle_select_up))
+            .on_action(cx.listener(Self::handle_select_down))
+            .on_action(cx.listener(Self::handle_select_to_line_start))
+            .on_action(cx.listener(Self::handle_select_to_line_end))
             .on_action(cx.listener(Self::handle_new_line))
+            .on_action(cx.listener(Self::handle_delete_line))
+            .on_action(cx.listener(Self::handle_delete_to_end_of_line))
             .on_action(cx.listener(Self::handle_move_up))
             .on_action(cx.listener(Self::handle_move_down))
             .on_action(cx.listener(Self::handle_move_left))
             .on_action(cx.listener(Self::handle_move_right))
             .on_action(cx.listener(Self::handle_move_to_line_start))
             .on_action(cx.listener(Self::handle_move_to_line_end))
+            .on_action(cx.listener(Self::handle_move_word_left))
+            .on_action(cx.listener(Self::handle_move_word_right))
+            .on_action(cx.listener(Self::handle_move_to_file_start))
+            .on_action(cx.listener(Self::handle_move_to_file_end))
             .on_action(cx.listener(Self::handle_page_up))
             .on_action(cx.listener(Self::handle_page_down))
             .on_action(cx.listener(Self::handle_enter_insert_mode))
