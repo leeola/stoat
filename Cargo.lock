@@ -6544,6 +6544,7 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clock",
  "gpui",
  "parking_lot 0.12.4",
  "rustc-hash 2.1.1",

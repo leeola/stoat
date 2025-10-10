@@ -15,6 +15,7 @@ stoat_text = { path = "../text" }
 stoat_rope = { path = "../rope" }
 gpui = { workspace = true }
 text = { workspace = true }
+clock = { workspace = true }
 sum_tree = { workspace = true }
 anyhow = "1.0"
 tracing = "0.1"
