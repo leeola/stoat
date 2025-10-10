@@ -6,10 +6,10 @@
 //! Layout matches [`FileFinder`] with two panels: file list on left, diff preview on right.
 
 use gpui::{
-    div, point, prelude::FluentBuilder, px, rgb, rgba, App, Bounds, Element, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window,
+    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
+    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
+    Window, div, point, prelude::FluentBuilder, px, rgb, rgba,
 };
 use stoat::git_status::{DiffPreviewData, GitBranchInfo, GitStatusEntry};
 

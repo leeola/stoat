@@ -13,7 +13,7 @@ use crate::{
     scroll::ScrollPosition,
     worktree::{Entry, Worktree},
 };
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Task};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
 use nucleo_matcher::{Config, Matcher};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -156,6 +156,13 @@ pub struct Stoat {
 
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
+
+    /// Parent stoat when this is a minimap instance.
+    ///
+    /// When `Some`, this Stoat is acting as a minimap for the parent editor.
+    /// Following Zed's pattern, the minimap is just another Stoat instance with
+    /// tiny font and this parent reference to synchronize scroll and handle interactions.
+    pub(crate) parent_stoat: Option<WeakEntity<Stoat>>,
 }
 
 impl EventEmitter<StoatEvent> for Stoat {}
@@ -236,6 +243,7 @@ impl Stoat {
             git_dirty_count,
             current_file_path: None,
             worktree,
+            parent_stoat: None,
         }
     }
 
@@ -287,6 +295,7 @@ impl Stoat {
             git_dirty_count: self.git_dirty_count,
             current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
+            parent_stoat: None,
         }
     }
 
@@ -384,6 +393,21 @@ impl Stoat {
     /// for the given mode name, or `None` if the mode is not registered.
     pub fn get_mode(&self, name: &str) -> Option<&Mode> {
         self.modes.get(name)
+    }
+
+    /// Check if this is a minimap instance.
+    ///
+    /// Returns `true` if this Stoat is acting as a minimap for a parent editor.
+    /// Minimap instances render with tiny font and synchronize with the parent's scroll.
+    pub fn is_minimap(&self) -> bool {
+        self.parent_stoat.is_some()
+    }
+
+    /// Get the parent stoat if this is a minimap.
+    ///
+    /// Returns the parent editor entity if this is a minimap, or `None` for regular editors.
+    pub fn parent_stoat(&self) -> Option<&WeakEntity<Stoat>> {
+        self.parent_stoat.as_ref()
     }
 
     /// Get viewport height in lines
@@ -523,6 +547,67 @@ impl Stoat {
         cx.notify();
 
         Ok(())
+    }
+
+    /// Create a minimap instance for this editor.
+    ///
+    /// Following Zed's architecture, the minimap is just another [`Stoat`] instance
+    /// that shares the same buffer but renders with a tiny font. The minimap tracks
+    /// the parent editor via a weak reference for scroll synchronization.
+    ///
+    /// The GUI layer will apply minimap-specific styling (tiny font, bold weight).
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - GPUI context
+    ///
+    /// # Returns
+    ///
+    /// A new [`Stoat`] entity configured as a minimap
+    pub fn create_minimap(&self, cx: &mut Context<Self>) -> Entity<Self> {
+        // Get weak reference to parent (self)
+        let parent_weak = cx.weak_entity();
+
+        // Create minimap in a special mode
+        cx.new(|_cx| Self {
+                buffer_store: self.buffer_store.clone(),
+                open_buffers: self.open_buffers.clone(),
+                active_buffer_id: self.active_buffer_id,
+                cursor: CursorManager::new(), // New cursor for minimap
+                scroll: self.scroll.clone(),  // Clone scroll state (will be synced)
+                viewport_lines: None,         // Will be set by layout
+                mode: "minimap".into(),       // Special mode for minimap
+                modes: self.modes.clone(),
+                file_finder_input: None,
+                file_finder_files: Vec::new(),
+                file_finder_filtered: Vec::new(),
+                file_finder_selected: 0,
+                file_finder_previous_mode: None,
+                file_finder_preview: None,
+                file_finder_preview_task: None,
+                file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+                command_palette_input: None,
+                command_palette_commands: Vec::new(),
+                command_palette_filtered: Vec::new(),
+                command_palette_selected: 0,
+                command_palette_previous_mode: None,
+                buffer_finder_input: None,
+                buffer_finder_buffers: Vec::new(),
+                buffer_finder_filtered: Vec::new(),
+                buffer_finder_selected: 0,
+                buffer_finder_previous_mode: None,
+                git_status_files: Vec::new(),
+                git_status_selected: 0,
+                git_status_previous_mode: None,
+                git_status_preview: None,
+                git_status_preview_task: None,
+                git_status_branch_info: None,
+                git_dirty_count: 0,
+                current_file_path: None,
+                worktree: self.worktree.clone(),
+                parent_stoat: Some(parent_weak),
+            }
+        })
     }
 
     /// Create a Stoat instance for testing with an empty buffer.

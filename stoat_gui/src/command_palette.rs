@@ -5,8 +5,8 @@
 //! mode system.
 
 use gpui::{
-    div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
+    App, FontWeight, InteractiveElement, IntoElement, ParentElement, RenderOnce, ScrollHandle,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb, rgba,
 };
 use stoat::CommandInfo;
 

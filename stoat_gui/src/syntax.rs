@@ -251,7 +251,7 @@ impl SyntaxTheme {
     ///
     /// Based on the original Sublime Text Monokai theme
     pub fn monokai_dark() -> Self {
-        use gpui::{rgba, FontWeight};
+        use gpui::{FontWeight, rgba};
 
         let mut theme = Self::new();
 
@@ -551,7 +551,7 @@ impl SyntaxTheme {
     ///
     /// Uses the classic Monokai syntax colors with adjusted brightness for light backgrounds
     pub fn monokai_light() -> Self {
-        use gpui::{rgba, FontWeight};
+        use gpui::{FontWeight, rgba};
 
         let mut theme = Self::new();
 
