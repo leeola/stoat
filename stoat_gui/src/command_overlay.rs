@@ -1,5 +1,5 @@
 use crate::keybinding_hint::KeybindingHint;
-use gpui::{App, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
+use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Window};
 
 /// Overlay displaying available commands for the current editor mode.
 ///

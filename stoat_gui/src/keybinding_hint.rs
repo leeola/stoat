@@ -1,4 +1,4 @@
-use gpui::{App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
+use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window};
 
 /// A single keybinding hint showing a key combination and its description.
 ///

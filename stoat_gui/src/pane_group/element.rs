@@ -1,7 +1,7 @@
 use gpui::{
-    Along, AnyElement, App, Axis, Bounds, CursorStyle, Element, GlobalElementId, Hitbox,
-    HitboxBehavior, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, Size, Style, Window, px, relative, size,
+    px, relative, size, Along, AnyElement, App, Axis, Bounds, CursorStyle, Element,
+    GlobalElementId, Hitbox, HitboxBehavior, IntoElement, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Size, Style, Window,
 };
 use parking_lot::Mutex;
 use smallvec::SmallVec;

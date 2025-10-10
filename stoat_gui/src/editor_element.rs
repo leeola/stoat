@@ -10,9 +10,9 @@ use crate::{
     syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
 };
 use gpui::{
-    App, Bounds, Element, ElementId, Entity, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextRun, Window, point,
-    px, relative, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
+    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 
 pub struct EditorElement {
@@ -511,6 +511,246 @@ impl EditorElement {
             });
         }
     }
+
+    // ==== Minimap Methods (Following Zed's Implementation) ====
+
+    /// Calculate minimap width based on editor dimensions.
+    ///
+    /// Following Zed's formula: 15% of text width, constrained by min/max columns.
+    /// Returns `None` if minimap should be hidden.
+    fn get_minimap_width(
+        &self,
+        text_width: Pixels,
+        em_width: Pixels,
+        max_columns: f32,
+        cx: &App,
+    ) -> Option<Pixels> {
+        if !self.style.show_minimap {
+            return None;
+        }
+
+        // Get minimap entity
+        let minimap = self.view.read(cx).minimap()?;
+
+        // Minimap font size is tiny (2-3px)
+        let minimap_font_size = crate::minimap::MINIMAP_FONT_SIZE;
+        let editor_font_size = self.style.font_size.0;
+
+        // Scale em_width proportionally to font size ratio
+        let minimap_em_width = em_width * (minimap_font_size / editor_font_size);
+
+        // Width is 15% of text width, capped by max columns
+        let minimap_width =
+            (text_width * crate::minimap::MINIMAP_WIDTH_PCT).min(minimap_em_width * max_columns);
+
+        // Must be at least min columns wide
+        let min_width = minimap_em_width * crate::minimap::MINIMAP_MIN_WIDTH_COLUMNS;
+        (minimap_width >= min_width).then_some(minimap_width)
+    }
+
+    /// Calculate minimap scroll position based on editor scroll.
+    ///
+    /// Zed's proportional scroll algorithm - minimap scrolls to keep
+    /// the viewport indicator aligned with the visible editor region.
+    fn calculate_minimap_scroll(
+        total_lines: f64,
+        visible_editor_lines: f64,
+        visible_minimap_lines: f64,
+        editor_scroll_y: f64,
+    ) -> f64 {
+        let non_visible_lines = (total_lines - visible_editor_lines).max(0.0);
+
+        if non_visible_lines == 0.0 {
+            // Entire document fits in viewport
+            return 0.0;
+        }
+
+        // Calculate scroll percentage
+        let scroll_percentage = (editor_scroll_y / non_visible_lines).clamp(0.0, 1.0);
+
+        // Apply to minimap's scrollable range
+        scroll_percentage * (total_lines - visible_minimap_lines).max(0.0)
+    }
+
+    /// Calculate thumb bounds for viewport indicator.
+    ///
+    /// The thumb shows which portion of the file is visible in the main editor.
+    fn calculate_thumb_bounds(
+        minimap_bounds: Bounds<Pixels>,
+        total_lines: f64,
+        visible_editor_lines: f64,
+        editor_scroll_y: f64,
+    ) -> Option<Bounds<Pixels>> {
+        // No thumb if entire document is visible
+        if total_lines <= visible_editor_lines {
+            return None;
+        }
+
+        let minimap_height = minimap_bounds.size.height;
+
+        // Thumb height as proportion of minimap height
+        let thumb_height_ratio = (visible_editor_lines / total_lines).clamp(0.0, 1.0);
+        let thumb_height = minimap_height * thumb_height_ratio as f32;
+
+        // Thumb position based on scroll percentage
+        let max_scroll = (total_lines - visible_editor_lines).max(0.0);
+        let scroll_ratio = if max_scroll > 0.0 {
+            (editor_scroll_y / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let max_thumb_y = minimap_height - thumb_height;
+        let thumb_y = minimap_bounds.origin.y + (max_thumb_y * scroll_ratio as f32);
+
+        Some(Bounds {
+            origin: point(minimap_bounds.origin.x, thumb_y),
+            size: size(minimap_bounds.size.width, thumb_height),
+        })
+    }
+
+    /// Layout the minimap editor and calculate thumb bounds.
+    ///
+    /// Following Zed's approach: set scroll on minimap, create element, calculate thumb.
+    fn layout_minimap(
+        &self,
+        bounds: Bounds<Pixels>,
+        gutter_width: Pixels,
+        total_lines: u32,
+        visible_editor_lines: f32,
+        editor_scroll_y: f32,
+        em_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<MinimapLayout> {
+        // Calculate text width (editor width minus gutter)
+        let text_width = bounds.size.width - gutter_width - self.style.padding * 2.0;
+
+        // Calculate minimap width
+        let minimap_width =
+            self.get_minimap_width(text_width, em_width, self.style.minimap_max_columns, cx)?;
+
+        // Get minimap entity
+        let minimap_entity = self.view.read(cx).minimap()?.clone();
+
+        // Skip if this IS the minimap (prevent infinite recursion)
+        if minimap_entity.read(cx).is_minimap() {
+            return None;
+        }
+
+        // Calculate minimap bounds (top-right corner, full height)
+        let minimap_bounds = Bounds {
+            origin: point(
+                bounds.origin.x + bounds.size.width - minimap_width,
+                bounds.origin.y,
+            ),
+            size: size(minimap_width, bounds.size.height),
+        };
+
+        // Calculate minimap metrics
+        let minimap_line_height = px(crate::minimap::MINIMAP_LINE_HEIGHT);
+        let visible_minimap_lines =
+            (minimap_bounds.size.height / minimap_line_height).floor() as f64;
+
+        // Calculate minimap scroll using Zed's algorithm
+        let minimap_scroll_top = Self::calculate_minimap_scroll(
+            total_lines as f64,
+            visible_editor_lines as f64,
+            visible_minimap_lines,
+            editor_scroll_y as f64,
+        );
+
+        // Set scroll position on minimap Stoat
+        minimap_entity.update(cx, |minimap_stoat, _cx| {
+            minimap_stoat.scroll.position = point(0.0, minimap_scroll_top as f32);
+            minimap_stoat.set_viewport_lines(visible_minimap_lines as f32);
+        });
+
+        // Calculate thumb bounds
+        let thumb_bounds = Self::calculate_thumb_bounds(
+            minimap_bounds,
+            total_lines as f64,
+            visible_editor_lines as f64,
+            editor_scroll_y as f64,
+        );
+
+        // Create minimap element (EditorElement rendering the minimap Stoat)
+        // We'll render it in paint_minimap
+        let minimap_element = gpui::div()
+            .size_full()
+            .child(EditorElement::new(self.view.clone())) // FIXME: Should be minimap view
+            .into_any_element();
+
+        Some(MinimapLayout {
+            minimap_element,
+            minimap_bounds,
+            thumb_bounds,
+            minimap_line_height,
+            minimap_scroll_top,
+        })
+    }
+
+    /// Paint the minimap and viewport thumb overlay.
+    fn paint_minimap(&mut self, minimap_layout: MinimapLayout, window: &mut Window, cx: &mut App) {
+        // Paint minimap background
+        window.paint_quad(gpui::PaintQuad {
+            bounds: minimap_layout.minimap_bounds,
+            corner_radii: 0.0.into(),
+            background: (self.style.background * 0.7).into(), // Slightly dimmed
+            border_color: gpui::transparent_black(),
+            border_widths: 0.0.into(),
+            border_style: gpui::BorderStyle::default(),
+        });
+
+        // FIXME: Need to actually render the minimap Stoat here
+        // For now, just paint the thumb overlay
+
+        // Paint viewport thumb overlay
+        if let Some(thumb_bounds) = minimap_layout.thumb_bounds {
+            // Paint thumb fill
+            window.paint_quad(gpui::PaintQuad {
+                bounds: thumb_bounds,
+                corner_radii: 0.0.into(),
+                background: self.style.minimap_thumb_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
+
+            // Paint thumb border (left edge)
+            let border_width = px(1.0);
+            let border_bounds = Bounds {
+                origin: thumb_bounds.origin,
+                size: size(border_width, thumb_bounds.size.height),
+            };
+
+            window.paint_quad(gpui::PaintQuad {
+                bounds: border_bounds,
+                corner_radii: 0.0.into(),
+                background: self.style.minimap_thumb_border_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
+        }
+    }
+}
+
+/// Layout information for the minimap.
+///
+/// Contains the laid-out minimap element, bounds, and thumb overlay position.
+/// Following Zed's architecture - minimap is just another EditorElement with tiny font.
+struct MinimapLayout {
+    /// The minimap editor element (laid out and ready to paint)
+    minimap_element: gpui::AnyElement,
+    /// Bounds of the minimap region
+    minimap_bounds: Bounds<Pixels>,
+    /// Bounds of the viewport thumb overlay (None if entire file visible)
+    thumb_bounds: Option<Bounds<Pixels>>,
+    /// Line height for minimap text rendering
+    minimap_line_height: Pixels,
+    /// Scroll position for the minimap (in lines)
+    minimap_scroll_top: f64,
 }
 
 impl IntoElement for EditorElement {

@@ -15,7 +15,7 @@
 //! Performance is optimized through aggressive caching - colored blocks are
 //! pre-computed and cached, then reused across frames during scroll animations.
 
-use gpui::{Bounds, Pixels, point};
+use gpui::{point, Bounds, Pixels};
 
 /// Font size for minimap text rendering (matches Zed)
 pub const MINIMAP_FONT_SIZE: f32 = 2.0;

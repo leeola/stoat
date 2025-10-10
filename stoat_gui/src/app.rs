@@ -1,5 +1,5 @@
 use crate::{editor_view::EditorView, pane_group::PaneGroupView};
-use gpui::{App, Application, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 use std::rc::Rc;
 use stoat::Stoat;
 
