@@ -23,6 +23,12 @@ pub struct BufferListEntry {
     pub buffer_id: BufferId,
     /// Optional file path (None for unnamed/scratch buffers)
     pub path: Option<PathBuf>,
+    /// Whether this is the active buffer in the current pane
+    pub is_active: bool,
+    /// Whether this buffer is visible in any pane
+    pub is_visible: bool,
+    /// Whether this buffer has unsaved modifications
+    pub is_modified: bool,
 }
 
 /// Open buffer state.
@@ -237,13 +243,24 @@ impl BufferStore {
     /// get display name "[Untitled]". Only includes buffers whose weak references
     /// can be upgraded (alive buffers).
     ///
-    /// Used by buffer finder to show all open buffers.
-    pub fn buffer_list(&self) -> Vec<BufferListEntry> {
+    /// # Arguments
+    ///
+    /// * `active_id` - The currently active buffer ID (in the current pane)
+    /// * `visible_ids` - Buffer IDs visible in any pane
+    /// * `cx` - App context for reading buffer modification state
+    ///
+    /// Used by buffer finder to show all open buffers with status flags.
+    pub fn buffer_list(
+        &self,
+        active_id: Option<BufferId>,
+        visible_ids: &[BufferId],
+        cx: &gpui::App,
+    ) -> Vec<BufferListEntry> {
         self.buffers
             .iter()
             .filter_map(|(buffer_id, open_buffer)| {
                 // Only include buffers that are still alive (can upgrade weak ref)
-                open_buffer.buffer_item.upgrade()?;
+                let buffer_item = open_buffer.buffer_item.upgrade()?;
 
                 let (display_name, path) = if let Some(path) = &open_buffer.path {
                     (path.display().to_string(), Some(path.clone()))
@@ -251,10 +268,17 @@ impl BufferStore {
                     ("[Untitled]".to_string(), None)
                 };
 
+                let is_active = active_id == Some(*buffer_id);
+                let is_visible = visible_ids.contains(buffer_id);
+                let is_modified = buffer_item.read(cx).is_modified(cx);
+
                 Some(BufferListEntry {
                     display_name,
                     buffer_id: *buffer_id,
                     path,
+                    is_active,
+                    is_visible,
+                    is_modified,
                 })
             })
             .collect()

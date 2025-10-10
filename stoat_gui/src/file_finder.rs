@@ -5,10 +5,10 @@
 
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
-    App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce,
-    ScrollHandle, ShapedLine, SharedString, StatefulInteractiveElement, Style, Styled, TextRun,
-    Window, div, point, prelude::FluentBuilder, px, relative, rgb, rgba,
+    div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
+    FontStyle, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
+    StatefulInteractiveElement, Style, Styled, TextRun, Window,
 };
 use std::{path::PathBuf, sync::OnceLock};
 use stoat::PreviewData;
@@ -58,6 +58,11 @@ impl Finder {
     }
 
     /// Create a new buffer finder renderer with the given state.
+    ///
+    /// Formats each buffer entry with status flags in Helix style:
+    /// - `*` for active buffer
+    /// - `o` for visible buffer (not active)
+    /// - `+` for modified buffer
     pub fn new_buffer_finder(
         query: String,
         buffers: Vec<stoat::BufferListEntry>,
@@ -66,7 +71,20 @@ impl Finder {
     ) -> Self {
         let items = buffers
             .iter()
-            .map(|entry| entry.display_name.clone())
+            .map(|entry| {
+                // Build flags string: active (*), visible (o), modified (+)
+                let mut flags = String::with_capacity(3);
+                flags.push(if entry.is_active { '*' } else { ' ' });
+                flags.push(if entry.is_visible && !entry.is_active {
+                    'o'
+                } else {
+                    ' '
+                });
+                flags.push(if entry.is_modified { '+' } else { ' ' });
+
+                // Combine flags and name with separator
+                format!("{}  {}", flags, entry.display_name)
+            })
             .collect();
 
         Self {
@@ -100,7 +118,26 @@ impl Finder {
             })
     }
 
+    /// Render column header for buffer finder.
+    ///
+    /// Shows column labels explaining the flags:
+    /// - First column: status flags (*=active, o=visible, +=modified)
+    /// - Second column: buffer name
+    fn render_buffer_header(&self) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(3.0))
+            .border_b_1()
+            .border_color(rgb(0x3e3e42))
+            .bg(rgb(0x2a2a2a))
+            .text_color(rgb(0x888888))
+            .text_size(px(10.0))
+            .child("*o+  Name")
+    }
+
     /// Render the list of filtered items (files or buffers).
+    ///
+    /// For buffer mode, includes a header row with column labels.
     fn render_item_list(&self) -> impl IntoElement {
         let items = &self.items;
         let selected = self.selected;
@@ -112,6 +149,9 @@ impl Finder {
             .flex_1()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
+            .when(self.mode == FinderMode::Buffers, |div| {
+                div.child(self.render_buffer_header())
+            })
             .children(items.iter().enumerate().map(|(i, display_name)| {
                 // Strip "./" prefix from file paths for cleaner display
                 let display_text = display_name.strip_prefix("./").unwrap_or(display_name);

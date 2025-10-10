@@ -1,9 +1,9 @@
 use crate::editor_element::EditorElement;
 use gpui::{
-    div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
 };
-use stoat::{actions::*, scroll, Stoat};
+use stoat::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -490,9 +490,14 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Handle direct keyboard input in insert, file_finder, and command_palette modes
+        // Handle direct keyboard input in insert, file_finder, buffer_finder, and command_palette
+        // modes
         let mode = self.stoat.read(cx).mode().to_string();
-        if mode == "insert" || mode == "file_finder" || mode == "command_palette" {
+        if mode == "insert"
+            || mode == "file_finder"
+            || mode == "buffer_finder"
+            || mode == "command_palette"
+        {
             if let Some(key_char) = &event.keystroke.key_char {
                 self.stoat.update(cx, |stoat, cx| {
                     stoat.insert_text(key_char, cx);

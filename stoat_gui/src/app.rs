@@ -1,7 +1,5 @@
 use crate::{editor_view::EditorView, pane_group::PaneGroupView};
-use gpui::{
-    prelude::*, px, size, App, Application, Bounds, Focusable, WindowBounds, WindowOptions,
-};
+use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 use std::rc::Rc;
 use stoat::Stoat;
 
@@ -60,7 +58,8 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
                     cx.new(|cx| PaneGroupView::new(editor_view.clone(), keymap.clone(), cx));
 
                 // Focus the initial editor so input works immediately
-                window.focus(&editor_view.read(cx).focus_handle(cx));
+                // This must happen after PaneGroupView is created so the focus chain is established
+                pane_group_view.read(cx).focus_active_editor(window, cx);
 
                 pane_group_view
             },

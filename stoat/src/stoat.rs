@@ -341,6 +341,13 @@ impl Stoat {
         }
     }
 
+    /// Get the currently active buffer ID.
+    ///
+    /// Returns the [`BufferId`] of the active buffer, or `None` if no buffer is active.
+    pub fn active_buffer_id(&self) -> Option<BufferId> {
+        self.active_buffer_id
+    }
+
     /// Get cursor position
     pub fn cursor_position(&self) -> Point {
         self.cursor.position()
@@ -468,6 +475,8 @@ impl Stoat {
                 buffer.edit([(0..len, contents.as_str())]);
             });
             let _ = item.reparse(cx);
+            // Set saved text baseline for modification tracking
+            item.set_saved_text(contents.clone());
         });
 
         // Store strong reference in open_buffers if not already present

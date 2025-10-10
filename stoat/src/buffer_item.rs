@@ -30,6 +30,9 @@ pub struct BufferItem {
 
     /// Git diff state (None if not in git repo or diff disabled)
     diff: Option<BufferDiff>,
+
+    /// Saved text content for modification tracking (None for unnamed buffers never saved)
+    saved_text: Option<String>,
 }
 
 impl BufferItem {
@@ -47,6 +50,7 @@ impl BufferItem {
             parser,
             language,
             diff: None,
+            saved_text: None,
         }
     }
 
@@ -115,5 +119,27 @@ impl BufferItem {
     /// Pass [`None`] to clear the diff state.
     pub fn set_diff(&mut self, diff: Option<BufferDiff>) {
         self.diff = diff;
+    }
+
+    /// Check if the buffer has unsaved modifications.
+    ///
+    /// Compares current buffer text with saved baseline. Returns `true` if the buffer
+    /// has been modified since last save, `false` otherwise. Always returns `false`
+    /// if no saved text baseline exists (unnamed buffers).
+    pub fn is_modified(&self, cx: &App) -> bool {
+        if let Some(saved) = &self.saved_text {
+            let current = self.buffer.read(cx).text();
+            current != *saved
+        } else {
+            false
+        }
+    }
+
+    /// Set the saved text baseline for modification tracking.
+    ///
+    /// Call this after saving a file or loading file content to establish
+    /// the baseline for detecting modifications.
+    pub fn set_saved_text(&mut self, text: String) {
+        self.saved_text = Some(text);
     }
 }

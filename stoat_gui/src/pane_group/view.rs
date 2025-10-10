@@ -70,6 +70,17 @@ impl PaneGroupView {
         self.pane_editors.get(&self.active_pane)
     }
 
+    /// Focus the currently active editor.
+    ///
+    /// This should be called after creating the [`PaneGroupView`] to establish the initial
+    /// focus, ensuring keyboard input is routed to the active editor. Used by [`run_with_paths`]
+    /// during app initialization.
+    pub fn focus_active_editor(&self, window: &mut Window, cx: &App) {
+        if let Some(editor) = self.active_editor() {
+            window.focus(&editor.read(cx).focus_handle(cx));
+        }
+    }
+
     /// Exit Pane mode if currently in it, returning to Normal mode.
     ///
     /// This is called after pane commands execute to make Pane mode a one-shot mode.
@@ -131,11 +142,18 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // Collect buffer IDs visible in all panes
+        let visible_buffer_ids: Vec<text::BufferId> = self
+            .pane_editors
+            .values()
+            .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id())
+            .collect();
+
         // Open buffer finder in the active editor's Stoat instance
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_buffer_finder(cx);
+                    stoat.open_buffer_finder(&visible_buffer_ids, cx);
                 });
             });
             cx.notify();

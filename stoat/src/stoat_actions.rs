@@ -2411,7 +2411,12 @@ impl Stoat {
     /// Open buffer finder modal.
     ///
     /// Initializes buffer list with currently open buffers and creates input buffer for searching.
-    pub fn open_buffer_finder(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// # Arguments
+    ///
+    /// * `visible_buffer_ids` - Buffer IDs visible in any pane (for visibility flag)
+    /// * `cx` - Context for creating entities and reading state
+    pub fn open_buffer_finder(&mut self, visible_buffer_ids: &[BufferId], cx: &mut Context<Self>) {
         debug!("Opening buffer finder");
 
         // Save current mode
@@ -2423,8 +2428,11 @@ impl Stoat {
         let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         self.buffer_finder_input = Some(input_buffer);
 
-        // Get all open buffers from BufferStore
-        let buffers = self.buffer_store.read(cx).buffer_list();
+        // Get all open buffers from BufferStore with status flags
+        let buffers =
+            self.buffer_store
+                .read(cx)
+                .buffer_list(self.active_buffer_id, visible_buffer_ids, cx);
 
         debug!(
             buffer_count = buffers.len(),
