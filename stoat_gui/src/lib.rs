@@ -11,6 +11,7 @@ pub mod gutter;
 pub mod keybinding_hint;
 pub mod keymap_query;
 pub mod minimap;
+pub mod minimap_view;
 pub mod pane_group;
 pub mod status_bar;
 pub mod syntax;

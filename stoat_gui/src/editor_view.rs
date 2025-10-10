@@ -1,7 +1,7 @@
-use crate::editor_element::EditorElement;
+use crate::{editor_element::EditorElement, minimap_view::MinimapView};
 use gpui::{
-    div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    div, point, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
 use stoat::{actions::*, scroll, Stoat};
 
@@ -9,16 +9,19 @@ pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
+    minimap: Entity<MinimapView>,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let minimap = cx.new(|cx| MinimapView::new(stoat.clone(), cx));
 
         Self {
             stoat,
             focus_handle,
             this: None,
+            minimap,
         }
     }
 
@@ -28,6 +31,10 @@ impl EditorView {
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    pub fn minimap(&self) -> &Entity<MinimapView> {
+        &self.minimap
     }
 
     // ==== Action handlers ====
@@ -778,7 +785,18 @@ impl Render for EditorView {
                     cx.notify();
                 },
             ))
+            .relative() // Enable absolute positioning for children
             .size_full()
             .child(EditorElement::new(view_entity))
+            .child(
+                // Minimap overlay - absolutely positioned on the right
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(gpui::px(150.0)) // Fixed width for now
+                    .child(self.minimap.clone()),
+            )
     }
 }

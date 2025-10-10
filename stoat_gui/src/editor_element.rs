@@ -7,7 +7,6 @@ use crate::{
     editor_style::EditorStyle,
     editor_view::EditorView,
     gutter::GutterLayout,
-    minimap::{CachedQuad, MAX_MINIMAP_LINES, MINIMAP_LINE_HEIGHT, MinimapCache, MinimapLayout},
     syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
 };
 use gpui::{
@@ -39,7 +38,7 @@ impl EditorElement {
 
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = MinimapCache;
+    type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -68,13 +67,12 @@ impl Element for EditorElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
+        _window: &mut Window,
+        _cx: &mut App,
     ) -> Self::PrepaintState {
-        // Build minimap cache during prepaint for optimal performance
-        self.build_minimap_cache(bounds, window, cx)
+        ()
     }
 
     fn paint(
@@ -250,9 +248,6 @@ impl Element for EditorElement {
 
         // Paint cursor on top of text
         self.paint_cursor(bounds, &line_positions, gutter_width, window, cx);
-
-        // Paint minimap on right side using cached colored quads
-        self.paint_minimap(bounds, _prepaint, window, cx);
     }
 }
 
@@ -514,256 +509,6 @@ impl EditorElement {
                 border_widths: 0.0.into(),
                 border_style: gpui::BorderStyle::default(),
             });
-        }
-    }
-
-    /// Paint the minimap using cached colored quads (VS Code style).
-    ///
-    /// This is dramatically faster than text rendering - we just paint pre-computed
-    /// colored rectangles from the cache. No text shaping, no font rendering!
-    ///
-    /// Performance: ~0.1-0.3ms per frame (vs 3-5ms with text rendering).
-    fn paint_minimap(
-        &self,
-        bounds: Bounds<Pixels>,
-        cache: &MinimapCache,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if !self.style.show_minimap {
-            return;
-        }
-
-        // Get buffer for calculating thumb bounds
-        let (total_lines, scroll_y, visible_editor_lines) = {
-            let stoat = self.view.read(cx).stoat.read(cx);
-            let buffer_item = stoat.active_buffer(cx);
-            let buffer = buffer_item.read(cx).buffer().read(cx);
-            let max_point = buffer.snapshot().max_point();
-            let total_lines = (max_point.row + 1) as f64;
-            let scroll_y = stoat.scroll_position().y as f64;
-            let visible_editor_lines = stoat.viewport_lines().unwrap_or(1.0) as f64;
-            (total_lines, scroll_y, visible_editor_lines)
-        };
-
-        // Calculate minimap dimensions
-        let em_width = px(8.0);
-        let minimap_width = MinimapLayout::calculate_minimap_width(
-            bounds.size.width,
-            em_width,
-            self.style.minimap_max_columns,
-        );
-
-        let minimap_bounds = Bounds {
-            origin: point(
-                bounds.origin.x + bounds.size.width - minimap_width,
-                bounds.origin.y,
-            ),
-            size: size(minimap_width, bounds.size.height),
-        };
-
-        // Paint minimap background
-        window.paint_quad(gpui::PaintQuad {
-            bounds: minimap_bounds,
-            corner_radii: 0.0.into(),
-            background: self.style.background.into(),
-            border_color: gpui::transparent_black(),
-            border_widths: 0.0.into(),
-            border_style: gpui::BorderStyle::default(),
-        });
-
-        // Paint all cached colored quads (super fast!)
-        for quad in &cache.cached_quads {
-            window.paint_quad(gpui::PaintQuad {
-                bounds: quad.bounds,
-                corner_radii: 0.0.into(),
-                background: quad.color.into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-        }
-
-        // Paint viewport thumb overlay
-        if let Some(thumb_bounds) = MinimapLayout::calculate_thumb_bounds(
-            minimap_bounds,
-            total_lines,
-            visible_editor_lines,
-            scroll_y,
-        ) {
-            // Paint thumb fill
-            window.paint_quad(gpui::PaintQuad {
-                bounds: thumb_bounds,
-                corner_radii: 0.0.into(),
-                background: self.style.minimap_thumb_color.into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-
-            // Paint thumb border (left edge for visual definition)
-            let border_width = px(1.0);
-            let border_bounds = Bounds {
-                origin: thumb_bounds.origin,
-                size: size(border_width, thumb_bounds.size.height),
-            };
-
-            window.paint_quad(gpui::PaintQuad {
-                bounds: border_bounds,
-                corner_radii: 0.0.into(),
-                background: self.style.minimap_thumb_border_color.into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-        }
-    }
-
-    /// Build cached minimap colored quads for blazing-fast rendering.
-    ///
-    /// VS Code-style approach: instead of rendering text, we create colored rectangles
-    /// that represent syntax chunks. These are cached and reused across frames during
-    /// scroll animations, avoiding expensive text shaping entirely.
-    fn build_minimap_cache(
-        &self,
-        bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> MinimapCache {
-        if !self.style.show_minimap {
-            return MinimapCache::default();
-        }
-
-        // Get buffer and token snapshots
-        let (buffer_snapshot, token_snapshot, buffer_version, token_version) = {
-            let stoat = self.view.read(cx).stoat.read(cx);
-            let buffer_item = stoat.active_buffer(cx);
-            let buffer = buffer_item.read(cx).buffer();
-            let buffer_snapshot = buffer.read(cx).snapshot();
-            let token_snapshot = buffer_item.read(cx).token_snapshot();
-            let buffer_version = buffer.read(cx).version();
-            let token_version = token_snapshot.version.clone();
-            (
-                buffer_snapshot,
-                token_snapshot,
-                buffer_version,
-                token_version,
-            )
-        };
-
-        let max_point = buffer_snapshot.max_point();
-        let total_lines = (max_point.row + 1) as f64;
-
-        // Get editor state
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let scroll_y = stoat.scroll_position().y as f64;
-        let visible_editor_lines = stoat.viewport_lines().unwrap_or(1.0) as f64;
-
-        // Calculate minimap dimensions
-        let em_width = px(8.0);
-        let minimap_width = MinimapLayout::calculate_minimap_width(
-            bounds.size.width,
-            em_width,
-            self.style.minimap_max_columns,
-        );
-
-        let minimap_bounds = Bounds {
-            origin: point(
-                bounds.origin.x + bounds.size.width - minimap_width,
-                bounds.origin.y,
-            ),
-            size: size(minimap_width, bounds.size.height),
-        };
-
-        let minimap_line_height = px(MINIMAP_LINE_HEIGHT);
-        let visible_minimap_lines = ((minimap_bounds.size.height / minimap_line_height) as f64)
-            .min(MAX_MINIMAP_LINES as f64);
-
-        let minimap_scroll_y = MinimapLayout::calculate_minimap_scroll(
-            total_lines,
-            visible_editor_lines,
-            visible_minimap_lines,
-            scroll_y,
-        );
-
-        // Build colored quads for all visible lines
-        let mut cached_quads = Vec::new();
-        let start_line = minimap_scroll_y.floor() as u32;
-        let end_line = ((minimap_scroll_y + visible_minimap_lines as f32).ceil() as u32)
-            .min(max_point.row + 1);
-
-        let mut y = minimap_bounds.origin.y;
-
-        for line_idx in start_line..end_line {
-            let line_start = buffer_snapshot.point_to_offset(text::Point::new(line_idx, 0));
-            let line_end_row = if line_idx == max_point.row {
-                buffer_snapshot.len()
-            } else {
-                buffer_snapshot.point_to_offset(text::Point::new(line_idx + 1, 0))
-            };
-
-            // Get highlighted chunks for this line
-            let chunks = HighlightedChunks::new(
-                line_start..line_end_row,
-                &buffer_snapshot,
-                &token_snapshot,
-                &self.highlight_map,
-            );
-
-            let mut x = minimap_bounds.origin.x + px(2.0);
-
-            // Convert each syntax chunk into a colored quad
-            for chunk in chunks {
-                let text = chunk.text;
-                if text.is_empty() || text == "\n" {
-                    continue;
-                }
-
-                // Get syntax color
-                let color = if let Some(highlight_id) = chunk.highlight_id {
-                    self.syntax_theme
-                        .highlights
-                        .get(highlight_id.0 as usize)
-                        .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
-                        .unwrap_or(self.style.text_color)
-                } else {
-                    self.style.text_color
-                };
-
-                // Calculate quad width: ~0.5px per character (dense blocks)
-                let text_len = text.trim_end_matches('\n').len();
-                if text_len == 0 {
-                    continue;
-                }
-                let quad_width = px(text_len as f32 * 0.5);
-
-                // Create colored quad
-                let quad_bounds = Bounds {
-                    origin: point(x, y),
-                    size: size(quad_width, minimap_line_height),
-                };
-
-                cached_quads.push(CachedQuad {
-                    bounds: quad_bounds,
-                    color,
-                });
-
-                x += quad_width;
-            }
-
-            y += minimap_line_height;
-
-            if y > minimap_bounds.origin.y + minimap_bounds.size.height {
-                break;
-            }
-        }
-
-        MinimapCache {
-            cached_quads,
-            buffer_version: Some(buffer_version),
-            token_version: Some(token_version),
-            cached_bounds: Some(minimap_bounds),
-            cached_scroll_y: Some(minimap_scroll_y),
         }
     }
 }

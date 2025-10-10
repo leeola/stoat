@@ -1,6 +1,7 @@
 use gpui::{px, rgb, Hsla, Pixels};
 
 /// Style configuration for the editor
+#[derive(Clone)]
 pub struct EditorStyle {
     pub text_color: Hsla,
     pub background: Hsla,
@@ -50,7 +51,8 @@ impl Default for EditorStyle {
             diff_added_color: rgb(0x4ec9b0).into(), // Green (VS Code green)
             diff_modified_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diff_deleted_color: rgb(0xf44747).into(), // Red (VS Code red)
-            show_minimap: true,
+            show_minimap: true,                     /* Enabled: Now using persistent MinimapView
+                                                     * entity */
             minimap_thumb_color: Hsla {
                 h: 0.0,
                 s: 0.0,

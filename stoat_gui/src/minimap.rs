@@ -15,8 +15,7 @@
 //! Performance is optimized through aggressive caching - colored blocks are
 //! pre-computed and cached, then reused across frames during scroll animations.
 
-use clock::Global;
-use gpui::{point, Bounds, Hsla, Pixels};
+use gpui::{point, Bounds, Pixels};
 
 /// Font size for minimap text rendering (matches Zed)
 pub const MINIMAP_FONT_SIZE: f32 = 2.0;
@@ -35,6 +34,18 @@ pub const MINIMAP_MIN_WIDTH_COLUMNS: f32 = 20.0;
 /// This caps the number of lines rendered even on very tall displays,
 /// preventing performance issues when rendering hundreds of tiny lines.
 pub const MAX_MINIMAP_LINES: f32 = 200.0;
+
+/// A single pre-shaped minimap line ready to paint.
+///
+/// Stores the shaped text for a line so we can avoid expensive text shaping
+/// operations during scroll. Text shaping only happens when buffer content changes.
+#[derive(Clone)]
+pub struct CachedLine {
+    /// Line index in the buffer
+    pub line_idx: u32,
+    /// Pre-shaped text layout from GPUI
+    pub shaped: gpui::ShapedLine,
+}
 
 /// Layout information for rendering the minimap.
 ///
@@ -174,60 +185,6 @@ impl MinimapLayout {
 
         // Apply constraints
         width_from_pct.max(min_width).min(max_width)
-    }
-}
-
-/// Cache for minimap colored blocks to eliminate all computation during scroll.
-///
-/// VS Code-style minimaps use colored rectangles instead of text, which is much
-/// faster to render. By caching these rectangles, we avoid even building the
-/// block list every frame - we just paint pre-computed quads.
-///
-/// The cache is invalidated only when:
-/// - Buffer content changes (edits)
-/// - Syntax highlighting updates
-/// - Minimap bounds change (window resize)
-/// - Minimap scroll position changes significantly
-///
-/// During scroll animation, the cache remains valid and we simply paint the
-/// same cached quads at blazing speed (~0.1-0.3ms per frame).
-#[derive(Default, Clone)]
-pub struct MinimapCache {
-    /// Pre-computed colored quads (rectangles) ready to paint
-    pub cached_quads: Vec<CachedQuad>,
-    /// Buffer version when cache was built
-    pub buffer_version: Option<Global>,
-    /// Token version when cache was built
-    pub token_version: Option<Global>,
-    /// Minimap bounds when cache was built
-    pub cached_bounds: Option<Bounds<Pixels>>,
-    /// Minimap scroll position when cache was built
-    pub cached_scroll_y: Option<f32>,
-}
-
-/// A single colored rectangle representing a syntax chunk in the minimap
-#[derive(Clone)]
-pub struct CachedQuad {
-    /// Bounds of the colored rectangle
-    pub bounds: Bounds<Pixels>,
-    /// Color from syntax highlighting
-    pub color: Hsla,
-}
-
-impl MinimapCache {
-    /// Check if the cache is still valid for the given parameters
-    pub fn is_valid(
-        &self,
-        buffer_version: &Global,
-        token_version: &Global,
-        bounds: Bounds<Pixels>,
-        scroll_y: f32,
-    ) -> bool {
-        self.buffer_version.as_ref() == Some(buffer_version)
-            && self.token_version.as_ref() == Some(token_version)
-            && self.cached_bounds == Some(bounds)
-            && self.cached_scroll_y == Some(scroll_y)
-            && !self.cached_quads.is_empty()
     }
 }
 
