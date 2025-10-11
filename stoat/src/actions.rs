@@ -203,6 +203,15 @@ actions!(
     ]
 );
 
+// View actions
+actions!(
+    stoat,
+    [
+        /// Toggle minimap visibility
+        ToggleMinimap,
+    ]
+);
+
 // Scroll actions - Scroll has data so defined below with #[derive(Action)]
 
 /// Insert text action data
@@ -596,6 +605,14 @@ action_metadata!(
 // Application actions
 action_metadata!(QuitApp, "quit", "Quit the application", ["q", "quit"]);
 
+// View actions
+action_metadata!(
+    ToggleMinimap,
+    "toggle minimap",
+    "Show or hide the minimap view",
+    ["minimap"]
+);
+
 // Static maps for looking up action metadata by TypeId
 
 /// Map from TypeId to action name
@@ -784,6 +801,9 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // Application actions
     names.insert(TypeId::of::<QuitApp>(), QuitApp::action_name());
+
+    // View actions
+    names.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::action_name());
 
     names
 });
@@ -975,6 +995,9 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     // Application actions
     descriptions.insert(TypeId::of::<QuitApp>(), QuitApp::description());
 
+    // View actions
+    descriptions.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::description());
+
     descriptions
 });
 
@@ -1157,6 +1180,9 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     // Application actions
     help.insert(TypeId::of::<QuitApp>(), QuitApp::help_text());
 
+    // View actions
+    help.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::help_text());
+
     help
 });
 
@@ -1171,6 +1197,9 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 
     // Application actions
     aliases.insert(TypeId::of::<QuitApp>(), QuitApp::aliases());
+
+    // View actions
+    aliases.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::aliases());
 
     // Add more aliases here as needed
 

@@ -152,6 +152,10 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<GitStatusSelect>() {
         window.dispatch_action(Box::new(GitStatusSelect), cx);
     }
+    // View actions
+    else if type_id == TypeId::of::<ToggleMinimap>() {
+        window.dispatch_action(Box::new(ToggleMinimap), cx);
+    }
     // Application actions
     else if type_id == TypeId::of::<QuitApp>() {
         window.dispatch_action(Box::new(QuitApp), cx);

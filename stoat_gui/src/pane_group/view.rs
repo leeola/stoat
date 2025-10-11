@@ -18,7 +18,7 @@ use stoat::{
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
         OpenCommandPalette, OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight,
-        SplitUp,
+        SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -71,6 +71,8 @@ pub struct PaneGroupView {
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
     minimap_view: Entity<EditorView>,
+    /// Whether the minimap is currently visible
+    minimap_visible: bool,
 }
 
 impl PaneGroupView {
@@ -141,6 +143,7 @@ impl PaneGroupView {
             git_status_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
+            minimap_visible: true, // Minimap is visible by default
         }
     }
 
@@ -685,6 +688,21 @@ impl PaneGroupView {
         }
     }
 
+    /// Handle toggle minimap action
+    fn handle_toggle_minimap(
+        &mut self,
+        _: &ToggleMinimap,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.minimap_visible = !self.minimap_visible;
+        debug!(
+            minimap_visible = self.minimap_visible,
+            "Toggled minimap visibility"
+        );
+        cx.notify();
+    }
+
     /// Recursively render a member of the pane tree.
     fn render_member(&self, member: &Member, basis: usize) -> AnyElement {
         match member {
@@ -733,11 +751,14 @@ impl Focusable for PaneGroupView {
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // Extract minimap viewport lines before main data extraction to avoid borrow conflicts
-        let minimap_viewport_lines = self.minimap_view.read(cx).stoat.read(cx).viewport_lines();
-        eprintln!(
-            "[THUMB DEBUG] Minimap viewport_lines: {:?}",
-            minimap_viewport_lines
-        );
+        // Only compute if minimap is visible to avoid performance impact
+        let minimap_viewport_lines = if self.minimap_visible {
+            let lines = self.minimap_view.read(cx).stoat.read(cx).viewport_lines();
+            eprintln!("[THUMB DEBUG] Minimap viewport_lines: {:?}", lines);
+            lines
+        } else {
+            None
+        };
 
         // Get the mode, file finder data, command palette data, buffer finder data,
         // git status data, status bar data, minimap scroll, and thumb data from the active editor
@@ -839,7 +860,8 @@ impl Render for PaneGroupView {
                 );
 
                 // Calculate minimap scroll position for later update
-                let minimap_scroll = {
+                // Only compute if minimap is visible to avoid performance impact
+                let minimap_scroll = if self.minimap_visible {
                     let buffer_item = stoat.active_buffer(cx);
                     let buffer = buffer_item.read(cx).buffer().read(cx);
                     let buffer_snapshot = buffer.snapshot();
@@ -876,13 +898,20 @@ impl Render for PaneGroupView {
                             minimap_scroll
                         })
                     })
+                } else {
+                    None
                 };
 
                 // Extract thumb calculation data (visible lines and editor scroll)
-                let thumb_data = stoat.viewport_lines().map(|visible_editor_lines| {
-                    let editor_scroll_y = stoat.scroll_position().y;
-                    (visible_editor_lines, editor_scroll_y)
-                });
+                // Only compute if minimap is visible to avoid performance impact
+                let thumb_data = if self.minimap_visible {
+                    stoat.viewport_lines().map(|visible_editor_lines| {
+                        let editor_scroll_y = stoat.scroll_position().y;
+                        (visible_editor_lines, editor_scroll_y)
+                    })
+                } else {
+                    None
+                };
 
                 (
                     mode_name.to_string(), // Convert to owned String to break borrow dependency
@@ -911,12 +940,15 @@ impl Render for PaneGroupView {
         // Update minimap scroll position to match calculated value
         // This must happen after data extraction (to avoid borrow conflicts) but before thumb
         // calculation
-        if let Some(minimap_scroll_y) = minimap_scroll_to_set {
-            self.minimap_view.update(cx, |minimap_view, cx| {
-                minimap_view.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_scroll_position(gpui::point(0.0, minimap_scroll_y));
+        // Only update if minimap is visible to avoid performance impact
+        if self.minimap_visible {
+            if let Some(minimap_scroll_y) = minimap_scroll_to_set {
+                self.minimap_view.update(cx, |minimap_view, cx| {
+                    minimap_view.stoat.update(cx, |stoat, _cx| {
+                        stoat.set_scroll_position(gpui::point(0.0, minimap_scroll_y));
+                    });
                 });
-            });
+            }
         }
 
         // Query keymap for bindings in the current mode
@@ -1004,6 +1036,7 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_open_command_palette))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))
+                    .on_action(cx.listener(Self::handle_toggle_minimap))
                     .child(self.render_member(self.pane_group.root(), 0))
                     .child(CommandOverlay::new(mode_display, bindings))
                     .when(active_mode == "file_finder", |div| {
@@ -1061,15 +1094,18 @@ impl Render for PaneGroupView {
                         }
                     })
                     // Render minimap as fixed overlay on the right side
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .h_full()
-                            .w(gpui::px(120.0)) // Fixed width in pixels
-                            .child(self.minimap_view.clone()),
-                    )
+                    // Only render if minimap is visible to avoid performance impact
+                    .when(self.minimap_visible, |parent_div| {
+                        parent_div.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .h_full()
+                                .w(gpui::px(120.0)) // Fixed width in pixels
+                                .child(self.minimap_view.clone()),
+                        )
+                    })
                     // Render minimap thumb (viewport indicator) if calculated
                     .when_some(minimap_thumb_bounds, |parent_div, thumb_bounds| {
                         parent_div.child(
