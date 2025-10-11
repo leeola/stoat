@@ -1,18 +1,18 @@
 use crate::{editor_element::EditorElement, editor_style::EditorStyle};
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
+    div, point, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
-use stoat::{Stoat, actions::*, scroll};
+use std::sync::Arc;
+use stoat::{actions::*, scroll, Stoat};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
     minimap_view: Option<Entity<EditorView>>,
-    /// Cached editor style (includes syntax theme and highlight map) to avoid recreation every
-    /// frame
-    editor_style: EditorStyle,
+    /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
+    editor_style: Arc<EditorStyle>,
 }
 
 impl EditorView {
@@ -21,8 +21,8 @@ impl EditorView {
 
         let focus_handle = cx.focus_handle();
 
-        // Create cached editor style once (includes theme and highlight map)
-        let editor_style = EditorStyle::default();
+        // Create cached editor style once (Arc makes cloning cheap)
+        let editor_style = Arc::new(EditorStyle::default());
 
         // Create minimap Stoat
         eprintln!("[PERF] EditorView::new() - creating minimap Stoat");
@@ -37,7 +37,7 @@ impl EditorView {
                 focus_handle: minimap_focus_handle,
                 this: None,
                 minimap_view: None, // Minimap doesn't have its own minimap
-                editor_style: EditorStyle::default(), // Minimap has its own style
+                editor_style: Arc::new(EditorStyle::default()), // Minimap has its own style
             }
         });
 
