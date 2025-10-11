@@ -28,6 +28,26 @@ impl EditorView {
         eprintln!("[PERF] EditorView::new() - creating minimap Stoat");
         let minimap_stoat = stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
 
+        // Create minimap-specific style with tiny font (following Zed's architecture)
+        // This ensures consistent font settings across frames for GPUI's LineLayoutCache
+        let minimap_font = gpui::Font {
+            family: gpui::SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: gpui::FontWeight(crate::minimap::MINIMAP_FONT_WEIGHT), // BLACK (900)
+            style: gpui::FontStyle::Normal,
+            fallbacks: None,
+        };
+        let minimap_style = Arc::new(EditorStyle {
+            font_size: gpui::px(crate::minimap::MINIMAP_FONT_SIZE), // 2.0px
+            line_height: gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT), // 2.5px
+            font: minimap_font,                                     // Cached font with BLACK weight
+            show_line_numbers: false,                               // Minimap has no gutter
+            show_diff_indicators: false,                            /* Minimap has no diff
+                                                                     * indicators */
+            show_minimap: false, // Minimap doesn't render its own minimap
+            ..EditorStyle::default()
+        });
+
         // Wrap minimap Stoat in EditorView (following Zed's architecture)
         eprintln!("[PERF] EditorView::new() - wrapping minimap in EditorView");
         let minimap_view = cx.new(|cx| {
@@ -37,7 +57,7 @@ impl EditorView {
                 focus_handle: minimap_focus_handle,
                 this: None,
                 minimap_view: None, // Minimap doesn't have its own minimap
-                editor_style: Arc::new(EditorStyle::default()), // Minimap has its own style
+                editor_style: minimap_style, // Use minimap-specific style
             }
         });
 

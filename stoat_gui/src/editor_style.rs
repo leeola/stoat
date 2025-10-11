@@ -1,5 +1,5 @@
 use crate::syntax::{HighlightMap, SyntaxTheme};
-use gpui::{px, rgb, Hsla, Pixels};
+use gpui::{px, rgb, Font, FontStyle, FontWeight, Hsla, Pixels, SharedString};
 
 /// Style configuration for the editor
 #[derive(Clone)]
@@ -8,6 +8,8 @@ pub struct EditorStyle {
     pub background: Hsla,
     pub line_height: Pixels,
     pub font_size: Pixels,
+    /// Cached font instance (stable font ID for GPUI's LineLayoutCache)
+    pub font: Font,
     pub padding: Pixels,
     /// Whether to show line numbers in the gutter
     pub show_line_numbers: bool,
@@ -44,11 +46,21 @@ impl Default for EditorStyle {
         let syntax_theme = SyntaxTheme::default();
         let highlight_map = HighlightMap::new(&syntax_theme);
 
+        // Create font once (stable font ID for GPUI's LineLayoutCache)
+        let font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+
         Self {
             text_color: rgb(0xcccccc).into(),
             background: rgb(0x1e1e1e).into(),
             line_height: px(20.0),
             font_size: px(14.0),
+            font,
             padding: px(4.0),
             show_line_numbers: true,
             show_diff_indicators: true,

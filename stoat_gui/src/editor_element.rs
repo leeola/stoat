@@ -67,39 +67,16 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        // Detect if this EditorElement is rendering a minimap
+        let prepaint_start = std::time::Instant::now();
+
+        // Detect if this EditorElement is rendering a minimap (for conditional gutter rendering)
         let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
 
-        eprintln!(
-            "[PERF] EditorElement::prepaint() - is_minimap={}, entity_id={:?}",
-            is_minimap,
-            self.view.entity_id()
-        );
-
-        // Apply minimap-specific styling (following Zed's approach)
-        let (font_size, line_height, font_weight) = if is_minimap {
-            // Minimap uses tiny font with BLACK weight (900) to make 2px text visible
-            (
-                px(crate::minimap::MINIMAP_FONT_SIZE),
-                px(crate::minimap::MINIMAP_LINE_HEIGHT),
-                FontWeight(crate::minimap::MINIMAP_FONT_WEIGHT),
-            )
-        } else {
-            (
-                self.style.font_size,
-                self.style.line_height,
-                FontWeight::NORMAL,
-            )
-        };
-
-        // Create font (use BLACK weight for minimap to make tiny text visible)
-        let font = Font {
-            family: SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: font_weight,
-            style: FontStyle::Normal,
-            fallbacks: None,
-        };
+        // Get font and sizing from style (persistent across frames for GPUI's LineLayoutCache)
+        // Using cached font ensures stable font ID for cache hits
+        let font = self.style.font.clone();
+        let font_size = self.style.font_size;
+        let line_height = self.style.line_height;
 
         // Get buffer and tokens - clone snapshots to avoid holding borrows of cx
         let buffer_snapshot = {
@@ -140,18 +117,14 @@ impl Element for EditorElement {
         let start_line = scroll_offset;
         let end_line = (start_line + max_lines).min(max_point.row + 1);
 
-        eprintln!(
-            "[PERF] EditorElement::prepaint() - is_minimap={}, computing layouts for lines {}..{} ({} lines)",
-            is_minimap,
-            start_line,
-            end_line,
-            end_line - start_line
-        );
-
         // ===== EXPENSIVE WORK: Syntax highlighting + text shaping =====
         // Do this ONCE in prepaint, cache results for fast paint()
         let mut line_layouts = Vec::with_capacity((end_line - start_line) as usize);
         let mut y = bounds.origin.y + self.style.padding;
+
+        // Detailed timing to diagnose cache effectiveness
+        let mut total_highlight_time = std::time::Duration::ZERO;
+        let mut total_shape_time = std::time::Duration::ZERO;
 
         for line_idx in start_line..end_line {
             let line_start = buffer_snapshot.point_to_offset(text::Point::new(line_idx, 0));
@@ -162,12 +135,14 @@ impl Element for EditorElement {
             };
 
             // Get highlighted chunks for this line (EXPENSIVE: tokenizing + highlighting)
+            let highlight_start = std::time::Instant::now();
             let chunks = HighlightedChunks::new(
                 line_start..line_end_row,
                 &buffer_snapshot,
                 &token_snapshot,
                 &self.style.highlight_map,
             );
+            total_highlight_time += highlight_start.elapsed();
 
             // Build complete line text and runs
             let mut line_text = String::new();
@@ -217,12 +192,14 @@ impl Element for EditorElement {
 
                 // Shape and store the line layout
                 if !line_text.is_empty() {
+                    let shape_start = std::time::Instant::now();
                     let shaped = window.text_system().shape_line(
                         SharedString::from(line_text),
                         font_size,
                         &runs,
                         None,
                     );
+                    total_shape_time += shape_start.elapsed();
 
                     line_layouts.push(ShapedLineLayout {
                         line_idx,
@@ -240,11 +217,7 @@ impl Element for EditorElement {
             }
         }
 
-        eprintln!(
-            "[PERF] EditorElement::prepaint() - is_minimap={}, shaped {} lines (cached for paint)",
-            is_minimap,
-            line_layouts.len()
-        );
+        let shape_elapsed = prepaint_start.elapsed();
 
         // Layout minimap (only for main editor, not for minimap itself)
         let minimap_layout = if !is_minimap {
@@ -281,6 +254,19 @@ impl Element for EditorElement {
             None
         };
 
+        let total_elapsed = prepaint_start.elapsed();
+        let other_time = shape_elapsed - total_highlight_time - total_shape_time;
+
+        eprintln!(
+            "[PERF] prepaint {} lines (is_minimap={}): highlight={:.2}ms, shape={:.2}ms, other={:.2}ms, total={:.2}ms",
+            line_layouts.len(),
+            is_minimap,
+            total_highlight_time.as_secs_f64() * 1000.0,
+            total_shape_time.as_secs_f64() * 1000.0,
+            other_time.as_secs_f64() * 1000.0,
+            total_elapsed.as_secs_f64() * 1000.0,
+        );
+
         EditorPrepaintState {
             minimap_layout,
             line_layouts,
@@ -298,15 +284,11 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Detect if this EditorElement is rendering a minimap
+        // Detect if this EditorElement is rendering a minimap (for conditional gutter rendering)
         let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
 
-        // Apply minimap-specific styling (following Zed's approach)
-        let line_height = if is_minimap {
-            px(crate::minimap::MINIMAP_LINE_HEIGHT)
-        } else {
-            self.style.line_height
-        };
+        // Get line height from style (persistent across frames for cache stability)
+        let line_height = self.style.line_height;
 
         // Paint background
         window.paint_quad(gpui::PaintQuad {
