@@ -1,6 +1,11 @@
 use crate::{
-    command_overlay::CommandOverlay, command_palette::CommandPalette, editor_view::EditorView,
-    file_finder::Finder, git_status::GitStatus, pane_group::element::pane_axis,
+    command_overlay::CommandOverlay,
+    command_palette::CommandPalette,
+    editor_view::EditorView,
+    file_finder::Finder,
+    git_status::GitStatus,
+    pane_group::element::pane_axis,
+    render_stats::{FrameTimer, RenderStatsOverlayElement},
     status_bar::StatusBar,
 };
 use gpui::{
@@ -8,7 +13,7 @@ use gpui::{
     Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
     Window,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use stoat::{
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
@@ -35,6 +40,7 @@ pub struct PaneGroupView {
     command_palette_scroll: ScrollHandle,
     buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
+    render_stats_tracker: Rc<RefCell<FrameTimer>>,
 }
 
 impl PaneGroupView {
@@ -62,6 +68,7 @@ impl PaneGroupView {
             command_palette_scroll: ScrollHandle::new(),
             buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
+            render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
         }
     }
 
@@ -796,7 +803,10 @@ impl Render for PaneGroupView {
                         } else {
                             div
                         }
-                    }),
+                    })
+                    .child(RenderStatsOverlayElement::new(
+                        self.render_stats_tracker.clone(),
+                    )),
             )
             .when_some(status_bar_data, |div, (mode, branch, files, path)| {
                 div.child(StatusBar::new(mode, branch, files, path))

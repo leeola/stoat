@@ -12,6 +12,7 @@ pub mod keybinding_hint;
 pub mod keymap_query;
 pub mod minimap;
 pub mod pane_group;
+pub mod render_stats;
 pub mod status_bar;
 pub mod syntax;
 

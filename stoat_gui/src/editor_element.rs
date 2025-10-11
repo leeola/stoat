@@ -8,9 +8,9 @@ use crate::{
     syntax::HighlightedChunks,
 };
 use gpui::{
-    App, Bounds, CursorStyle, Element, ElementId, Entity, Font, FontStyle, FontWeight,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    ParentElement, Pixels, SharedString, Style, Styled, TextRun, Window, point, px, relative, size,
+    point, px, relative, size, App, Bounds, CursorStyle, Element, ElementId, Entity, Font,
+    FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled, TextRun, Window,
 };
 use std::sync::Arc;
 
