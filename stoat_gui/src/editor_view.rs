@@ -1,4 +1,4 @@
-use crate::editor_element::EditorElement;
+use crate::{editor_element::EditorElement, editor_style::EditorStyle};
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
@@ -10,16 +10,26 @@ pub struct EditorView {
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
     minimap_view: Option<Entity<EditorView>>,
+    /// Cached editor style (includes syntax theme and highlight map) to avoid recreation every
+    /// frame
+    editor_style: EditorStyle,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
+        eprintln!("[PERF] EditorView::new() - creating main editor");
+
         let focus_handle = cx.focus_handle();
 
+        // Create cached editor style once (includes theme and highlight map)
+        let editor_style = EditorStyle::default();
+
         // Create minimap Stoat
+        eprintln!("[PERF] EditorView::new() - creating minimap Stoat");
         let minimap_stoat = stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
 
         // Wrap minimap Stoat in EditorView (following Zed's architecture)
+        eprintln!("[PERF] EditorView::new() - wrapping minimap in EditorView");
         let minimap_view = cx.new(|cx| {
             let minimap_focus_handle = cx.focus_handle();
             EditorView {
@@ -27,10 +37,12 @@ impl EditorView {
                 focus_handle: minimap_focus_handle,
                 this: None,
                 minimap_view: None, // Minimap doesn't have its own minimap
+                editor_style: EditorStyle::default(), // Minimap has its own style
             }
         });
 
         // Set entity on minimap view so it can render
+        eprintln!("[PERF] EditorView::new() - setting entity on minimap view");
         minimap_view.update(cx, |minimap, _cx| {
             minimap.set_entity(minimap_view.clone());
         });
@@ -40,6 +52,7 @@ impl EditorView {
             focus_handle,
             this: None,
             minimap_view: Some(minimap_view),
+            editor_style,
         }
     }
 
@@ -716,6 +729,13 @@ impl Focusable for EditorView {
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let mode = self.stoat.read(cx).mode().to_string();
+        let is_minimap = mode == "minimap";
+        eprintln!(
+            "[PERF] EditorView::render() - is_minimap={}, entity_id={:?}",
+            is_minimap,
+            self.this.as_ref().map(|e| e.entity_id())
+        );
+
         let view_entity = self
             .this
             .clone()
@@ -805,7 +825,7 @@ impl Render for EditorView {
             ))
             .relative() // Enable absolute positioning for children
             .size_full()
-            .child(EditorElement::new(view_entity))
+            .child(EditorElement::new(view_entity, self.editor_style.clone()))
         // FIXME: Minimap rendering will be integrated into EditorElement following Zed's approach
     }
 }

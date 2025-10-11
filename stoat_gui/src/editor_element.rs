@@ -4,10 +4,8 @@
 //! No gutter, no mouse handling, no complex layout - just get text visible.
 
 use crate::{
-    editor_style::EditorStyle,
-    editor_view::EditorView,
-    gutter::GutterLayout,
-    syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
+    editor_style::EditorStyle, editor_view::EditorView, gutter::GutterLayout,
+    syntax::HighlightedChunks,
 };
 use gpui::{
     point, px, relative, size, App, Bounds, CursorStyle, Element, ElementId, Entity, Font,
@@ -18,21 +16,16 @@ use gpui::{
 pub struct EditorElement {
     view: Entity<EditorView>,
     style: EditorStyle,
-    syntax_theme: SyntaxTheme,
-    highlight_map: HighlightMap,
 }
 
 impl EditorElement {
-    pub fn new(view: Entity<EditorView>) -> Self {
-        let syntax_theme = SyntaxTheme::default();
-        let highlight_map = HighlightMap::new(&syntax_theme);
+    pub fn new(view: Entity<EditorView>, style: EditorStyle) -> Self {
+        eprintln!(
+            "[PERF] EditorElement::new() called - entity_id={:?}",
+            view.entity_id()
+        );
 
-        Self {
-            view,
-            style: EditorStyle::default(),
-            syntax_theme,
-            highlight_map,
-        }
+        Self { view, style }
     }
 }
 
@@ -74,6 +67,12 @@ impl Element for EditorElement {
     ) -> Self::PrepaintState {
         // Detect if this EditorElement is rendering a minimap
         let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
+
+        eprintln!(
+            "[PERF] EditorElement::prepaint() - is_minimap={}, entity_id={:?}",
+            is_minimap,
+            self.view.entity_id()
+        );
 
         // Minimap should not render a nested minimap
         if is_minimap {
@@ -246,6 +245,17 @@ impl Element for EditorElement {
         let start_line = scroll_offset;
         let end_line = (start_line + max_lines).min(max_point.row + 1);
 
+        eprintln!(
+            "[PERF] EditorElement::paint() - is_minimap={}, rendering lines {}..{} ({} lines)",
+            is_minimap,
+            start_line,
+            end_line,
+            end_line - start_line
+        );
+
+        let mut highlighted_lines = 0;
+        let mut shaped_lines = 0;
+
         for line_idx in start_line..end_line {
             // Store position of this line
             line_positions.push((line_idx, y));
@@ -257,11 +267,12 @@ impl Element for EditorElement {
             };
 
             // Get highlighted chunks for this line
+            highlighted_lines += 1;
             let chunks = HighlightedChunks::new(
                 line_start..line_end_row,
                 &buffer_snapshot,
                 &token_snapshot,
-                &self.highlight_map,
+                &self.style.highlight_map,
             );
 
             // Build complete line text and runs
@@ -276,7 +287,8 @@ impl Element for EditorElement {
 
                 // Get color for this chunk
                 let color = if let Some(highlight_id) = chunk.highlight_id {
-                    self.syntax_theme
+                    self.style
+                        .syntax_theme
                         .highlights
                         .get(highlight_id.0 as usize)
                         .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
@@ -311,6 +323,7 @@ impl Element for EditorElement {
 
                 // Shape and paint the complete line (only if not empty after stripping newline)
                 if !line_text.is_empty() {
+                    shaped_lines += 1;
                     let shaped = window.text_system().shape_line(
                         SharedString::from(line_text),
                         font_size,
@@ -332,6 +345,11 @@ impl Element for EditorElement {
                 break;
             }
         }
+
+        eprintln!(
+            "[PERF] EditorElement::paint() - is_minimap={}, highlighted {} lines, shaped {} lines",
+            is_minimap, highlighted_lines, shaped_lines
+        );
 
         // Skip gutter and cursor rendering for minimap
         if !is_minimap {

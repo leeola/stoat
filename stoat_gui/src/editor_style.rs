@@ -1,3 +1,4 @@
+use crate::syntax::{HighlightMap, SyntaxTheme};
 use gpui::{px, rgb, Hsla, Pixels};
 
 /// Style configuration for the editor
@@ -32,10 +33,17 @@ pub struct EditorStyle {
     pub minimap_thumb_border_color: Hsla,
     /// Maximum width of minimap in columns
     pub minimap_max_columns: f32,
+    /// Syntax highlighting theme (cached to avoid recreation every frame)
+    pub syntax_theme: SyntaxTheme,
+    /// Highlight map for efficient token -> color lookup (cached)
+    pub highlight_map: HighlightMap,
 }
 
 impl Default for EditorStyle {
     fn default() -> Self {
+        let syntax_theme = SyntaxTheme::default();
+        let highlight_map = HighlightMap::new(&syntax_theme);
+
         Self {
             text_color: rgb(0xcccccc).into(),
             background: rgb(0x1e1e1e).into(),
@@ -66,6 +74,8 @@ impl Default for EditorStyle {
                 a: 0.25, // Slightly more opaque for visibility
             },
             minimap_max_columns: 120.0, // Reasonable max width
+            syntax_theme,
+            highlight_map,
         }
     }
 }
