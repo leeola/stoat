@@ -170,7 +170,7 @@ impl Element for EditorElement {
                     if !line_text.is_empty() {
                         let shape_start = std::time::Instant::now();
                         let shaped = window.text_system().shape_line(
-                            SharedString::from(line_text.clone()),
+                            SharedString::from(std::mem::take(&mut line_text)),
                             font_size,
                             &runs,
                             None,
@@ -215,7 +215,7 @@ impl Element for EditorElement {
         if !line_text.is_empty() {
             let shape_start = std::time::Instant::now();
             let shaped = window.text_system().shape_line(
-                SharedString::from(line_text),
+                SharedString::from(std::mem::take(&mut line_text)),
                 font_size,
                 &runs,
                 None,
