@@ -61,7 +61,11 @@ impl FrameTimer {
         let avg = total / self.frame_times.len() as u32;
         let secs = avg.as_secs_f64();
 
-        if secs > 0.0 { 1.0 / secs } else { 0.0 }
+        if secs > 0.0 {
+            1.0 / secs
+        } else {
+            0.0
+        }
     }
 
     /// Returns average frame time in milliseconds.

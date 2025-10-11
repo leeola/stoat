@@ -10,68 +10,23 @@ pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
-    minimap_view: Option<Entity<EditorView>>,
     /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
-    editor_style: Arc<EditorStyle>,
+    pub(crate) editor_style: Arc<EditorStyle>,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
-        eprintln!("[PERF] EditorView::new() - creating main editor");
+        eprintln!("[PERF] EditorView::new() - creating editor");
 
         let focus_handle = cx.focus_handle();
 
         // Create cached editor style once (Arc makes cloning cheap)
         let editor_style = Arc::new(EditorStyle::default());
 
-        // Create minimap Stoat
-        eprintln!("[PERF] EditorView::new() - creating minimap Stoat");
-        let minimap_stoat = stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
-
-        // Create minimap-specific style with tiny font (following Zed's architecture)
-        // This ensures consistent font settings across frames for GPUI's LineLayoutCache
-        let minimap_font = gpui::Font {
-            family: gpui::SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: gpui::FontWeight(crate::minimap::MINIMAP_FONT_WEIGHT), // BLACK (900)
-            style: gpui::FontStyle::Normal,
-            fallbacks: None,
-        };
-        let minimap_style = Arc::new(EditorStyle {
-            font_size: gpui::px(crate::minimap::MINIMAP_FONT_SIZE), // 2.0px
-            line_height: gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT), // 2.5px
-            font: minimap_font,                                     // Cached font with BLACK weight
-            show_line_numbers: false,                               // Minimap has no gutter
-            show_diff_indicators: false,                            /* Minimap has no diff
-                                                                     * indicators */
-            show_minimap: false, // Minimap doesn't render its own minimap
-            ..EditorStyle::default()
-        });
-
-        // Wrap minimap Stoat in EditorView (following Zed's architecture)
-        eprintln!("[PERF] EditorView::new() - wrapping minimap in EditorView");
-        let minimap_view = cx.new(|cx| {
-            let minimap_focus_handle = cx.focus_handle();
-            EditorView {
-                stoat: minimap_stoat,
-                focus_handle: minimap_focus_handle,
-                this: None,
-                minimap_view: None, // Minimap doesn't have its own minimap
-                editor_style: minimap_style, // Use minimap-specific style
-            }
-        });
-
-        // Set entity on minimap view so it can render
-        eprintln!("[PERF] EditorView::new() - setting entity on minimap view");
-        minimap_view.update(cx, |minimap, _cx| {
-            minimap.set_entity(minimap_view.clone());
-        });
-
         Self {
             stoat,
             focus_handle,
             this: None,
-            minimap_view: Some(minimap_view),
             editor_style,
         }
     }
@@ -82,10 +37,6 @@ impl EditorView {
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
-    }
-
-    pub fn minimap_view(&self) -> Option<&Entity<EditorView>> {
-        self.minimap_view.as_ref()
     }
 
     // ==== Action handlers ====

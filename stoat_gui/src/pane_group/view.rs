@@ -25,11 +25,39 @@ use stoat::{
 };
 use tracing::debug;
 
+/// Pixel offset to adjust the minimap thumb's Y position.
+///
+/// This constant compensates for padding alignment in the editor coordinate system.
+/// The viewport calculation assumes lines start at Y=0, but the first visible line
+/// actually starts at Y=4px (after padding). This causes the thumb to be positioned
+/// slightly higher than the actual visible content.
+///
+/// Without this offset, the minimap thumb appeared ~2 lines off from the actual
+/// visible content in the editor. Users reported that the thumb didn't align with
+/// what was actually visible on screen.
+const THUMB_OFFSET_PX: f64 = 2.0;
+
+/// Pixel offset to adjust the minimap thumb's height.
+///
+/// This constant compensates for the discrepancy between calculated visible lines
+/// and actually rendered lines. The viewport calculation includes fractional lines
+/// (e.g., 45.2 lines fit in the viewport), but the renderer only shows complete
+/// lines (45 lines). This causes the thumb to be sized for slightly more content
+/// than is actually visible.
+///
+/// Without this offset, the thumb was slightly shorter than the actual visible
+/// region, making it appear misaligned with the editor viewport. Combined with
+/// [`THUMB_OFFSET_PX`], this solved the ~2 line positioning error.
+const THUMB_HEIGHT_OFFSET_PX: f64 = 1.0;
+
 /// Main view that manages multiple editor panes in a tree layout.
 ///
 /// PaneGroupView wraps a [`PaneGroup`] (from stoat core) and maintains
 /// the mapping from [`PaneId`] to [`EditorView`] entities. It handles
 /// split operations, pane focus, and recursive rendering of the pane tree.
+///
+/// The minimap is owned at this level (window-level) rather than per-pane,
+/// ensuring only one minimap appears regardless of split configuration.
 pub struct PaneGroupView {
     pane_group: PaneGroup,
     pane_editors: HashMap<PaneId, Entity<EditorView>>,
@@ -41,6 +69,8 @@ pub struct PaneGroupView {
     buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
+    /// Single minimap view for the entire window (updates to show active pane's content)
+    minimap_view: Entity<EditorView>,
 }
 
 impl PaneGroupView {
@@ -58,6 +88,47 @@ impl PaneGroupView {
         let mut pane_editors = HashMap::new();
         pane_editors.insert(initial_pane_id, initial_editor.clone());
 
+        // Create single minimap for the entire window
+        // The minimap shares the initial editor's Stoat and will be updated when active pane
+        // changes
+        let minimap_view = {
+            let initial_stoat = initial_editor.read(cx).stoat.clone();
+            let minimap_stoat = initial_stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
+
+            // Create minimap-specific style with tiny font (following Zed's architecture)
+            let minimap_font = gpui::Font {
+                family: gpui::SharedString::from("Menlo"),
+                features: Default::default(),
+                weight: gpui::FontWeight(crate::minimap::MINIMAP_FONT_WEIGHT), // BLACK (900)
+                style: gpui::FontStyle::Normal,
+                fallbacks: None,
+            };
+            let minimap_style = std::sync::Arc::new(crate::editor_style::EditorStyle {
+                font_size: gpui::px(crate::minimap::MINIMAP_FONT_SIZE), // 2.0px
+                line_height: gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT), // 2.5px
+                font: minimap_font,
+                show_line_numbers: false,
+                show_diff_indicators: false,
+                show_minimap: false, // Minimap doesn't render its own minimap
+                ..crate::editor_style::EditorStyle::default()
+            });
+
+            // Create minimap EditorView with custom style
+            let minimap_view = cx.new(|cx| {
+                let mut editor = EditorView::new(minimap_stoat, cx);
+                // Override the editor style with minimap-specific settings
+                editor.editor_style = minimap_style;
+                editor
+            });
+
+            // Set entity reference so EditorView can pass it to EditorElement
+            minimap_view.update(cx, |view, _| {
+                view.set_entity(minimap_view.clone());
+            });
+
+            minimap_view
+        };
+
         Self {
             pane_group,
             pane_editors,
@@ -69,6 +140,7 @@ impl PaneGroupView {
             buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
+            minimap_view,
         }
     }
 
@@ -101,6 +173,25 @@ impl PaneGroupView {
                     });
                     cx.notify();
                 }
+            });
+        }
+    }
+
+    /// Update the minimap to show the active pane's content.
+    ///
+    /// This should be called whenever the active pane changes (focus, split, close).
+    /// The minimap's Stoat will be updated to point to the same buffer as the active editor.
+    fn update_minimap_to_active_pane(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+            let active_stoat = active_editor.read(cx).stoat.clone();
+
+            // Update minimap's Stoat to point to the active editor's buffer
+            self.minimap_view.update(cx, |minimap_view, cx| {
+                // Create a new minimap Stoat from the active editor's Stoat
+                let new_minimap_stoat =
+                    active_stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
+                minimap_view.stoat = new_minimap_stoat;
+                cx.notify();
             });
         }
     }
@@ -230,6 +321,9 @@ impl PaneGroupView {
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
 
+        // Update minimap to show new active pane's content
+        self.update_minimap_to_active_pane(cx);
+
         // Exit Pane mode after command
         self.exit_pane_mode(cx);
 
@@ -271,6 +365,9 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Update minimap to show new active pane's content
+        self.update_minimap_to_active_pane(cx);
 
         // Exit Pane mode after command
         self.exit_pane_mode(cx);
@@ -314,6 +411,9 @@ impl PaneGroupView {
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
 
+        // Update minimap to show new active pane's content
+        self.update_minimap_to_active_pane(cx);
+
         // Exit Pane mode after command
         self.exit_pane_mode(cx);
 
@@ -355,6 +455,9 @@ impl PaneGroupView {
 
         // Focus the newly created editor
         window.focus(&new_editor.read(cx).focus_handle(cx));
+
+        // Update minimap to show new active pane's content
+        self.update_minimap_to_active_pane(cx);
 
         // Exit Pane mode after command
         self.exit_pane_mode(cx);
@@ -410,6 +513,9 @@ impl PaneGroupView {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
+            // Update minimap to show new active pane's content
+            self.update_minimap_to_active_pane(cx);
+
             // Exit Pane mode after command
             self.exit_pane_mode(cx);
 
@@ -441,6 +547,9 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Update minimap to show new active pane's content
+            self.update_minimap_to_active_pane(cx);
 
             // Exit Pane mode after command
             self.exit_pane_mode(cx);
@@ -474,6 +583,9 @@ impl PaneGroupView {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
+            // Update minimap to show new active pane's content
+            self.update_minimap_to_active_pane(cx);
+
             // Exit Pane mode after command
             self.exit_pane_mode(cx);
 
@@ -505,6 +617,9 @@ impl PaneGroupView {
             if let Some(editor) = self.pane_editors.get(&new_pane) {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
+
+            // Update minimap to show new active pane's content
+            self.update_minimap_to_active_pane(cx);
 
             // Exit Pane mode after command
             self.exit_pane_mode(cx);
@@ -550,6 +665,9 @@ impl PaneGroupView {
                     if let Some(editor) = self.pane_editors.get(&new_active_pane) {
                         window.focus(&editor.read(cx).focus_handle(cx));
                     }
+
+                    // Update minimap to show new active pane's content
+                    self.update_minimap_to_active_pane(cx);
 
                     // Exit Pane mode after command
                     self.exit_pane_mode(cx);
@@ -614,8 +732,15 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Extract minimap viewport lines before main data extraction to avoid borrow conflicts
+        let minimap_viewport_lines = self.minimap_view.read(cx).stoat.read(cx).viewport_lines();
+        eprintln!(
+            "[THUMB DEBUG] Minimap viewport_lines: {:?}",
+            minimap_viewport_lines
+        );
+
         // Get the mode, file finder data, command palette data, buffer finder data,
-        // git status data, and status bar data from the active editor
+        // git status data, status bar data, minimap scroll, and thumb data from the active editor
         let (
             active_mode,
             mode_display,
@@ -624,6 +749,8 @@ impl Render for PaneGroupView {
             buffer_finder_data,
             git_status_data,
             status_bar_data,
+            minimap_scroll_to_set,
+            thumb_calculation_data,
         ) = self
             .pane_editors
             .get(&self.active_pane)
@@ -711,20 +838,149 @@ impl Render for PaneGroupView {
                     stoat.current_file_path().map(|p| p.display().to_string()),
                 );
 
+                // Calculate minimap scroll position for later update
+                let minimap_scroll = {
+                    let buffer_item = stoat.active_buffer(cx);
+                    let buffer = buffer_item.read(cx).buffer().read(cx);
+                    let buffer_snapshot = buffer.snapshot();
+                    let total_lines = buffer_snapshot.max_point().row as f64 + 1.0;
+
+                    eprintln!("[THUMB DEBUG] Total lines in buffer: {}", total_lines);
+
+                    stoat.viewport_lines().and_then(|visible_editor_lines| {
+                        let editor_scroll_y = stoat.scroll_position().y as f64;
+
+                        eprintln!(
+                            "[THUMB DEBUG] Editor: visible_lines={:.2}, scroll_y={:.2}",
+                            visible_editor_lines, editor_scroll_y
+                        );
+
+                        minimap_viewport_lines.map(|visible_minimap_lines| {
+                            eprintln!(
+                                "[THUMB DEBUG] Minimap: visible_lines={:.2}",
+                                visible_minimap_lines
+                            );
+
+                            let minimap_scroll =
+                                crate::minimap::MinimapLayout::calculate_minimap_scroll(
+                                    total_lines,
+                                    visible_editor_lines as f64,
+                                    visible_minimap_lines as f64,
+                                    editor_scroll_y,
+                                );
+
+                            eprintln!(
+                                "[THUMB DEBUG] Calculated minimap_scroll: {:.2}",
+                                minimap_scroll
+                            );
+                            minimap_scroll
+                        })
+                    })
+                };
+
+                // Extract thumb calculation data (visible lines and editor scroll)
+                let thumb_data = stoat.viewport_lines().map(|visible_editor_lines| {
+                    let editor_scroll_y = stoat.scroll_position().y;
+                    (visible_editor_lines, editor_scroll_y)
+                });
+
                 (
-                    mode_name,
+                    mode_name.to_string(), // Convert to owned String to break borrow dependency
                     display,
                     ff_data,
                     cp_data,
                     bf_data,
                     gs_data,
                     Some(sb_data),
+                    minimap_scroll,
+                    thumb_data,
                 )
             })
-            .unwrap_or(("normal", "NORMAL".to_string(), None, None, None, None, None));
+            .unwrap_or((
+                "normal".to_string(),
+                "NORMAL".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ));
+
+        // Update minimap scroll position to match calculated value
+        // This must happen after data extraction (to avoid borrow conflicts) but before thumb
+        // calculation
+        if let Some(minimap_scroll_y) = minimap_scroll_to_set {
+            self.minimap_view.update(cx, |minimap_view, cx| {
+                minimap_view.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_scroll_position(gpui::point(0.0, minimap_scroll_y));
+                });
+            });
+        }
 
         // Query keymap for bindings in the current mode
-        let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, active_mode);
+        let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, &active_mode);
+
+        // Calculate minimap thumb bounds using pre-extracted data
+        // Following Zed's architecture: thumb is sized and positioned using minimap line heights
+        let minimap_thumb_bounds = minimap_scroll_to_set.and_then(|minimap_scroll_y| {
+            thumb_calculation_data.map(|(visible_editor_lines, editor_scroll_y)| {
+                // Calculate thumb using minimap line heights (following Zed's approach)
+                let minimap_line_height = crate::minimap::MINIMAP_LINE_HEIGHT as f64;
+
+                eprintln!(
+                    "[THUMB DEBUG] Thumb calculation: visible_editor_lines={:.2}, editor_scroll_y={:.2}, minimap_scroll_y={:.2}, minimap_line_height={:.2}",
+                    visible_editor_lines, editor_scroll_y, minimap_scroll_y, minimap_line_height
+                );
+
+                // Thumb height: visible_editor_lines × minimap_line_height
+                // visible_editor_lines now reflects the actual rendered count from prepaint
+                let thumb_height_px = visible_editor_lines as f64 * minimap_line_height;
+
+                eprintln!(
+                    "[THUMB DEBUG] Calculated thumb_height_px={:.2} (visible_editor_lines * minimap_line_height)",
+                    thumb_height_px
+                );
+
+                // Apply height offset (see THUMB_HEIGHT_OFFSET_PX module constant)
+                let thumb_height_px_adjusted = thumb_height_px + THUMB_HEIGHT_OFFSET_PX;
+
+                eprintln!(
+                    "[THUMB DEBUG] Applied height offset: {:.2}px, adjusted thumb_height_px={:.2}",
+                    THUMB_HEIGHT_OFFSET_PX, thumb_height_px_adjusted
+                );
+
+                // Thumb Y position: (editor_scroll - minimap_scroll) × minimap_line_height
+                let thumb_y_px =
+                    (editor_scroll_y as f64 - minimap_scroll_y as f64) * minimap_line_height;
+
+                eprintln!(
+                    "[THUMB DEBUG] Calculated thumb_y_px={:.2} ((editor_scroll - minimap_scroll) * minimap_line_height)",
+                    thumb_y_px
+                );
+
+                // Apply position offset (see THUMB_OFFSET_PX module constant)
+                let thumb_y_px_adjusted = thumb_y_px + THUMB_OFFSET_PX;
+
+                eprintln!(
+                    "[THUMB DEBUG] Applied offset: {:.2}px, adjusted thumb_y_px={:.2}",
+                    THUMB_OFFSET_PX, thumb_y_px_adjusted
+                );
+
+                let bounds = gpui::Bounds {
+                    origin: gpui::point(gpui::px(0.0), gpui::px(thumb_y_px_adjusted as f32)),
+                    size: gpui::size(gpui::px(120.0), gpui::px(thumb_height_px_adjusted as f32)),
+                };
+
+                eprintln!(
+                    "[THUMB DEBUG] Final thumb bounds: origin.y={:.2}px, height={:.2}px",
+                    thumb_y_px_adjusted, thumb_height_px_adjusted
+                );
+
+                bounds
+            })
+        });
 
         div()
             .size_full()
@@ -803,6 +1059,32 @@ impl Render for PaneGroupView {
                         } else {
                             div
                         }
+                    })
+                    // Render minimap as fixed overlay on the right side
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .h_full()
+                            .w(gpui::px(120.0)) // Fixed width in pixels
+                            .child(self.minimap_view.clone()),
+                    )
+                    // Render minimap thumb (viewport indicator) if calculated
+                    .when_some(minimap_thumb_bounds, |parent_div, thumb_bounds| {
+                        parent_div.child(
+                            div()
+                                .absolute()
+                                .occlude() // Allow pointer events to pass through
+                                .right_0() // Aligned with minimap on right edge
+                                .top(thumb_bounds.origin.y)
+                                .w(gpui::px(120.0)) // Same width as minimap
+                                .h(thumb_bounds.size.height)
+                                .bg(gpui::rgba(0xFFFFFF22)) // Mostly clear white background
+                                .border_1()
+                                .border_color(gpui::rgba(0xFFFFFF55)), /* Semi-transparent white
+                                                                        * border */
+                        )
                     })
                     .child(RenderStatsOverlayElement::new(
                         self.render_stats_tracker.clone(),
