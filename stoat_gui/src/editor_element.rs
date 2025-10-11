@@ -119,103 +119,120 @@ impl Element for EditorElement {
 
         // ===== EXPENSIVE WORK: Syntax highlighting + text shaping =====
         // Do this ONCE in prepaint, cache results for fast paint()
+        // Following Zed's architecture: ONE iterator for all visible lines
         let mut line_layouts = Vec::with_capacity((end_line - start_line) as usize);
-        let mut y = bounds.origin.y + self.style.padding;
 
         // Detailed timing to diagnose cache effectiveness
         let mut total_highlight_time = std::time::Duration::ZERO;
         let mut total_shape_time = std::time::Duration::ZERO;
 
-        for line_idx in start_line..end_line {
-            let line_start = buffer_snapshot.point_to_offset(text::Point::new(line_idx, 0));
-            let line_end_row = if line_idx == max_point.row {
-                buffer_snapshot.len()
+        let highlight_start = std::time::Instant::now();
+
+        // Calculate byte offset range for ENTIRE visible region (not per-line)
+        let start_offset = buffer_snapshot.point_to_offset(text::Point::new(start_line, 0));
+        let end_offset = if end_line > max_point.row {
+            buffer_snapshot.len()
+        } else {
+            buffer_snapshot.point_to_offset(text::Point::new(end_line, 0))
+        };
+
+        // Create ONE iterator for ALL visible lines (Zed's approach)
+        let chunks = HighlightedChunks::new(
+            start_offset..end_offset,
+            &buffer_snapshot,
+            &token_snapshot,
+            &self.style.highlight_map,
+        );
+
+        // Process all chunks, detecting line boundaries via newlines
+        let mut line_text = String::new();
+        let mut runs = Vec::new();
+        let mut current_line_idx = start_line;
+        let mut y = bounds.origin.y + self.style.padding;
+
+        for chunk in chunks {
+            // Get color for this chunk (outside the split loop to avoid recomputation)
+            let color = if let Some(highlight_id) = chunk.highlight_id {
+                self.style
+                    .syntax_theme
+                    .highlights
+                    .get(highlight_id.0 as usize)
+                    .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
+                    .unwrap_or(self.style.text_color)
             } else {
-                buffer_snapshot.point_to_offset(text::Point::new(line_idx + 1, 0))
+                self.style.text_color
             };
 
-            // Get highlighted chunks for this line (EXPENSIVE: tokenizing + highlighting)
-            let highlight_start = std::time::Instant::now();
-            let chunks = HighlightedChunks::new(
-                line_start..line_end_row,
-                &buffer_snapshot,
-                &token_snapshot,
-                &self.style.highlight_map,
-            );
-            total_highlight_time += highlight_start.elapsed();
+            // Split chunk on '\n' to detect line boundaries (following Zed)
+            for (split_ix, line_chunk) in chunk.text.split('\n').enumerate() {
+                if split_ix > 0 {
+                    // We hit a newline - shape the completed line
+                    if !line_text.is_empty() {
+                        let shape_start = std::time::Instant::now();
+                        let shaped = window.text_system().shape_line(
+                            SharedString::from(line_text.clone()),
+                            font_size,
+                            &runs,
+                            None,
+                        );
+                        total_shape_time += shape_start.elapsed();
 
-            // Build complete line text and runs
-            let mut line_text = String::new();
-            let mut runs = Vec::new();
+                        line_layouts.push(ShapedLineLayout {
+                            line_idx: current_line_idx,
+                            shaped,
+                            y_position: y,
+                        });
+                    }
 
-            for chunk in chunks {
-                let text = chunk.text;
-                if text.is_empty() {
-                    continue;
-                }
+                    // Reset for next line
+                    line_text.clear();
+                    runs.clear();
+                    current_line_idx += 1;
+                    y += line_height;
 
-                // Get color for this chunk
-                let color = if let Some(highlight_id) = chunk.highlight_id {
-                    self.style
-                        .syntax_theme
-                        .highlights
-                        .get(highlight_id.0 as usize)
-                        .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
-                        .unwrap_or(self.style.text_color)
-                } else {
-                    self.style.text_color
-                };
-
-                line_text.push_str(text);
-                runs.push(TextRun {
-                    len: text.len(),
-                    font: font.clone(),
-                    color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-            }
-
-            // Shape the line if non-empty (EXPENSIVE: text shaping)
-            if !line_text.is_empty() {
-                // Strip trailing newline (shape_line doesn't accept newlines)
-                if line_text.ends_with('\n') {
-                    line_text.pop();
-                    // Adjust last run length if needed
-                    if let Some(last_run) = runs.last_mut() {
-                        if last_run.len > 0 {
-                            last_run.len -= 1;
-                        }
+                    // Early exit if beyond visible area
+                    if y > bounds.origin.y + bounds.size.height {
+                        break;
                     }
                 }
 
-                // Shape and store the line layout
-                if !line_text.is_empty() {
-                    let shape_start = std::time::Instant::now();
-                    let shaped = window.text_system().shape_line(
-                        SharedString::from(line_text),
-                        font_size,
-                        &runs,
-                        None,
-                    );
-                    total_shape_time += shape_start.elapsed();
-
-                    line_layouts.push(ShapedLineLayout {
-                        line_idx,
-                        shaped,
-                        y_position: y,
+                // Accumulate text for current line
+                if !line_chunk.is_empty() {
+                    line_text.push_str(line_chunk);
+                    runs.push(TextRun {
+                        len: line_chunk.len(),
+                        font: font.clone(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
                     });
                 }
             }
-
-            y += line_height;
-
-            // Stop if we've gone past the visible area
-            if y > bounds.origin.y + bounds.size.height {
-                break;
-            }
         }
+
+        // Shape final line if we have accumulated text (no trailing newline case)
+        if !line_text.is_empty() {
+            let shape_start = std::time::Instant::now();
+            let shaped = window.text_system().shape_line(
+                SharedString::from(line_text),
+                font_size,
+                &runs,
+                None,
+            );
+            total_shape_time += shape_start.elapsed();
+
+            line_layouts.push(ShapedLineLayout {
+                line_idx: current_line_idx,
+                shaped,
+                y_position: y,
+            });
+        }
+
+        // Measure total highlighting + iteration time (excludes individual shape timings)
+        total_highlight_time += highlight_start.elapsed();
+        // Subtract out the shape time we accumulated separately
+        total_highlight_time -= total_shape_time;
 
         let shape_elapsed = prepaint_start.elapsed();
 
@@ -255,7 +272,7 @@ impl Element for EditorElement {
         };
 
         let total_elapsed = prepaint_start.elapsed();
-        let other_time = shape_elapsed - total_highlight_time - total_shape_time;
+        let other_time = shape_elapsed.saturating_sub(total_highlight_time + total_shape_time);
 
         eprintln!(
             "[PERF] prepaint {} lines (is_minimap={}): highlight={:.2}ms, shape={:.2}ms, other={:.2}ms, total={:.2}ms",

@@ -976,6 +976,11 @@ pub struct HighlightedChunks<'a> {
     token_cursor: Cursor<'a, 'a, TokenEntry, TokenSummary>,
     current_token: Option<&'a TokenEntry>,
 
+    // Cached token byte offsets (like Zed's direct byte offsets from tree-sitter)
+    // This eliminates repeated O(log n) Anchor::to_offset() conversions
+    current_token_start_byte: usize,
+    current_token_end_byte: usize,
+
     // Position tracking
     buffer_snapshot: &'a BufferSnapshot,
     highlight_map: &'a HighlightMap,
@@ -1016,11 +1021,23 @@ impl<'a> HighlightedChunks<'a> {
             current_token = token_cursor.item();
         }
 
+        // Cache byte offsets for the initial token (avoids repeated conversions)
+        let (current_token_start_byte, current_token_end_byte) = current_token
+            .map(|token| {
+                (
+                    token.range.start.to_offset(buffer_snapshot),
+                    token.range.end.to_offset(buffer_snapshot),
+                )
+            })
+            .unwrap_or((usize::MAX, usize::MAX));
+
         Self {
             text_chunks,
             current_text_remaining: "",
             token_cursor,
             current_token,
+            current_token_start_byte,
+            current_token_end_byte,
             buffer_snapshot,
             highlight_map,
             current_offset: range.start,
@@ -1045,26 +1062,34 @@ impl<'a> Iterator for HighlightedChunks<'a> {
 
         // Advance cursor if current token is behind our position
         // This handles the case where we've moved past the end of the current token
-        while let Some(token) = self.current_token {
-            let token_end = token.range.end.to_offset(self.buffer_snapshot);
-            if token_end <= self.current_offset {
+        while let Some(_token) = self.current_token {
+            if self.current_token_end_byte <= self.current_offset {
                 self.token_cursor.next();
                 self.current_token = self.token_cursor.item();
+
+                // Cache byte offsets for the new token (called once per token)
+                (self.current_token_start_byte, self.current_token_end_byte) = self
+                    .current_token
+                    .map(|token| {
+                        (
+                            token.range.start.to_offset(self.buffer_snapshot),
+                            token.range.end.to_offset(self.buffer_snapshot),
+                        )
+                    })
+                    .unwrap_or((usize::MAX, usize::MAX));
             } else {
                 break;
             }
         }
 
-        // Get highlight ID from current token
-        // Check if we're inside a token's range
+        // Get highlight ID from current token using cached offsets
         let highlight_id = self
             .current_token
             .and_then(|token| {
-                let token_start = token.range.start.to_offset(self.buffer_snapshot);
-                let token_end = token.range.end.to_offset(self.buffer_snapshot);
-
-                // Only use this token's highlight if we're inside its range
-                if token_start <= self.current_offset && self.current_offset < token_end {
+                // Use cached byte offsets instead of calling to_offset() repeatedly
+                if self.current_token_start_byte <= self.current_offset
+                    && self.current_offset < self.current_token_end_byte
+                {
                     Some(self.highlight_map.get(token.kind))
                 } else {
                     None
@@ -1077,17 +1102,19 @@ impl<'a> Iterator for HighlightedChunks<'a> {
         chunk_end = chunk_end.min(self.end_offset);
 
         // If we have a current token, clip chunk to BOTH start and end token boundaries
-        if let Some(token) = self.current_token {
-            let token_start = token.range.start.to_offset(self.buffer_snapshot);
-            let token_end = token.range.end.to_offset(self.buffer_snapshot);
-
+        // Use cached byte offsets instead of calling to_offset() repeatedly
+        if self.current_token.is_some() {
             // If we're before the token starts, clip to the token start
-            if self.current_offset < token_start && chunk_end > token_start {
-                chunk_end = token_start;
+            if self.current_offset < self.current_token_start_byte
+                && chunk_end > self.current_token_start_byte
+            {
+                chunk_end = self.current_token_start_byte;
             }
             // If we're inside the token, clip to the token end
-            else if self.current_offset >= token_start && token_end < chunk_end {
-                chunk_end = token_end;
+            else if self.current_offset >= self.current_token_start_byte
+                && self.current_token_end_byte < chunk_end
+            {
+                chunk_end = self.current_token_end_byte;
             }
         }
 
