@@ -10,9 +10,9 @@ use crate::{
     syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
 };
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
-    Style, TextRun, Window,
+    point, px, relative, size, App, Bounds, CursorStyle, Element, ElementId, Entity, Font,
+    FontStyle, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled, TextRun, Window,
 };
 
 pub struct EditorElement {
@@ -38,7 +38,7 @@ impl EditorElement {
 
 impl Element for EditorElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<MinimapLayout>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -55,7 +55,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // Request a simple full-size layout
+        // Request a simple full-size layout for the main editor
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = relative(1.).into();
@@ -67,12 +67,83 @@ impl Element for EditorElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Self::PrepaintState {
-        ()
+        // Detect if this EditorElement is rendering a minimap
+        let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
+
+        // Minimap should not render a nested minimap
+        if is_minimap {
+            return None;
+        }
+
+        // Get font size for measurements
+        let font_size = self.style.font_size;
+
+        // Create font
+        let font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+
+        // Measure em_width for minimap calculations
+        let em_width = {
+            let text_run = TextRun {
+                len: 1,
+                font: font.clone(),
+                color: self.style.text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window.text_system().shape_line(
+                SharedString::from("M"),
+                font_size,
+                &[text_run],
+                None,
+            );
+            shaped.width
+        };
+
+        // Get buffer snapshot to calculate total lines
+        let max_point = {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            let buffer_item = stoat.active_buffer(cx);
+            buffer_item
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .snapshot()
+                .max_point()
+        };
+
+        // Calculate visible lines based on bounds
+        let visible_lines =
+            ((bounds.size.height - self.style.padding * 2.0) / self.style.line_height).floor();
+
+        // Get scroll position
+        let scroll_y = self.view.read(cx).stoat.read(cx).scroll_position().y;
+
+        // Calculate gutter width
+        let gutter_width = self.calculate_gutter_width(max_point.row + 1, window);
+
+        // Layout minimap (only allowed during prepaint phase!)
+        self.layout_minimap(
+            bounds,
+            gutter_width,
+            max_point.row + 1,
+            visible_lines,
+            scroll_y,
+            em_width,
+            window,
+            cx,
+        )
     }
 
     fn paint(
@@ -81,10 +152,29 @@ impl Element for EditorElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Detect if this EditorElement is rendering a minimap
+        let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
+
+        // Apply minimap-specific styling (following Zed's approach)
+        let (font_size, line_height, font_weight) = if is_minimap {
+            // Minimap uses tiny font with BLACK weight (900) to make 2px text visible
+            (
+                px(crate::minimap::MINIMAP_FONT_SIZE),
+                px(crate::minimap::MINIMAP_LINE_HEIGHT),
+                FontWeight(crate::minimap::MINIMAP_FONT_WEIGHT),
+            )
+        } else {
+            (
+                self.style.font_size,
+                self.style.line_height,
+                FontWeight::NORMAL,
+            )
+        };
+
         // Paint background
         window.paint_quad(gpui::PaintQuad {
             bounds,
@@ -107,19 +197,18 @@ impl Element for EditorElement {
             buffer_item.read(cx).token_snapshot()
         };
 
-        // Create font
+        // Create font (use BLACK weight for minimap to make tiny text visible)
         let font = Font {
             family: SharedString::from("Menlo"),
             features: Default::default(),
-            weight: FontWeight::NORMAL,
+            weight: font_weight,
             style: FontStyle::Normal,
             fallbacks: None,
         };
 
         // Calculate visible range
         let max_point = buffer_snapshot.max_point();
-        let visible_lines =
-            ((bounds.size.height - self.style.padding * 2.0) / self.style.line_height).floor();
+        let visible_lines = ((bounds.size.height - self.style.padding * 2.0) / line_height).floor();
         let max_lines = visible_lines as u32;
 
         // Set viewport lines on Stoat, update scroll animation, and get scroll position
@@ -138,8 +227,12 @@ impl Element for EditorElement {
             });
         }
 
-        // Calculate gutter width (for line numbers)
-        let gutter_width = self.calculate_gutter_width(max_point.row + 1, window);
+        // Calculate gutter width (minimap has no gutter)
+        let gutter_width = if is_minimap {
+            Pixels::ZERO
+        } else {
+            self.calculate_gutter_width(max_point.row + 1, window)
+        };
 
         // Use scroll position as offset
         let scroll_offset = scroll_y.floor() as u32;
@@ -220,19 +313,19 @@ impl Element for EditorElement {
                 if !line_text.is_empty() {
                     let shaped = window.text_system().shape_line(
                         SharedString::from(line_text),
-                        self.style.font_size,
+                        font_size,
                         &runs,
                         None,
                     );
 
                     let x = bounds.origin.x + gutter_width + self.style.padding;
-                    if let Err(e) = shaped.paint(point(x, y), self.style.line_height, window, cx) {
+                    if let Err(e) = shaped.paint(point(x, y), line_height, window, cx) {
                         tracing::error!("Failed to paint line {}: {:?}", line_idx, e);
                     }
                 }
             }
 
-            y += self.style.line_height;
+            y += line_height;
 
             // Stop if we've gone past the visible area
             if y > bounds.origin.y + bounds.size.height {
@@ -240,14 +333,22 @@ impl Element for EditorElement {
             }
         }
 
-        // Paint git diff indicators in gutter (behind line numbers)
-        self.paint_gutter(bounds, start_line..end_line, gutter_width, window, cx);
+        // Skip gutter and cursor rendering for minimap
+        if !is_minimap {
+            // Paint git diff indicators in gutter (behind line numbers)
+            self.paint_gutter(bounds, start_line..end_line, gutter_width, window, cx);
 
-        // Paint line numbers in gutter
-        self.paint_line_numbers(bounds, &line_positions, gutter_width, window, cx);
+            // Paint line numbers in gutter
+            self.paint_line_numbers(bounds, &line_positions, gutter_width, window, cx);
 
-        // Paint cursor on top of text
-        self.paint_cursor(bounds, &line_positions, gutter_width, window, cx);
+            // Paint cursor on top of text
+            self.paint_cursor(bounds, &line_positions, gutter_width, window, cx);
+
+            // Paint minimap and thumb overlay (if we have a layout from prepaint)
+            if let Some(layout) = prepaint.take() {
+                self.paint_minimap(layout, window, cx);
+            }
+        }
     }
 }
 
@@ -529,15 +630,14 @@ impl EditorElement {
             return None;
         }
 
-        // Get minimap entity
-        let minimap = self.view.read(cx).minimap()?;
+        // Get minimap view (checking it exists)
+        let _minimap_view = self.view.read(cx).minimap_view()?;
 
-        // Minimap font size is tiny (2-3px)
-        let minimap_font_size = crate::minimap::MINIMAP_FONT_SIZE;
-        let editor_font_size = self.style.font_size.0;
+        // Minimap font size is tiny (2-3px) - calculate ratio from raw constants
+        let font_ratio = crate::minimap::MINIMAP_FONT_SIZE / 14.0; // Assuming 14px base editor font
 
         // Scale em_width proportionally to font size ratio
-        let minimap_em_width = em_width * (minimap_font_size / editor_font_size);
+        let minimap_em_width = em_width * font_ratio;
 
         // Width is 15% of text width, capped by max columns
         let minimap_width =
@@ -609,9 +709,9 @@ impl EditorElement {
         })
     }
 
-    /// Layout the minimap editor and calculate thumb bounds.
+    /// Layout the minimap editor and calculate thumb bounds (following Zed's architecture).
     ///
-    /// Following Zed's approach: set scroll on minimap, create element, calculate thumb.
+    /// Uses `layout_as_root` + `with_absolute_element_offset` instead of Element lifecycle.
     fn layout_minimap(
         &self,
         bounds: Bounds<Pixels>,
@@ -630,13 +730,8 @@ impl EditorElement {
         let minimap_width =
             self.get_minimap_width(text_width, em_width, self.style.minimap_max_columns, cx)?;
 
-        // Get minimap entity
-        let minimap_entity = self.view.read(cx).minimap()?.clone();
-
-        // Skip if this IS the minimap (prevent infinite recursion)
-        if minimap_entity.read(cx).is_minimap() {
-            return None;
-        }
+        // Get minimap view
+        let minimap_view = self.view.read(cx).minimap_view()?.clone();
 
         // Calculate minimap bounds (top-right corner, full height)
         let minimap_bounds = Bounds {
@@ -646,6 +741,9 @@ impl EditorElement {
             ),
             size: size(minimap_width, bounds.size.height),
         };
+
+        // Create hitbox for mouse interaction
+        let minimap_hitbox = window.insert_hitbox(minimap_bounds, HitboxBehavior::Normal);
 
         // Calculate minimap metrics
         let minimap_line_height = px(crate::minimap::MINIMAP_LINE_HEIGHT);
@@ -661,9 +759,11 @@ impl EditorElement {
         );
 
         // Set scroll position on minimap Stoat
-        minimap_entity.update(cx, |minimap_stoat, _cx| {
-            minimap_stoat.scroll.position = point(0.0, minimap_scroll_top as f32);
-            minimap_stoat.set_viewport_lines(visible_minimap_lines as f32);
+        minimap_view.update(cx, |minimap_editor_view, cx| {
+            minimap_editor_view.stoat.update(cx, |minimap_stoat, _cx| {
+                minimap_stoat.set_scroll_position(point(0.0, minimap_scroll_top as f32));
+                minimap_stoat.set_viewport_lines(visible_minimap_lines as f32);
+            });
         });
 
         // Calculate thumb bounds
@@ -674,83 +774,89 @@ impl EditorElement {
             editor_scroll_y as f64,
         );
 
-        // Create minimap element (EditorElement rendering the minimap Stoat)
-        // We'll render it in paint_minimap
-        let minimap_element = gpui::div()
+        // Create minimap element (passing Entity<EditorView> directly)
+        // Following Zed's approach: GPUI calls Render trait automatically
+        let mut minimap = gpui::div()
             .size_full()
-            .child(EditorElement::new(self.view.clone())) // FIXME: Should be minimap view
+            .child(minimap_view)
             .into_any_element();
 
+        // Layout with explicit size (Zed's approach - NOT using Element lifecycle)
+        minimap.layout_as_root(minimap_bounds.size.into(), window, cx);
+
+        // Prepaint with absolute positioning (Zed's approach)
+        window.with_absolute_element_offset(minimap_bounds.origin, |window| {
+            minimap.prepaint(window, cx)
+        });
+
         Some(MinimapLayout {
-            minimap_element,
-            minimap_bounds,
+            minimap,
+            minimap_hitbox,
             thumb_bounds,
             minimap_line_height,
             minimap_scroll_top,
         })
     }
 
-    /// Paint the minimap and viewport thumb overlay.
-    fn paint_minimap(&mut self, minimap_layout: MinimapLayout, window: &mut Window, cx: &mut App) {
-        // Paint minimap background
-        window.paint_quad(gpui::PaintQuad {
-            bounds: minimap_layout.minimap_bounds,
-            corner_radii: 0.0.into(),
-            background: (self.style.background * 0.7).into(), // Slightly dimmed
-            border_color: gpui::transparent_black(),
-            border_widths: 0.0.into(),
-            border_style: gpui::BorderStyle::default(),
+    /// Paint the minimap and viewport thumb overlay (following Zed's architecture).
+    ///
+    /// Uses `paint_layer` for proper compositing.
+    fn paint_minimap(&mut self, mut layout: MinimapLayout, window: &mut Window, cx: &mut App) {
+        // Paint in a layer for proper compositing (following Zed)
+        window.paint_layer(layout.minimap_hitbox.bounds, |window| {
+            // Paint the minimap element (already laid out and prepainted)
+            layout.minimap.paint(window, cx);
+
+            // Paint viewport thumb overlay on top
+            if let Some(thumb_bounds) = layout.thumb_bounds {
+                // Paint thumb fill
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: thumb_bounds,
+                    corner_radii: 0.0.into(),
+                    background: self.style.minimap_thumb_color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+
+                // Paint thumb border (left edge)
+                let border_width = px(1.0);
+                let border_bounds = Bounds {
+                    origin: thumb_bounds.origin,
+                    size: size(border_width, thumb_bounds.size.height),
+                };
+
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: border_bounds,
+                    corner_radii: 0.0.into(),
+                    background: self.style.minimap_thumb_border_color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+            }
         });
 
-        // FIXME: Need to actually render the minimap Stoat here
-        // For now, just paint the thumb overlay
-
-        // Paint viewport thumb overlay
-        if let Some(thumb_bounds) = minimap_layout.thumb_bounds {
-            // Paint thumb fill
-            window.paint_quad(gpui::PaintQuad {
-                bounds: thumb_bounds,
-                corner_radii: 0.0.into(),
-                background: self.style.minimap_thumb_color.into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-
-            // Paint thumb border (left edge)
-            let border_width = px(1.0);
-            let border_bounds = Bounds {
-                origin: thumb_bounds.origin,
-                size: size(border_width, thumb_bounds.size.height),
-            };
-
-            window.paint_quad(gpui::PaintQuad {
-                bounds: border_bounds,
-                corner_radii: 0.0.into(),
-                background: self.style.minimap_thumb_border_color.into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-        }
+        // Set cursor style when hovering over minimap (basic hover detection)
+        window.set_cursor_style(CursorStyle::Arrow, &layout.minimap_hitbox);
     }
 }
 
-/// Layout information for the minimap.
+/// Layout information for the minimap (following Zed's architecture).
 ///
-/// Contains the laid-out minimap element, bounds, and thumb overlay position.
-/// Following Zed's architecture - minimap is just another EditorElement with tiny font.
-struct MinimapLayout {
-    /// The minimap editor element (laid out and ready to paint)
-    minimap_element: gpui::AnyElement,
-    /// Bounds of the minimap region
-    minimap_bounds: Bounds<Pixels>,
+/// Contains the fully laid-out and prepainted minimap element along with
+/// hitbox for mouse interaction and thumb overlay bounds.
+pub struct MinimapLayout {
+    /// The minimap editor element (already laid out and prepainted via layout_as_root)
+    pub minimap: gpui::AnyElement,
+    /// Hitbox for mouse interaction (hover, click, drag)
+    pub minimap_hitbox: Hitbox,
     /// Bounds of the viewport thumb overlay (None if entire file visible)
-    thumb_bounds: Option<Bounds<Pixels>>,
+    pub thumb_bounds: Option<Bounds<Pixels>>,
     /// Line height for minimap text rendering
-    minimap_line_height: Pixels,
+    pub minimap_line_height: Pixels,
     /// Scroll position for the minimap (in lines)
-    minimap_scroll_top: f64,
+    pub minimap_scroll_top: f64,
 }
 
 impl IntoElement for EditorElement {

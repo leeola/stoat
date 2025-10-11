@@ -23,6 +23,9 @@ pub const MINIMAP_FONT_SIZE: f32 = 2.0;
 /// Line height for minimap text (tight spacing)
 pub const MINIMAP_LINE_HEIGHT: f32 = 2.5;
 
+/// Font weight for minimap text - BLACK weight (900) makes tiny text visible (matches Zed)
+pub const MINIMAP_FONT_WEIGHT: f32 = 900.0;
+
 /// Minimap width as a percentage of the editor width
 pub const MINIMAP_WIDTH_PCT: f32 = 0.15;
 

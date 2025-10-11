@@ -1,28 +1,45 @@
 use crate::editor_element::EditorElement;
 use gpui::{
-    div, point, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
 };
-use stoat::{actions::*, scroll, Stoat};
+use stoat::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
     this: Option<Entity<Self>>,
-    minimap: Option<Entity<Stoat>>,
+    minimap_view: Option<Entity<EditorView>>,
 }
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        // Create minimap using Zed's approach - minimap is just another Stoat instance
-        let minimap = stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
+
+        // Create minimap Stoat
+        let minimap_stoat = stoat.update(cx, |stoat, cx| stoat.create_minimap(cx));
+
+        // Wrap minimap Stoat in EditorView (following Zed's architecture)
+        let minimap_view = cx.new(|cx| {
+            let minimap_focus_handle = cx.focus_handle();
+            EditorView {
+                stoat: minimap_stoat,
+                focus_handle: minimap_focus_handle,
+                this: None,
+                minimap_view: None, // Minimap doesn't have its own minimap
+            }
+        });
+
+        // Set entity on minimap view so it can render
+        minimap_view.update(cx, |minimap, _cx| {
+            minimap.set_entity(minimap_view.clone());
+        });
 
         Self {
             stoat,
             focus_handle,
             this: None,
-            minimap: Some(minimap),
+            minimap_view: Some(minimap_view),
         }
     }
 
@@ -34,8 +51,8 @@ impl EditorView {
         self.focus_handle.is_focused(window)
     }
 
-    pub fn minimap(&self) -> Option<&Entity<Stoat>> {
-        self.minimap.as_ref()
+    pub fn minimap_view(&self) -> Option<&Entity<EditorView>> {
+        self.minimap_view.as_ref()
     }
 
     // ==== Action handlers ====

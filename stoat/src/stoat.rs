@@ -315,7 +315,17 @@ impl Stoat {
     ///
     /// This is a convenience method that unwraps the result from [`active_buffer_item`].
     /// Panics if no buffer is active (should never happen in practice).
+    ///
+    /// Following Zed's architecture: if this is a minimap, delegates to the parent editor
+    /// to get the active buffer. This ensures the minimap always shows the parent's current buffer.
     pub fn active_buffer(&self, cx: &App) -> Entity<BufferItem> {
+        // If this is a minimap, delegate to parent (following Zed's pattern)
+        if let Some(parent_weak) = &self.parent_stoat {
+            if let Some(parent) = parent_weak.upgrade() {
+                return parent.read(cx).active_buffer(cx);
+            }
+        }
+
         let buffer_id = match self.active_buffer_id {
             Some(id) => id,
             None => {
@@ -353,7 +363,16 @@ impl Stoat {
     /// Get the currently active buffer ID.
     ///
     /// Returns the [`BufferId`] of the active buffer, or `None` if no buffer is active.
-    pub fn active_buffer_id(&self) -> Option<BufferId> {
+    ///
+    /// Following Zed's architecture: if this is a minimap, delegates to the parent editor.
+    pub fn active_buffer_id(&self, cx: &App) -> Option<BufferId> {
+        // If this is a minimap, delegate to parent (following Zed's pattern)
+        if let Some(parent_weak) = &self.parent_stoat {
+            if let Some(parent) = parent_weak.upgrade() {
+                return parent.read(cx).active_buffer_id(cx);
+            }
+        }
+
         self.active_buffer_id
     }
 
@@ -375,6 +394,11 @@ impl Stoat {
     /// Get scroll position
     pub fn scroll_position(&self) -> gpui::Point<f32> {
         self.scroll.position
+    }
+
+    /// Set scroll position (used by minimap synchronization)
+    pub fn set_scroll_position(&mut self, position: gpui::Point<f32>) {
+        self.scroll.position = position;
     }
 
     /// Get current mode
@@ -570,43 +594,42 @@ impl Stoat {
 
         // Create minimap in a special mode
         cx.new(|_cx| Self {
-                buffer_store: self.buffer_store.clone(),
-                open_buffers: self.open_buffers.clone(),
-                active_buffer_id: self.active_buffer_id,
-                cursor: CursorManager::new(), // New cursor for minimap
-                scroll: self.scroll.clone(),  // Clone scroll state (will be synced)
-                viewport_lines: None,         // Will be set by layout
-                mode: "minimap".into(),       // Special mode for minimap
-                modes: self.modes.clone(),
-                file_finder_input: None,
-                file_finder_files: Vec::new(),
-                file_finder_filtered: Vec::new(),
-                file_finder_selected: 0,
-                file_finder_previous_mode: None,
-                file_finder_preview: None,
-                file_finder_preview_task: None,
-                file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
-                command_palette_input: None,
-                command_palette_commands: Vec::new(),
-                command_palette_filtered: Vec::new(),
-                command_palette_selected: 0,
-                command_palette_previous_mode: None,
-                buffer_finder_input: None,
-                buffer_finder_buffers: Vec::new(),
-                buffer_finder_filtered: Vec::new(),
-                buffer_finder_selected: 0,
-                buffer_finder_previous_mode: None,
-                git_status_files: Vec::new(),
-                git_status_selected: 0,
-                git_status_previous_mode: None,
-                git_status_preview: None,
-                git_status_preview_task: None,
-                git_status_branch_info: None,
-                git_dirty_count: 0,
-                current_file_path: None,
-                worktree: self.worktree.clone(),
-                parent_stoat: Some(parent_weak),
-            }
+            buffer_store: self.buffer_store.clone(),
+            open_buffers: self.open_buffers.clone(),
+            active_buffer_id: self.active_buffer_id,
+            cursor: CursorManager::new(), // New cursor for minimap
+            scroll: self.scroll.clone(),  // Clone scroll state (will be synced)
+            viewport_lines: None,         // Will be set by layout
+            mode: "minimap".into(),       // Special mode for minimap
+            modes: self.modes.clone(),
+            file_finder_input: None,
+            file_finder_files: Vec::new(),
+            file_finder_filtered: Vec::new(),
+            file_finder_selected: 0,
+            file_finder_previous_mode: None,
+            file_finder_preview: None,
+            file_finder_preview_task: None,
+            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            command_palette_input: None,
+            command_palette_commands: Vec::new(),
+            command_palette_filtered: Vec::new(),
+            command_palette_selected: 0,
+            command_palette_previous_mode: None,
+            buffer_finder_input: None,
+            buffer_finder_buffers: Vec::new(),
+            buffer_finder_filtered: Vec::new(),
+            buffer_finder_selected: 0,
+            buffer_finder_previous_mode: None,
+            git_status_files: Vec::new(),
+            git_status_selected: 0,
+            git_status_previous_mode: None,
+            git_status_preview: None,
+            git_status_preview_task: None,
+            git_status_branch_info: None,
+            git_dirty_count: 0,
+            current_file_path: None,
+            worktree: self.worktree.clone(),
+            parent_stoat: Some(parent_weak),
         })
     }
 

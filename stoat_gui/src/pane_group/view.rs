@@ -146,7 +146,7 @@ impl PaneGroupView {
         let visible_buffer_ids: Vec<text::BufferId> = self
             .pane_editors
             .values()
-            .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id())
+            .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx))
             .collect();
 
         // Open buffer finder in the active editor's Stoat instance
