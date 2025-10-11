@@ -1,10 +1,10 @@
 use crate::{editor_element::EditorElement, editor_style::EditorStyle};
 use gpui::{
-    div, point, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    ParentElement, Render, ScrollWheelEvent, Styled, Window, div, point,
 };
 use std::sync::Arc;
-use stoat::{actions::*, scroll, Stoat};
+use stoat::{Stoat, actions::*, scroll};
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
