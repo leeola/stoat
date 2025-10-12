@@ -9,19 +9,23 @@ use crate::{
     status_bar::StatusBar,
 };
 use gpui::{
-    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Window,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use stoat::{
+    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
-        OpenCommandPalette, OpenFileFinder, OpenGitStatus, SplitDown, SplitLeft, SplitRight,
-        SplitUp, ToggleMinimap,
+        OpenCommandPalette, OpenFileFinder, OpenGitStatus, ShowMinimapOnScroll, SplitDown,
+        SplitLeft, SplitRight, SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
-    Stoat,
 };
 use tracing::debug;
 
@@ -50,6 +54,72 @@ const THUMB_OFFSET_PX: f64 = 2.0;
 /// [`THUMB_OFFSET_PX`], this solved the ~2 line positioning error.
 const THUMB_HEIGHT_OFFSET_PX: f64 = 1.0;
 
+/// Default threshold in lines for scroll hint mode.
+///
+/// Scroll changes smaller than this threshold won't trigger the minimap hint.
+/// Set to 5 lines to prevent small movements (like single jk presses) from
+/// causing the minimap to blink in and out.
+const SCROLL_HINT_DEFAULT_THRESHOLD: f32 = 5.0;
+
+/// Duration the minimap hint stays visible after a large scroll.
+///
+/// Allows users to orient themselves without being distracting.
+const SCROLL_HINT_DURATION: Duration = Duration::from_millis(1000);
+
+/// Duration for fade-in animation when minimap appears.
+const FADE_IN_DURATION: Duration = Duration::from_millis(100);
+
+/// Duration for fade-out animation when minimap disappears.
+const FADE_OUT_DURATION: Duration = Duration::from_millis(300);
+
+/// Minimap fade animation state.
+///
+/// Tracks the current fade animation state of the minimap in ScrollHint mode.
+/// Transitions: Hidden -> FadingIn -> Visible -> FadingOut -> Hidden
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MinimapFadeState {
+    /// Minimap is not rendered
+    Hidden,
+    /// Minimap is fading in (opacity 0.0 to 1.0)
+    FadingIn { started_at: Instant },
+    /// Minimap is fully visible (opacity 1.0)
+    Visible { expires_at: Instant },
+    /// Minimap is fading out (opacity 1.0 to 0.0)
+    FadingOut { started_at: Instant },
+}
+
+impl Default for MinimapFadeState {
+    fn default() -> Self {
+        Self::Hidden
+    }
+}
+
+/// Minimap visibility mode.
+///
+/// Controls when and how the minimap is displayed to the user.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MinimapVisibility {
+    /// Minimap is always visible
+    AlwaysVisible,
+    /// Minimap is always hidden
+    AlwaysHidden,
+    /// Minimap appears temporarily on large scrolls
+    ///
+    /// The minimap stays hidden until the viewport scrolls by more than
+    /// the threshold (in lines). When triggered, it appears for
+    /// [`SCROLL_HINT_DURATION`] then automatically hides.
+    ScrollHint {
+        /// Scroll threshold in lines
+        threshold_lines: f32,
+    },
+}
+
+impl Default for MinimapVisibility {
+    fn default() -> Self {
+        Self::AlwaysVisible
+    }
+}
+
 /// Main view that manages multiple editor panes in a tree layout.
 ///
 /// PaneGroupView wraps a [`PaneGroup`] (from stoat core) and maintains
@@ -71,8 +141,12 @@ pub struct PaneGroupView {
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
     minimap_view: Entity<EditorView>,
-    /// Whether the minimap is currently visible
-    minimap_visible: bool,
+    /// Minimap visibility mode
+    minimap_visibility: MinimapVisibility,
+    /// Last editor scroll position (for detecting scroll changes in ScrollHint mode)
+    last_editor_scroll_y: Option<f32>,
+    /// Minimap fade animation state (for ScrollHint mode)
+    minimap_fade_state: MinimapFadeState,
 }
 
 impl PaneGroupView {
@@ -143,7 +217,9 @@ impl PaneGroupView {
             git_status_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
-            minimap_visible: true, // Minimap is visible by default
+            minimap_visibility: MinimapVisibility::AlwaysVisible,
+            last_editor_scroll_y: None,
+            minimap_fade_state: MinimapFadeState::Hidden,
         }
     }
 
@@ -688,18 +764,94 @@ impl PaneGroupView {
         }
     }
 
+    /// Compute minimap opacity based on current fade state.
+    ///
+    /// Returns opacity value (0.0 to 1.0) and whether animation is active.
+    /// Animation is active during FadingIn and FadingOut states.
+    fn calculate_minimap_opacity(&mut self) -> (f32, bool) {
+        match self.minimap_visibility {
+            MinimapVisibility::AlwaysVisible => (1.0, false),
+            MinimapVisibility::AlwaysHidden => (0.0, false),
+            MinimapVisibility::ScrollHint { .. } => match self.minimap_fade_state {
+                MinimapFadeState::Hidden => (0.0, false),
+                MinimapFadeState::FadingIn { started_at } => {
+                    let elapsed = started_at.elapsed();
+                    let progress =
+                        (elapsed.as_secs_f32() / FADE_IN_DURATION.as_secs_f32()).min(1.0);
+
+                    if progress >= 1.0 {
+                        // Fade-in complete, transition to Visible
+                        // (This shouldn't happen often as timer should handle it, but just in case)
+                        let expires_at = Instant::now() + SCROLL_HINT_DURATION;
+                        self.minimap_fade_state = MinimapFadeState::Visible { expires_at };
+                        (1.0, false)
+                    } else {
+                        (progress, true)
+                    }
+                },
+                MinimapFadeState::Visible { .. } => (1.0, false),
+                MinimapFadeState::FadingOut { started_at } => {
+                    let elapsed = started_at.elapsed();
+                    let progress =
+                        (elapsed.as_secs_f32() / FADE_OUT_DURATION.as_secs_f32()).min(1.0);
+
+                    if progress >= 1.0 {
+                        // Fade-out complete, transition to Hidden
+                        self.minimap_fade_state = MinimapFadeState::Hidden;
+                        (0.0, false)
+                    } else {
+                        (1.0 - progress, true)
+                    }
+                },
+            },
+        }
+    }
+
     /// Handle toggle minimap action
+    ///
+    /// Toggles between AlwaysVisible and AlwaysHidden
     fn handle_toggle_minimap(
         &mut self,
         _: &ToggleMinimap,
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.minimap_visible = !self.minimap_visible;
+        self.minimap_visibility = match self.minimap_visibility {
+            MinimapVisibility::AlwaysVisible => MinimapVisibility::AlwaysHidden,
+            MinimapVisibility::AlwaysHidden | MinimapVisibility::ScrollHint { .. } => {
+                MinimapVisibility::AlwaysVisible
+            },
+        };
+
+        // Reset scroll tracking and fade state when changing modes
+        self.last_editor_scroll_y = None;
+        self.minimap_fade_state = MinimapFadeState::Hidden;
+
         debug!(
-            minimap_visible = self.minimap_visible,
+            minimap_visibility = ?self.minimap_visibility,
             "Toggled minimap visibility"
         );
+        cx.notify();
+    }
+
+    /// Handle show minimap on scroll action
+    ///
+    /// Enables ScrollHint mode where minimap appears on large scrolls
+    fn handle_show_minimap_on_scroll(
+        &mut self,
+        _: &ShowMinimapOnScroll,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.minimap_visibility = MinimapVisibility::ScrollHint {
+            threshold_lines: SCROLL_HINT_DEFAULT_THRESHOLD,
+        };
+
+        // Reset scroll tracking and fade state when changing modes
+        self.last_editor_scroll_y = None;
+        self.minimap_fade_state = MinimapFadeState::Hidden;
+
+        debug!("Enabled minimap scroll hint mode");
         cx.notify();
     }
 
@@ -749,10 +901,126 @@ impl Focusable for PaneGroupView {
 }
 
 impl Render for PaneGroupView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Track scroll position for ScrollHint mode
+        // Extract early to avoid borrow conflicts with later code
+        let current_scroll_y = self.pane_editors.get(&self.active_pane).and_then(|editor| {
+            let stoat = editor.read(cx).stoat.read(cx);
+            Some(stoat.scroll_position().y)
+        });
+
+        // Update scroll hint state if in ScrollHint mode
+        if let MinimapVisibility::ScrollHint { threshold_lines } = self.minimap_visibility {
+            if let Some(current_y) = current_scroll_y {
+                // Check if scroll exceeds threshold
+                let scroll_delta = self
+                    .last_editor_scroll_y
+                    .map(|last_y| (current_y - last_y).abs())
+                    .unwrap_or(0.0);
+
+                if scroll_delta >= threshold_lines {
+                    // Large scroll detected - show minimap or extend visibility
+                    match self.minimap_fade_state {
+                        MinimapFadeState::Hidden => {
+                            // Start fade-in animation from hidden state
+                            let now = Instant::now();
+                            self.minimap_fade_state =
+                                MinimapFadeState::FadingIn { started_at: now };
+
+                            // Spawn timer to transition through visible state to fade-out
+                            cx.spawn(async move |this, cx| {
+                                // Wait for fade-in to complete
+                                cx.background_executor().timer(FADE_IN_DURATION).await;
+
+                                // Transition to Visible state
+                                let fade_in_completed = this.update(cx, |this, _cx| {
+                                    if matches!(
+                                        this.minimap_fade_state,
+                                        MinimapFadeState::FadingIn { .. }
+                                    ) {
+                                        let expires_at = Instant::now() + SCROLL_HINT_DURATION;
+                                        this.minimap_fade_state =
+                                            MinimapFadeState::Visible { expires_at };
+                                        true
+                                    } else {
+                                        // State changed (new scroll), abort this transition
+                                        false
+                                    }
+                                });
+
+                                if fade_in_completed.unwrap_or(false) {
+                                    // Wait for visible duration
+                                    cx.background_executor().timer(SCROLL_HINT_DURATION).await;
+
+                                    // Transition to FadingOut state
+                                    this.update(cx, |this, cx| {
+                                        if matches!(
+                                            this.minimap_fade_state,
+                                            MinimapFadeState::Visible { .. }
+                                        ) {
+                                            this.minimap_fade_state = MinimapFadeState::FadingOut {
+                                                started_at: Instant::now(),
+                                            };
+                                            cx.notify();
+                                        }
+                                    })
+                                    .ok();
+                                }
+                            })
+                            .detach();
+                        },
+                        MinimapFadeState::FadingIn { .. }
+                        | MinimapFadeState::Visible { .. }
+                        | MinimapFadeState::FadingOut { .. } => {
+                            // Already visible or animating - keep it visible and restart timer
+                            let expires_at = Instant::now() + SCROLL_HINT_DURATION;
+                            self.minimap_fade_state = MinimapFadeState::Visible { expires_at };
+
+                            // Spawn timer for new fade-out
+                            cx.spawn(async move |this, cx| {
+                                // Wait for visible duration
+                                cx.background_executor().timer(SCROLL_HINT_DURATION).await;
+
+                                // Transition to FadingOut state
+                                this.update(cx, |this, cx| {
+                                    // Only fade out if still in the expected Visible state
+                                    if matches!(
+                                        this.minimap_fade_state,
+                                        MinimapFadeState::Visible { expires_at }
+                                        if expires_at <= Instant::now()
+                                    ) {
+                                        this.minimap_fade_state = MinimapFadeState::FadingOut {
+                                            started_at: Instant::now(),
+                                        };
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                            })
+                            .detach();
+                        },
+                    }
+
+                    cx.notify();
+                }
+
+                // Update tracked position
+                self.last_editor_scroll_y = Some(current_y);
+            }
+        }
+
+        // Compute minimap opacity and check if animating
+        let (minimap_opacity, is_animating) = self.calculate_minimap_opacity();
+        let minimap_visible = minimap_opacity > 0.0;
+
+        // Request animation frame if currently animating
+        if is_animating {
+            window.request_animation_frame();
+        }
+
         // Extract minimap viewport lines before main data extraction to avoid borrow conflicts
         // Only compute if minimap is visible to avoid performance impact
-        let minimap_viewport_lines = if self.minimap_visible {
+        let minimap_viewport_lines = if minimap_visible {
             let lines = self.minimap_view.read(cx).stoat.read(cx).viewport_lines();
             eprintln!("[THUMB DEBUG] Minimap viewport_lines: {:?}", lines);
             lines
@@ -861,7 +1129,7 @@ impl Render for PaneGroupView {
 
                 // Calculate minimap scroll position for later update
                 // Only compute if minimap is visible to avoid performance impact
-                let minimap_scroll = if self.minimap_visible {
+                let minimap_scroll = if minimap_visible {
                     let buffer_item = stoat.active_buffer(cx);
                     let buffer = buffer_item.read(cx).buffer().read(cx);
                     let buffer_snapshot = buffer.snapshot();
@@ -904,7 +1172,7 @@ impl Render for PaneGroupView {
 
                 // Extract thumb calculation data (visible lines and editor scroll)
                 // Only compute if minimap is visible to avoid performance impact
-                let thumb_data = if self.minimap_visible {
+                let thumb_data = if minimap_visible {
                     stoat.viewport_lines().map(|visible_editor_lines| {
                         let editor_scroll_y = stoat.scroll_position().y;
                         (visible_editor_lines, editor_scroll_y)
@@ -941,7 +1209,7 @@ impl Render for PaneGroupView {
         // This must happen after data extraction (to avoid borrow conflicts) but before thumb
         // calculation
         // Only update if minimap is visible to avoid performance impact
-        if self.minimap_visible {
+        if minimap_visible {
             if let Some(minimap_scroll_y) = minimap_scroll_to_set {
                 self.minimap_view.update(cx, |minimap_view, cx| {
                     minimap_view.stoat.update(cx, |stoat, _cx| {
@@ -1037,6 +1305,7 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))
                     .on_action(cx.listener(Self::handle_toggle_minimap))
+                    .on_action(cx.listener(Self::handle_show_minimap_on_scroll))
                     .child(self.render_member(self.pane_group.root(), 0))
                     .child(CommandOverlay::new(mode_display, bindings))
                     .when(active_mode == "file_finder", |div| {
@@ -1093,9 +1362,9 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
-                    // Render minimap as fixed overlay on the right side
-                    // Only render if minimap is visible to avoid performance impact
-                    .when(self.minimap_visible, |parent_div| {
+                    // Render minimap as fixed overlay on the right side with opacity
+                    // Only render if opacity > 0 (minimap_visible) to avoid performance impact
+                    .when(minimap_visible, |parent_div| {
                         parent_div.child(
                             div()
                                 .absolute()
@@ -1103,10 +1372,11 @@ impl Render for PaneGroupView {
                                 .right_0()
                                 .h_full()
                                 .w(gpui::px(120.0)) // Fixed width in pixels
+                                .opacity(minimap_opacity)
                                 .child(self.minimap_view.clone()),
                         )
                     })
-                    // Render minimap thumb (viewport indicator) if calculated
+                    // Render minimap thumb (viewport indicator) if calculated, with same opacity
                     .when_some(minimap_thumb_bounds, |parent_div, thumb_bounds| {
                         parent_div.child(
                             div()
@@ -1116,6 +1386,7 @@ impl Render for PaneGroupView {
                                 .top(thumb_bounds.origin.y)
                                 .w(gpui::px(120.0)) // Same width as minimap
                                 .h(thumb_bounds.size.height)
+                                .opacity(minimap_opacity)
                                 .bg(gpui::rgba(0xFFFFFF22)) // Mostly clear white background
                                 .border_1()
                                 .border_color(gpui::rgba(0xFFFFFF55)), /* Semi-transparent white

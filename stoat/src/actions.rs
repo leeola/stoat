@@ -209,6 +209,8 @@ actions!(
     [
         /// Toggle minimap visibility
         ToggleMinimap,
+        /// Show minimap on scroll
+        ShowMinimapOnScroll,
     ]
 );
 
@@ -609,8 +611,13 @@ action_metadata!(QuitApp, "quit", "Quit the application", ["q", "quit"]);
 action_metadata!(
     ToggleMinimap,
     "toggle minimap",
-    "Show or hide the minimap view",
+    "Toggle minimap visibility between always visible and always hidden",
     ["minimap"]
+);
+action_metadata!(
+    ShowMinimapOnScroll,
+    "minimap on scroll",
+    "Show minimap temporarily when scrolling more than 5 lines"
 );
 
 // Static maps for looking up action metadata by TypeId
@@ -804,6 +811,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // View actions
     names.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::action_name());
+    names.insert(
+        TypeId::of::<ShowMinimapOnScroll>(),
+        ShowMinimapOnScroll::action_name(),
+    );
 
     names
 });
@@ -997,6 +1008,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // View actions
     descriptions.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::description());
+    descriptions.insert(
+        TypeId::of::<ShowMinimapOnScroll>(),
+        ShowMinimapOnScroll::description(),
+    );
 
     descriptions
 });
@@ -1182,6 +1197,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
 
     // View actions
     help.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::help_text());
+    help.insert(
+        TypeId::of::<ShowMinimapOnScroll>(),
+        ShowMinimapOnScroll::help_text(),
+    );
 
     help
 });

@@ -155,6 +155,8 @@ pub fn dispatch_command_by_type_id(
     // View actions
     else if type_id == TypeId::of::<ToggleMinimap>() {
         window.dispatch_action(Box::new(ToggleMinimap), cx);
+    } else if type_id == TypeId::of::<ShowMinimapOnScroll>() {
+        window.dispatch_action(Box::new(ShowMinimapOnScroll), cx);
     }
     // Application actions
     else if type_id == TypeId::of::<QuitApp>() {
