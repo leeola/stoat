@@ -214,6 +214,19 @@ actions!(
     ]
 );
 
+// Help actions
+actions!(
+    stoat,
+    [
+        /// Open help overlay
+        OpenHelpOverlay,
+        /// Open help modal
+        OpenHelpModal,
+        /// Dismiss help modal
+        HelpModalDismiss,
+    ]
+);
+
 // Scroll actions - Scroll has data so defined below with #[derive(Action)]
 
 /// Insert text action data
@@ -620,6 +633,24 @@ action_metadata!(
     "Show minimap temporarily when scrolling more than 5 lines"
 );
 
+// Help actions
+action_metadata!(
+    OpenHelpOverlay,
+    "help",
+    "Show help overlay with basic keybinding hints",
+    ["help", "?"]
+);
+action_metadata!(
+    OpenHelpModal,
+    "full help",
+    "Open full help modal with comprehensive keybinding reference"
+);
+action_metadata!(
+    HelpModalDismiss,
+    "dismiss help",
+    "Close the help modal and return to the previous mode"
+);
+
 // Static maps for looking up action metadata by TypeId
 
 /// Map from TypeId to action name
@@ -814,6 +845,17 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<ShowMinimapOnScroll>(),
         ShowMinimapOnScroll::action_name(),
+    );
+
+    // Help actions
+    names.insert(
+        TypeId::of::<OpenHelpOverlay>(),
+        OpenHelpOverlay::action_name(),
+    );
+    names.insert(TypeId::of::<OpenHelpModal>(), OpenHelpModal::action_name());
+    names.insert(
+        TypeId::of::<HelpModalDismiss>(),
+        HelpModalDismiss::action_name(),
     );
 
     names
@@ -1013,6 +1055,17 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         ShowMinimapOnScroll::description(),
     );
 
+    // Help actions
+    descriptions.insert(
+        TypeId::of::<OpenHelpOverlay>(),
+        OpenHelpOverlay::description(),
+    );
+    descriptions.insert(TypeId::of::<OpenHelpModal>(), OpenHelpModal::description());
+    descriptions.insert(
+        TypeId::of::<HelpModalDismiss>(),
+        HelpModalDismiss::description(),
+    );
+
     descriptions
 });
 
@@ -1202,6 +1255,17 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         ShowMinimapOnScroll::help_text(),
     );
 
+    // Help actions
+    help.insert(
+        TypeId::of::<OpenHelpOverlay>(),
+        OpenHelpOverlay::help_text(),
+    );
+    help.insert(TypeId::of::<OpenHelpModal>(), OpenHelpModal::help_text());
+    help.insert(
+        TypeId::of::<HelpModalDismiss>(),
+        HelpModalDismiss::help_text(),
+    );
+
     help
 });
 
@@ -1219,6 +1283,9 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 
     // View actions
     aliases.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::aliases());
+
+    // Help actions
+    aliases.insert(TypeId::of::<OpenHelpOverlay>(), OpenHelpOverlay::aliases());
 
     // Add more aliases here as needed
 

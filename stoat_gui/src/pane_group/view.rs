@@ -4,13 +4,15 @@ use crate::{
     editor_view::EditorView,
     file_finder::Finder,
     git_status::GitStatus,
+    help_modal::HelpModal,
     pane_group::element::pane_axis,
     render_stats::{FrameTimer, RenderStatsOverlayElement},
     status_bar::StatusBar,
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
+    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Window,
 };
 use std::{
     cell::RefCell,
@@ -19,13 +21,14 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    Stoat,
     actions::{
-        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, OpenBufferFinder,
-        OpenCommandPalette, OpenFileFinder, OpenGitStatus, ShowMinimapOnScroll, SplitDown,
-        SplitLeft, SplitRight, SplitUp, ToggleMinimap,
+        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, HelpModalDismiss,
+        OpenBufferFinder, OpenCommandPalette, OpenFileFinder, OpenGitStatus, OpenHelpModal,
+        OpenHelpOverlay, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight, SplitUp,
+        ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    Stoat,
 };
 use tracing::debug;
 
@@ -147,6 +150,8 @@ pub struct PaneGroupView {
     last_editor_scroll_y: Option<f32>,
     /// Minimap fade animation state (for ScrollHint mode)
     minimap_fade_state: MinimapFadeState,
+    /// Help overlay visibility (non-modal overlay showing hint to press ? again)
+    help_overlay_visible: bool,
 }
 
 impl PaneGroupView {
@@ -220,6 +225,7 @@ impl PaneGroupView {
             minimap_visibility: MinimapVisibility::AlwaysVisible,
             last_editor_scroll_y: None,
             minimap_fade_state: MinimapFadeState::Hidden,
+            help_overlay_visible: false,
         }
     }
 
@@ -353,6 +359,77 @@ impl PaneGroupView {
             });
             cx.notify();
         }
+    }
+
+    /// Handle opening the help overlay or modal.
+    ///
+    /// This implements the double-? pattern:
+    /// - First press: Show help overlay (non-modal)
+    /// - Second press (while overlay visible): Open help modal (modal)
+    fn handle_open_help_overlay(
+        &mut self,
+        _: &OpenHelpOverlay,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        debug!(
+            "handle_open_help_overlay called, help_overlay_visible={}",
+            self.help_overlay_visible
+        );
+        if self.help_overlay_visible {
+            // Overlay already showing - open full modal
+            debug!("Opening help modal");
+            if let Some(editor) = self.active_editor() {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.open_help_modal(cx);
+                    });
+                });
+            }
+            self.help_overlay_visible = false;
+        } else {
+            // Show overlay
+            debug!("Showing help overlay");
+            self.help_overlay_visible = true;
+        }
+        cx.notify();
+    }
+
+    /// Handle opening the help modal directly.
+    ///
+    /// This is for command palette or programmatic access to help.
+    fn handle_open_help_modal(
+        &mut self,
+        _: &OpenHelpModal,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_help_modal(cx);
+                });
+            });
+        }
+        self.help_overlay_visible = false;
+        cx.notify();
+    }
+
+    /// Handle dismissing the help modal.
+    fn handle_help_modal_dismiss(
+        &mut self,
+        _: &HelpModalDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.help_modal_dismiss(cx);
+                });
+            });
+        }
+        cx.notify();
     }
 
     /// Split the active pane in the given direction.
@@ -1304,10 +1381,12 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_open_command_palette))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))
+                    .on_action(cx.listener(Self::handle_open_help_overlay))
+                    .on_action(cx.listener(Self::handle_open_help_modal))
+                    .on_action(cx.listener(Self::handle_help_modal_dismiss))
                     .on_action(cx.listener(Self::handle_toggle_minimap))
                     .on_action(cx.listener(Self::handle_show_minimap_on_scroll))
                     .child(self.render_member(self.pane_group.root(), 0))
-                    .child(CommandOverlay::new(mode_display, bindings))
                     .when(active_mode == "file_finder", |div| {
                         // Render file finder overlay when in file_finder mode
                         if let Some((query, files, selected, preview)) = file_finder_data {
@@ -1362,6 +1441,10 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
+                    .when(active_mode == "help_modal", |div| {
+                        // Render help modal when in help_modal mode
+                        div.child(HelpModal::new())
+                    })
                     // Render minimap as fixed overlay on the right side with opacity
                     // Only render if opacity > 0 (minimap_visible) to avoid performance impact
                     .when(minimap_visible, |parent_div| {
@@ -1392,6 +1475,10 @@ impl Render for PaneGroupView {
                                 .border_color(gpui::rgba(0xFFFFFF55)), /* Semi-transparent white
                                                                         * border */
                         )
+                    })
+                    // Render help overlay (CommandOverlay) on top of minimap
+                    .when(self.help_overlay_visible, |div| {
+                        div.child(CommandOverlay::new(mode_display.clone(), bindings.clone()))
                     })
                     .child(RenderStatsOverlayElement::new(
                         self.render_stats_tracker.clone(),

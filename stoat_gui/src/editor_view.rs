@@ -5,6 +5,7 @@ use gpui::{
 };
 use std::sync::Arc;
 use stoat::{actions::*, scroll, Stoat};
+use tracing::debug;
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -652,6 +653,12 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // Debug logging to see what keystroke we receive
+        debug!(
+            "KeyDownEvent: keystroke={:?}, key_char={:?}",
+            event.keystroke, event.keystroke.key_char
+        );
+
         // Handle direct keyboard input in insert, file_finder, buffer_finder, and command_palette
         // modes
         let mode = self.stoat.read(cx).mode().to_string();

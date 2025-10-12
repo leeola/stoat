@@ -2406,6 +2406,47 @@ impl Stoat {
         self.current_file_path.as_deref()
     }
 
+    // ==== Help modal actions ====
+
+    /// Open help modal.
+    ///
+    /// Displays full help modal with comprehensive keybinding reference.
+    pub fn open_help_modal(&mut self, cx: &mut Context<Self>) {
+        debug!("Opening help modal");
+
+        // Save current mode to restore later
+        self.help_modal_previous_mode = Some(self.mode.clone());
+        self.mode = "help_modal".to_string();
+
+        cx.notify();
+    }
+
+    /// Dismiss help modal and return to previous mode.
+    pub fn help_modal_dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "help_modal" {
+            return;
+        }
+
+        debug!("Dismissing help modal");
+
+        // Restore previous mode - check if mode has configured previous override
+        self.mode = if let Some(mode_def) = self.modes.get("help_modal") {
+            if let Some(previous) = &mode_def.previous {
+                previous.clone()
+            } else {
+                self.help_modal_previous_mode
+                    .take()
+                    .unwrap_or_else(|| "normal".to_string())
+            }
+        } else {
+            self.help_modal_previous_mode
+                .take()
+                .unwrap_or_else(|| "normal".to_string())
+        };
+
+        cx.notify();
+    }
+
     // ==== Buffer finder actions ====
 
     /// Open buffer finder modal.

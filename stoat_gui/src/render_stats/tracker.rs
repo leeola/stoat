@@ -34,6 +34,10 @@ impl FrameTimer {
     ///
     /// Should be called once per frame at the start of rendering. If render stats
     /// are disabled via `STOAT_RENDER_STATS` env var, returns immediately with ~1ns cost.
+    ///
+    /// **Note**: This measures inter-frame gaps (time since last frame) rather than
+    /// actual render time, which includes idle time in event-driven UIs. See
+    /// [`avg_frame_time_ms`] for details on the measurement issue and TODO for fixing it.
     pub fn record_frame(&mut self) {
         if !is_render_stats_enabled() {
             return;
@@ -49,9 +53,16 @@ impl FrameTimer {
         }
     }
 
-    /// Returns current FPS based on average frame time.
+    /// Returns FPS derived from average frame time (1.0 / avg_frame_time).
     ///
     /// Returns 0.0 if no frames have been recorded yet.
+    ///
+    /// **Note**: This is a derived metric based on frame time measurements that currently
+    /// measure inter-frame gaps rather than actual render time. This means idle time
+    /// (waiting for user input) is included, making the FPS artificially low.
+    ///
+    /// TODO: Fix the underlying frame time measurement to track input-to-screen latency.
+    /// See [`avg_frame_time_ms`] for details.
     pub fn fps(&self) -> f64 {
         if self.frame_times.is_empty() {
             return 0.0;
@@ -61,14 +72,21 @@ impl FrameTimer {
         let avg = total / self.frame_times.len() as u32;
         let secs = avg.as_secs_f64();
 
-        if secs > 0.0 {
-            1.0 / secs
-        } else {
-            0.0
-        }
+        if secs > 0.0 { 1.0 / secs } else { 0.0 }
     }
 
     /// Returns average frame time in milliseconds.
+    ///
+    /// **Note**: This currently measures inter-frame gaps (time between consecutive frames)
+    /// rather than actual render time. In event-driven UIs, this includes idle time waiting
+    /// for user input, which inflates the measured frame time. For accurate user-perceived
+    /// latency, the measurement should track input-to-screen time: starting when user input
+    /// occurs (keyboard press, mouse event) and ending when rendering completes.
+    ///
+    /// TODO: Change `record_frame()` to a two-phase measurement:
+    /// - `start_frame()`: Called in action handlers when user input triggers work
+    /// - `end_frame()`: Called at end of paint phase
+    /// This would measure true input-to-screen latency instead of inter-frame gaps.
     pub fn avg_frame_time_ms(&self) -> f64 {
         if self.frame_times.is_empty() {
             return 0.0;

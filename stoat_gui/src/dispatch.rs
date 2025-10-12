@@ -152,6 +152,14 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<GitStatusSelect>() {
         window.dispatch_action(Box::new(GitStatusSelect), cx);
     }
+    // Help actions
+    else if type_id == TypeId::of::<OpenHelpOverlay>() {
+        window.dispatch_action(Box::new(OpenHelpOverlay), cx);
+    } else if type_id == TypeId::of::<OpenHelpModal>() {
+        window.dispatch_action(Box::new(OpenHelpModal), cx);
+    } else if type_id == TypeId::of::<HelpModalDismiss>() {
+        window.dispatch_action(Box::new(HelpModalDismiss), cx);
+    }
     // View actions
     else if type_id == TypeId::of::<ToggleMinimap>() {
         window.dispatch_action(Box::new(ToggleMinimap), cx);

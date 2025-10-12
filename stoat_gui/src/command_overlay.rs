@@ -82,7 +82,28 @@ impl RenderOnce for CommandOverlay {
                             .mb_1()
                             .child(format!("{}  MODE", self.mode_display)),
                     )
-                    .child(div().flex().flex_col().gap_1().children(hints)),
+                    .child(div().flex().flex_col().gap_1().children(hints))
+                    .child(
+                        div()
+                            .mt_2()
+                            .pt_2()
+                            .border_t_1()
+                            .border_color(border_color.opacity(0.5))
+                            .text_xs()
+                            .text_color(text_color.opacity(0.7))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_color(gpui::rgb(0x569CD6))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .child("?"),
+                                    )
+                                    .child("for full help"),
+                            ),
+                    ),
             )
     }
 }

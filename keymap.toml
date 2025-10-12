@@ -44,6 +44,11 @@ name = "git_status"
 display_name = "GIT STATUS"
 previous = "normal"
 
+[[modes]]
+name = "help_modal"
+display_name = "HELP"
+previous = "normal"
+
 # Normal Mode - Vim-style navigation and commands
 [[bindings]]
 key = "h"
@@ -721,3 +726,15 @@ context = "Editor && mode == git_status"
 key = "enter"
 action = "GitStatusSelect"
 context = "Editor && mode == git_status"
+
+# Help - Context-sensitive help system
+[[bindings]]
+key = "?"
+action = "OpenHelpOverlay"
+context = "Editor && mode == normal"
+
+# Help Modal Mode - Full help reference
+[[bindings]]
+key = "escape"
+action = "HelpModalDismiss"
+context = "Editor && mode == help_modal"

@@ -148,6 +148,9 @@ pub struct Stoat {
     pub(crate) git_status_previous_mode: Option<String>,
     pub(crate) git_status_preview: Option<crate::git_status::DiffPreviewData>,
     pub(crate) git_status_preview_task: Option<Task<()>>,
+
+    // Help modal state
+    pub(crate) help_modal_previous_mode: Option<String>,
     pub(crate) git_status_branch_info: Option<crate::git_status::GitBranchInfo>,
     pub(crate) git_dirty_count: usize,
 
@@ -239,6 +242,7 @@ impl Stoat {
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
+            help_modal_previous_mode: None,
             git_status_branch_info: git_branch_info,
             git_dirty_count,
             current_file_path: None,
@@ -291,6 +295,7 @@ impl Stoat {
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
+            help_modal_previous_mode: None,
             git_status_branch_info: self.git_status_branch_info.clone(),
             git_dirty_count: self.git_dirty_count,
             current_file_path: self.current_file_path.clone(),
@@ -625,6 +630,7 @@ impl Stoat {
             git_status_previous_mode: None,
             git_status_preview: None,
             git_status_preview_task: None,
+            help_modal_previous_mode: None,
             git_status_branch_info: None,
             git_dirty_count: 0,
             current_file_path: None,

@@ -8,6 +8,7 @@ pub mod editor_view;
 pub mod file_finder;
 pub mod git_status;
 pub mod gutter;
+pub mod help_modal;
 pub mod keybinding_hint;
 pub mod keymap_query;
 pub mod minimap;
