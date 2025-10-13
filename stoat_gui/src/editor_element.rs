@@ -13,6 +13,7 @@ use gpui::{
     Style, TextRun, Window,
 };
 use std::sync::Arc;
+use text::ToPoint;
 
 pub struct EditorElement {
     view: Entity<EditorView>,
@@ -21,12 +22,6 @@ pub struct EditorElement {
 
 impl EditorElement {
     pub fn new(view: Entity<EditorView>, style: Arc<EditorStyle>) -> Self {
-        eprintln!(
-            "[PERF] EditorElement::new() called - entity_id={:?} (Arc refcount: {})",
-            view.entity_id(),
-            Arc::strong_count(&style)
-        );
-
         Self { view, style }
     }
 }
@@ -97,24 +92,13 @@ impl Element for EditorElement {
         let visible_lines_precise = (bounds.size.height - self.style.padding * 2.0) / line_height;
         let max_lines = visible_lines_precise.floor() as u32;
 
-        eprintln!(
-            "[THUMB DEBUG] EditorElement prepaint: bounds.height={:.2}px, padding={:.2}px, line_height={:.2}px, visible_lines_precise={:.2}",
-            bounds.size.height, self.style.padding, line_height, visible_lines_precise
-        );
-
         // Set viewport lines on Stoat and get scroll position
         let stoat_entity = self.view.read(cx).stoat.clone();
         let scroll_y = stoat_entity.update(cx, |stoat, _cx| {
-            eprintln!(
-                "[THUMB DEBUG] Setting viewport_lines to {:.2}",
-                visible_lines_precise
-            );
             stoat.set_viewport_lines(visible_lines_precise);
             stoat.update_scroll_animation();
             stoat.scroll_position().y
         });
-
-        eprintln!("[THUMB DEBUG] Editor scroll_y={:.2}", scroll_y);
 
         // Calculate gutter width (minimap has no gutter)
         let gutter_width = if is_minimap {
@@ -244,28 +228,17 @@ impl Element for EditorElement {
         // at the start of prepaint(). This ensures the thumb accurately represents the viewport
         // including any fractional line space.
 
-        // Measure total highlighting + iteration time (excludes individual shape timings)
-        total_highlight_time += highlight_start.elapsed();
-        // Subtract out the shape time we accumulated separately
-        total_highlight_time -= total_shape_time;
-
-        let shape_elapsed = prepaint_start.elapsed();
-        let total_elapsed = prepaint_start.elapsed();
-        let other_time = shape_elapsed.saturating_sub(total_highlight_time + total_shape_time);
-
-        eprintln!(
-            "[PERF] prepaint {} lines (is_minimap={}): highlight={:.2}ms, shape={:.2}ms, other={:.2}ms, total={:.2}ms",
-            line_layouts.len(),
-            is_minimap,
-            total_highlight_time.as_secs_f64() * 1000.0,
-            total_shape_time.as_secs_f64() * 1000.0,
-            other_time.as_secs_f64() * 1000.0,
-            total_elapsed.as_secs_f64() * 1000.0,
-        );
+        // Collect expanded diff blocks for visible range (skip for minimap)
+        let diff_blocks = if is_minimap {
+            Vec::new()
+        } else {
+            self.collect_diff_blocks(cx, &buffer_snapshot)
+        };
 
         EditorPrepaintState {
             line_layouts,
             gutter_width,
+            diff_blocks,
         }
     }
 
@@ -307,11 +280,6 @@ impl Element for EditorElement {
 
         // ===== FAST PATH: Just paint the pre-shaped lines from prepaint =====
         // All expensive work (syntax highlighting + text shaping) was done in prepaint()
-        eprintln!(
-            "[PERF] EditorElement::paint() - is_minimap={}, painting {} cached lines",
-            is_minimap,
-            prepaint.line_layouts.len()
-        );
 
         // Collect line positions for cursor/gutter rendering
         let mut line_positions: Vec<(u32, Pixels)> =
@@ -342,6 +310,17 @@ impl Element for EditorElement {
                 bounds,
                 start_line..end_line,
                 prepaint.gutter_width,
+                window,
+                cx,
+            );
+
+            // Paint expanded diff blocks inline (before line numbers, behind text)
+            self.paint_diff_blocks(
+                bounds,
+                &prepaint.diff_blocks,
+                &line_positions,
+                prepaint.gutter_width,
+                line_height,
                 window,
                 cx,
             );
@@ -553,6 +532,154 @@ impl EditorElement {
         });
     }
 
+    /// Paint expanded diff blocks inline.
+    ///
+    /// Renders deleted content from git HEAD as dimmed text blocks positioned before
+    /// their corresponding hunks. Uses dark red background and subtle styling to
+    /// distinguish from normal code.
+    fn paint_diff_blocks(
+        &self,
+        bounds: Bounds<Pixels>,
+        diff_blocks: &[DiffBlock],
+        line_positions: &[(u32, Pixels)],
+        gutter_width: Pixels,
+        line_height: Pixels,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        for block in diff_blocks {
+            // Find the Y position where this block should be inserted
+            // (before the line at insert_before_row)
+            let insert_y = line_positions
+                .iter()
+                .find(|(row, _)| *row == block.insert_before_row)
+                .map(|(_, y)| *y);
+
+            let Some(base_y) = insert_y else {
+                // Block's insertion point not in visible range
+                continue;
+            };
+
+            // Calculate block height and position
+            let block_height = line_height * (block.deleted_lines.len() as f32);
+            let block_y = base_y - block_height;
+
+            // Paint background for the deleted block (dark red with transparency)
+            let block_bounds = Bounds {
+                origin: point(bounds.origin.x, block_y),
+                size: size(bounds.size.width, block_height),
+            };
+
+            window.paint_quad(gpui::PaintQuad {
+                bounds: block_bounds,
+                corner_radii: 0.0.into(),
+                background: gpui::Hsla {
+                    h: 0.0,  // Red hue
+                    s: 0.3,  // Subtle saturation
+                    l: 0.15, // Dark
+                    a: 0.3,  // Transparent
+                }
+                .into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
+
+            // Create font for diff text
+            let font = Font {
+                family: SharedString::from("Menlo"),
+                features: Default::default(),
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Normal,
+                fallbacks: None,
+            };
+
+            // Dimmed color for deleted text
+            let deleted_text_color = gpui::Hsla {
+                h: 0.0, // Red hue
+                s: 0.3, // Some saturation
+                l: 0.5, // Medium lightness
+                a: 0.6, // Dimmed
+            };
+
+            // Paint each deleted line with "- " prefix
+            let mut y = block_y;
+            for line in &block.deleted_lines {
+                let line_text = format!("- {line}");
+                let line_shared = SharedString::from(line_text);
+
+                let text_run = TextRun {
+                    len: line_shared.len(),
+                    font: font.clone(),
+                    color: deleted_text_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+
+                let shaped = window.text_system().shape_line(
+                    line_shared,
+                    self.style.font_size,
+                    &[text_run],
+                    None,
+                );
+
+                let x = bounds.origin.x + gutter_width + self.style.padding;
+                if let Err(e) = shaped.paint(point(x, y), line_height, window, _cx) {
+                    tracing::error!("Failed to paint diff line: {:?}", e);
+                }
+
+                y += line_height;
+            }
+        }
+    }
+
+    /// Collect expanded diff blocks for rendering.
+    ///
+    /// Iterates over all expanded hunks in the buffer item and constructs [`DiffBlock`]
+    /// structures containing the deleted text to display inline.
+    fn collect_diff_blocks(
+        &self,
+        cx: &App,
+        buffer_snapshot: &text::BufferSnapshot,
+    ) -> Vec<DiffBlock> {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let buffer_item = stoat.active_buffer(cx);
+        let buffer_item_ref = buffer_item.read(cx);
+
+        let blocks: Vec<_> = buffer_item_ref
+            .expanded_hunks()
+            .filter_map(|(hunk_idx, hunk)| {
+                // Skip if no deleted content
+                if hunk.diff_base_byte_range.is_empty() {
+                    return None;
+                }
+
+                // Get the row where this block should be inserted (before the hunk start)
+                let insert_before_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
+
+                // Get deleted text and split into lines
+                let deleted_text = buffer_item_ref.base_text_for_hunk(hunk_idx);
+                let deleted_lines: Vec<String> =
+                    deleted_text.lines().map(|line| line.to_string()).collect();
+
+                // Skip empty deleted sections
+                if deleted_lines.is_empty() {
+                    return None;
+                }
+
+                Some(DiffBlock {
+                    insert_before_row,
+                    deleted_lines,
+                    status: hunk.status,
+                })
+            })
+            .collect();
+
+        tracing::info!("collect_diff_blocks: collected {} blocks", blocks.len());
+        blocks
+    }
+
     /// Paint git diff indicators in the gutter
     fn paint_gutter(
         &self,
@@ -617,6 +744,21 @@ impl EditorElement {
     }
 }
 
+/// Block of deleted text to show inline above a diff hunk.
+///
+/// Represents deleted content from git HEAD that can be expanded inline to show
+/// what was removed. Each block is positioned before a specific row and contains
+/// the formatted deleted lines.
+#[derive(Debug, Clone)]
+pub struct DiffBlock {
+    /// Row where block should be inserted (before this row)
+    pub insert_before_row: u32,
+    /// Lines of deleted text from HEAD
+    pub deleted_lines: Vec<String>,
+    /// Original hunk status for styling
+    pub status: stoat::git_diff::DiffHunkStatus,
+}
+
 /// Prepaint state for editor rendering (following Zed's architecture).
 ///
 /// Caches expensive computations (syntax highlighting, text shaping) done in prepaint
@@ -626,6 +768,8 @@ pub struct EditorPrepaintState {
     pub line_layouts: Vec<ShapedLineLayout>,
     /// Gutter width for positioning
     pub gutter_width: Pixels,
+    /// Expanded diff blocks to render inline
+    pub diff_blocks: Vec<DiffBlock>,
 }
 
 /// A single line that has been shaped and is ready to paint.

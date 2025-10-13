@@ -6,7 +6,7 @@
 use crate::git_diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot};
@@ -31,6 +31,9 @@ pub struct BufferItem {
     /// Git diff state (None if not in git repo or diff disabled)
     diff: Option<BufferDiff>,
 
+    /// Set of expanded diff hunk indices (for showing deleted content inline)
+    expanded_hunks: HashSet<usize>,
+
     /// Saved text content for modification tracking (None for unnamed buffers never saved)
     saved_text: Option<String>,
 }
@@ -50,6 +53,7 @@ impl BufferItem {
             parser,
             language,
             diff: None,
+            expanded_hunks: HashSet::new(),
             saved_text: None,
         }
     }
@@ -141,5 +145,88 @@ impl BufferItem {
     /// the baseline for detecting modifications.
     pub fn set_saved_text(&mut self, text: String) {
         self.saved_text = Some(text);
+    }
+
+    /// Toggle expansion of diff hunk at given row.
+    ///
+    /// If a hunk exists at the specified row, toggles its expansion state. When expanded,
+    /// the hunk's deleted content from git HEAD will be displayed inline above the hunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Buffer row to check for hunk
+    /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
+    ///
+    /// # Returns
+    ///
+    /// `true` if a hunk was toggled, `false` if no hunk exists at this row
+    pub fn toggle_diff_hunk_at_row(&mut self, row: u32, buffer_snapshot: &BufferSnapshot) -> bool {
+        if let Some(hunk_idx) = self
+            .diff
+            .as_ref()
+            .and_then(|d| d.hunk_for_row(row, buffer_snapshot))
+        {
+            if self.expanded_hunks.contains(&hunk_idx) {
+                self.expanded_hunks.remove(&hunk_idx);
+            } else {
+                self.expanded_hunks.insert(hunk_idx);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if a diff hunk at given row is expanded.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Buffer row to check
+    /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
+    ///
+    /// # Returns
+    ///
+    /// `true` if the hunk at this row is expanded, `false` otherwise
+    pub fn is_hunk_expanded_at_row(&self, row: u32, buffer_snapshot: &BufferSnapshot) -> bool {
+        self.diff
+            .as_ref()
+            .and_then(|d| d.hunk_for_row(row, buffer_snapshot))
+            .map(|hunk_idx| self.expanded_hunks.contains(&hunk_idx))
+            .unwrap_or(false)
+    }
+
+    /// Get information about expanded diff hunks for rendering.
+    ///
+    /// Returns an iterator over tuples of (hunk_index, hunk) for all expanded hunks.
+    /// The GUI layer uses this to construct [`DiffBlock`](crate::DiffBlock) structures
+    /// for inline display of deleted content.
+    ///
+    /// # Returns
+    ///
+    /// Iterator yielding (index, hunk) pairs for expanded hunks
+    pub fn expanded_hunks(&self) -> impl Iterator<Item = (usize, &crate::git_diff::DiffHunk)> {
+        let hunks = self.diff.as_ref().map(|d| &d.hunks);
+        self.expanded_hunks
+            .iter()
+            .filter_map(move |&idx| hunks.and_then(|h| h.get(idx).map(|hunk| (idx, hunk))))
+    }
+
+    /// Get the base text for a specific diff hunk.
+    ///
+    /// Returns the deleted content from git HEAD for the specified hunk index.
+    /// Used by the GUI layer to display deleted lines inline.
+    ///
+    /// # Arguments
+    ///
+    /// * `hunk_idx` - Index of the hunk
+    ///
+    /// # Returns
+    ///
+    /// String slice of the base text, or empty string if hunk doesn't exist
+    pub fn base_text_for_hunk(&self, hunk_idx: usize) -> &str {
+        self.diff
+            .as_ref()
+            .map(|d| d.base_text_for_hunk(hunk_idx))
+            .unwrap_or("")
     }
 }

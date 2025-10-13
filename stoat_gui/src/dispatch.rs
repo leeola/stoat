@@ -152,6 +152,14 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<GitStatusSelect>() {
         window.dispatch_action(Box::new(GitStatusSelect), cx);
     }
+    // Git diff hunk actions
+    else if type_id == TypeId::of::<ToggleDiffHunk>() {
+        window.dispatch_action(Box::new(ToggleDiffHunk), cx);
+    } else if type_id == TypeId::of::<GotoNextHunk>() {
+        window.dispatch_action(Box::new(GotoNextHunk), cx);
+    } else if type_id == TypeId::of::<GotoPrevHunk>() {
+        window.dispatch_action(Box::new(GotoPrevHunk), cx);
+    }
     // Help actions
     else if type_id == TypeId::of::<OpenHelpOverlay>() {
         window.dispatch_action(Box::new(OpenHelpOverlay), cx);

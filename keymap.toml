@@ -214,6 +214,17 @@ key = "ctrl-s"
 action = "Save"
 context = "Editor && mode == normal"
 
+# Git diff hunks in normal mode
+[[bindings]]
+key = "] h"
+action = "GotoNextHunk"
+context = "Editor && mode == normal"
+
+[[bindings]]
+key = "[ h"
+action = "GotoPrevHunk"
+context = "Editor && mode == normal"
+
 # Insert Mode - Standard text editing
 [[bindings]]
 key = "left"
@@ -638,6 +649,11 @@ context = "Editor && mode == space"
 [[bindings]]
 key = "g"
 action = "OpenGitStatus"
+context = "Editor && mode == space"
+
+[[bindings]]
+key = "d"
+action = "ToggleDiffHunk"
 context = "Editor && mode == space"
 
 [[bindings]]

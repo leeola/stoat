@@ -9,7 +9,7 @@ use crate::{
 use gpui::{AppContext, Context};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use std::{num::NonZeroU64, path::PathBuf};
-use text::{Bias, Buffer, BufferId};
+use text::{Bias, Buffer, BufferId, ToPoint};
 use tracing::debug;
 
 impl Stoat {
@@ -860,7 +860,7 @@ impl Stoat {
     /// Enter space mode (leader key)
     pub fn enter_space_mode(&mut self, cx: &mut Context<Self>) {
         self.mode = "space".to_string();
-        debug!("Entering space mode");
+        tracing::info!("Entering space mode");
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }
@@ -2642,6 +2642,104 @@ impl Stoat {
     /// Get selected buffer index.
     pub fn buffer_finder_selected(&self) -> usize {
         self.buffer_finder_selected
+    }
+
+    // ==== Git Diff Actions ====
+
+    /// Toggle expansion of diff hunk at cursor position.
+    ///
+    /// If the cursor is on a line with a diff hunk, toggles whether the hunk's
+    /// deleted content is shown inline. When expanded, deleted lines from git HEAD
+    /// are displayed above the hunk with a dark red background.
+    pub fn toggle_diff_hunk(&mut self, cx: &mut Context<Self>) {
+        let cursor_row = self.cursor.position().row;
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+        let has_diff = buffer_item.read(cx).diff().is_some();
+        tracing::info!(
+            "toggle_diff_hunk called: cursor_row={}, has_diff={}",
+            cursor_row,
+            has_diff
+        );
+
+        buffer_item.update(cx, |item, _cx| {
+            if item.toggle_diff_hunk_at_row(cursor_row, &buffer_snapshot) {
+                tracing::info!("SUCCESS: Toggled diff hunk at row {}", cursor_row);
+            } else {
+                tracing::info!("FAILED: No diff hunk found at row {}", cursor_row);
+            }
+        });
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Jump to the next diff hunk.
+    ///
+    /// Moves the cursor to the start of the next git diff hunk after the current position.
+    /// Wraps around to the first hunk if at the end of the file.
+    pub fn goto_next_hunk(&mut self, cx: &mut Context<Self>) {
+        let cursor_row = self.cursor.position().row;
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+        let diff = buffer_item.read(cx).diff();
+        if let Some(diff) = diff {
+            // Find next hunk after cursor
+            let next_hunk = diff
+                .hunks
+                .iter()
+                .find(|hunk| {
+                    let hunk_start_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                    hunk_start_row > cursor_row
+                })
+                .or_else(|| diff.hunks.first()); // Wrap to first hunk
+
+            if let Some(hunk) = next_hunk {
+                let target_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                self.cursor.move_to(text::Point::new(target_row, 0));
+                self.ensure_cursor_visible();
+
+                tracing::debug!("Jumped to next diff hunk at row {}", target_row);
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Jump to the previous diff hunk.
+    ///
+    /// Moves the cursor to the start of the previous git diff hunk before the current position.
+    /// Wraps around to the last hunk if at the beginning of the file.
+    pub fn goto_prev_hunk(&mut self, cx: &mut Context<Self>) {
+        let cursor_row = self.cursor.position().row;
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+        let diff = buffer_item.read(cx).diff();
+        if let Some(diff) = diff {
+            // Find previous hunk before cursor
+            let prev_hunk = diff
+                .hunks
+                .iter()
+                .rev()
+                .find(|hunk| {
+                    let hunk_start_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                    hunk_start_row < cursor_row
+                })
+                .or_else(|| diff.hunks.last()); // Wrap to last hunk
+
+            if let Some(hunk) = prev_hunk {
+                let target_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                self.cursor.move_to(text::Point::new(target_row, 0));
+                self.ensure_cursor_visible();
+
+                tracing::debug!("Jumped to previous diff hunk at row {}", target_row);
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
+            }
+        }
     }
 }
 

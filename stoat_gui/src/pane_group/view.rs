@@ -1098,9 +1098,7 @@ impl Render for PaneGroupView {
         // Extract minimap viewport lines before main data extraction to avoid borrow conflicts
         // Only compute if minimap is visible to avoid performance impact
         let minimap_viewport_lines = if minimap_visible {
-            let lines = self.minimap_view.read(cx).stoat.read(cx).viewport_lines();
-            eprintln!("[THUMB DEBUG] Minimap viewport_lines: {:?}", lines);
-            lines
+            self.minimap_view.read(cx).stoat.read(cx).viewport_lines()
         } else {
             None
         };
@@ -1212,35 +1210,16 @@ impl Render for PaneGroupView {
                     let buffer_snapshot = buffer.snapshot();
                     let total_lines = buffer_snapshot.max_point().row as f64 + 1.0;
 
-                    eprintln!("[THUMB DEBUG] Total lines in buffer: {}", total_lines);
-
                     stoat.viewport_lines().and_then(|visible_editor_lines| {
                         let editor_scroll_y = stoat.scroll_position().y as f64;
 
-                        eprintln!(
-                            "[THUMB DEBUG] Editor: visible_lines={:.2}, scroll_y={:.2}",
-                            visible_editor_lines, editor_scroll_y
-                        );
-
                         minimap_viewport_lines.map(|visible_minimap_lines| {
-                            eprintln!(
-                                "[THUMB DEBUG] Minimap: visible_lines={:.2}",
-                                visible_minimap_lines
-                            );
-
-                            let minimap_scroll =
-                                crate::minimap::MinimapLayout::calculate_minimap_scroll(
-                                    total_lines,
-                                    visible_editor_lines as f64,
-                                    visible_minimap_lines as f64,
-                                    editor_scroll_y,
-                                );
-
-                            eprintln!(
-                                "[THUMB DEBUG] Calculated minimap_scroll: {:.2}",
-                                minimap_scroll
-                            );
-                            minimap_scroll
+                            crate::minimap::MinimapLayout::calculate_minimap_scroll(
+                                total_lines,
+                                visible_editor_lines as f64,
+                                visible_minimap_lines as f64,
+                                editor_scroll_y,
+                            )
                         })
                     })
                 } else {
@@ -1306,56 +1285,24 @@ impl Render for PaneGroupView {
                 // Calculate thumb using minimap line heights (following Zed's approach)
                 let minimap_line_height = crate::minimap::MINIMAP_LINE_HEIGHT as f64;
 
-                eprintln!(
-                    "[THUMB DEBUG] Thumb calculation: visible_editor_lines={:.2}, editor_scroll_y={:.2}, minimap_scroll_y={:.2}, minimap_line_height={:.2}",
-                    visible_editor_lines, editor_scroll_y, minimap_scroll_y, minimap_line_height
-                );
-
                 // Thumb height: visible_editor_lines × minimap_line_height
                 // visible_editor_lines now reflects the actual rendered count from prepaint
                 let thumb_height_px = visible_editor_lines as f64 * minimap_line_height;
 
-                eprintln!(
-                    "[THUMB DEBUG] Calculated thumb_height_px={:.2} (visible_editor_lines * minimap_line_height)",
-                    thumb_height_px
-                );
-
                 // Apply height offset (see THUMB_HEIGHT_OFFSET_PX module constant)
                 let thumb_height_px_adjusted = thumb_height_px + THUMB_HEIGHT_OFFSET_PX;
-
-                eprintln!(
-                    "[THUMB DEBUG] Applied height offset: {:.2}px, adjusted thumb_height_px={:.2}",
-                    THUMB_HEIGHT_OFFSET_PX, thumb_height_px_adjusted
-                );
 
                 // Thumb Y position: (editor_scroll - minimap_scroll) × minimap_line_height
                 let thumb_y_px =
                     (editor_scroll_y as f64 - minimap_scroll_y as f64) * minimap_line_height;
 
-                eprintln!(
-                    "[THUMB DEBUG] Calculated thumb_y_px={:.2} ((editor_scroll - minimap_scroll) * minimap_line_height)",
-                    thumb_y_px
-                );
-
                 // Apply position offset (see THUMB_OFFSET_PX module constant)
                 let thumb_y_px_adjusted = thumb_y_px + THUMB_OFFSET_PX;
 
-                eprintln!(
-                    "[THUMB DEBUG] Applied offset: {:.2}px, adjusted thumb_y_px={:.2}",
-                    THUMB_OFFSET_PX, thumb_y_px_adjusted
-                );
-
-                let bounds = gpui::Bounds {
+                gpui::Bounds {
                     origin: gpui::point(gpui::px(0.0), gpui::px(thumb_y_px_adjusted as f32)),
                     size: gpui::size(gpui::px(120.0), gpui::px(thumb_height_px_adjusted as f32)),
-                };
-
-                eprintln!(
-                    "[THUMB DEBUG] Final thumb bounds: origin.y={:.2}px, height={:.2}px",
-                    thumb_y_px_adjusted, thumb_height_px_adjusted
-                );
-
-                bounds
+                }
             })
         });
 

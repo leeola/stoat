@@ -17,8 +17,6 @@ pub struct EditorView {
 
 impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
-        eprintln!("[PERF] EditorView::new() - creating editor");
-
         let focus_handle = cx.focus_handle();
 
         // Create cached editor style once (Arc makes cloning cheap)
@@ -583,6 +581,43 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_toggle_diff_hunk(
+        &mut self,
+        _: &ToggleDiffHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        tracing::info!("handle_toggle_diff_hunk called in EditorView");
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.toggle_diff_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_goto_next_hunk(
+        &mut self,
+        _: &GotoNextHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.goto_next_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_goto_prev_hunk(
+        &mut self,
+        _: &GotoPrevHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.goto_prev_hunk(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -707,12 +742,6 @@ impl Focusable for EditorView {
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let mode = self.stoat.read(cx).mode().to_string();
-        let is_minimap = mode == "minimap";
-        eprintln!(
-            "[PERF] EditorView::render() - is_minimap={}, entity_id={:?}",
-            is_minimap,
-            self.this.as_ref().map(|e| e.entity_id())
-        );
 
         let view_entity = self
             .this
@@ -774,6 +803,9 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_git_status_prev))
             .on_action(cx.listener(Self::handle_git_status_select))
             .on_action(cx.listener(Self::handle_git_status_dismiss))
+            .on_action(cx.listener(Self::handle_toggle_diff_hunk))
+            .on_action(cx.listener(Self::handle_goto_next_hunk))
+            .on_action(cx.listener(Self::handle_goto_prev_hunk))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))
             .on_action(cx.listener(Self::handle_command_palette_execute))

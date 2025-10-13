@@ -113,6 +113,11 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "GitStatusSelect" => Ok(KeyBinding::new(key, GitStatusSelect, context)),
         "GitStatusDismiss" => Ok(KeyBinding::new(key, GitStatusDismiss, context)),
 
+        // Git diff hunk actions
+        "ToggleDiffHunk" => Ok(KeyBinding::new(key, ToggleDiffHunk, context)),
+        "GotoNextHunk" => Ok(KeyBinding::new(key, GotoNextHunk, context)),
+        "GotoPrevHunk" => Ok(KeyBinding::new(key, GotoPrevHunk, context)),
+
         // Help actions
         "OpenHelpOverlay" => Ok(KeyBinding::new(key, OpenHelpOverlay, context)),
         "OpenHelpModal" => Ok(KeyBinding::new(key, OpenHelpModal, context)),

@@ -142,6 +142,19 @@ actions!(
     ]
 );
 
+// Git diff hunk actions
+actions!(
+    stoat,
+    [
+        /// Toggle inline diff view at cursor
+        ToggleDiffHunk,
+        /// Jump to next git diff hunk
+        GotoNextHunk,
+        /// Jump to previous git diff hunk
+        GotoPrevHunk,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat,
@@ -570,6 +583,19 @@ action_metadata!(
     "Close the git status modal without opening a file"
 );
 
+// Git diff hunk actions
+action_metadata!(
+    ToggleDiffHunk,
+    "toggle diff",
+    "Toggle inline diff view at cursor position"
+);
+action_metadata!(GotoNextHunk, "next hunk", "Jump to the next git diff hunk");
+action_metadata!(
+    GotoPrevHunk,
+    "prev hunk",
+    "Jump to the previous git diff hunk"
+);
+
 // Pane management actions
 action_metadata!(
     SplitRight,
@@ -801,6 +827,14 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitStatusDismiss::action_name(),
     );
 
+    // Git diff hunk actions
+    names.insert(
+        TypeId::of::<ToggleDiffHunk>(),
+        ToggleDiffHunk::action_name(),
+    );
+    names.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::action_name());
+    names.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::action_name());
+
     // Buffer finder actions
     names.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1009,6 +1043,14 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitStatusDismiss::description(),
     );
 
+    // Git diff hunk actions
+    descriptions.insert(
+        TypeId::of::<ToggleDiffHunk>(),
+        ToggleDiffHunk::description(),
+    );
+    descriptions.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::description());
+    descriptions.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::description());
+
     // Buffer finder actions
     descriptions.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1211,6 +1253,11 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<GitStatusDismiss>(),
         GitStatusDismiss::help_text(),
     );
+
+    // Git diff hunk actions
+    help.insert(TypeId::of::<ToggleDiffHunk>(), ToggleDiffHunk::help_text());
+    help.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::help_text());
+    help.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::help_text());
 
     // Buffer finder actions
     help.insert(
