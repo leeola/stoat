@@ -102,6 +102,13 @@ pub struct RowInfo {
     /// For phantom rows, this is from the git base text. For buffer rows, this is
     /// from the actual buffer content.
     pub content: String,
+
+    /// Byte ranges within the line that were modified (for Modified rows only).
+    ///
+    /// Indicates which parts of the line text changed from the base version.
+    /// Used to highlight specific changed words/characters more strongly.
+    /// Empty for non-Modified rows.
+    pub modified_ranges: Vec<Range<usize>>,
 }
 
 /// A view over a buffer that includes phantom rows for git diffs.
@@ -145,11 +152,17 @@ impl DisplayBuffer {
     ///
     /// * `buffer_snapshot` - Snapshot of the buffer content
     /// * `diff` - Optional git diff information
+    /// * `show_phantom_rows` - Whether to show phantom deleted rows (false in normal mode, true in
+    ///   review mode)
     ///
     /// # Returns
     ///
     /// A new [`DisplayBuffer`] with all rows built and cached
-    pub fn new(buffer_snapshot: BufferSnapshot, diff: Option<BufferDiff>) -> Self {
+    pub fn new(
+        buffer_snapshot: BufferSnapshot,
+        diff: Option<BufferDiff>,
+        show_phantom_rows: bool,
+    ) -> Self {
         let max_buffer_row = buffer_snapshot.max_point().row;
         let mut rows = Vec::new();
         let mut buffer_to_display = vec![DisplayRow(0); (max_buffer_row + 1) as usize];
@@ -199,13 +212,14 @@ impl DisplayBuffer {
                             buffer_row: Some(buffer_row),
                             diff_status: None,
                             content,
+                            modified_ranges: Vec::new(),
                         });
 
                         display_row += 1;
                         buffer_row += 1;
 
-                        // Now insert phantom rows for deleted content
-                        if has_deleted_content {
+                        // Now insert phantom rows for deleted content (only in review mode)
+                        if show_phantom_rows && has_deleted_content {
                             let deleted_text = diff.base_text_for_hunk(idx);
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
@@ -213,6 +227,7 @@ impl DisplayBuffer {
                                     buffer_row: None, // Phantom row
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
+                                    modified_ranges: Vec::new(),
                                 });
                                 display_row += 1;
                             }
@@ -220,9 +235,12 @@ impl DisplayBuffer {
 
                         hunk_idx += 1;
                     } else {
-                        // For Added/Modified hunks: insert phantom deleted rows first,
-                        // then add buffer rows
-                        if has_deleted_content {
+                        // For Modified hunks: don't show phantom deleted rows, compute intra-line
+                        // diff For Added hunks: show phantom deleted rows
+                        // if in review mode
+                        let is_modified = matches!(hunk.status, DiffHunkStatus::Modified);
+
+                        if show_phantom_rows && has_deleted_content && !is_modified {
                             let deleted_text = diff.base_text_for_hunk(idx);
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
@@ -230,13 +248,20 @@ impl DisplayBuffer {
                                     buffer_row: None, // Phantom row
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
+                                    modified_ranges: Vec::new(),
                                 });
                                 display_row += 1;
                             }
                         }
 
                         // Add buffer rows for this hunk (marked as Added or Modified)
-                        for row in hunk_start_row..hunk_end_row {
+                        let base_lines: Vec<&str> = if is_modified && has_deleted_content {
+                            diff.base_text_for_hunk(idx).lines().collect()
+                        } else {
+                            Vec::new()
+                        };
+
+                        for (row_offset, row) in (hunk_start_row..hunk_end_row).enumerate() {
                             if row > max_buffer_row {
                                 break;
                             }
@@ -255,11 +280,22 @@ impl DisplayBuffer {
                                 buffer_snapshot.text_for_range(start..end).collect();
                             let content = content.trim_end_matches('\n').to_string();
 
+                            // Compute modified_ranges for Modified rows
+                            let modified_ranges = if is_modified {
+                                base_lines
+                                    .get(row_offset)
+                                    .map(|base_line| compute_word_diff(base_line, &content))
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+
                             rows.push(RowInfo {
                                 display_row: DisplayRow(display_row),
                                 buffer_row: Some(row),
                                 diff_status: Some(hunk.status),
                                 content,
+                                modified_ranges,
                             });
 
                             display_row += 1;
@@ -289,6 +325,7 @@ impl DisplayBuffer {
                         buffer_row: Some(buffer_row),
                         diff_status: None,
                         content,
+                        modified_ranges: Vec::new(),
                     });
 
                     display_row += 1;
@@ -315,6 +352,7 @@ impl DisplayBuffer {
                     buffer_row: Some(buffer_row),
                     diff_status: None,
                     content,
+                    modified_ranges: Vec::new(),
                 });
 
                 display_row += 1;
@@ -423,6 +461,57 @@ impl DisplayBuffer {
     }
 }
 
+/// Compute word-level diff between two lines.
+///
+/// Compares two strings word-by-word and returns the byte ranges of words
+/// that differ in the new line. Used for intra-line highlighting of modified rows.
+///
+/// # Arguments
+///
+/// * `base_line` - Original line from git HEAD
+/// * `new_line` - Modified line from buffer
+///
+/// # Returns
+///
+/// Vector of byte ranges indicating modified words in `new_line`
+///
+/// # Algorithm
+///
+/// 1. Split both lines into words (on whitespace)
+/// 2. Compare word sequences
+/// 3. Mark words that differ or are added
+/// 4. Convert word positions to byte ranges
+fn compute_word_diff(base_line: &str, new_line: &str) -> Vec<Range<usize>> {
+    let base_words: Vec<&str> = base_line.split_whitespace().collect();
+
+    let mut modified_ranges = Vec::new();
+    let mut byte_offset = 0;
+
+    for (i, new_word) in new_line.split_whitespace().enumerate() {
+        // Find the byte position of this word in new_line
+        if let Some(word_start) = new_line[byte_offset..].find(new_word) {
+            let word_start = byte_offset + word_start;
+            let word_end = word_start + new_word.len();
+
+            // Check if this word differs from the corresponding base word
+            let differs = if i < base_words.len() {
+                base_words[i] != new_word
+            } else {
+                // Word was added (beyond base line length)
+                true
+            };
+
+            if differs {
+                modified_ranges.push(word_start..word_end);
+            }
+
+            byte_offset = word_end;
+        }
+    }
+
+    modified_ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,7 +528,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 2\nline 3");
         let snapshot = buffer.snapshot();
 
-        let display_buffer = DisplayBuffer::new(snapshot, None);
+        let display_buffer = DisplayBuffer::new(snapshot, None, true);
 
         assert_eq!(display_buffer.row_count(), 3);
 
@@ -463,7 +552,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff));
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
         // Should have 4 rows (no phantom rows for Added hunks)
         assert_eq!(display_buffer.row_count(), 4);
@@ -489,7 +578,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff));
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
         // Should have 3 rows: 1 normal, 1 phantom deleted, 1 normal
         assert_eq!(display_buffer.row_count(), 3);
@@ -519,32 +608,27 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff));
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
-        // Should have 4 rows: 1 normal, 1 phantom deleted, 1 modified, 1 normal
-        assert_eq!(display_buffer.row_count(), 4);
+        // Should have 3 rows: 1 normal, 1 modified, 1 normal
+        // Modified hunks no longer show phantom deleted rows - they show intra-line highlighting
+        // instead
+        assert_eq!(display_buffer.row_count(), 3);
 
         let rows: Vec<_> = display_buffer.rows().collect();
 
-        // Find deleted and modified rows
-        let deleted_rows: Vec<_> = rows
-            .iter()
-            .filter(|r| r.diff_status == Some(DiffHunkStatus::Deleted))
-            .collect();
+        // Find modified rows
         let modified_rows: Vec<_> = rows
             .iter()
             .filter(|r| r.diff_status == Some(DiffHunkStatus::Modified))
             .collect();
 
-        assert_eq!(
-            deleted_rows.len(),
-            1,
-            "Should have one deleted phantom row for old content"
-        );
-        assert_eq!(
-            modified_rows.len(),
-            1,
-            "Should have one modified row for new content"
+        assert_eq!(modified_rows.len(), 1, "Should have one modified row");
+
+        // Verify that the modified row has computed modified_ranges
+        assert!(
+            !modified_rows[0].modified_ranges.is_empty(),
+            "Modified row should have non-empty modified_ranges for intra-line diff"
         );
     }
 
@@ -557,7 +641,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff));
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
         // Debug: print all rows
         eprintln!("All rows:");
@@ -588,7 +672,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff));
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
         // Display row 0 -> Buffer row 0
         assert_eq!(display_buffer.display_row_to_buffer(DisplayRow(0)), Some(0));

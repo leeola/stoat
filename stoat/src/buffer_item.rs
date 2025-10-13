@@ -67,23 +67,29 @@ impl BufferItem {
     /// Create a display buffer with phantom rows for git diffs.
     ///
     /// Returns a [`DisplayBuffer`](crate::DisplayBuffer) that includes both real buffer rows
-    /// and phantom rows for deleted content from git diffs. This is used by the rendering
-    /// layer to display diffs inline with appropriate styling.
+    /// and optionally phantom rows for deleted content from git diffs. This is used by the
+    /// rendering layer to display diffs inline with appropriate styling.
     ///
     /// # Arguments
     ///
     /// * `cx` - Application context for reading buffer state
+    /// * `show_phantom_rows` - Whether to show phantom deleted rows (false in normal mode, true in
+    ///   review mode)
     ///
     /// # Returns
     ///
-    /// A [`DisplayBuffer`](crate::DisplayBuffer) with all rows (real + phantom) built
+    /// A [`DisplayBuffer`](crate::DisplayBuffer) with all rows (real + optionally phantom) built
     ///
     /// # Related
     ///
     /// - [`DisplayBuffer`](crate::DisplayBuffer) - The display buffer abstraction
     /// - [`diff`](#method.diff) - Get the current git diff state
-    pub fn display_buffer(&self, cx: &App) -> crate::DisplayBuffer {
-        crate::DisplayBuffer::new(self.buffer_snapshot(cx), self.diff.clone())
+    pub fn display_buffer(&self, cx: &App, show_phantom_rows: bool) -> crate::DisplayBuffer {
+        crate::DisplayBuffer::new(
+            self.buffer_snapshot(cx),
+            self.diff.clone(),
+            show_phantom_rows,
+        )
     }
 
     /// Get a snapshot of syntax highlighting tokens.

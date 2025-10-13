@@ -83,10 +83,14 @@ impl Element for EditorElement {
             let buffer_item = stoat.active_buffer(cx);
             buffer_item.read(cx).token_snapshot()
         };
+        let is_in_diff_review = {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            stoat.is_in_diff_review()
+        };
         let display_buffer = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
-            buffer_item.read(cx).display_buffer(cx)
+            buffer_item.read(cx).display_buffer(cx, is_in_diff_review)
         };
 
         // Calculate visible range
@@ -206,46 +210,16 @@ impl Element for EditorElement {
                 continue;
             };
 
-            // Determine styling based on diff status
-            let (background_color, text_color_override, use_strikethrough) =
-                match row_info.diff_status {
-                    Some(DiffHunkStatus::Added) => (
-                        Some(gpui::Hsla {
-                            h: 120.0,
-                            s: 0.3,
-                            l: 0.15,
-                            a: 0.3,
-                        }),
-                        None,
-                        false,
-                    ),
-                    Some(DiffHunkStatus::Deleted) => (
-                        Some(gpui::Hsla {
-                            h: 0.0,
-                            s: 0.3,
-                            l: 0.15,
-                            a: 0.3,
-                        }),
-                        Some(gpui::Hsla {
-                            h: 0.0,
-                            s: 0.3,
-                            l: 0.5,
-                            a: 0.6,
-                        }),
-                        true,
-                    ),
-                    Some(DiffHunkStatus::Modified) => (
-                        Some(gpui::Hsla {
-                            h: 45.0,
-                            s: 0.3,
-                            l: 0.15,
-                            a: 0.3,
-                        }),
-                        None,
-                        false,
-                    ),
-                    None => (None, None, false),
-                };
+            // Determine text styling for diff rows (backgrounds painted separately)
+            let text_color_override = match row_info.diff_status {
+                Some(DiffHunkStatus::Deleted) => Some(gpui::Hsla {
+                    h: 0.0,
+                    s: 0.3,
+                    l: 0.5,
+                    a: 0.6,
+                }),
+                _ => None,
+            };
 
             // Build text runs for this display row
             let mut runs = Vec::new();
@@ -262,19 +236,25 @@ impl Element for EditorElement {
             if let Some(buffer_row) = row_info.buffer_row {
                 // Use highlighted runs from phase 1
                 if let Some(buffer_runs) = highlighted_lines.get(&buffer_row) {
-                    for mut run in buffer_runs.clone() {
-                        // Override styling for diff rows
-                        if let Some(bg) = background_color {
-                            run.background_color = Some(bg);
-                        }
+                    let mut processed_runs = buffer_runs.clone();
+
+                    // Apply stronger background to modified ranges for Modified rows (only in
+                    // review mode)
+                    if is_in_diff_review
+                        && matches!(row_info.diff_status, Some(DiffHunkStatus::Modified))
+                        && !row_info.modified_ranges.is_empty()
+                    {
+                        processed_runs = apply_modified_range_backgrounds(
+                            processed_runs,
+                            &row_info.modified_ranges,
+                            &self.style,
+                        );
+                    }
+
+                    for mut run in processed_runs {
+                        // Override text color for deleted rows
                         if let Some(color) = text_color_override {
                             run.color = color;
-                        }
-                        if use_strikethrough {
-                            run.strikethrough = Some(gpui::StrikethroughStyle {
-                                color: Some(run.color),
-                                thickness: px(1.0),
-                            });
                         }
                         runs.push(run);
                     }
@@ -284,23 +264,16 @@ impl Element for EditorElement {
                 let content_len = row_info.content.len();
                 let color = text_color_override.unwrap_or(self.style.text_color);
 
-                // Ensure even empty lines get a TextRun with background
+                // Ensure even empty lines get a TextRun for painting
                 let text_len = if content_len == 0 { 1 } else { content_len };
 
                 runs.push(TextRun {
                     len: text_len,
                     font: font.clone(),
                     color,
-                    background_color,
+                    background_color: None,
                     underline: None,
-                    strikethrough: if use_strikethrough {
-                        Some(gpui::StrikethroughStyle {
-                            color: Some(color),
-                            thickness: px(1.0),
-                        })
-                    } else {
-                        None
-                    },
+                    strikethrough: None,
                 });
             }
 
@@ -373,6 +346,15 @@ impl Element for EditorElement {
         // ===== FAST PATH: Just paint the pre-shaped lines from prepaint =====
         // All expensive work (syntax highlighting + text shaping) was done in prepaint()
 
+        // Paint full-width background bars for diff rows (before text)
+        self.paint_diff_backgrounds(
+            bounds,
+            &prepaint.line_layouts,
+            prepaint.gutter_width,
+            window,
+            cx,
+        );
+
         // Collect buffer line positions for cursor/gutter rendering (only real buffer rows, not
         // phantoms)
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
@@ -384,8 +366,24 @@ impl Element for EditorElement {
                 line_positions.push((buffer_row, layout.y_position));
             }
 
-            // Paint the line
+            // Paint the line (backgrounds first, then text)
             let x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
+
+            // Paint backgrounds first
+            if let Err(e) =
+                layout
+                    .shaped
+                    .paint_background(point(x, layout.y_position), line_height, window, cx)
+            {
+                tracing::error!(
+                    "Failed to paint background for display row {} (buffer row {:?}): {:?}",
+                    layout.display_row,
+                    layout.buffer_row,
+                    e
+                );
+            }
+
+            // Then paint text on top
             if let Err(e) =
                 layout
                     .shaped
@@ -497,6 +495,12 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Only show symbols in review mode
+        let stoat = self.view.read(cx).stoat.read(cx);
+        if !stoat.is_in_diff_review() {
+            return;
+        }
+
         let font = Font {
             family: SharedString::from("Menlo"),
             features: Default::default(),
@@ -506,12 +510,7 @@ impl EditorElement {
         };
 
         // Strip width: wider during diff review for better visibility
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let strip_width = if stoat.is_in_diff_review() {
-            (0.6 * self.style.line_height).floor() // Wider in review mode
-        } else {
-            (0.275 * self.style.line_height).floor() // Normal width
-        };
+        let strip_width = (0.6 * self.style.line_height).floor();
 
         for layout in line_layouts {
             let symbol = match layout.diff_status {
@@ -787,6 +786,153 @@ impl EditorElement {
             });
         }
     }
+
+    /// Paint full-width background bars for diff rows.
+    ///
+    /// Paints subtle colored rectangles spanning from gutter edge to right edge
+    /// for all rows with diff status. These provide visual context for changes.
+    fn paint_diff_backgrounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        _gutter_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let is_in_diff_review = stoat.is_in_diff_review();
+
+        // Only paint backgrounds in review mode
+        if !is_in_diff_review {
+            return;
+        }
+
+        for layout in line_layouts {
+            if let Some(status) = layout.diff_status {
+                // Get the base color for this diff type
+                let base_color = match status {
+                    DiffHunkStatus::Added => self.style.diff_added_color,
+                    DiffHunkStatus::Modified => self.style.diff_modified_color,
+                    DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+                };
+
+                // Make it very subtle for full-width backgrounds (15% opacity in review mode)
+                let background_color = gpui::Hsla {
+                    h: base_color.h,
+                    s: base_color.s,
+                    l: base_color.l,
+                    a: 0.15,
+                };
+
+                // Paint full-width background bar
+                let bar_bounds = Bounds {
+                    origin: point(bounds.origin.x, layout.y_position),
+                    size: size(bounds.size.width, self.style.line_height),
+                };
+
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: bar_bounds,
+                    corner_radii: 0.0.into(),
+                    background: background_color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+            }
+        }
+    }
+}
+
+/// Apply stronger background highlighting to modified ranges within a line.
+///
+/// Splits existing TextRuns at the boundaries of modified_ranges and applies
+/// a more opaque background color to runs within those ranges.
+///
+/// # Arguments
+///
+/// * `runs` - Original syntax-highlighted text runs
+/// * `modified_ranges` - Byte ranges that were modified (from word diff)
+/// * `style` - Editor style for getting diff colors
+///
+/// # Returns
+///
+/// New list of TextRuns with backgrounds applied to modified regions
+fn apply_modified_range_backgrounds(
+    runs: Vec<TextRun>,
+    modified_ranges: &[std::ops::Range<usize>],
+    _style: &EditorStyle,
+) -> Vec<TextRun> {
+    if modified_ranges.is_empty() {
+        return runs;
+    }
+
+    let mut result = Vec::new();
+    let mut byte_offset = 0;
+
+    // Subtle background for modified words (like GitHub)
+    // Use a desaturated version of the diff color for subtlety
+    let modified_bg = gpui::Hsla {
+        h: _style.diff_modified_color.h,
+        s: _style.diff_modified_color.s * 0.5, // Reduced saturation for subtlety
+        l: 0.4,                                // Slightly lighter
+        a: 0.2,                                // 20% opacity for subtle appearance
+    };
+
+    for run in runs {
+        let run_start = byte_offset;
+        let run_end = byte_offset + run.len;
+
+        // Find which modified ranges overlap with this run
+        let mut splits = Vec::new();
+        splits.push(run_start); // Always include run start
+
+        for range in modified_ranges {
+            // Add split points where modified ranges intersect this run
+            if range.start > run_start && range.start < run_end {
+                splits.push(range.start);
+            }
+            if range.end > run_start && range.end < run_end {
+                splits.push(range.end);
+            }
+        }
+
+        splits.push(run_end); // Always include run end
+        splits.sort_unstable();
+        splits.dedup();
+
+        // Create sub-runs for each split segment
+        for i in 0..splits.len() - 1 {
+            let segment_start = splits[i];
+            let segment_end = splits[i + 1];
+            let segment_len = segment_end - segment_start;
+
+            if segment_len == 0 {
+                continue;
+            }
+
+            // Check if this segment is within any modified range
+            let is_modified = modified_ranges
+                .iter()
+                .any(|range| segment_start >= range.start && segment_end <= range.end);
+
+            result.push(TextRun {
+                len: segment_len,
+                font: run.font.clone(),
+                color: run.color,
+                background_color: if is_modified {
+                    Some(modified_bg)
+                } else {
+                    run.background_color
+                },
+                underline: run.underline.clone(),
+                strikethrough: run.strikethrough.clone(),
+            });
+        }
+
+        byte_offset = run_end;
+    }
+
+    result
 }
 
 /// Prepaint state for editor rendering (following Zed's architecture).
