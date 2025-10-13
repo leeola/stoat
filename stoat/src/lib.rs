@@ -7,6 +7,7 @@ pub mod actions;
 pub mod buffer_item;
 pub mod buffer_store;
 pub mod cursor;
+pub mod diff_review;
 pub mod file_finder;
 pub mod git_diff;
 pub mod git_repository;

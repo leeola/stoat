@@ -8,9 +8,9 @@ use crate::{
     syntax::HighlightedChunks,
 };
 use gpui::{
-    point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
-    Style, TextRun, Window,
+    App, Bounds, Element, ElementId, Entity, Font, FontStyle, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextRun, Window, point,
+    px, relative, size,
 };
 use std::sync::Arc;
 use text::ToPoint;
@@ -111,7 +111,8 @@ impl Element for EditorElement {
         let scroll_offset = scroll_y.floor() as u32;
 
         // Calculate visible line range
-        let start_line = scroll_offset;
+        // Clamp start_line to prevent overflow when switching to smaller files
+        let start_line = scroll_offset.min(max_point.row);
         let end_line = (start_line + max_lines).min(max_point.row + 1);
 
         // ===== EXPENSIVE WORK: Syntax highlighting + text shaping =====

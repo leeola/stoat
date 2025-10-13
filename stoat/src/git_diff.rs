@@ -161,6 +161,7 @@ pub struct DiffHunk {
 /// // Show deleted content when hunk is expanded
 /// let deleted_text = diff.base_text_for_hunk(0);
 /// ```
+#[derive(Clone, Debug)]
 pub struct BufferDiff {
     /// Buffer this diff applies to
     pub buffer_id: BufferId,

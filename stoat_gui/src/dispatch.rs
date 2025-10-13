@@ -160,6 +160,18 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<GotoPrevHunk>() {
         window.dispatch_action(Box::new(GotoPrevHunk), cx);
     }
+    // Diff review actions
+    else if type_id == TypeId::of::<OpenDiffReview>() {
+        window.dispatch_action(Box::new(OpenDiffReview), cx);
+    } else if type_id == TypeId::of::<DiffReviewNextHunk>() {
+        window.dispatch_action(Box::new(DiffReviewNextHunk), cx);
+    } else if type_id == TypeId::of::<DiffReviewPrevHunk>() {
+        window.dispatch_action(Box::new(DiffReviewPrevHunk), cx);
+    } else if type_id == TypeId::of::<DiffReviewApproveHunk>() {
+        window.dispatch_action(Box::new(DiffReviewApproveHunk), cx);
+    } else if type_id == TypeId::of::<DiffReviewDismiss>() {
+        window.dispatch_action(Box::new(DiffReviewDismiss), cx);
+    }
     // Help actions
     else if type_id == TypeId::of::<OpenHelpOverlay>() {
         window.dispatch_action(Box::new(OpenHelpOverlay), cx);

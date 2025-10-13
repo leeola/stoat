@@ -118,6 +118,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "GotoNextHunk" => Ok(KeyBinding::new(key, GotoNextHunk, context)),
         "GotoPrevHunk" => Ok(KeyBinding::new(key, GotoPrevHunk, context)),
 
+        // Diff review actions
+        "OpenDiffReview" => Ok(KeyBinding::new(key, OpenDiffReview, context)),
+        "DiffReviewNextHunk" => Ok(KeyBinding::new(key, DiffReviewNextHunk, context)),
+        "DiffReviewPrevHunk" => Ok(KeyBinding::new(key, DiffReviewPrevHunk, context)),
+        "DiffReviewApproveHunk" => Ok(KeyBinding::new(key, DiffReviewApproveHunk, context)),
+        "DiffReviewDismiss" => Ok(KeyBinding::new(key, DiffReviewDismiss, context)),
+
         // Help actions
         "OpenHelpOverlay" => Ok(KeyBinding::new(key, OpenHelpOverlay, context)),
         "OpenHelpModal" => Ok(KeyBinding::new(key, OpenHelpModal, context)),

@@ -23,9 +23,9 @@ use std::{
 use stoat::{
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, HelpModalDismiss,
-        OpenBufferFinder, OpenCommandPalette, OpenFileFinder, OpenGitStatus, OpenHelpModal,
-        OpenHelpOverlay, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight, SplitUp,
-        ToggleMinimap,
+        OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder, OpenGitStatus,
+        OpenHelpModal, OpenHelpOverlay, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight,
+        SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     Stoat,
@@ -355,6 +355,24 @@ impl PaneGroupView {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
                     stoat.open_git_status(cx);
+                });
+            });
+            cx.notify();
+        }
+    }
+
+    /// Handle opening the diff review mode
+    fn handle_open_diff_review(
+        &mut self,
+        _: &OpenDiffReview,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Open diff review in the active editor's Stoat instance
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_diff_review(cx);
                 });
             });
             cx.notify();
@@ -1328,6 +1346,7 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_open_command_palette))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))
+                    .on_action(cx.listener(Self::handle_open_diff_review))
                     .on_action(cx.listener(Self::handle_open_help_overlay))
                     .on_action(cx.listener(Self::handle_open_help_modal))
                     .on_action(cx.listener(Self::handle_help_modal_dismiss))

@@ -618,6 +618,54 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_diff_review_next_hunk(
+        &mut self,
+        _: &DiffReviewNextHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_next_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_diff_review_prev_hunk(
+        &mut self,
+        _: &DiffReviewPrevHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_prev_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_diff_review_approve_hunk(
+        &mut self,
+        _: &DiffReviewApproveHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_approve_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_diff_review_dismiss(
+        &mut self,
+        _: &DiffReviewDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_dismiss(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -806,6 +854,10 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_toggle_diff_hunk))
             .on_action(cx.listener(Self::handle_goto_next_hunk))
             .on_action(cx.listener(Self::handle_goto_prev_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_next_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_prev_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_approve_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_dismiss))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))
             .on_action(cx.listener(Self::handle_command_palette_execute))

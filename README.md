@@ -1,6 +1,7 @@
-
 # Stoat
 
 **Development Status**: Exploration / Prototyping
 
-A Stoat-ally different editor.
+An editor.
+
+fo bar b

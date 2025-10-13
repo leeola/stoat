@@ -154,6 +154,14 @@ pub struct Stoat {
     pub(crate) git_status_branch_info: Option<crate::git_status::GitBranchInfo>,
     pub(crate) git_dirty_count: usize,
 
+    // Diff review state
+    pub(crate) diff_review_files: Vec<crate::diff_review::DiffReviewFile>,
+    pub(crate) diff_review_current_file_idx: usize,
+    pub(crate) diff_review_current_hunk_idx: usize,
+    pub(crate) diff_review_approved_hunks:
+        std::collections::HashMap<PathBuf, std::collections::HashSet<usize>>,
+    pub(crate) diff_review_previous_mode: Option<String>,
+
     /// Current file path (for status bar display)
     pub(crate) current_file_path: Option<PathBuf>,
 
@@ -245,6 +253,11 @@ impl Stoat {
             help_modal_previous_mode: None,
             git_status_branch_info: git_branch_info,
             git_dirty_count,
+            diff_review_files: Vec::new(),
+            diff_review_current_file_idx: 0,
+            diff_review_current_hunk_idx: 0,
+            diff_review_approved_hunks: std::collections::HashMap::new(),
+            diff_review_previous_mode: None,
             current_file_path: None,
             worktree,
             parent_stoat: None,
@@ -298,6 +311,11 @@ impl Stoat {
             help_modal_previous_mode: None,
             git_status_branch_info: self.git_status_branch_info.clone(),
             git_dirty_count: self.git_dirty_count,
+            diff_review_files: Vec::new(),
+            diff_review_current_file_idx: 0,
+            diff_review_current_hunk_idx: 0,
+            diff_review_approved_hunks: std::collections::HashMap::new(),
+            diff_review_previous_mode: None,
             current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: None,
@@ -633,6 +651,11 @@ impl Stoat {
             help_modal_previous_mode: None,
             git_status_branch_info: None,
             git_dirty_count: 0,
+            diff_review_files: Vec::new(),
+            diff_review_current_file_idx: 0,
+            diff_review_current_hunk_idx: 0,
+            diff_review_approved_hunks: std::collections::HashMap::new(),
+            diff_review_previous_mode: None,
             current_file_path: None,
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),

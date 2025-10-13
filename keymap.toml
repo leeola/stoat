@@ -45,6 +45,11 @@ display_name = "GIT STATUS"
 previous = "normal"
 
 [[modes]]
+name = "diff_review"
+display_name = "DIFF REVIEW"
+previous = "normal"
+
+[[modes]]
 name = "help_modal"
 display_name = "HELP"
 previous = "normal"
@@ -657,6 +662,11 @@ action = "ToggleDiffHunk"
 context = "Editor && mode == space"
 
 [[bindings]]
+key = "r"
+action = "OpenDiffReview"
+context = "Editor && mode == space"
+
+[[bindings]]
 key = "escape"
 action = "SetMode(normal)"
 context = "Editor && mode == space"
@@ -742,6 +752,62 @@ context = "Editor && mode == git_status"
 key = "enter"
 action = "GitStatusSelect"
 context = "Editor && mode == git_status"
+
+# Diff Review Mode - Hunk-by-hunk review
+[[bindings]]
+key = "escape"
+action = "DiffReviewDismiss"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "j"
+action = "DiffReviewNextHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "k"
+action = "DiffReviewPrevHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "down"
+action = "DiffReviewNextHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "up"
+action = "DiffReviewPrevHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "ctrl-n"
+action = "DiffReviewNextHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "ctrl-p"
+action = "DiffReviewPrevHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "space"
+action = "DiffReviewApproveHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "a"
+action = "DiffReviewApproveHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "enter"
+action = "DiffReviewApproveHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = ": q"
+action = "DiffReviewDismiss"
+context = "Editor && mode == diff_review"
 
 # Help - Context-sensitive help system
 [[bindings]]

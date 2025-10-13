@@ -155,6 +155,23 @@ actions!(
     ]
 );
 
+// Diff review actions
+actions!(
+    stoat,
+    [
+        /// Open git diff review mode
+        OpenDiffReview,
+        /// Jump to next unreviewed hunk in diff review
+        DiffReviewNextHunk,
+        /// Jump to previous hunk in diff review
+        DiffReviewPrevHunk,
+        /// Approve current hunk and move to next
+        DiffReviewApproveHunk,
+        /// Exit diff review mode
+        DiffReviewDismiss,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat,
@@ -596,6 +613,33 @@ action_metadata!(
     "Jump to the previous git diff hunk"
 );
 
+// Diff review actions
+action_metadata!(
+    OpenDiffReview,
+    "diff review",
+    "Open git diff review mode to review all modified files hunk by hunk"
+);
+action_metadata!(
+    DiffReviewNextHunk,
+    "next hunk",
+    "Jump to the next unreviewed hunk in diff review mode"
+);
+action_metadata!(
+    DiffReviewPrevHunk,
+    "prev hunk",
+    "Jump to the previous hunk in diff review mode"
+);
+action_metadata!(
+    DiffReviewApproveHunk,
+    "approve hunk",
+    "Mark the current hunk as reviewed and move to the next unreviewed hunk"
+);
+action_metadata!(
+    DiffReviewDismiss,
+    "dismiss review",
+    "Exit diff review mode and return to the previous mode"
+);
+
 // Pane management actions
 action_metadata!(
     SplitRight,
@@ -835,6 +879,28 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::action_name());
     names.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::action_name());
 
+    // Diff review actions
+    names.insert(
+        TypeId::of::<OpenDiffReview>(),
+        OpenDiffReview::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewNextHunk>(),
+        DiffReviewNextHunk::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewPrevHunk>(),
+        DiffReviewPrevHunk::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewApproveHunk>(),
+        DiffReviewApproveHunk::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewDismiss>(),
+        DiffReviewDismiss::action_name(),
+    );
+
     // Buffer finder actions
     names.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1051,6 +1117,28 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::description());
     descriptions.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::description());
 
+    // Diff review actions
+    descriptions.insert(
+        TypeId::of::<OpenDiffReview>(),
+        OpenDiffReview::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewNextHunk>(),
+        DiffReviewNextHunk::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewPrevHunk>(),
+        DiffReviewPrevHunk::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewApproveHunk>(),
+        DiffReviewApproveHunk::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewDismiss>(),
+        DiffReviewDismiss::description(),
+    );
+
     // Buffer finder actions
     descriptions.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1258,6 +1346,25 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<ToggleDiffHunk>(), ToggleDiffHunk::help_text());
     help.insert(TypeId::of::<GotoNextHunk>(), GotoNextHunk::help_text());
     help.insert(TypeId::of::<GotoPrevHunk>(), GotoPrevHunk::help_text());
+
+    // Diff review actions
+    help.insert(TypeId::of::<OpenDiffReview>(), OpenDiffReview::help_text());
+    help.insert(
+        TypeId::of::<DiffReviewNextHunk>(),
+        DiffReviewNextHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewPrevHunk>(),
+        DiffReviewPrevHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewApproveHunk>(),
+        DiffReviewApproveHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewDismiss>(),
+        DiffReviewDismiss::help_text(),
+    );
 
     // Buffer finder actions
     help.insert(
