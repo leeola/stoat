@@ -38,6 +38,17 @@ use std::ops::Range;
 use stoat::git_diff::{BufferDiff, DiffHunkStatus};
 use text::{BufferSnapshot, ToPoint};
 
+/// Display row info for gutter rendering.
+///
+/// Used to create diff indicators for both buffer rows and phantom rows.
+#[derive(Debug, Clone)]
+pub struct DisplayRowInfo {
+    /// Y position where this row is painted
+    pub y_position: Pixels,
+    /// Diff status for this row
+    pub diff_status: Option<DiffHunkStatus>,
+}
+
 /// Dimensions and position of the gutter area.
 ///
 /// The gutter is a vertical strip on the left side of the editor that displays
@@ -104,18 +115,20 @@ pub struct GutterLayout {
 impl GutterLayout {
     /// Compute gutter layout for visible rows.
     ///
-    /// Finds all diff hunks that intersect with visible rows and creates
-    /// indicators for each changed line.
+    /// Creates diff indicators for both buffer rows (from buffer hunks) and
+    /// display rows (including phantom rows for deleted content).
     ///
     /// # Arguments
     ///
     /// * `gutter_bounds` - Bounds for the gutter area
-    /// * `visible_rows` - Range of rows currently visible in viewport
+    /// * `visible_rows` - Range of buffer rows currently visible in viewport
+    /// * `display_rows` - Display row information including phantom rows
     /// * `diff` - Optional diff data (None if not in git repo)
     /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
     /// * `gutter_width` - Total width of gutter in pixels
     /// * `right_padding` - Spacing between gutter content and editor text
     /// * `line_height` - Height of one line in pixels
+    /// * `strip_width` - Width of diff indicator strip
     ///
     /// # Returns
     ///
@@ -123,20 +136,20 @@ impl GutterLayout {
     ///
     /// # Algorithm
     ///
-    /// 1. For each hunk in the diff:
-    ///    - Convert anchor range to row range
-    ///    - Check if hunk intersects visible rows
-    ///    - Create indicator for each visible row in hunk
-    /// 2. Position indicators at left edge of gutter
-    /// 3. Size indicators to match line height (following Zed's 0.275 ratio)
+    /// 1. Create indicators for display rows (includes phantom deleted rows)
+    /// 2. Create indicators for buffer hunks (includes deleted markers at buffer positions)
+    /// 3. Position indicators at left edge of gutter
+    /// 4. Size indicators based on provided strip_width
     pub fn new(
         gutter_bounds: Bounds<Pixels>,
         visible_rows: Range<u32>,
+        display_rows: &[DisplayRowInfo],
         diff: Option<&BufferDiff>,
         buffer_snapshot: &BufferSnapshot,
         gutter_width: Pixels,
         right_padding: Pixels,
         line_height: Pixels,
+        strip_width: Pixels,
     ) -> Self {
         let dimensions = GutterDimensions {
             width: gutter_width,
@@ -146,31 +159,82 @@ impl GutterLayout {
 
         let mut diff_indicators = Vec::new();
 
-        if let Some(diff) = diff {
-            // Strip width scales with line height (matches Zed)
-            let strip_width = (0.275 * line_height).floor();
+        // PHASE 1: Create indicators for display rows (includes phantom rows)
+        // Group consecutive rows with the same diff status into continuous strips
+        let mut current_group: Option<(DiffHunkStatus, Pixels, Pixels)> = None;
 
+        for row in display_rows {
+            if let Some(status) = row.diff_status {
+                match current_group {
+                    Some((group_status, start_y, _)) if group_status == status => {
+                        // Extend current group
+                        current_group = Some((group_status, start_y, row.y_position + line_height));
+                    },
+                    Some((group_status, start_y, end_y)) => {
+                        // Finish current group and start new one
+                        diff_indicators.push(DiffIndicator {
+                            status: group_status,
+                            bounds: Bounds {
+                                origin: point(gutter_bounds.origin.x, start_y),
+                                size: size(strip_width, end_y - start_y),
+                            },
+                            corner_radii: Corners::all(px(0.0)),
+                        });
+                        current_group =
+                            Some((status, row.y_position, row.y_position + line_height));
+                    },
+                    None => {
+                        // Start new group
+                        current_group =
+                            Some((status, row.y_position, row.y_position + line_height));
+                    },
+                }
+            } else {
+                // No diff status - finish current group if any
+                if let Some((group_status, start_y, end_y)) = current_group {
+                    diff_indicators.push(DiffIndicator {
+                        status: group_status,
+                        bounds: Bounds {
+                            origin: point(gutter_bounds.origin.x, start_y),
+                            size: size(strip_width, end_y - start_y),
+                        },
+                        corner_radii: Corners::all(px(0.0)),
+                    });
+                    current_group = None;
+                }
+            }
+        }
+
+        // Finish final group if any
+        if let Some((group_status, start_y, end_y)) = current_group {
+            diff_indicators.push(DiffIndicator {
+                status: group_status,
+                bounds: Bounds {
+                    origin: point(gutter_bounds.origin.x, start_y),
+                    size: size(strip_width, end_y - start_y),
+                },
+                corner_radii: Corners::all(px(0.0)),
+            });
+        }
+
+        // PHASE 2: Add special markers for zero-length deleted hunks at buffer positions
+        // These show as small rounded pills where content was deleted
+        if let Some(diff) = diff {
             for hunk in &diff.hunks {
-                // Convert anchor range to row range
                 let hunk_start_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
                 let hunk_end_row = hunk.buffer_range.end.to_point(buffer_snapshot).row;
 
-                // Check if hunk intersects visible rows
-                if hunk_end_row < visible_rows.start || hunk_start_row >= visible_rows.end {
-                    continue;
-                }
-
-                // Clamp to visible range
-                let visible_start = hunk_start_row.max(visible_rows.start);
-                let visible_end = hunk_end_row.min(visible_rows.end.saturating_sub(1));
-
-                // Compute bounds and corner radii based on hunk type
-                let (bounds, corner_radii) = if hunk_start_row == hunk_end_row
-                    && matches!(hunk.status, DiffHunkStatus::Deleted)
+                // Only process zero-length deleted hunks
+                if hunk_start_row == hunk_end_row && matches!(hunk.status, DiffHunkStatus::Deleted)
                 {
-                    // Deleted hunk (zero-length) - small rounded pill
+                    // Check if hunk is in visible range
+                    if hunk_start_row < visible_rows.start || hunk_start_row >= visible_rows.end {
+                        continue;
+                    }
+
+                    // Create small rounded pill at deletion point
                     let width = (0.35 * line_height).floor();
-                    let y_offset = line_height * ((visible_start - visible_rows.start) as f32)
+                    let y_offset = line_height * ((hunk_start_row - visible_rows.start) as f32)
                         - line_height / 2.0;
 
                     let bounds = Bounds {
@@ -178,25 +242,12 @@ impl GutterLayout {
                         size: size(width, line_height),
                     };
 
-                    (bounds, Corners::all(line_height))
-                } else {
-                    // Added/Modified hunk - continuous vertical bar
-                    let y_start = line_height * ((visible_start - visible_rows.start) as f32);
-                    let y_end = line_height * ((visible_end - visible_rows.start + 1) as f32);
-
-                    let bounds = Bounds {
-                        origin: point(gutter_bounds.origin.x, gutter_bounds.origin.y + y_start),
-                        size: size(strip_width, y_end - y_start),
-                    };
-
-                    (bounds, Corners::all(px(0.0)))
-                };
-
-                diff_indicators.push(DiffIndicator {
-                    status: hunk.status,
-                    bounds,
-                    corner_radii,
-                });
+                    diff_indicators.push(DiffIndicator {
+                        status: DiffHunkStatus::Deleted,
+                        bounds,
+                        corner_radii: Corners::all(line_height),
+                    });
+                }
             }
         }
 

@@ -2646,33 +2646,13 @@ impl Stoat {
 
     // ==== Git Diff Actions ====
 
-    /// Toggle expansion of diff hunk at cursor position.
+    /// Toggle expansion of diff hunk at cursor position (no-op).
     ///
-    /// If the cursor is on a line with a diff hunk, toggles whether the hunk's
-    /// deleted content is shown inline. When expanded, deleted lines from git HEAD
-    /// are displayed above the hunk with a dark red background.
-    pub fn toggle_diff_hunk(&mut self, cx: &mut Context<Self>) {
-        let cursor_row = self.cursor.position().row;
-        let buffer_item = self.active_buffer(cx);
-        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-
-        let has_diff = buffer_item.read(cx).diff().is_some();
-        tracing::info!(
-            "toggle_diff_hunk called: cursor_row={}, has_diff={}",
-            cursor_row,
-            has_diff
-        );
-
-        buffer_item.update(cx, |item, _cx| {
-            if item.toggle_diff_hunk_at_row(cursor_row, &buffer_snapshot) {
-                tracing::info!("SUCCESS: Toggled diff hunk at row {}", cursor_row);
-            } else {
-                tracing::info!("FAILED: No diff hunk found at row {}", cursor_row);
-            }
-        });
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+    /// NOTE: This action is now a no-op. In the new phantom row design, all diff hunks
+    /// are always visible with their deleted content shown inline. There is no concept
+    /// of collapsed/expanded hunks anymore.
+    pub fn toggle_diff_hunk(&mut self, _cx: &mut Context<Self>) {
+        tracing::debug!("toggle_diff_hunk called (no-op - all hunks always visible)");
     }
 
     /// Jump to the next diff hunk.
@@ -2751,6 +2731,7 @@ impl Stoat {
     ///
     /// Following Zed's ProjectDiff pattern but simplified for stoat's modal architecture.
     pub fn open_diff_review(&mut self, cx: &mut Context<Self>) {
+        tracing::info!("Opening diff review");
         debug!("Opening diff review");
 
         // Save current mode to restore later
@@ -2800,11 +2781,17 @@ impl Stoat {
             let buffer_item = self.active_buffer(cx);
             if let Some(diff) = buffer_item.read(cx).diff() {
                 let hunk_count = diff.hunks.len();
+                tracing::info!(
+                    "Diff review: loaded first file with {} hunks (all visible)",
+                    hunk_count
+                );
                 // Now update the file
                 if let Some(first_file_mut) = self.diff_review_files.first_mut() {
                     first_file_mut.diff = Some(diff.clone());
                     first_file_mut.hunk_count = hunk_count;
                 }
+            } else {
+                tracing::info!("Diff review: first file has NO diff");
             }
         }
 

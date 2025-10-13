@@ -450,6 +450,14 @@ impl Stoat {
         self.parent_stoat.is_some()
     }
 
+    /// Check if we're currently in diff review mode.
+    ///
+    /// Returns `true` if diff review mode is active (has loaded review files).
+    /// Used by GUI to adjust gutter width for better diff visualization.
+    pub fn is_in_diff_review(&self) -> bool {
+        !self.diff_review_files.is_empty()
+    }
+
     /// Get the parent stoat if this is a minimap.
     ///
     /// Returns the parent editor entity if this is a minimap, or `None` for regular editors.

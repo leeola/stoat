@@ -4,7 +4,9 @@
 //! No gutter, no mouse handling, no complex layout - just get text visible.
 
 use crate::{
-    editor_style::EditorStyle, editor_view::EditorView, gutter::GutterLayout,
+    editor_style::EditorStyle,
+    editor_view::EditorView,
+    gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
 };
 use gpui::{
@@ -12,8 +14,8 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextRun, Window, point,
     px, relative, size,
 };
-use std::sync::Arc;
-use text::ToPoint;
+use std::{collections::HashMap, sync::Arc};
+use stoat::{DisplayRow, git_diff::DiffHunkStatus};
 
 pub struct EditorElement {
     view: Entity<EditorView>,
@@ -62,18 +64,15 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let prepaint_start = std::time::Instant::now();
-
         // Detect if this EditorElement is rendering a minimap (for conditional gutter rendering)
         let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
 
         // Get font and sizing from style (persistent across frames for GPUI's LineLayoutCache)
-        // Using cached font ensures stable font ID for cache hits
         let font = self.style.font.clone();
         let font_size = self.style.font_size;
         let line_height = self.style.line_height;
 
-        // Get buffer and tokens - clone snapshots to avoid holding borrows of cx
+        // Get buffer snapshot, token snapshot, and display buffer
         let buffer_snapshot = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
@@ -84,11 +83,14 @@ impl Element for EditorElement {
             let buffer_item = stoat.active_buffer(cx);
             buffer_item.read(cx).token_snapshot()
         };
+        let display_buffer = {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            let buffer_item = stoat.active_buffer(cx);
+            buffer_item.read(cx).display_buffer(cx)
+        };
 
         // Calculate visible range
         let max_point = buffer_snapshot.max_point();
-        // Calculate ACTUAL visible lines including fractional lines for accurate thumb sizing
-        // Don't floor here - use the precise fractional value for viewport_lines
         let visible_lines_precise = (bounds.size.height - self.style.padding * 2.0) / line_height;
         let max_lines = visible_lines_precise.floor() as u32;
 
@@ -104,142 +106,231 @@ impl Element for EditorElement {
         let gutter_width = if is_minimap {
             Pixels::ZERO
         } else {
-            self.calculate_gutter_width(max_point.row + 1, window)
+            self.calculate_gutter_width(max_point.row + 1, window, cx)
         };
 
-        // Use scroll position as offset
+        // Calculate visible display row range (not buffer row range!)
         let scroll_offset = scroll_y.floor() as u32;
+        let max_display_row = display_buffer.max_display_row();
+        let start_display_row = scroll_offset.min(max_display_row.0);
+        let end_display_row = (start_display_row + max_lines).min(max_display_row.0 + 1);
 
-        // Calculate visible line range
-        // Clamp start_line to prevent overflow when switching to smaller files
-        let start_line = scroll_offset.min(max_point.row);
-        let end_line = (start_line + max_lines).min(max_point.row + 1);
+        // ===== PHASE 1: Collect syntax highlighting for all buffer rows in visible range =====
+        // Build a HashMap of buffer_row -> Vec<TextRun> for efficient lookup
 
-        // ===== EXPENSIVE WORK: Syntax highlighting + text shaping =====
-        // Do this ONCE in prepaint, cache results for fast paint()
-        // Following Zed's architecture: ONE iterator for all visible lines
-        let mut line_layouts = Vec::with_capacity((end_line - start_line) as usize);
-
-        // Detailed timing to diagnose cache effectiveness
-        let mut total_highlight_time = std::time::Duration::ZERO;
-        let mut total_shape_time = std::time::Duration::ZERO;
-
-        let highlight_start = std::time::Instant::now();
-
-        // Calculate byte offset range for ENTIRE visible region (not per-line)
-        let start_offset = buffer_snapshot.point_to_offset(text::Point::new(start_line, 0));
-        let end_offset = if end_line > max_point.row {
-            buffer_snapshot.len()
-        } else {
-            buffer_snapshot.point_to_offset(text::Point::new(end_line, 0))
-        };
-
-        // Create ONE iterator for ALL visible lines (Zed's approach)
-        let chunks = HighlightedChunks::new(
-            start_offset..end_offset,
-            &buffer_snapshot,
-            &token_snapshot,
-            &self.style.highlight_map,
-        );
-
-        // Process all chunks, detecting line boundaries via newlines
-        let mut line_text = String::new();
-        let mut runs = Vec::new();
-        let mut current_line_idx = start_line;
-        let mut y = bounds.origin.y + self.style.padding;
-
-        for chunk in chunks {
-            // Get color for this chunk (outside the split loop to avoid recomputation)
-            let color = if let Some(highlight_id) = chunk.highlight_id {
-                self.style
-                    .syntax_theme
-                    .highlights
-                    .get(highlight_id.0 as usize)
-                    .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
-                    .unwrap_or(self.style.text_color)
-            } else {
-                self.style.text_color
-            };
-
-            // Split chunk on '\n' to detect line boundaries (following Zed)
-            for (split_ix, line_chunk) in chunk.text.split('\n').enumerate() {
-                if split_ix > 0 {
-                    // We hit a newline - shape the completed line (including empty lines)
-                    let shape_start = std::time::Instant::now();
-                    let shaped = window.text_system().shape_line(
-                        SharedString::from(std::mem::take(&mut line_text)),
-                        font_size,
-                        &runs,
-                        None,
-                    );
-                    total_shape_time += shape_start.elapsed();
-
-                    line_layouts.push(ShapedLineLayout {
-                        line_idx: current_line_idx,
-                        shaped,
-                        y_position: y,
-                    });
-
-                    // Reset for next line
-                    line_text.clear();
-                    runs.clear();
-                    current_line_idx += 1;
-                    y += line_height;
-
-                    // Early exit if beyond visible area
-                    if y > bounds.origin.y + bounds.size.height {
-                        break;
-                    }
-                }
-
-                // Accumulate text for current line
-                if !line_chunk.is_empty() {
-                    line_text.push_str(line_chunk);
-                    runs.push(TextRun {
-                        len: line_chunk.len(),
-                        font: font.clone(),
-                        color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    });
+        // Determine which buffer rows are in the visible display range
+        let mut buffer_rows_in_range = Vec::new();
+        for display_row in start_display_row..end_display_row {
+            if let Some(row_info) = display_buffer.row_at(DisplayRow(display_row)) {
+                if let Some(buffer_row) = row_info.buffer_row {
+                    buffer_rows_in_range.push(buffer_row);
                 }
             }
         }
 
-        // Shape final line if we have accumulated text (no trailing newline case)
-        if !line_text.is_empty() {
-            let shape_start = std::time::Instant::now();
+        // Get min/max buffer rows to create one HighlightedChunks iterator
+        let mut highlighted_lines: HashMap<u32, Vec<TextRun>> = HashMap::new();
+
+        if !buffer_rows_in_range.is_empty() {
+            let min_buffer_row = *buffer_rows_in_range.iter().min().unwrap();
+            let max_buffer_row = *buffer_rows_in_range.iter().max().unwrap();
+
+            // Calculate byte offset range for all visible buffer rows
+            let start_offset = buffer_snapshot.point_to_offset(text::Point::new(min_buffer_row, 0));
+            let end_offset = if max_buffer_row >= max_point.row {
+                buffer_snapshot.len()
+            } else {
+                buffer_snapshot.point_to_offset(text::Point::new(max_buffer_row + 1, 0))
+            };
+
+            // Create one HighlightedChunks iterator for entire visible buffer range
+            let chunks = HighlightedChunks::new(
+                start_offset..end_offset,
+                &buffer_snapshot,
+                &token_snapshot,
+                &self.style.highlight_map,
+            );
+
+            // Process chunks into TextRuns per buffer row
+            let mut current_buffer_row = min_buffer_row;
+            let mut runs = Vec::new();
+
+            for chunk in chunks {
+                // Get color for this chunk
+                let color = if let Some(highlight_id) = chunk.highlight_id {
+                    self.style
+                        .syntax_theme
+                        .highlights
+                        .get(highlight_id.0 as usize)
+                        .map(|(_name, style)| style.color.unwrap_or(self.style.text_color))
+                        .unwrap_or(self.style.text_color)
+                } else {
+                    self.style.text_color
+                };
+
+                // Split on newlines to detect row boundaries
+                for (split_ix, line_chunk) in chunk.text.split('\n').enumerate() {
+                    if split_ix > 0 {
+                        // Store runs for completed row
+                        highlighted_lines.insert(current_buffer_row, runs.clone());
+                        runs.clear();
+                        current_buffer_row += 1;
+                    }
+
+                    // Accumulate runs for current row
+                    if !line_chunk.is_empty() {
+                        runs.push(TextRun {
+                            len: line_chunk.len(),
+                            font: font.clone(),
+                            color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        });
+                    }
+                }
+            }
+
+            // Store final row if we have accumulated runs
+            if !runs.is_empty() {
+                highlighted_lines.insert(current_buffer_row, runs);
+            }
+        }
+
+        // ===== PHASE 2: Build ShapedLineLayout for each display row =====
+        let mut line_layouts = Vec::with_capacity((end_display_row - start_display_row) as usize);
+        let mut y = bounds.origin.y + self.style.padding;
+
+        for display_row in start_display_row..end_display_row {
+            let Some(row_info) = display_buffer.row_at(DisplayRow(display_row)) else {
+                continue;
+            };
+
+            // Determine styling based on diff status
+            let (background_color, text_color_override, use_strikethrough) =
+                match row_info.diff_status {
+                    Some(DiffHunkStatus::Added) => (
+                        Some(gpui::Hsla {
+                            h: 120.0,
+                            s: 0.3,
+                            l: 0.15,
+                            a: 0.3,
+                        }),
+                        None,
+                        false,
+                    ),
+                    Some(DiffHunkStatus::Deleted) => (
+                        Some(gpui::Hsla {
+                            h: 0.0,
+                            s: 0.3,
+                            l: 0.15,
+                            a: 0.3,
+                        }),
+                        Some(gpui::Hsla {
+                            h: 0.0,
+                            s: 0.3,
+                            l: 0.5,
+                            a: 0.6,
+                        }),
+                        true,
+                    ),
+                    Some(DiffHunkStatus::Modified) => (
+                        Some(gpui::Hsla {
+                            h: 45.0,
+                            s: 0.3,
+                            l: 0.15,
+                            a: 0.3,
+                        }),
+                        None,
+                        false,
+                    ),
+                    None => (None, None, false),
+                };
+
+            // Build text runs for this display row
+            let mut runs = Vec::new();
+
+            // Get the text content (no prefix prepended)
+            // Ensure empty phantom rows have at least a space for background rendering
+            let line_text = if row_info.content.is_empty() && row_info.buffer_row.is_none() {
+                " ".to_string()
+            } else {
+                row_info.content.clone()
+            };
+
+            // Add content text runs
+            if let Some(buffer_row) = row_info.buffer_row {
+                // Use highlighted runs from phase 1
+                if let Some(buffer_runs) = highlighted_lines.get(&buffer_row) {
+                    for mut run in buffer_runs.clone() {
+                        // Override styling for diff rows
+                        if let Some(bg) = background_color {
+                            run.background_color = Some(bg);
+                        }
+                        if let Some(color) = text_color_override {
+                            run.color = color;
+                        }
+                        if use_strikethrough {
+                            run.strikethrough = Some(gpui::StrikethroughStyle {
+                                color: Some(run.color),
+                                thickness: px(1.0),
+                            });
+                        }
+                        runs.push(run);
+                    }
+                }
+            } else {
+                // Phantom row - use plain text styling
+                let content_len = row_info.content.len();
+                let color = text_color_override.unwrap_or(self.style.text_color);
+
+                // Ensure even empty lines get a TextRun with background
+                let text_len = if content_len == 0 { 1 } else { content_len };
+
+                runs.push(TextRun {
+                    len: text_len,
+                    font: font.clone(),
+                    color,
+                    background_color,
+                    underline: None,
+                    strikethrough: if use_strikethrough {
+                        Some(gpui::StrikethroughStyle {
+                            color: Some(color),
+                            thickness: px(1.0),
+                        })
+                    } else {
+                        None
+                    },
+                });
+            }
+
+            // Shape the line
             let shaped = window.text_system().shape_line(
-                SharedString::from(std::mem::take(&mut line_text)),
+                SharedString::from(line_text),
                 font_size,
                 &runs,
                 None,
             );
-            total_shape_time += shape_start.elapsed();
 
             line_layouts.push(ShapedLineLayout {
-                line_idx: current_line_idx,
+                display_row,
+                buffer_row: row_info.buffer_row,
                 shaped,
                 y_position: y,
+                diff_status: row_info.diff_status,
             });
+
+            y += line_height;
+
+            // Early exit if beyond visible area
+            if y > bounds.origin.y + bounds.size.height {
+                break;
+            }
         }
-
-        // Don't update viewport_lines here - we already set it with the precise fractional value
-        // at the start of prepaint(). This ensures the thumb accurately represents the viewport
-        // including any fractional line space.
-
-        // Collect expanded diff blocks for visible range (skip for minimap)
-        let diff_blocks = if is_minimap {
-            Vec::new()
-        } else {
-            self.collect_diff_blocks(cx, &buffer_snapshot)
-        };
 
         EditorPrepaintState {
             line_layouts,
             gutter_width,
-            diff_blocks,
         }
     }
 
@@ -282,27 +373,36 @@ impl Element for EditorElement {
         // ===== FAST PATH: Just paint the pre-shaped lines from prepaint =====
         // All expensive work (syntax highlighting + text shaping) was done in prepaint()
 
-        // Collect line positions for cursor/gutter rendering
-        let mut line_positions: Vec<(u32, Pixels)> =
-            Vec::with_capacity(prepaint.line_layouts.len());
+        // Collect buffer line positions for cursor/gutter rendering (only real buffer rows, not
+        // phantoms)
+        let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
 
-        // Paint all pre-shaped lines (FAST: just drawing, no computation!)
+        // Paint all pre-shaped lines (includes both buffer rows and phantom rows)
         for layout in &prepaint.line_layouts {
-            line_positions.push((layout.line_idx, layout.y_position));
+            // Track buffer row positions for cursor/line numbers
+            if let Some(buffer_row) = layout.buffer_row {
+                line_positions.push((buffer_row, layout.y_position));
+            }
 
+            // Paint the line
             let x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
             if let Err(e) =
                 layout
                     .shaped
                     .paint(point(x, layout.y_position), line_height, window, cx)
             {
-                tracing::error!("Failed to paint line {}: {:?}", layout.line_idx, e);
+                tracing::error!(
+                    "Failed to paint display row {} (buffer row {:?}): {:?}",
+                    layout.display_row,
+                    layout.buffer_row,
+                    e
+                );
             }
         }
 
         // Skip gutter and cursor rendering for minimap
         if !is_minimap {
-            // Calculate visible range for gutter
+            // Calculate visible buffer row range for gutter
             let start_line = line_positions.first().map(|(idx, _)| *idx).unwrap_or(0);
             let end_line = line_positions.last().map(|(idx, _)| *idx + 1).unwrap_or(0);
 
@@ -310,21 +410,14 @@ impl Element for EditorElement {
             self.paint_gutter(
                 bounds,
                 start_line..end_line,
+                &prepaint.line_layouts,
                 prepaint.gutter_width,
                 window,
                 cx,
             );
 
-            // Paint expanded diff blocks inline (before line numbers, behind text)
-            self.paint_diff_blocks(
-                bounds,
-                &prepaint.diff_blocks,
-                &line_positions,
-                prepaint.gutter_width,
-                line_height,
-                window,
-                cx,
-            );
+            // Paint diff symbols (+/-) in gutter
+            self.paint_diff_symbols(bounds, &prepaint.line_layouts, window, cx);
 
             // Paint line numbers in gutter
             self.paint_line_numbers(bounds, &line_positions, prepaint.gutter_width, window, cx);
@@ -396,8 +489,81 @@ impl EditorElement {
         }
     }
 
+    /// Paint diff symbols (+/-) in the gutter
+    fn paint_diff_symbols(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+
+        // Strip width: wider during diff review for better visibility
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let strip_width = if stoat.is_in_diff_review() {
+            (0.6 * self.style.line_height).floor() // Wider in review mode
+        } else {
+            (0.275 * self.style.line_height).floor() // Normal width
+        };
+
+        for layout in line_layouts {
+            let symbol = match layout.diff_status {
+                Some(DiffHunkStatus::Added) => "+",
+                Some(DiffHunkStatus::Deleted) => "-",
+                Some(DiffHunkStatus::Modified) => "~",
+                None => continue,
+            };
+
+            // White symbols for better visibility on colored backgrounds
+            let symbol_color = gpui::Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.95,
+                a: 1.0,
+            };
+
+            let symbol_shared = SharedString::from(symbol);
+            let text_run = TextRun {
+                len: symbol_shared.len(),
+                font: font.clone(),
+                color: symbol_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+
+            let shaped = window.text_system().shape_line(
+                symbol_shared,
+                self.style.font_size,
+                &[text_run],
+                None,
+            );
+
+            // Center symbol on the diff strip
+            let x = bounds.origin.x + (strip_width - shaped.width) / 2.0;
+            let _ = shaped.paint(
+                point(x, layout.y_position),
+                self.style.line_height,
+                window,
+                cx,
+            );
+        }
+    }
+
     /// Calculate gutter width based on line numbers to display
-    fn calculate_gutter_width(&self, max_line_number: u32, window: &mut Window) -> Pixels {
+    fn calculate_gutter_width(
+        &self,
+        max_line_number: u32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Pixels {
         if !self.style.show_line_numbers {
             return Pixels::ZERO;
         }
@@ -432,8 +598,15 @@ impl EditorElement {
             None,
         );
 
-        // Add padding on both sides for spacing
-        shaped.width + px(16.0) // 8px padding on each side
+        // Layout: [diff strip with +/- overlaid][line numbers]
+        // Strip width: wider during diff review for better visibility
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let strip_width = if stoat.is_in_diff_review() {
+            (0.6 * self.style.line_height).floor() // Wider in review mode
+        } else {
+            (0.275 * self.style.line_height).floor() // Normal width
+        };
+        strip_width + shaped.width + px(16.0)
     }
 
     /// Paint the cursor at the current position
@@ -533,159 +706,12 @@ impl EditorElement {
         });
     }
 
-    /// Paint expanded diff blocks inline.
-    ///
-    /// Renders deleted content from git HEAD as dimmed text blocks positioned before
-    /// their corresponding hunks. Uses dark red background and subtle styling to
-    /// distinguish from normal code.
-    fn paint_diff_blocks(
-        &self,
-        bounds: Bounds<Pixels>,
-        diff_blocks: &[DiffBlock],
-        line_positions: &[(u32, Pixels)],
-        gutter_width: Pixels,
-        line_height: Pixels,
-        window: &mut Window,
-        _cx: &mut App,
-    ) {
-        for block in diff_blocks {
-            // Find the Y position where this block should be inserted
-            // (before the line at insert_before_row)
-            let insert_y = line_positions
-                .iter()
-                .find(|(row, _)| *row == block.insert_before_row)
-                .map(|(_, y)| *y);
-
-            let Some(base_y) = insert_y else {
-                // Block's insertion point not in visible range
-                continue;
-            };
-
-            // Calculate block height and position
-            let block_height = line_height * (block.deleted_lines.len() as f32);
-            let block_y = base_y - block_height;
-
-            // Paint background for the deleted block (dark red with transparency)
-            let block_bounds = Bounds {
-                origin: point(bounds.origin.x, block_y),
-                size: size(bounds.size.width, block_height),
-            };
-
-            window.paint_quad(gpui::PaintQuad {
-                bounds: block_bounds,
-                corner_radii: 0.0.into(),
-                background: gpui::Hsla {
-                    h: 0.0,  // Red hue
-                    s: 0.3,  // Subtle saturation
-                    l: 0.15, // Dark
-                    a: 0.3,  // Transparent
-                }
-                .into(),
-                border_color: gpui::transparent_black(),
-                border_widths: 0.0.into(),
-                border_style: gpui::BorderStyle::default(),
-            });
-
-            // Create font for diff text
-            let font = Font {
-                family: SharedString::from("Menlo"),
-                features: Default::default(),
-                weight: FontWeight::NORMAL,
-                style: FontStyle::Normal,
-                fallbacks: None,
-            };
-
-            // Dimmed color for deleted text
-            let deleted_text_color = gpui::Hsla {
-                h: 0.0, // Red hue
-                s: 0.3, // Some saturation
-                l: 0.5, // Medium lightness
-                a: 0.6, // Dimmed
-            };
-
-            // Paint each deleted line with "- " prefix
-            let mut y = block_y;
-            for line in &block.deleted_lines {
-                let line_text = format!("- {line}");
-                let line_shared = SharedString::from(line_text);
-
-                let text_run = TextRun {
-                    len: line_shared.len(),
-                    font: font.clone(),
-                    color: deleted_text_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-
-                let shaped = window.text_system().shape_line(
-                    line_shared,
-                    self.style.font_size,
-                    &[text_run],
-                    None,
-                );
-
-                let x = bounds.origin.x + gutter_width + self.style.padding;
-                if let Err(e) = shaped.paint(point(x, y), line_height, window, _cx) {
-                    tracing::error!("Failed to paint diff line: {:?}", e);
-                }
-
-                y += line_height;
-            }
-        }
-    }
-
-    /// Collect expanded diff blocks for rendering.
-    ///
-    /// Iterates over all expanded hunks in the buffer item and constructs [`DiffBlock`]
-    /// structures containing the deleted text to display inline.
-    fn collect_diff_blocks(
-        &self,
-        cx: &App,
-        buffer_snapshot: &text::BufferSnapshot,
-    ) -> Vec<DiffBlock> {
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let buffer_item = stoat.active_buffer(cx);
-        let buffer_item_ref = buffer_item.read(cx);
-
-        let blocks: Vec<_> = buffer_item_ref
-            .expanded_hunks()
-            .filter_map(|(hunk_idx, hunk)| {
-                // Skip if no deleted content
-                if hunk.diff_base_byte_range.is_empty() {
-                    return None;
-                }
-
-                // Get the row where this block should be inserted (before the hunk start)
-                let insert_before_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
-
-                // Get deleted text and split into lines
-                let deleted_text = buffer_item_ref.base_text_for_hunk(hunk_idx);
-                let deleted_lines: Vec<String> =
-                    deleted_text.lines().map(|line| line.to_string()).collect();
-
-                // Skip empty deleted sections
-                if deleted_lines.is_empty() {
-                    return None;
-                }
-
-                Some(DiffBlock {
-                    insert_before_row,
-                    deleted_lines,
-                    status: hunk.status,
-                })
-            })
-            .collect();
-
-        tracing::info!("collect_diff_blocks: collected {} blocks", blocks.len());
-        blocks
-    }
-
     /// Paint git diff indicators in the gutter
     fn paint_gutter(
         &self,
         bounds: Bounds<Pixels>,
         visible_rows: std::ops::Range<u32>,
+        line_layouts: &[ShapedLineLayout],
         gutter_width: Pixels,
         window: &mut Window,
         cx: &mut App,
@@ -700,29 +726,47 @@ impl EditorElement {
         let diff = buffer_item.read(cx).diff();
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 
+        // Calculate strip width: wider during diff review for better visibility
+        let strip_width = if stoat.is_in_diff_review() {
+            (0.6 * self.style.line_height).floor() // Wider in review mode
+        } else {
+            (0.275 * self.style.line_height).floor() // Normal width
+        };
+
         // Create gutter bounds (left portion of editor)
         let gutter_bounds = Bounds {
             origin: bounds.origin,
             size: size(gutter_width, bounds.size.height),
         };
 
+        // Build display row info from line layouts
+        let display_rows: Vec<DisplayRowInfo> = line_layouts
+            .iter()
+            .map(|layout| DisplayRowInfo {
+                y_position: layout.y_position,
+                diff_status: layout.diff_status,
+            })
+            .collect();
+
         // Create gutter layout with diff indicators
         let gutter_layout = GutterLayout::new(
             gutter_bounds,
             visible_rows,
+            &display_rows,
             diff,
             &buffer_snapshot,
             gutter_width,
             self.style.padding,
             self.style.line_height,
+            strip_width,
         );
 
         // Paint diff indicators
         for indicator in &gutter_layout.diff_indicators {
             let diff_color = match indicator.status {
-                stoat::git_diff::DiffHunkStatus::Added => self.style.diff_added_color,
-                stoat::git_diff::DiffHunkStatus::Modified => self.style.diff_modified_color,
-                stoat::git_diff::DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+                DiffHunkStatus::Added => self.style.diff_added_color,
+                DiffHunkStatus::Modified => self.style.diff_modified_color,
+                DiffHunkStatus::Deleted => self.style.diff_deleted_color,
             };
 
             // Blend with background for subtle appearance (60% opacity)
@@ -745,44 +789,32 @@ impl EditorElement {
     }
 }
 
-/// Block of deleted text to show inline above a diff hunk.
-///
-/// Represents deleted content from git HEAD that can be expanded inline to show
-/// what was removed. Each block is positioned before a specific row and contains
-/// the formatted deleted lines.
-#[derive(Debug, Clone)]
-pub struct DiffBlock {
-    /// Row where block should be inserted (before this row)
-    pub insert_before_row: u32,
-    /// Lines of deleted text from HEAD
-    pub deleted_lines: Vec<String>,
-    /// Original hunk status for styling
-    pub status: stoat::git_diff::DiffHunkStatus,
-}
-
 /// Prepaint state for editor rendering (following Zed's architecture).
 ///
 /// Caches expensive computations (syntax highlighting, text shaping) done in prepaint
 /// so that paint() can be fast and just draw the pre-computed results.
 pub struct EditorPrepaintState {
-    /// Pre-shaped line layouts for visible lines
+    /// Pre-shaped line layouts for visible lines (includes phantom rows)
     pub line_layouts: Vec<ShapedLineLayout>,
     /// Gutter width for positioning
     pub gutter_width: Pixels,
-    /// Expanded diff blocks to render inline
-    pub diff_blocks: Vec<DiffBlock>,
 }
 
 /// A single line that has been shaped and is ready to paint.
 ///
-/// Contains the line index, pre-shaped text, and Y position for fast painting.
+/// Represents either a real buffer line or a phantom line (for git diffs).
+/// Contains display/buffer indices, pre-shaped text, and Y position for fast painting.
 pub struct ShapedLineLayout {
-    /// Line index in the buffer
-    pub line_idx: u32,
+    /// Display row index (includes phantom rows)
+    pub display_row: u32,
+    /// Buffer row index (None for phantom rows)
+    pub buffer_row: Option<u32>,
     /// Pre-shaped text from GPUI (already has syntax highlighting colors)
     pub shaped: gpui::ShapedLine,
     /// Y position where this line should be painted
     pub y_position: Pixels,
+    /// Diff status for gutter symbol rendering
+    pub diff_status: Option<DiffHunkStatus>,
 }
 
 impl IntoElement for EditorElement {

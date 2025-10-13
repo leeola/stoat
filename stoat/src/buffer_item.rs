@@ -6,7 +6,7 @@
 use crate::git_diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot};
@@ -31,9 +31,6 @@ pub struct BufferItem {
     /// Git diff state (None if not in git repo or diff disabled)
     diff: Option<BufferDiff>,
 
-    /// Set of expanded diff hunk indices (for showing deleted content inline)
-    expanded_hunks: HashSet<usize>,
-
     /// Saved text content for modification tracking (None for unnamed buffers never saved)
     saved_text: Option<String>,
 }
@@ -53,7 +50,6 @@ impl BufferItem {
             parser,
             language,
             diff: None,
-            expanded_hunks: HashSet::new(),
             saved_text: None,
         }
     }
@@ -66,6 +62,28 @@ impl BufferItem {
     /// Get a snapshot of the buffer state.
     pub fn buffer_snapshot(&self, cx: &App) -> BufferSnapshot {
         self.buffer.read(cx).snapshot()
+    }
+
+    /// Create a display buffer with phantom rows for git diffs.
+    ///
+    /// Returns a [`DisplayBuffer`](crate::DisplayBuffer) that includes both real buffer rows
+    /// and phantom rows for deleted content from git diffs. This is used by the rendering
+    /// layer to display diffs inline with appropriate styling.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context for reading buffer state
+    ///
+    /// # Returns
+    ///
+    /// A [`DisplayBuffer`](crate::DisplayBuffer) with all rows (real + phantom) built
+    ///
+    /// # Related
+    ///
+    /// - [`DisplayBuffer`](crate::DisplayBuffer) - The display buffer abstraction
+    /// - [`diff`](#method.diff) - Get the current git diff state
+    pub fn display_buffer(&self, cx: &App) -> crate::DisplayBuffer {
+        crate::DisplayBuffer::new(self.buffer_snapshot(cx), self.diff.clone())
     }
 
     /// Get a snapshot of syntax highlighting tokens.
@@ -121,6 +139,8 @@ impl BufferItem {
     ///
     /// Call this after computing the diff between HEAD and the current buffer state.
     /// Pass [`None`] to clear the diff state.
+    ///
+    /// All diff hunks are always visible as phantom rows in the display buffer.
     pub fn set_diff(&mut self, diff: Option<BufferDiff>) {
         self.diff = diff;
     }
@@ -145,70 +165,6 @@ impl BufferItem {
     /// the baseline for detecting modifications.
     pub fn set_saved_text(&mut self, text: String) {
         self.saved_text = Some(text);
-    }
-
-    /// Toggle expansion of diff hunk at given row.
-    ///
-    /// If a hunk exists at the specified row, toggles its expansion state. When expanded,
-    /// the hunk's deleted content from git HEAD will be displayed inline above the hunk.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Buffer row to check for hunk
-    /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
-    ///
-    /// # Returns
-    ///
-    /// `true` if a hunk was toggled, `false` if no hunk exists at this row
-    pub fn toggle_diff_hunk_at_row(&mut self, row: u32, buffer_snapshot: &BufferSnapshot) -> bool {
-        if let Some(hunk_idx) = self
-            .diff
-            .as_ref()
-            .and_then(|d| d.hunk_for_row(row, buffer_snapshot))
-        {
-            if self.expanded_hunks.contains(&hunk_idx) {
-                self.expanded_hunks.remove(&hunk_idx);
-            } else {
-                self.expanded_hunks.insert(hunk_idx);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if a diff hunk at given row is expanded.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Buffer row to check
-    /// * `buffer_snapshot` - Buffer snapshot for converting anchors to positions
-    ///
-    /// # Returns
-    ///
-    /// `true` if the hunk at this row is expanded, `false` otherwise
-    pub fn is_hunk_expanded_at_row(&self, row: u32, buffer_snapshot: &BufferSnapshot) -> bool {
-        self.diff
-            .as_ref()
-            .and_then(|d| d.hunk_for_row(row, buffer_snapshot))
-            .map(|hunk_idx| self.expanded_hunks.contains(&hunk_idx))
-            .unwrap_or(false)
-    }
-
-    /// Get information about expanded diff hunks for rendering.
-    ///
-    /// Returns an iterator over tuples of (hunk_index, hunk) for all expanded hunks.
-    /// The GUI layer uses this to construct [`DiffBlock`](crate::DiffBlock) structures
-    /// for inline display of deleted content.
-    ///
-    /// # Returns
-    ///
-    /// Iterator yielding (index, hunk) pairs for expanded hunks
-    pub fn expanded_hunks(&self) -> impl Iterator<Item = (usize, &crate::git_diff::DiffHunk)> {
-        let hunks = self.diff.as_ref().map(|d| &d.hunks);
-        self.expanded_hunks
-            .iter()
-            .filter_map(move |&idx| hunks.and_then(|h| h.get(idx).map(|hunk| (idx, hunk))))
     }
 
     /// Get the base text for a specific diff hunk.
