@@ -805,6 +805,26 @@ action = "DiffReviewApproveHunk"
 context = "Editor && mode == diff_review"
 
 [[bindings]]
+key = "t"
+action = "DiffReviewToggleApproval"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "n"
+action = "DiffReviewNextUnreviewedHunk"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "R"
+action = "DiffReviewResetProgress"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
+key = "?"
+action = "OpenHelpOverlay"
+context = "Editor && mode == diff_review"
+
+[[bindings]]
 key = ": q"
 action = "DiffReviewDismiss"
 context = "Editor && mode == diff_review"

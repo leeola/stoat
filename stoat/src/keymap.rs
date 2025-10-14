@@ -123,6 +123,11 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "DiffReviewNextHunk" => Ok(KeyBinding::new(key, DiffReviewNextHunk, context)),
         "DiffReviewPrevHunk" => Ok(KeyBinding::new(key, DiffReviewPrevHunk, context)),
         "DiffReviewApproveHunk" => Ok(KeyBinding::new(key, DiffReviewApproveHunk, context)),
+        "DiffReviewToggleApproval" => Ok(KeyBinding::new(key, DiffReviewToggleApproval, context)),
+        "DiffReviewNextUnreviewedHunk" => {
+            Ok(KeyBinding::new(key, DiffReviewNextUnreviewedHunk, context))
+        },
+        "DiffReviewResetProgress" => Ok(KeyBinding::new(key, DiffReviewResetProgress, context)),
         "DiffReviewDismiss" => Ok(KeyBinding::new(key, DiffReviewDismiss, context)),
 
         // Help actions

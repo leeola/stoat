@@ -666,6 +666,42 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_diff_review_toggle_approval(
+        &mut self,
+        _: &DiffReviewToggleApproval,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_toggle_approval(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_diff_review_next_unreviewed_hunk(
+        &mut self,
+        _: &DiffReviewNextUnreviewedHunk,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_next_unreviewed_hunk(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_diff_review_reset_progress(
+        &mut self,
+        _: &DiffReviewResetProgress,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_reset_progress(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -857,6 +893,9 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_diff_review_next_hunk))
             .on_action(cx.listener(Self::handle_diff_review_prev_hunk))
             .on_action(cx.listener(Self::handle_diff_review_approve_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_toggle_approval))
+            .on_action(cx.listener(Self::handle_diff_review_next_unreviewed_hunk))
+            .on_action(cx.listener(Self::handle_diff_review_reset_progress))
             .on_action(cx.listener(Self::handle_diff_review_dismiss))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))

@@ -167,6 +167,12 @@ actions!(
         DiffReviewPrevHunk,
         /// Approve current hunk and move to next
         DiffReviewApproveHunk,
+        /// Toggle current hunk approval status
+        DiffReviewToggleApproval,
+        /// Jump to next unreviewed hunk
+        DiffReviewNextUnreviewedHunk,
+        /// Reset review progress and start over
+        DiffReviewResetProgress,
         /// Exit diff review mode
         DiffReviewDismiss,
     ]
@@ -635,6 +641,21 @@ action_metadata!(
     "Mark the current hunk as reviewed and move to the next unreviewed hunk"
 );
 action_metadata!(
+    DiffReviewToggleApproval,
+    "toggle approval",
+    "Toggle the current hunk between reviewed and not reviewed status"
+);
+action_metadata!(
+    DiffReviewNextUnreviewedHunk,
+    "next unreviewed",
+    "Jump to the next unreviewed hunk across all files in diff review"
+);
+action_metadata!(
+    DiffReviewResetProgress,
+    "reset progress",
+    "Clear all review progress and start diff review from the beginning"
+);
+action_metadata!(
     DiffReviewDismiss,
     "dismiss review",
     "Exit diff review mode and return to the previous mode"
@@ -897,6 +918,18 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewApproveHunk::action_name(),
     );
     names.insert(
+        TypeId::of::<DiffReviewToggleApproval>(),
+        DiffReviewToggleApproval::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewNextUnreviewedHunk>(),
+        DiffReviewNextUnreviewedHunk::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewResetProgress>(),
+        DiffReviewResetProgress::action_name(),
+    );
+    names.insert(
         TypeId::of::<DiffReviewDismiss>(),
         DiffReviewDismiss::action_name(),
     );
@@ -1135,6 +1168,18 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewApproveHunk::description(),
     );
     descriptions.insert(
+        TypeId::of::<DiffReviewToggleApproval>(),
+        DiffReviewToggleApproval::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewNextUnreviewedHunk>(),
+        DiffReviewNextUnreviewedHunk::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewResetProgress>(),
+        DiffReviewResetProgress::description(),
+    );
+    descriptions.insert(
         TypeId::of::<DiffReviewDismiss>(),
         DiffReviewDismiss::description(),
     );
@@ -1360,6 +1405,18 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewApproveHunk>(),
         DiffReviewApproveHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewToggleApproval>(),
+        DiffReviewToggleApproval::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewNextUnreviewedHunk>(),
+        DiffReviewNextUnreviewedHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewResetProgress>(),
+        DiffReviewResetProgress::help_text(),
     );
     help.insert(
         TypeId::of::<DiffReviewDismiss>(),

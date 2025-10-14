@@ -10,9 +10,8 @@ use crate::{
     status_bar::StatusBar,
 };
 use gpui::{
-    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Window,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
 };
 use std::{
     cell::RefCell,
@@ -21,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
+    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, HelpModalDismiss,
         OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder, OpenGitStatus,
@@ -28,7 +28,6 @@ use stoat::{
         SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
-    Stoat,
 };
 use tracing::debug;
 
@@ -1224,6 +1223,8 @@ impl Render for PaneGroupView {
                     stoat.git_status_branch_info().cloned(),
                     stoat.git_status_files().to_vec(),
                     stoat.current_file_path().map(|p| p.display().to_string()),
+                    stoat.diff_review_progress(),
+                    stoat.diff_review_file_progress(),
                 );
 
                 // Calculate minimap scroll position for later update
@@ -1456,8 +1457,18 @@ impl Render for PaneGroupView {
                         self.render_stats_tracker.clone(),
                     )),
             )
-            .when_some(status_bar_data, |div, (mode, branch, files, path)| {
-                div.child(StatusBar::new(mode, branch, files, path))
-            })
+            .when_some(
+                status_bar_data,
+                |div, (mode, branch, files, path, review_progress, review_file_progress)| {
+                    div.child(StatusBar::new(
+                        mode,
+                        branch,
+                        files,
+                        path,
+                        review_progress,
+                        review_file_progress,
+                    ))
+                },
+            )
     }
 }

@@ -14,6 +14,7 @@ use gpui::{div, px, rgb, IntoElement, ParentElement, RenderOnce, Styled};
 /// Small single-line bar at bottom of window displaying:
 /// - Mode indicator (left)
 /// - Git branch and status (middle)
+/// - Diff review progress (middle, when in review mode)
 /// - File path (right)
 #[derive(IntoElement)]
 pub struct StatusBar {
@@ -25,6 +26,10 @@ pub struct StatusBar {
     git_status_files: Vec<stoat::git_status::GitStatusEntry>,
     /// Current file path for display
     file_path: Option<String>,
+    /// Review progress: (reviewed_count, total_count)
+    review_progress: Option<(usize, usize)>,
+    /// File progress: (current_file, total_files)
+    review_file_progress: Option<(usize, usize)>,
 }
 
 impl StatusBar {
@@ -34,12 +39,16 @@ impl StatusBar {
         branch_info: Option<stoat::git_status::GitBranchInfo>,
         git_status_files: Vec<stoat::git_status::GitStatusEntry>,
         file_path: Option<String>,
+        review_progress: Option<(usize, usize)>,
+        review_file_progress: Option<(usize, usize)>,
     ) -> Self {
         Self {
             mode_display,
             branch_info,
             git_status_files,
             file_path,
+            review_progress,
+            review_file_progress,
         }
     }
 
@@ -97,12 +106,27 @@ impl StatusBar {
 
         parts.join(", ")
     }
+
+    /// Format review progress for display.
+    ///
+    /// Returns a string like "5/30 reviewed | File 2/5" showing both hunk and file progress.
+    fn review_progress_display(&self) -> Option<String> {
+        match (self.review_progress, self.review_file_progress) {
+            (Some((reviewed, total)), Some((current, total_files))) => Some(format!(
+                "{reviewed}/{total} reviewed | File {current}/{total_files}"
+            )),
+            (Some((reviewed, total)), None) => Some(format!("{reviewed}/{total} reviewed")),
+            (None, Some((current, total_files))) => Some(format!("File {current}/{total_files}")),
+            (None, None) => None,
+        }
+    }
 }
 
 impl RenderOnce for StatusBar {
     fn render(self, _window: &mut gpui::Window, _cx: &mut gpui::App) -> impl IntoElement {
         let git_branch = self.git_branch_display();
         let git_wt_status = self.working_tree_status_display();
+        let review_progress = self.review_progress_display();
         let file_display = self.file_path.unwrap_or_else(|| "[No file]".to_string());
 
         // Build left side with mode and git info
@@ -119,6 +143,13 @@ impl RenderOnce for StatusBar {
             left_div = left_div
                 .child(div().text_color(rgb(0x808080)).child("|"))
                 .child(div().text_color(rgb(0xd4d4d4)).child(git_wt_status));
+        }
+
+        // Add review progress column if present
+        if let Some(progress) = review_progress {
+            left_div = left_div
+                .child(div().text_color(rgb(0x808080)).child("|"))
+                .child(div().text_color(rgb(0x4ec9b0)).child(progress));
         }
 
         div()

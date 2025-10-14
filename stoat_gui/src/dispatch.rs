@@ -169,6 +169,12 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(DiffReviewPrevHunk), cx);
     } else if type_id == TypeId::of::<DiffReviewApproveHunk>() {
         window.dispatch_action(Box::new(DiffReviewApproveHunk), cx);
+    } else if type_id == TypeId::of::<DiffReviewToggleApproval>() {
+        window.dispatch_action(Box::new(DiffReviewToggleApproval), cx);
+    } else if type_id == TypeId::of::<DiffReviewNextUnreviewedHunk>() {
+        window.dispatch_action(Box::new(DiffReviewNextUnreviewedHunk), cx);
+    } else if type_id == TypeId::of::<DiffReviewResetProgress>() {
+        window.dispatch_action(Box::new(DiffReviewResetProgress), cx);
     } else if type_id == TypeId::of::<DiffReviewDismiss>() {
         window.dispatch_action(Box::new(DiffReviewDismiss), cx);
     }

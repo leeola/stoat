@@ -452,10 +452,53 @@ impl Stoat {
 
     /// Check if we're currently in diff review mode.
     ///
-    /// Returns `true` if diff review mode is active (has loaded review files).
-    /// Used by GUI to adjust gutter width for better diff visualization.
+    /// Returns `true` if diff review mode is active. Since we persist state when
+    /// exiting review mode (for position restoration), we check both mode and files.
+    /// Used by GUI to adjust gutter width and show diff backgrounds.
     pub fn is_in_diff_review(&self) -> bool {
-        !self.diff_review_files.is_empty()
+        self.mode == "diff_review" && !self.diff_review_files.is_empty()
+    }
+
+    /// Get diff review progress as (reviewed_count, total_count).
+    ///
+    /// Returns [`None`] if not in review mode. Used by status bar to show progress like "5/30".
+    ///
+    /// # Returns
+    ///
+    /// `Some((reviewed, total))` where:
+    /// - `reviewed`: Number of approved hunks across all files
+    /// - `total`: Total number of hunks across all files
+    pub fn diff_review_progress(&self) -> Option<(usize, usize)> {
+        if self.diff_review_files.is_empty() {
+            return None;
+        }
+
+        let total: usize = self.diff_review_files.iter().map(|f| f.hunk_count).sum();
+        let reviewed: usize = self
+            .diff_review_approved_hunks
+            .values()
+            .map(|set| set.len())
+            .sum();
+
+        Some((reviewed, total))
+    }
+
+    /// Get current file progress in review as (current_file, total_files).
+    ///
+    /// Returns [`None`] if not in review mode. Used by status bar to show progress like "File 2/5".
+    ///
+    /// # Returns
+    ///
+    /// `Some((current, total))` where both are 1-indexed for display
+    pub fn diff_review_file_progress(&self) -> Option<(usize, usize)> {
+        if self.diff_review_files.is_empty() {
+            return None;
+        }
+
+        Some((
+            self.diff_review_current_file_idx + 1, // 1-indexed for display
+            self.diff_review_files.len(),
+        ))
     }
 
     /// Get the parent stoat if this is a minimap.
