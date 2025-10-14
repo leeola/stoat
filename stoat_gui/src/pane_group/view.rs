@@ -10,8 +10,9 @@ use crate::{
     status_bar::StatusBar,
 };
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, Styled, Window, div, prelude::FluentBuilder,
+    div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Window,
 };
 use std::{
     cell::RefCell,
@@ -20,7 +21,6 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    Stoat,
     actions::{
         ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, HelpModalDismiss,
         OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder, OpenGitStatus,
@@ -28,6 +28,7 @@ use stoat::{
         SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    Stoat,
 };
 use tracing::debug;
 

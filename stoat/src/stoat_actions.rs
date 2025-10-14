@@ -3012,7 +3012,7 @@ impl Stoat {
     /// Jump to next unreviewed hunk across all files.
     ///
     /// Skips approved hunks, searching across files to find the next unreviewed one.
-    /// More efficient for second pass reviews. Exits review mode if all hunks reviewed.
+    /// Wraps around to the beginning if needed. Exits review mode if all hunks reviewed.
     pub fn diff_review_next_unreviewed_hunk(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -3092,6 +3092,74 @@ impl Stoat {
                     cx.notify();
                     return;
                 }
+            }
+        }
+
+        // No unreviewed found forward - wrap around and search from beginning
+        for file_idx in 0..start_file {
+            // Extract data we need before mutably borrowing self
+            let (file_path, first_unreviewed) = {
+                let file = &self.diff_review_files[file_idx];
+                let approved_hunks = self
+                    .diff_review_approved_hunks
+                    .get(&file.path)
+                    .unwrap_or(&empty_set);
+
+                // Find first unreviewed hunk
+                let first_unreviewed =
+                    (0..file.hunk_count).find(|hunk_idx| !approved_hunks.contains(hunk_idx));
+
+                (file.path.clone(), first_unreviewed)
+            };
+
+            // Process the first unreviewed hunk if found
+            if let Some(hunk_idx) = first_unreviewed {
+                // Found unreviewed hunk - load file and jump
+                self.diff_review_current_file_idx = file_idx;
+                self.diff_review_current_hunk_idx = hunk_idx;
+
+                // Load the file
+                let root_path = self.worktree.lock().root().to_path_buf();
+                if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
+                    let abs_path = repo.workdir().join(&file_path);
+
+                    if let Err(e) = self.load_file(&abs_path, cx) {
+                        tracing::error!("Failed to load file {:?}: {}", abs_path, e);
+                        continue;
+                    }
+
+                    // Update diff for this file
+                    let buffer_item = self.active_buffer(cx);
+                    if let Some(diff) = buffer_item.read(cx).diff() {
+                        let hunk_count = diff.hunks.len();
+                        if let Some(file_mut) = self.diff_review_files.get_mut(file_idx) {
+                            file_mut.diff = Some(diff.clone());
+                            file_mut.hunk_count = hunk_count;
+                        }
+                    }
+
+                    self.jump_to_current_hunk(cx);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        // Search current file from beginning up to starting hunk
+        if let Some(file) = self.diff_review_files.get(start_file) {
+            let approved_hunks = self
+                .diff_review_approved_hunks
+                .get(&file.path)
+                .unwrap_or(&empty_set);
+
+            if let Some(hunk_idx) =
+                (0..start_hunk).find(|hunk_idx| !approved_hunks.contains(hunk_idx))
+            {
+                // Found unreviewed hunk before starting position
+                self.diff_review_current_hunk_idx = hunk_idx;
+                self.jump_to_current_hunk(cx);
+                cx.notify();
+                return;
             }
         }
 
@@ -3222,17 +3290,16 @@ impl Stoat {
     /// Load next file in diff review.
     ///
     /// Cross-file navigation: loads the next file, computes diff,
-    /// and jumps to its first hunk. Exits review mode if no more files.
+    /// and jumps to its first hunk. Wraps to first file if at the end.
     fn load_next_file(&mut self, cx: &mut Context<Self>) {
-        // Check if there's a next file
-        if self.diff_review_current_file_idx + 1 >= self.diff_review_files.len() {
-            // At last file - exit review mode
-            debug!("Reached end of diff review");
-            self.diff_review_dismiss(cx);
-            return;
-        }
-
-        let file_idx = self.diff_review_current_file_idx + 1;
+        // Check if there's a next file, or wrap to first
+        let file_idx = if self.diff_review_current_file_idx + 1 >= self.diff_review_files.len() {
+            // At last file - wrap to first
+            debug!("Wrapping to first file");
+            0
+        } else {
+            self.diff_review_current_file_idx + 1
+        };
         let file = &self.diff_review_files[file_idx];
 
         // Load the file
@@ -3266,12 +3333,15 @@ impl Stoat {
     /// Load previous file.
     ///
     /// Cross-file navigation in reverse: loads the previous file and jumps to its last hunk.
+    /// Wraps to last file if at the beginning.
     fn load_prev_file(&mut self, cx: &mut Context<Self>) {
-        if self.diff_review_current_file_idx == 0 {
-            return;
-        }
-
-        let file_idx = self.diff_review_current_file_idx - 1;
+        let file_idx = if self.diff_review_current_file_idx == 0 {
+            // At first file - wrap to last
+            debug!("Wrapping to last file");
+            self.diff_review_files.len() - 1
+        } else {
+            self.diff_review_current_file_idx - 1
+        };
         let file = &self.diff_review_files[file_idx];
 
         // Load the file
