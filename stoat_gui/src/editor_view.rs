@@ -445,6 +445,30 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_set_key_context(
+        &mut self,
+        action: &SetKeyContext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.handle_set_key_context(action.0, cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_set_mode(
+        &mut self,
+        action: &SetMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.set_mode_by_name(&action.0, cx);
+        });
+        cx.notify();
+    }
+
     fn handle_file_finder_next(
         &mut self,
         _: &FileFinderNext,
@@ -960,6 +984,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_space_mode))
             .on_action(cx.listener(Self::handle_enter_pane_mode))
             .on_action(cx.listener(Self::handle_enter_git_filter_mode))
+            .on_action(cx.listener(Self::handle_set_key_context))
+            .on_action(cx.listener(Self::handle_set_mode))
             .on_action(cx.listener(Self::handle_file_finder_next))
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))

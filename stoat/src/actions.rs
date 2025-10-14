@@ -2,6 +2,7 @@
 //!
 //! Actions are dispatched through GPUI's action system and handled by [`crate::Stoat`].
 
+use crate::stoat::KeyContext;
 use gpui::{actions, Action};
 use std::{any::TypeId, collections::HashMap, sync::LazyLock};
 
@@ -293,6 +294,16 @@ pub struct Scroll {
     /// Whether this is fast scroll (e.g., from trackpad)
     pub fast_scroll: bool,
 }
+
+/// Set the active KeyContext
+#[derive(Clone, PartialEq, Action)]
+#[action(no_json)]
+pub struct SetKeyContext(pub KeyContext);
+
+/// Set the active mode within the current KeyContext
+#[derive(Clone, PartialEq, Action)]
+#[action(no_json)]
+pub struct SetMode(pub String);
 
 // ==== Action Metadata System ====
 
@@ -791,6 +802,18 @@ action_metadata!(
     "Close the help modal and return to the previous mode"
 );
 
+// KeyContext and Mode actions
+action_metadata!(
+    SetKeyContext,
+    "set context",
+    "Set the active KeyContext (controls which UI is rendered)"
+);
+action_metadata!(
+    SetMode,
+    "set mode",
+    "Set the active mode within the current KeyContext"
+);
+
 // Static maps for looking up action metadata by TypeId
 
 /// Map from TypeId to action name
@@ -1067,6 +1090,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<HelpModalDismiss>(),
         HelpModalDismiss::action_name(),
     );
+
+    // KeyContext and Mode actions
+    names.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::action_name());
+    names.insert(TypeId::of::<SetMode>(), SetMode::action_name());
 
     names
 });
@@ -1346,6 +1373,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         HelpModalDismiss::description(),
     );
 
+    // KeyContext and Mode actions
+    descriptions.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::description());
+    descriptions.insert(TypeId::of::<SetMode>(), SetMode::description());
+
     descriptions
 });
 
@@ -1609,6 +1640,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<HelpModalDismiss>(),
         HelpModalDismiss::help_text(),
     );
+
+    // KeyContext and Mode actions
+    help.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::help_text());
+    help.insert(TypeId::of::<SetMode>(), SetMode::help_text());
 
     help
 });

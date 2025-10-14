@@ -28,6 +28,7 @@ use stoat::{
         SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
+    stoat::KeyContext,
     Stoat,
 };
 use tracing::debug;
@@ -1127,9 +1128,10 @@ impl Render for PaneGroupView {
             window.request_animation_frame();
         }
 
-        // Get the mode, file finder data, command palette data, buffer finder data,
+        // Get the key context, mode, file finder data, command palette data, buffer finder data,
         // git status data, status bar data, minimap scroll, and thumb data from the active editor
         let (
+            key_context,
             active_mode,
             mode_display,
             file_finder_data,
@@ -1145,14 +1147,15 @@ impl Render for PaneGroupView {
             .map(|editor| {
                 let stoat_entity = editor.read(cx).stoat.clone();
                 let stoat = stoat_entity.read(cx);
+                let key_context = stoat.key_context();
                 let mode_name = stoat.mode();
                 let display = stoat
                     .get_mode(mode_name)
                     .map(|m| m.display_name.clone())
                     .unwrap_or_else(|| mode_name.to_uppercase());
 
-                // Extract file finder data if in file_finder mode
-                let ff_data = if mode_name == "file_finder" {
+                // Extract file finder data if in FileFinder context
+                let ff_data = if key_context == KeyContext::FileFinder {
                     let query = stoat
                         .file_finder_input()
                         .map(|buffer| {
@@ -1170,8 +1173,8 @@ impl Render for PaneGroupView {
                     None
                 };
 
-                // Extract command palette data if in command_palette mode
-                let cp_data = if mode_name == "command_palette" {
+                // Extract command palette data if in CommandPalette context
+                let cp_data = if key_context == KeyContext::CommandPalette {
                     let query = stoat
                         .command_palette_input()
                         .map(|buffer| {
@@ -1188,8 +1191,8 @@ impl Render for PaneGroupView {
                     None
                 };
 
-                // Extract buffer finder data if in buffer_finder mode
-                let bf_data = if mode_name == "buffer_finder" {
+                // Extract buffer finder data if in BufferFinder context
+                let bf_data = if key_context == KeyContext::BufferFinder {
                     let query = stoat
                         .buffer_finder_input()
                         .map(|buffer| {
@@ -1206,8 +1209,8 @@ impl Render for PaneGroupView {
                     None
                 };
 
-                // Extract git status data if in git_status mode
-                let gs_data = if mode_name == "git_status" {
+                // Extract git status data if in Git context
+                let gs_data = if key_context == KeyContext::Git {
                     Some((
                         stoat.git_status_files().to_vec(),
                         stoat.git_status_filtered().to_vec(),
@@ -1267,6 +1270,7 @@ impl Render for PaneGroupView {
                 };
 
                 (
+                    key_context,
                     mode_name.to_string(), // Convert to owned String to break borrow dependency
                     display,
                     ff_data,
@@ -1279,6 +1283,7 @@ impl Render for PaneGroupView {
                 )
             })
             .unwrap_or((
+                KeyContext::TextEditor,
                 "normal".to_string(),
                 "NORMAL".to_string(),
                 None,
@@ -1364,8 +1369,8 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_toggle_minimap))
                     .on_action(cx.listener(Self::handle_show_minimap_on_scroll))
                     .child(self.render_member(self.pane_group.root(), 0))
-                    .when(active_mode == "file_finder", |div| {
-                        // Render file finder overlay when in file_finder mode
+                    .when(key_context == KeyContext::FileFinder, |div| {
+                        // Render file finder overlay when in FileFinder context
                         if let Some((query, files, selected, preview)) = file_finder_data {
                             div.child(Finder::new_file_finder(
                                 query,
@@ -1378,8 +1383,8 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
-                    .when(active_mode == "command_palette", |div| {
-                        // Render command palette overlay when in command_palette mode
+                    .when(key_context == KeyContext::CommandPalette, |div| {
+                        // Render command palette overlay when in CommandPalette context
                         if let Some((query, commands, selected)) = command_palette_data {
                             div.child(CommandPalette::new(
                                 query,
@@ -1391,8 +1396,8 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
-                    .when(active_mode == "buffer_finder", |div| {
-                        // Render buffer finder overlay when in buffer_finder mode
+                    .when(key_context == KeyContext::BufferFinder, |div| {
+                        // Render buffer finder overlay when in BufferFinder context
                         if let Some((query, buffers, selected)) = buffer_finder_data {
                             div.child(Finder::new_buffer_finder(
                                 query,
@@ -1404,8 +1409,8 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
-                    .when(active_mode == "git_status", |div| {
-                        // Render git status overlay when in git_status mode
+                    .when(key_context == KeyContext::Git, |div| {
+                        // Render git status overlay when in Git context
                         if let Some((
                             files,
                             filtered,
@@ -1430,8 +1435,8 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
-                    .when(active_mode == "help_modal", |div| {
-                        // Render help modal when in help_modal mode
+                    .when(key_context == KeyContext::HelpModal, |div| {
+                        // Render help modal when in HelpModal context
                         div.child(HelpModal::new())
                     })
                     // Render minimap as fixed overlay on the right side with opacity

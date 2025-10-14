@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
 use gpui::{AppContext, Context};
@@ -880,6 +880,49 @@ impl Stoat {
         cx.notify();
     }
 
+    /// Set the active KeyContext (action handler).
+    ///
+    /// Changes which UI is rendered (e.g., TextEditor, Git modal, FileFinder).
+    /// The KeyContext determines the high-level "what's showing" while mode
+    /// determines "how you interact with it".
+    ///
+    /// This is the action handler version that emits events and notifications.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The KeyContext to activate
+    ///
+    /// # Example
+    ///
+    /// When opening git status, we set [`KeyContext::Git`](crate::stoat::KeyContext::Git)
+    /// and mode "git_status". When filtering git, we switch mode to "git_filter" but keep
+    /// KeyContext::Git, preventing the modal from disappearing.
+    pub fn handle_set_key_context(
+        &mut self,
+        context: crate::stoat::KeyContext,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_key_context(context);
+        debug!(context = ?context, "Set KeyContext");
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
+    /// Set the active mode within the current KeyContext.
+    ///
+    /// Changes which keybindings are active without changing the rendered UI.
+    /// Used for transitions like git_status to git_filter within the Git context.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode_name` - Name of the mode to activate
+    pub fn set_mode_by_name(&mut self, mode_name: &str, cx: &mut Context<Self>) {
+        self.mode = mode_name.to_string();
+        debug!(mode = mode_name, "Set mode");
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
     // ==== File finder actions ====
 
     /// Open file finder.
@@ -890,6 +933,7 @@ impl Stoat {
 
         // Save current mode
         self.file_finder_previous_mode = Some(self.mode.clone());
+        self.key_context = crate::stoat::KeyContext::FileFinder;
         self.mode = "file_finder".to_string();
 
         // Create input buffer
@@ -997,6 +1041,9 @@ impl Stoat {
                 .take()
                 .unwrap_or_else(|| "normal".to_string())
         };
+
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
 
         // Clear state
         self.file_finder_input = None;
@@ -1987,6 +2034,7 @@ impl Stoat {
         self.command_palette_selected = 0;
 
         // Enter command_palette mode
+        self.key_context = crate::stoat::KeyContext::CommandPalette;
         self.mode = "command_palette".into();
         debug!("Entered command_palette mode");
 
@@ -2162,6 +2210,9 @@ impl Stoat {
                 .unwrap_or_else(|| "normal".to_string())
         };
 
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
+
         // Clear command palette state
         self.command_palette_input = None;
         self.command_palette_commands.clear();
@@ -2253,9 +2304,10 @@ impl Stoat {
         self.git_status_branch_info = branch_info;
         self.git_dirty_count = dirty_count;
 
-        // Enter git_status mode
+        // Enter Git KeyContext and git_status mode
+        self.key_context = crate::stoat::KeyContext::Git;
         self.mode = "git_status".into();
-        debug!("Entered git_status mode");
+        debug!("Entered Git KeyContext with git_status mode");
 
         // Apply initial filter and load preview
         self.filter_git_status_files(cx);
@@ -2374,6 +2426,9 @@ impl Stoat {
                 .take()
                 .unwrap_or_else(|| "normal".to_string())
         };
+
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
 
         // Clear git status state
         self.git_status_files.clear();
@@ -2554,6 +2609,7 @@ impl Stoat {
 
         // Save current mode to restore later
         self.help_modal_previous_mode = Some(self.mode.clone());
+        self.key_context = crate::stoat::KeyContext::HelpModal;
         self.mode = "help_modal".to_string();
 
         cx.notify();
@@ -2582,6 +2638,9 @@ impl Stoat {
                 .unwrap_or_else(|| "normal".to_string())
         };
 
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
+
         cx.notify();
     }
 
@@ -2600,6 +2659,7 @@ impl Stoat {
 
         // Save current mode
         self.buffer_finder_previous_mode = Some(self.mode.clone());
+        self.key_context = crate::stoat::KeyContext::BufferFinder;
         self.mode = "buffer_finder".to_string();
 
         // Create input buffer
@@ -2717,6 +2777,9 @@ impl Stoat {
                 .take()
                 .unwrap_or_else(|| "normal".to_string())
         };
+
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
 
         // Clear buffer finder state
         self.buffer_finder_input = None;
@@ -2920,6 +2983,7 @@ impl Stoat {
             }
 
             // Enter diff_review mode
+            self.key_context = crate::stoat::KeyContext::DiffReview;
             self.mode = "diff_review".to_string();
 
             // Jump to saved hunk
@@ -2985,6 +3049,7 @@ impl Stoat {
         self.diff_review_approved_hunks.clear();
 
         // Enter diff_review mode
+        self.key_context = crate::stoat::KeyContext::DiffReview;
         self.mode = "diff_review".to_string();
 
         // Jump to first hunk
@@ -3100,6 +3165,9 @@ impl Stoat {
                 .take()
                 .unwrap_or_else(|| "normal".to_string())
         };
+
+        // Reset KeyContext to TextEditor
+        self.key_context = crate::stoat::KeyContext::TextEditor;
 
         // State persists for next review session (files, hunks, approved state)
         // Only clear the previous_mode reference

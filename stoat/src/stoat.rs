@@ -20,6 +20,72 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
 use text::{Buffer, BufferId, Point};
 
+/// KeyContext for keybinding dispatch.
+///
+/// Represents the high-level context determining which UI is active.
+/// Mapped to GPUI's [`gpui::KeyContext`] for binding resolution.
+///
+/// Following Zed's pattern, these contexts group related bindings and determine
+/// which modal/UI is rendered. Multiple modes can exist within the same context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyContext {
+    /// Text editing context (normal, insert, visual modes)
+    TextEditor,
+    /// Git status modal context (git_status, git_filter modes)
+    Git,
+    /// File finder modal context
+    FileFinder,
+    /// Buffer finder modal context
+    BufferFinder,
+    /// Command palette modal context
+    CommandPalette,
+    /// Diff review mode context
+    DiffReview,
+    /// Help modal context
+    HelpModal,
+}
+
+impl KeyContext {
+    /// Get the string representation for GPUI KeyContext.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TextEditor => "TextEditor",
+            Self::Git => "Git",
+            Self::FileFinder => "FileFinder",
+            Self::BufferFinder => "BufferFinder",
+            Self::CommandPalette => "CommandPalette",
+            Self::DiffReview => "DiffReview",
+            Self::HelpModal => "HelpModal",
+        }
+    }
+
+    /// Parse a KeyContext from string, validating it's a known context.
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "TextEditor" => Ok(Self::TextEditor),
+            "Git" => Ok(Self::Git),
+            "FileFinder" => Ok(Self::FileFinder),
+            "BufferFinder" => Ok(Self::BufferFinder),
+            "CommandPalette" => Ok(Self::CommandPalette),
+            "DiffReview" => Ok(Self::DiffReview),
+            "HelpModal" => Ok(Self::HelpModal),
+            _ => Err(format!("Unknown KeyContext: {}", s)),
+        }
+    }
+}
+
+/// Metadata for a KeyContext.
+///
+/// Associates a KeyContext with its default mode. When entering a context,
+/// the mode is automatically set to the default specified in the keymap config.
+#[derive(Clone, Debug)]
+pub struct KeyContextMeta {
+    /// The KeyContext this metadata is for
+    pub context: KeyContext,
+    /// Default mode when entering this context
+    pub default_mode: String,
+}
+
 /// Mode metadata for editor modes.
 ///
 /// Contains display information for a mode. Modes define different editor behaviors
@@ -118,6 +184,12 @@ pub struct Stoat {
     /// Registry of available modes
     pub(crate) modes: HashMap<String, Mode>,
 
+    /// Current KeyContext (controls UI rendering and keybinding groups)
+    pub(crate) key_context: KeyContext,
+
+    /// Registry of KeyContexts with their metadata
+    pub(crate) contexts: HashMap<KeyContext, KeyContextMeta>,
+
     // File finder state
     pub(crate) file_finder_input: Option<Entity<Buffer>>,
     pub(crate) file_finder_files: Vec<Entry>,
@@ -208,6 +280,11 @@ impl Stoat {
         // Initialize mode registry from keymap.toml
         let modes = crate::keymap::parse_modes_from_config();
 
+        // Initialize KeyContext registry (will be populated from config later)
+        // FIXME: Parse contexts from keymap.toml once parser is updated
+        let contexts = HashMap::new();
+        let key_context = KeyContext::TextEditor; // Default context
+
         // Initialize git status for status bar
         let (git_branch_info, git_status_files, git_dirty_count) =
             if let Ok(repo) = Repository::open(std::path::Path::new(".")) {
@@ -229,6 +306,8 @@ impl Stoat {
             viewport_lines: None,
             mode: "normal".into(),
             modes,
+            key_context,
+            contexts,
             file_finder_input: None,
             file_finder_files: Vec::new(),
             file_finder_filtered: Vec::new(),
@@ -289,6 +368,8 @@ impl Stoat {
             viewport_lines: self.viewport_lines,
             mode: self.mode.clone(),
             modes: self.modes.clone(),
+            key_context: self.key_context,
+            contexts: self.contexts.clone(),
             file_finder_input: None,
             file_finder_files: Vec::new(),
             file_finder_filtered: Vec::new(),
@@ -446,6 +527,29 @@ impl Stoat {
     /// for the given mode name, or `None` if the mode is not registered.
     pub fn get_mode(&self, name: &str) -> Option<&Mode> {
         self.modes.get(name)
+    }
+
+    /// Get current KeyContext.
+    ///
+    /// Returns the active [`KeyContext`] controlling UI rendering and keybinding groups.
+    pub fn key_context(&self) -> KeyContext {
+        self.key_context
+    }
+
+    /// Set KeyContext.
+    ///
+    /// Changes the active [`KeyContext`], which controls which UI is rendered
+    /// (e.g., TextEditor vs Git modal) and which keybinding groups are active.
+    pub fn set_key_context(&mut self, context: KeyContext) {
+        self.key_context = context;
+    }
+
+    /// Get KeyContext metadata by context.
+    ///
+    /// Returns the [`KeyContextMeta`] containing default mode for the given context,
+    /// or `None` if the context is not registered.
+    pub fn get_key_context_meta(&self, context: KeyContext) -> Option<&KeyContextMeta> {
+        self.contexts.get(&context)
     }
 
     /// Check if this is a minimap instance.
@@ -682,6 +786,8 @@ impl Stoat {
             viewport_lines: None,         // Will be set by layout
             mode: "minimap".into(),       // Special mode for minimap
             modes: self.modes.clone(),
+            key_context: KeyContext::TextEditor, // Minimap always in editor context
+            contexts: self.contexts.clone(),
             file_finder_input: None,
             file_finder_files: Vec::new(),
             file_finder_filtered: Vec::new(),
