@@ -1,21 +1,22 @@
-//! Bottom status bar showing mode, git status, and file path.
+//! Bottom status bar showing file path, git status, and mode.
 //!
 //! Displays essential context information:
-//! - Current mode (NORMAL, INSERT, etc.)
-//! - Git branch name and dirty status
-//! - Active file path
+//! - Active file path (left)
+//! - Diff review progress (right, when in review mode)
+//! - Git branch name and dirty status (right)
+//! - Current mode (right - NORMAL, INSERT, etc.)
 //!
 //! Renders as a small fixed-height bar at the bottom of the window.
 
-use gpui::{div, px, rgb, IntoElement, ParentElement, RenderOnce, Styled};
+use gpui::{IntoElement, ParentElement, RenderOnce, Styled, div, px, rgb};
 
-/// Status bar component showing mode, git status, and file path.
+/// Status bar component showing file path, git status, and mode.
 ///
 /// Small single-line bar at bottom of window displaying:
-/// - Mode indicator (left)
-/// - Git branch and status (middle)
-/// - Diff review progress (middle, when in review mode)
-/// - File path (right)
+/// - File path (left)
+/// - Diff review progress (right, first when in review mode)
+/// - Git branch and status (right)
+/// - Mode indicator (right, last)
 #[derive(IntoElement)]
 pub struct StatusBar {
     /// Mode display name (e.g., "NORMAL", "INSERT")
@@ -129,27 +130,24 @@ impl RenderOnce for StatusBar {
         let review_progress = self.review_progress_display();
         let file_display = self.file_path.unwrap_or_else(|| "[No file]".to_string());
 
-        // Build left side with mode and git info
-        let mut left_div = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().text_color(rgb(0xd4d4d4)).child(self.mode_display))
-            .child(div().text_color(rgb(0x808080)).child("|"))
-            .child(div().text_color(rgb(0xd4d4d4)).child(git_branch));
+        // Build right section starting with review progress, then git info
+        let mut right_div = div().flex().items_center().gap_2();
+
+        // Add review progress first if present
+        if let Some(progress) = review_progress {
+            right_div = right_div
+                .child(div().text_color(rgb(0x4ec9b0)).child(progress))
+                .child(div().text_color(rgb(0x808080)).child("|"));
+        }
+
+        // Add git branch
+        right_div = right_div.child(div().text_color(rgb(0xd4d4d4)).child(git_branch));
 
         // Add working tree status column if present
         if !git_wt_status.is_empty() {
-            left_div = left_div
+            right_div = right_div
                 .child(div().text_color(rgb(0x808080)).child("|"))
                 .child(div().text_color(rgb(0xd4d4d4)).child(git_wt_status));
-        }
-
-        // Add review progress column if present
-        if let Some(progress) = review_progress {
-            left_div = left_div
-                .child(div().text_color(rgb(0x808080)).child("|"))
-                .child(div().text_color(rgb(0x4ec9b0)).child(progress));
         }
 
         div()
@@ -162,15 +160,22 @@ impl RenderOnce for StatusBar {
             .border_color(rgb(0x3e3e42))
             .text_size(px(11.0))
             .font_family(".AppleSystemUIFontMonospaced")
-            .child(left_div)
             .child(
-                // Right: File path
+                // Left: File path
+                div().text_color(rgb(0xd4d4d4)).child(file_display),
+            )
+            .child(
+                // Right: Review progress, git info, and mode (takes remaining space and pushes to
+                // right)
                 div()
                     .flex_1()
                     .flex()
+                    .items_center()
                     .justify_end()
-                    .text_color(rgb(0xd4d4d4))
-                    .child(file_display),
+                    .gap_2()
+                    .child(right_div)
+                    .child(div().text_color(rgb(0x808080)).child("|"))
+                    .child(div().text_color(rgb(0xd4d4d4)).child(self.mode_display)),
             )
     }
 }
