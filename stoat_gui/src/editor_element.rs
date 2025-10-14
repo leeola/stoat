@@ -10,12 +10,12 @@ use crate::{
     syntax::HighlightedChunks,
 };
 use gpui::{
-    App, Bounds, Element, ElementId, Entity, Font, FontStyle, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextRun, Window, point,
-    px, relative, size,
+    point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
+    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
+    Style, TextRun, Window,
 };
 use std::{collections::HashMap, sync::Arc};
-use stoat::{DisplayRow, git_diff::DiffHunkStatus};
+use stoat::{git_diff::DiffHunkStatus, DisplayRow};
 
 pub struct EditorElement {
     view: Entity<EditorView>,

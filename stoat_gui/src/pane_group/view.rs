@@ -1121,6 +1121,12 @@ impl Render for PaneGroupView {
             None
         };
 
+        // Request another frame if minimap is visible but hasn't rendered yet
+        // This ensures thumb appears on the next frame after pane changes
+        if minimap_visible && minimap_viewport_lines.is_none() {
+            window.request_animation_frame();
+        }
+
         // Get the mode, file finder data, command palette data, buffer finder data,
         // git status data, status bar data, minimap scroll, and thumb data from the active editor
         let (
