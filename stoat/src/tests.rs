@@ -1565,3 +1565,130 @@ fn command_palette_preserves_previous_mode(cx: &mut TestAppContext) {
         assert_eq!(s.mode(), "insert");
     });
 }
+
+// ===== Table-Driven Tests (Using Cursor Notation DSL) =====
+
+/// Table-driven test for basic movement operations.
+///
+/// This demonstrates how cursor notation enables concise, data-driven tests.
+/// Each test case is a tuple of (input_state, expected_output, description).
+#[gpui::test]
+fn table_driven_move_left(cx: &mut TestAppContext) {
+    let cases = [
+        ("hel|lo", "he|llo", "basic move left"),
+        ("|hello", "|hello", "at line start (noop)"),
+        ("café|", "caf|é", "before multibyte char"),
+        ("test\u{00A0}|", "test|\u{00A0}", "2-byte UTF-8 char"),
+    ];
+
+    for (input, expected, description) in cases {
+        let mut stoat = Stoat::test_with_cursor_notation(input, cx)
+            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+
+        stoat.update(|s, cx| {
+            s.move_left(cx);
+        });
+
+        stoat.assert_cursor_notation(expected);
+        // Assertion message includes description for clarity
+        assert_eq!(
+            stoat.to_cursor_notation(),
+            expected,
+            "Failed: {} (input: '{}')",
+            description,
+            input
+        );
+    }
+}
+
+/// Table-driven test for basic movement operations - right direction.
+#[gpui::test]
+fn table_driven_move_right(cx: &mut TestAppContext) {
+    let cases = [
+        ("|hello", "h|ello", "basic move right"),
+        ("hello|", "hello|", "at line end (noop)"),
+        ("test|", "test|", "single line at end"),
+        (
+            "|test\u{00A0}",
+            "t|est\u{00A0}",
+            "before multibyte sequence",
+        ),
+    ];
+
+    for (input, expected, description) in cases {
+        let mut stoat = Stoat::test_with_cursor_notation(input, cx)
+            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+
+        stoat.update(|s, cx| {
+            s.move_right(cx);
+        });
+
+        assert_eq!(
+            stoat.to_cursor_notation(),
+            expected,
+            "Failed: {} (input: '{}')",
+            description,
+            input
+        );
+    }
+}
+
+/// Table-driven test for delete operations.
+#[gpui::test]
+fn table_driven_delete_left(cx: &mut TestAppContext) {
+    let cases = [
+        ("hello|", "hell|", "delete last char"),
+        ("|hello", "|hello", "at start (noop)"),
+        ("hel|lo", "he|lo", "delete middle char"),
+        ("test\u{00A0}|", "test|", "delete 2-byte UTF-8"),
+        ("hello中|", "hello|", "delete 3-byte UTF-8"),
+    ];
+
+    for (input, expected, description) in cases {
+        let mut stoat = Stoat::test_with_cursor_notation(input, cx)
+            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+
+        stoat.update(|s, cx| {
+            s.delete_left(cx);
+        });
+
+        assert_eq!(
+            stoat.to_cursor_notation(),
+            expected,
+            "Failed: {} (input: '{}')",
+            description,
+            input
+        );
+    }
+}
+
+/// Table-driven test demonstrating selection operations with cursor notation.
+#[gpui::test]
+fn table_driven_selections(cx: &mut TestAppContext) {
+    let cases = [
+        ("<|hello||>", "hello", "selection cursor at end"),
+        ("<||hello|>", "hello", "selection cursor at start"),
+        ("<|foo||> bar", "foo bar", "partial selection"),
+        ("x <|test||> y", "x test y", "mid-line selection"),
+    ];
+
+    for (input, expected_text, description) in cases {
+        let stoat = Stoat::test_with_cursor_notation(input, cx)
+            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+
+        assert_eq!(
+            stoat.buffer_text(),
+            expected_text,
+            "Text mismatch for: {}",
+            description
+        );
+
+        // Verify selection exists
+        let selection = stoat.selection();
+        assert!(
+            !selection.is_empty(),
+            "Selection should not be empty for: {}",
+            description
+        );
+    }
+}

@@ -750,4 +750,32 @@ impl Stoat {
     ) -> crate::test::TestStoat<'a> {
         crate::test::TestStoat::new(text, cx)
     }
+
+    /// Create a Stoat instance for testing with cursor notation.
+    ///
+    /// Uses the cursor notation DSL to specify buffer content and initial
+    /// cursor/selection positions in a single string.
+    ///
+    /// # Arguments
+    ///
+    /// * `marked_text` - Text with cursor/selection markers (see [`crate::test::cursor_notation`])
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Cursor at position 6
+    /// let stoat = Stoat::test_with_cursor_notation("hello |world", cx).unwrap();
+    /// assert_eq!(stoat.cursor_position(), Point::new(0, 6));
+    ///
+    /// // Selection with cursor at end
+    /// let stoat = Stoat::test_with_cursor_notation("<|hello||>", cx).unwrap();
+    /// assert_eq!(stoat.selection().range(), 0..5);
+    /// ```
+    #[cfg(test)]
+    pub fn test_with_cursor_notation<'a>(
+        marked_text: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> anyhow::Result<crate::test::TestStoat<'a>> {
+        crate::test::TestStoat::test_with_cursor_notation(marked_text, cx)
+    }
 }
