@@ -3,6 +3,36 @@
 # This file defines all key bindings for the Stoat editor, organized by mode.
 # Each binding specifies a key, the action to execute, and the context where it applies.
 
+# Key Contexts - Define default mode for each UI context
+# When entering a context via SetKeyContext, the mode is set to default_mode
+[[contexts]]
+name = "TextEditor"
+default_mode = "normal"
+
+[[contexts]]
+name = "Git"
+default_mode = "git_status"
+
+[[contexts]]
+name = "FileFinder"
+default_mode = "file_finder"
+
+[[contexts]]
+name = "CommandPalette"
+default_mode = "command_palette"
+
+[[contexts]]
+name = "BufferFinder"
+default_mode = "buffer_finder"
+
+[[contexts]]
+name = "DiffReview"
+default_mode = "diff_review"
+
+[[contexts]]
+name = "HelpModal"
+default_mode = "help_modal"
+
 # Editor Modes
 [[modes]]
 name = "normal"
@@ -571,7 +601,7 @@ context = "Editor && mode == pane"
 # File Finder Mode - Quick file navigation
 [[bindings]]
 key = "escape"
-action = "FileFinderDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == file_finder"
 
 [[bindings]]
@@ -607,7 +637,7 @@ context = "Editor && mode == file_finder"
 # Buffer Finder Mode - Quick buffer switching
 [[bindings]]
 key = "escape"
-action = "BufferFinderDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == buffer_finder"
 
 [[bindings]]
@@ -684,7 +714,7 @@ context = "Editor && mode == normal"
 
 [[bindings]]
 key = "escape"
-action = "CommandPaletteDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == command_palette"
 
 [[bindings]]
@@ -720,7 +750,7 @@ context = "Editor && mode == command_palette"
 # Git Status Mode - View modified files
 [[bindings]]
 key = "escape"
-action = "GitStatusDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == git_status"
 
 [[bindings]]
@@ -797,7 +827,7 @@ context = "Editor && mode == git_filter"
 # Diff Review Mode - Hunk-by-hunk review
 [[bindings]]
 key = "escape"
-action = "DiffReviewDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == diff_review"
 
 [[bindings]]
@@ -879,5 +909,5 @@ context = "Editor && mode == normal"
 # Help Modal Mode - Full help reference
 [[bindings]]
 key = "escape"
-action = "HelpModalDismiss"
+action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == help_modal"

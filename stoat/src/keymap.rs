@@ -14,8 +14,16 @@ const DEFAULT_KEYMAP_TOML: &str = include_str!("../../keymap.toml");
 /// Keymap configuration loaded from TOML
 #[derive(Debug, Deserialize)]
 struct KeymapConfig {
+    contexts: Vec<ContextConfig>,
     modes: Vec<ModeConfig>,
     bindings: Vec<BindingConfig>,
+}
+
+/// Context configuration from TOML
+#[derive(Debug, Deserialize)]
+struct ContextConfig {
+    name: String,
+    default_mode: String,
 }
 
 /// Mode configuration from TOML
@@ -41,6 +49,17 @@ struct BindingConfig {
 fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, String> {
     let key = binding_config.key.as_str();
     let context = Some(binding_config.context.as_str());
+
+    // Handle parameterized SetKeyContext action: SetKeyContext(context_name)
+    if let Some(context_name) = binding_config.action.strip_prefix("SetKeyContext(") {
+        if let Some(context_name) = context_name.strip_suffix(")") {
+            use crate::stoat::KeyContext;
+            return match KeyContext::from_str(context_name) {
+                Ok(key_context) => Ok(KeyBinding::new(key, SetKeyContext(key_context), context)),
+                Err(_) => Err(format!("Unknown context in SetKeyContext: {context_name}")),
+            };
+        }
+    }
 
     // Handle parameterized SetMode action: SetMode(mode_name)
     if let Some(mode_name) = binding_config.action.strip_prefix("SetMode(") {
@@ -232,6 +251,50 @@ pub fn parse_modes_from_config() -> HashMap<String, Mode> {
             (mode_config.name, mode)
         })
         .collect()
+}
+
+/// Parse context definitions from keymap.toml.
+///
+/// Reads the embedded keymap configuration and constructs a mapping of [`KeyContext`]
+/// to their metadata (default mode). This is used by the
+/// [`SetKeyContext`](crate::actions::SetKeyContext) action to automatically set the appropriate
+/// mode when changing contexts.
+///
+/// # Returns
+///
+/// `HashMap<KeyContext, KeyContextMeta>` - Maps each KeyContext to its metadata
+///
+/// # Example
+///
+/// ```ignore
+/// let contexts = parse_contexts_from_config();
+/// let meta = contexts.get(&KeyContext::Git); // Some(KeyContextMeta { default_mode: "git_status" })
+/// ```
+pub fn parse_contexts_from_config(
+) -> HashMap<crate::stoat::KeyContext, crate::stoat::KeyContextMeta> {
+    use crate::stoat::{KeyContext, KeyContextMeta};
+
+    // Parse the embedded TOML configuration
+    let config: KeymapConfig =
+        toml::from_str(DEFAULT_KEYMAP_TOML).expect("Failed to parse embedded keymap.toml");
+
+    let mut contexts = HashMap::new();
+
+    for context_config in config.contexts {
+        // Parse the context name into KeyContext enum
+        let key_context = KeyContext::from_str(&context_config.name).unwrap_or_else(|_| {
+            panic!(
+                "Unknown context name in keymap.toml: {}",
+                context_config.name
+            )
+        });
+
+        // Build metadata for this context
+        let meta = KeyContextMeta::new(context_config.default_mode);
+        contexts.insert(key_context, meta);
+    }
+
+    contexts
 }
 
 pub fn create_default_keymap() -> Keymap {

@@ -76,14 +76,20 @@ impl KeyContext {
 
 /// Metadata for a KeyContext.
 ///
-/// Associates a KeyContext with its default mode. When entering a context,
-/// the mode is automatically set to the default specified in the keymap config.
+/// Associates a KeyContext with its default mode. When entering a context via
+/// [`SetKeyContext`](crate::actions::SetKeyContext), the mode is automatically
+/// set to the default mode specified in the keymap config.
 #[derive(Clone, Debug)]
 pub struct KeyContextMeta {
-    /// The KeyContext this metadata is for
-    pub context: KeyContext,
     /// Default mode when entering this context
     pub default_mode: String,
+}
+
+impl KeyContextMeta {
+    /// Create new KeyContext metadata.
+    pub fn new(default_mode: String) -> Self {
+        Self { default_mode }
+    }
 }
 
 /// Mode metadata for editor modes.
@@ -280,9 +286,8 @@ impl Stoat {
         // Initialize mode registry from keymap.toml
         let modes = crate::keymap::parse_modes_from_config();
 
-        // Initialize KeyContext registry (will be populated from config later)
-        // FIXME: Parse contexts from keymap.toml once parser is updated
-        let contexts = HashMap::new();
+        // Initialize KeyContext registry from keymap.toml
+        let contexts = crate::keymap::parse_contexts_from_config();
         let key_context = KeyContext::TextEditor; // Default context
 
         // Initialize git status for status bar

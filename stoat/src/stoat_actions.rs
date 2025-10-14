@@ -10,7 +10,7 @@ use gpui::{AppContext, Context};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use std::{num::NonZeroU64, path::PathBuf};
 use text::{Bias, Buffer, BufferId, ToPoint};
-use tracing::debug;
+use tracing::{debug, warn};
 
 impl Stoat {
     // ==== Editing actions ====
@@ -894,16 +894,27 @@ impl Stoat {
     ///
     /// # Example
     ///
-    /// When opening git status, we set [`KeyContext::Git`](crate::stoat::KeyContext::Git)
-    /// and mode "git_status". When filtering git, we switch mode to "git_filter" but keep
-    /// KeyContext::Git, preventing the modal from disappearing.
+    /// When opening git status, we use `SetKeyContext(Git)` which sets context to Git
+    /// and mode to "git_status" (the default mode for Git context from keymap.toml).
+    /// Within Git context, we can switch between git_status and git_filter modes without
+    /// the modal disappearing.
     pub fn handle_set_key_context(
         &mut self,
         context: crate::stoat::KeyContext,
         cx: &mut Context<Self>,
     ) {
+        // Set the new context
         self.set_key_context(context);
-        debug!(context = ?context, "Set KeyContext");
+
+        // Look up and set the default mode for this context
+        if let Some(meta) = self.get_key_context_meta(context) {
+            let default_mode = meta.default_mode.clone();
+            self.set_mode(&default_mode);
+            debug!(context = ?context, mode = %default_mode, "Set KeyContext with default mode");
+        } else {
+            warn!(context = ?context, "No metadata found for KeyContext, mode unchanged");
+        }
+
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }
@@ -1019,31 +1030,16 @@ impl Stoat {
         self.file_finder_dismiss(cx);
     }
 
-    /// Dismiss file finder
+    /// Dismiss file finder.
+    ///
+    /// Clears file finder state. Mode and KeyContext transitions are now handled
+    /// by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
     pub fn file_finder_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.mode != "file_finder" {
             return;
         }
 
         debug!("Dismissing file finder");
-
-        // Restore previous mode - check if mode has configured previous override
-        self.mode = if let Some(mode_def) = self.modes.get("file_finder") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.file_finder_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.file_finder_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
 
         // Clear state
         self.file_finder_input = None;
@@ -1052,6 +1048,7 @@ impl Stoat {
         self.file_finder_selected = 0;
         self.file_finder_preview = None;
         self.file_finder_preview_task = None;
+        self.file_finder_previous_mode = None;
 
         cx.notify();
     }
@@ -2195,29 +2192,12 @@ impl Stoat {
 
         debug!("Dismissing command palette");
 
-        // Restore previous mode - check if mode has configured previous override
-        self.mode = if let Some(mode_def) = self.modes.get("command_palette") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.command_palette_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.command_palette_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
-
         // Clear command palette state
         self.command_palette_input = None;
         self.command_palette_commands.clear();
         self.command_palette_filtered.clear();
         self.command_palette_selected = 0;
+        self.command_palette_previous_mode = None;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -2405,6 +2385,9 @@ impl Stoat {
     }
 
     /// Dismiss git status modal.
+    ///
+    /// Clears git status state. Mode and KeyContext transitions are now handled
+    /// by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
     pub fn git_status_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.mode != "git_status" {
             return;
@@ -2412,28 +2395,11 @@ impl Stoat {
 
         debug!("Dismissing git status");
 
-        // Restore previous mode - check if mode has configured previous override
-        self.mode = if let Some(mode_def) = self.modes.get("git_status") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.git_status_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.git_status_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
-
         // Clear git status state
         self.git_status_files.clear();
         self.git_status_selected = 0;
         self.git_status_branch_info = None;
+        self.git_status_previous_mode = None;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -2615,7 +2581,10 @@ impl Stoat {
         cx.notify();
     }
 
-    /// Dismiss help modal and return to previous mode.
+    /// Dismiss help modal.
+    ///
+    /// Clears help modal state. Mode and KeyContext transitions are now handled
+    /// by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
     pub fn help_modal_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.mode != "help_modal" {
             return;
@@ -2623,23 +2592,8 @@ impl Stoat {
 
         debug!("Dismissing help modal");
 
-        // Restore previous mode - check if mode has configured previous override
-        self.mode = if let Some(mode_def) = self.modes.get("help_modal") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.help_modal_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.help_modal_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
+        // Clear help modal state
+        self.help_modal_previous_mode = None;
 
         cx.notify();
     }
@@ -2756,6 +2710,9 @@ impl Stoat {
     }
 
     /// Dismiss buffer finder.
+    ///
+    /// Clears buffer finder state. Mode and KeyContext transitions are now handled
+    /// by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
     pub fn buffer_finder_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.mode != "buffer_finder" {
             return;
@@ -2763,29 +2720,12 @@ impl Stoat {
 
         debug!("Dismissing buffer finder");
 
-        // Restore previous mode
-        self.mode = if let Some(mode_def) = self.modes.get("buffer_finder") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.buffer_finder_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.buffer_finder_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
-
         // Clear buffer finder state
         self.buffer_finder_input = None;
         self.buffer_finder_buffers.clear();
         self.buffer_finder_filtered.clear();
         self.buffer_finder_selected = 0;
+        self.buffer_finder_previous_mode = None;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -3143,7 +3083,14 @@ impl Stoat {
         self.diff_review_next_hunk(cx);
     }
 
-    /// Exit diff review mode and return to previous mode.
+    /// Exit diff review mode.
+    ///
+    /// Clears the previous mode reference. Mode and KeyContext transitions are now
+    /// handled by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
+    ///
+    /// State persists for next review session (files, hunks, approved state).
+    /// To fully reset review progress, use
+    /// [`DiffReviewResetProgress`](crate::actions::DiffReviewResetProgress).
     pub fn diff_review_dismiss(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -3151,27 +3098,8 @@ impl Stoat {
 
         debug!("Dismissing diff review");
 
-        // Restore previous mode
-        self.mode = if let Some(mode_def) = self.modes.get("diff_review") {
-            if let Some(previous) = &mode_def.previous {
-                previous.clone()
-            } else {
-                self.diff_review_previous_mode
-                    .take()
-                    .unwrap_or_else(|| "normal".to_string())
-            }
-        } else {
-            self.diff_review_previous_mode
-                .take()
-                .unwrap_or_else(|| "normal".to_string())
-        };
-
-        // Reset KeyContext to TextEditor
-        self.key_context = crate::stoat::KeyContext::TextEditor;
-
-        // State persists for next review session (files, hunks, approved state)
-        // Only clear the previous_mode reference
-        // To fully reset, use DiffReviewResetProgress action
+        // Clear previous mode reference
+        self.diff_review_previous_mode = None;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
