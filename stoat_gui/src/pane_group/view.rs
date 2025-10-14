@@ -1210,6 +1210,9 @@ impl Render for PaneGroupView {
                 let gs_data = if mode_name == "git_status" {
                     Some((
                         stoat.git_status_files().to_vec(),
+                        stoat.git_status_filtered().to_vec(),
+                        stoat.git_status_filter(),
+                        stoat.git_status_files().len(),
                         stoat.git_status_selected(),
                         stoat.git_status_preview().cloned(),
                         stoat.git_status_branch_info().cloned(),
@@ -1403,9 +1406,21 @@ impl Render for PaneGroupView {
                     })
                     .when(active_mode == "git_status", |div| {
                         // Render git status overlay when in git_status mode
-                        if let Some((files, selected, preview, branch_info)) = git_status_data {
+                        if let Some((
+                            files,
+                            filtered,
+                            filter,
+                            total_count,
+                            selected,
+                            preview,
+                            branch_info,
+                        )) = git_status_data
+                        {
                             div.child(GitStatus::new(
                                 files,
+                                filtered,
+                                filter,
+                                total_count,
                                 selected,
                                 preview,
                                 branch_info,

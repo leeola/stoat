@@ -433,6 +433,18 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_enter_git_filter_mode(
+        &mut self,
+        _: &EnterGitFilterMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.enter_git_filter_mode(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_file_finder_next(
         &mut self,
         _: &FileFinderNext,
@@ -577,6 +589,78 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.git_status_dismiss(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_cycle_filter(
+        &mut self,
+        _: &GitStatusCycleFilter,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_cycle_filter(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_set_filter_all(
+        &mut self,
+        _: &GitStatusSetFilterAll,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_set_filter_all(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_set_filter_staged(
+        &mut self,
+        _: &GitStatusSetFilterStaged,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_set_filter_staged(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_set_filter_unstaged(
+        &mut self,
+        _: &GitStatusSetFilterUnstaged,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_set_filter_unstaged(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_set_filter_unstaged_with_untracked(
+        &mut self,
+        _: &GitStatusSetFilterUnstagedWithUntracked,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_set_filter_unstaged_with_untracked(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_git_status_set_filter_untracked(
+        &mut self,
+        _: &GitStatusSetFilterUntracked,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.git_status_set_filter_untracked(cx);
         });
         cx.notify();
     }
@@ -875,6 +959,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_normal_mode))
             .on_action(cx.listener(Self::handle_enter_space_mode))
             .on_action(cx.listener(Self::handle_enter_pane_mode))
+            .on_action(cx.listener(Self::handle_enter_git_filter_mode))
             .on_action(cx.listener(Self::handle_file_finder_next))
             .on_action(cx.listener(Self::handle_file_finder_prev))
             .on_action(cx.listener(Self::handle_file_finder_select))
@@ -887,6 +972,12 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_git_status_prev))
             .on_action(cx.listener(Self::handle_git_status_select))
             .on_action(cx.listener(Self::handle_git_status_dismiss))
+            .on_action(cx.listener(Self::handle_git_status_cycle_filter))
+            .on_action(cx.listener(Self::handle_git_status_set_filter_all))
+            .on_action(cx.listener(Self::handle_git_status_set_filter_staged))
+            .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged))
+            .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged_with_untracked))
+            .on_action(cx.listener(Self::handle_git_status_set_filter_untracked))
             .on_action(cx.listener(Self::handle_toggle_diff_hunk))
             .on_action(cx.listener(Self::handle_goto_next_hunk))
             .on_action(cx.listener(Self::handle_goto_prev_hunk))

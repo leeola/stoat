@@ -873,6 +873,13 @@ impl Stoat {
         cx.notify();
     }
 
+    pub fn enter_git_filter_mode(&mut self, cx: &mut Context<Self>) {
+        self.mode = "git_filter".to_string();
+        debug!("Entering git_filter mode");
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+
     // ==== File finder actions ====
 
     /// Open file finder.
@@ -2241,6 +2248,7 @@ impl Stoat {
 
         // Initialize git status state
         self.git_status_files = entries;
+        self.git_status_filter = crate::git_status::GitStatusFilter::default();
         self.git_status_selected = 0;
         self.git_status_branch_info = branch_info;
         self.git_dirty_count = dirty_count;
@@ -2249,8 +2257,8 @@ impl Stoat {
         self.mode = "git_status".into();
         debug!("Entered git_status mode");
 
-        // Load preview for first file
-        self.load_git_diff_preview(cx);
+        // Apply initial filter and load preview
+        self.filter_git_status_files(cx);
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -2264,8 +2272,8 @@ impl Stoat {
         // Cancel existing task
         self.git_status_preview_task = None;
 
-        // Get selected file entry
-        let entry = match self.git_status_files.get(self.git_status_selected) {
+        // Get selected file entry from filtered list
+        let entry = match self.git_status_filtered.get(self.git_status_selected) {
             Some(entry) => entry.clone(),
             None => {
                 self.git_status_preview = None;
@@ -2296,7 +2304,7 @@ impl Stoat {
             return;
         }
 
-        if self.git_status_selected + 1 < self.git_status_files.len() {
+        if self.git_status_selected + 1 < self.git_status_filtered.len() {
             self.git_status_selected += 1;
             debug!(selected = self.git_status_selected, "Git status: next");
             self.load_git_diff_preview(cx);
@@ -2324,8 +2332,8 @@ impl Stoat {
             return;
         }
 
-        if self.git_status_selected < self.git_status_files.len() {
-            let entry = &self.git_status_files[self.git_status_selected];
+        if self.git_status_selected < self.git_status_filtered.len() {
+            let entry = &self.git_status_filtered[self.git_status_selected];
             let relative_path = &entry.path;
             debug!(file = ?relative_path, "Git status: select");
 
@@ -2376,9 +2384,139 @@ impl Stoat {
         cx.notify();
     }
 
+    /// Apply current filter to git status files.
+    ///
+    /// Filters the `git_status_files` list based on the current `git_status_filter` value
+    /// and updates `git_status_filtered` with the results. Also resets selection to 0
+    /// and loads preview for the first filtered file.
+    ///
+    /// This method is called:
+    /// - When opening git status modal (with initial filter)
+    /// - When cycling/changing the filter mode
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - GPUI context for spawning async tasks
+    pub fn filter_git_status_files(&mut self, cx: &mut Context<Self>) {
+        // Apply filter
+        self.git_status_filtered = self
+            .git_status_files
+            .iter()
+            .filter(|entry| self.git_status_filter.matches(entry))
+            .cloned()
+            .collect();
+
+        // Reset selection to first item
+        self.git_status_selected = 0;
+
+        // Load preview for first filtered file
+        self.load_git_diff_preview(cx);
+    }
+
+    /// Cycle to next git status filter.
+    ///
+    /// Rotates through filter modes (All, Staged, Unstaged, UnstagedWithUntracked, Untracked)
+    /// and re-filters the file list.
+    pub fn git_status_cycle_filter(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_status" {
+            return;
+        }
+
+        self.git_status_filter = self.git_status_filter.next();
+        debug!(filter = ?self.git_status_filter, "Git status: cycled filter");
+
+        self.filter_git_status_files(cx);
+        cx.notify();
+    }
+
+    /// Set git status filter to show all files.
+    pub fn git_status_set_filter_all(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_filter" {
+            return;
+        }
+
+        self.git_status_filter = crate::git_status::GitStatusFilter::All;
+        debug!("Git status: set filter to All");
+
+        self.filter_git_status_files(cx);
+        self.set_mode("git_status");
+        cx.notify();
+    }
+
+    /// Set git status filter to show only staged files.
+    pub fn git_status_set_filter_staged(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_filter" {
+            return;
+        }
+
+        self.git_status_filter = crate::git_status::GitStatusFilter::Staged;
+        debug!("Git status: set filter to Staged");
+
+        self.filter_git_status_files(cx);
+        self.set_mode("git_status");
+        cx.notify();
+    }
+
+    /// Set git status filter to show only unstaged files (excluding untracked).
+    pub fn git_status_set_filter_unstaged(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_filter" {
+            return;
+        }
+
+        self.git_status_filter = crate::git_status::GitStatusFilter::Unstaged;
+        debug!("Git status: set filter to Unstaged");
+
+        self.filter_git_status_files(cx);
+        self.set_mode("git_status");
+        cx.notify();
+    }
+
+    /// Set git status filter to show unstaged and untracked files.
+    pub fn git_status_set_filter_unstaged_with_untracked(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_filter" {
+            return;
+        }
+
+        self.git_status_filter = crate::git_status::GitStatusFilter::UnstagedWithUntracked;
+        debug!("Git status: set filter to UnstagedWithUntracked");
+
+        self.filter_git_status_files(cx);
+        self.set_mode("git_status");
+        cx.notify();
+    }
+
+    /// Set git status filter to show only untracked files.
+    pub fn git_status_set_filter_untracked(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "git_filter" {
+            return;
+        }
+
+        self.git_status_filter = crate::git_status::GitStatusFilter::Untracked;
+        debug!("Git status: set filter to Untracked");
+
+        self.filter_git_status_files(cx);
+        self.set_mode("git_status");
+        cx.notify();
+    }
+
     /// Accessor for git status files (for GUI layer).
     pub fn git_status_files(&self) -> &[crate::git_status::GitStatusEntry] {
         &self.git_status_files
+    }
+
+    /// Accessor for filtered git status files (for GUI layer).
+    ///
+    /// Returns the list of files after the current filter has been applied.
+    /// This is the list that should be displayed in the git status modal.
+    pub fn git_status_filtered(&self) -> &[crate::git_status::GitStatusEntry] {
+        &self.git_status_filtered
+    }
+
+    /// Accessor for current git status filter mode (for GUI layer).
+    ///
+    /// Returns the current filter mode being used to filter the git status files.
+    pub fn git_status_filter(&self) -> crate::git_status::GitStatusFilter {
+        self.git_status_filter
     }
 
     /// Accessor for git branch info (for GUI layer).

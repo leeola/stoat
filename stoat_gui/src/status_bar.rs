@@ -8,7 +8,7 @@
 //!
 //! Renders as a small fixed-height bar at the bottom of the window.
 
-use gpui::{IntoElement, ParentElement, RenderOnce, Styled, div, px, rgb};
+use gpui::{div, px, rgb, IntoElement, ParentElement, RenderOnce, Styled};
 
 /// Status bar component showing file path, git status, and mode.
 ///

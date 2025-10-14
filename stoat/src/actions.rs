@@ -71,6 +71,8 @@ actions!(
         EnterSpaceMode,
         /// Enter pane mode (window management)
         EnterPaneMode,
+        /// Enter git filter mode
+        EnterGitFilterMode,
     ]
 );
 
@@ -139,6 +141,18 @@ actions!(
         GitStatusSelect,
         /// Dismiss git status modal
         GitStatusDismiss,
+        /// Cycle through git status filter modes
+        GitStatusCycleFilter,
+        /// Set filter to show all files
+        GitStatusSetFilterAll,
+        /// Set filter to show only staged files
+        GitStatusSetFilterStaged,
+        /// Set filter to show only unstaged files
+        GitStatusSetFilterUnstaged,
+        /// Set filter to show unstaged and untracked files
+        GitStatusSetFilterUnstagedWithUntracked,
+        /// Set filter to show only untracked files
+        GitStatusSetFilterUntracked,
     ]
 );
 
@@ -449,6 +463,11 @@ action_metadata!(
     "pane mode",
     "Enter pane mode for window management"
 );
+action_metadata!(
+    EnterGitFilterMode,
+    "git filter mode",
+    "Enter git filter mode for selecting filter type"
+);
 
 // Selection actions
 action_metadata!(
@@ -604,6 +623,36 @@ action_metadata!(
     GitStatusDismiss,
     "dismiss status",
     "Close the git status modal without opening a file"
+);
+action_metadata!(
+    GitStatusCycleFilter,
+    "cycle filter",
+    "Cycle through git status filter modes (All, Staged, Unstaged, Unstaged+Untracked, Untracked)"
+);
+action_metadata!(
+    GitStatusSetFilterAll,
+    "show all",
+    "Show all files in git status"
+);
+action_metadata!(
+    GitStatusSetFilterStaged,
+    "show staged",
+    "Show only staged files in git status"
+);
+action_metadata!(
+    GitStatusSetFilterUnstaged,
+    "show unstaged",
+    "Show only unstaged files in git status (excluding untracked)"
+);
+action_metadata!(
+    GitStatusSetFilterUnstagedWithUntracked,
+    "unstaged+untracked",
+    "Show all unstaged files including untracked files"
+);
+action_metadata!(
+    GitStatusSetFilterUntracked,
+    "show untracked",
+    "Show only untracked files in git status"
 );
 
 // Git diff hunk actions
@@ -804,6 +853,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         EnterSpaceMode::action_name(),
     );
     names.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::action_name());
+    names.insert(
+        TypeId::of::<EnterGitFilterMode>(),
+        EnterGitFilterMode::action_name(),
+    );
 
     // Selection actions
     names.insert(
@@ -890,6 +943,30 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<GitStatusDismiss>(),
         GitStatusDismiss::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusCycleFilter>(),
+        GitStatusCycleFilter::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusSetFilterAll>(),
+        GitStatusSetFilterAll::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusSetFilterStaged>(),
+        GitStatusSetFilterStaged::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusSetFilterUnstaged>(),
+        GitStatusSetFilterUnstaged::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusSetFilterUnstagedWithUntracked>(),
+        GitStatusSetFilterUnstagedWithUntracked::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitStatusSetFilterUntracked>(),
+        GitStatusSetFilterUntracked::action_name(),
     );
 
     // Git diff hunk actions
@@ -1054,6 +1131,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         EnterSpaceMode::description(),
     );
     descriptions.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::description());
+    descriptions.insert(
+        TypeId::of::<EnterGitFilterMode>(),
+        EnterGitFilterMode::description(),
+    );
 
     // Selection actions
     descriptions.insert(
@@ -1140,6 +1221,30 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(
         TypeId::of::<GitStatusDismiss>(),
         GitStatusDismiss::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusCycleFilter>(),
+        GitStatusCycleFilter::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusSetFilterAll>(),
+        GitStatusSetFilterAll::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusSetFilterStaged>(),
+        GitStatusSetFilterStaged::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusSetFilterUnstaged>(),
+        GitStatusSetFilterUnstaged::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusSetFilterUnstagedWithUntracked>(),
+        GitStatusSetFilterUnstagedWithUntracked::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitStatusSetFilterUntracked>(),
+        GitStatusSetFilterUntracked::description(),
     );
 
     // Git diff hunk actions
@@ -1308,6 +1413,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     );
     help.insert(TypeId::of::<EnterSpaceMode>(), EnterSpaceMode::help_text());
     help.insert(TypeId::of::<EnterPaneMode>(), EnterPaneMode::help_text());
+    help.insert(
+        TypeId::of::<EnterGitFilterMode>(),
+        EnterGitFilterMode::help_text(),
+    );
 
     // Selection actions
     help.insert(
@@ -1385,6 +1494,30 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<GitStatusDismiss>(),
         GitStatusDismiss::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusCycleFilter>(),
+        GitStatusCycleFilter::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusSetFilterAll>(),
+        GitStatusSetFilterAll::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusSetFilterStaged>(),
+        GitStatusSetFilterStaged::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusSetFilterUnstaged>(),
+        GitStatusSetFilterUnstaged::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusSetFilterUnstagedWithUntracked>(),
+        GitStatusSetFilterUnstagedWithUntracked::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitStatusSetFilterUntracked>(),
+        GitStatusSetFilterUntracked::help_text(),
     );
 
     // Git diff hunk actions

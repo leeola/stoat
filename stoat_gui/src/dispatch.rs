@@ -105,6 +105,8 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(EnterSpaceMode), cx);
     } else if type_id == TypeId::of::<EnterPaneMode>() {
         window.dispatch_action(Box::new(EnterPaneMode), cx);
+    } else if type_id == TypeId::of::<EnterGitFilterMode>() {
+        window.dispatch_action(Box::new(EnterGitFilterMode), cx);
     }
     // File finder actions
     else if type_id == TypeId::of::<OpenFileFinder>() {
@@ -151,6 +153,18 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(GitStatusDismiss), cx);
     } else if type_id == TypeId::of::<GitStatusSelect>() {
         window.dispatch_action(Box::new(GitStatusSelect), cx);
+    } else if type_id == TypeId::of::<GitStatusCycleFilter>() {
+        window.dispatch_action(Box::new(GitStatusCycleFilter), cx);
+    } else if type_id == TypeId::of::<GitStatusSetFilterAll>() {
+        window.dispatch_action(Box::new(GitStatusSetFilterAll), cx);
+    } else if type_id == TypeId::of::<GitStatusSetFilterStaged>() {
+        window.dispatch_action(Box::new(GitStatusSetFilterStaged), cx);
+    } else if type_id == TypeId::of::<GitStatusSetFilterUnstaged>() {
+        window.dispatch_action(Box::new(GitStatusSetFilterUnstaged), cx);
+    } else if type_id == TypeId::of::<GitStatusSetFilterUnstagedWithUntracked>() {
+        window.dispatch_action(Box::new(GitStatusSetFilterUnstagedWithUntracked), cx);
+    } else if type_id == TypeId::of::<GitStatusSetFilterUntracked>() {
+        window.dispatch_action(Box::new(GitStatusSetFilterUntracked), cx);
     }
     // Git diff hunk actions
     else if type_id == TypeId::of::<ToggleDiffHunk>() {

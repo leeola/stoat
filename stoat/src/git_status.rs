@@ -60,6 +60,94 @@ pub enum GitStatusError {
     GitError(String),
 }
 
+/// Filter mode for git status display.
+///
+/// Determines which files are shown in the git status modal. Filters can be applied
+/// to focus on specific types of changes (staged, unstaged, untracked).
+///
+/// # Variants
+///
+/// - [`All`](Self::All) - Show all modified files (default)
+/// - [`Staged`](Self::Staged) - Show only staged changes (in index)
+/// - [`Unstaged`](Self::Unstaged) - Show unstaged changes (modified working tree, excludes
+///   untracked)
+/// - [`UnstagedWithUntracked`](Self::UnstagedWithUntracked) - Show unstaged + untracked files
+/// - [`Untracked`](Self::Untracked) - Show only untracked files
+///
+/// # Usage
+///
+/// Used by [`Stoat`](crate::Stoat) to filter the git status file list based on user selection.
+/// The filter is applied when opening git status or when cycling through filter modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitStatusFilter {
+    /// Show all files (staged, unstaged, untracked)
+    All,
+    /// Show only staged changes (in index)
+    Staged,
+    /// Show only unstaged changes (modified working tree, excludes untracked)
+    Unstaged,
+    /// Show unstaged changes and untracked files
+    UnstagedWithUntracked,
+    /// Show only untracked files
+    Untracked,
+}
+
+impl GitStatusFilter {
+    /// Get display name for the filter.
+    ///
+    /// Returns a human-readable string for showing in the UI.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Staged => "Staged",
+            Self::Unstaged => "Unstaged",
+            Self::UnstagedWithUntracked => "Unstaged + Untracked",
+            Self::Untracked => "Untracked",
+        }
+    }
+
+    /// Cycle to the next filter mode.
+    ///
+    /// Rotates through filter modes in order: All, Staged, Unstaged,
+    /// UnstagedWithUntracked, Untracked, and back to All.
+    pub fn next(&self) -> Self {
+        match self {
+            Self::All => Self::Staged,
+            Self::Staged => Self::Unstaged,
+            Self::Unstaged => Self::UnstagedWithUntracked,
+            Self::UnstagedWithUntracked => Self::Untracked,
+            Self::Untracked => Self::All,
+        }
+    }
+
+    /// Check if an entry matches this filter.
+    ///
+    /// Determines whether a [`GitStatusEntry`] should be included based on the filter mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The status entry to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the entry matches the filter criteria
+    pub fn matches(&self, entry: &GitStatusEntry) -> bool {
+        match self {
+            Self::All => true,
+            Self::Staged => entry.staged,
+            Self::Unstaged => !entry.staged && entry.status != "??",
+            Self::UnstagedWithUntracked => !entry.staged,
+            Self::Untracked => entry.status == "??",
+        }
+    }
+}
+
+impl Default for GitStatusFilter {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
 /// A git status entry for a single file.
 ///
 /// Represents the status of one file in the working tree and/or index. Used by the

@@ -11,7 +11,7 @@ use gpui::{
     PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
     StatefulInteractiveElement, Style, Styled, TextRun, Window,
 };
-use stoat::git_status::{DiffPreviewData, GitBranchInfo, GitStatusEntry};
+use stoat::git_status::{DiffPreviewData, GitBranchInfo, GitStatusEntry, GitStatusFilter};
 
 /// Git status modal renderer.
 ///
@@ -20,6 +20,9 @@ use stoat::git_status::{DiffPreviewData, GitBranchInfo, GitStatusEntry};
 #[derive(IntoElement)]
 pub struct GitStatus {
     files: Vec<GitStatusEntry>,
+    filtered: Vec<GitStatusEntry>,
+    filter: GitStatusFilter,
+    total_count: usize,
     selected: usize,
     preview: Option<DiffPreviewData>,
     branch_info: Option<GitBranchInfo>,
@@ -30,6 +33,9 @@ impl GitStatus {
     /// Create a new git status renderer with the given state.
     pub fn new(
         files: Vec<GitStatusEntry>,
+        filtered: Vec<GitStatusEntry>,
+        filter: GitStatusFilter,
+        total_count: usize,
         selected: usize,
         preview: Option<DiffPreviewData>,
         branch_info: Option<GitBranchInfo>,
@@ -37,6 +43,9 @@ impl GitStatus {
     ) -> Self {
         Self {
             files,
+            filtered,
+            filter,
+            total_count,
             selected,
             preview,
             branch_info,
@@ -44,8 +53,19 @@ impl GitStatus {
         }
     }
 
-    /// Render the header bar showing title.
+    /// Render the header bar showing title and filter info.
     fn render_header(&self) -> impl IntoElement {
+        let filter_text = if self.filter == GitStatusFilter::All {
+            format!("Git Status - {} files", self.total_count)
+        } else {
+            format!(
+                "Git Status - {} - {}/{} files",
+                self.filter.display_name(),
+                self.filtered.len(),
+                self.total_count
+            )
+        };
+
         div()
             .p(px(8.0))
             .border_b_1()
@@ -53,7 +73,7 @@ impl GitStatus {
             .bg(rgb(0x252526))
             .text_color(rgb(0xd4d4d4))
             .font_weight(FontWeight::SEMIBOLD)
-            .child("Git Status")
+            .child(filter_text)
     }
 
     /// Render branch information section (git-style formatting).
@@ -100,10 +120,16 @@ impl GitStatus {
 
     /// Render the list of modified files with status indicators.
     fn render_file_list(&self) -> impl IntoElement {
-        let files = &self.files;
+        let files = &self.filtered;
         let selected = self.selected;
 
         if files.is_empty() {
+            let empty_message = if self.filter == GitStatusFilter::All {
+                "nothing to commit, working tree clean"
+            } else {
+                "no files match current filter"
+            };
+
             return div()
                 .id("git-status-list")
                 .flex()
@@ -115,7 +141,7 @@ impl GitStatus {
                     div()
                         .text_color(rgb(0x808080))
                         .text_size(px(13.0))
-                        .child("nothing to commit, working tree clean"),
+                        .child(empty_message),
                 );
         }
 

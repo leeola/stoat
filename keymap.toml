@@ -45,6 +45,11 @@ display_name = "GIT STATUS"
 previous = "normal"
 
 [[modes]]
+name = "git_filter"
+display_name = "GIT FILTER"
+previous = "git_status"
+
+[[modes]]
 name = "diff_review"
 display_name = "DIFF REVIEW"
 previous = "normal"
@@ -752,6 +757,42 @@ context = "Editor && mode == git_status"
 key = "enter"
 action = "GitStatusSelect"
 context = "Editor && mode == git_status"
+
+[[bindings]]
+key = "f"
+action = "SetMode(git_filter)"
+context = "Editor && mode == git_status"
+
+# Git Filter Mode - Quick filter selection
+[[bindings]]
+key = "a"
+action = "GitStatusSetFilterAll"
+context = "Editor && mode == git_filter"
+
+[[bindings]]
+key = "s"
+action = "GitStatusSetFilterStaged"
+context = "Editor && mode == git_filter"
+
+[[bindings]]
+key = "u"
+action = "GitStatusSetFilterUnstaged"
+context = "Editor && mode == git_filter"
+
+[[bindings]]
+key = "w"
+action = "GitStatusSetFilterUnstagedWithUntracked"
+context = "Editor && mode == git_filter"
+
+[[bindings]]
+key = "t"
+action = "GitStatusSetFilterUntracked"
+context = "Editor && mode == git_filter"
+
+[[bindings]]
+key = "escape"
+action = "SetMode(git_status)"
+context = "Editor && mode == git_filter"
 
 # Diff Review Mode - Hunk-by-hunk review
 [[bindings]]

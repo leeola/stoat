@@ -93,8 +93,13 @@ fn is_binding_mode_specific(keymap: &Keymap, binding: &KeyBinding) -> bool {
         "visual",
         "pane",
         "file_finder",
+        "buffer_finder",
         "space",
         "command_palette",
+        "git_status",
+        "git_filter",
+        "diff_review",
+        "help_modal",
     ];
     let mut active_in_count = 0;
 
