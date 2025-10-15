@@ -1812,4 +1812,5 @@ mod edit;
 mod git;
 #[allow(clippy::module_inception)]
 mod r#move;
+mod select;
 mod write_file;

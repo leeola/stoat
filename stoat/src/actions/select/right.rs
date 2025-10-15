@@ -1,0 +1,52 @@
+//! Select right action implementation and tests.
+
+use crate::Stoat;
+use gpui::Context;
+use text::Bias;
+
+impl Stoat {
+    /// Extend selection right by one character.
+    pub fn select_right(&mut self, cx: &mut Context<Self>) {
+        let selection = self.cursor.selection().clone();
+        let cursor_pos = selection.cursor_position();
+
+        let line_len = {
+            let buffer_item = self.active_buffer(cx).read(cx);
+            let buffer = buffer_item.buffer().read(cx);
+            buffer.line_len(cursor_pos.row)
+        };
+
+        if cursor_pos.column < line_len {
+            let target = text::Point::new(cursor_pos.row, cursor_pos.column + 1);
+            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let new_pos = snapshot.clip_point(target, Bias::Right);
+            let new_selection = if selection.is_empty() {
+                crate::cursor::Selection::new(cursor_pos, new_pos)
+            } else {
+                let anchor = selection.anchor_position();
+                crate::cursor::Selection::new(anchor, new_pos)
+            };
+            self.cursor.set_selection(new_selection);
+        }
+
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn extends_selection_right(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello", cx);
+            s.set_cursor_position(text::Point::new(0, 0));
+            s.select_right(cx);
+            let sel = s.cursor.selection();
+            assert!(!sel.is_empty());
+        });
+    }
+}
