@@ -3592,6 +3592,55 @@ impl Stoat {
 
         debug!("No more files with hunks in current comparison mode");
     }
+
+    // ==== File operations ====
+
+    /// Write the current buffer to disk.
+    ///
+    /// Writes the contents of the active buffer to its associated file path on disk.
+    /// After a successful write, the buffer's saved text baseline is updated to mark
+    /// the buffer as "clean" (no unsaved changes).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the write succeeds, or `Err(String)` with an error message if:
+    /// - No file path is associated with the current buffer
+    /// - The write operation fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// stoat.update(|s, cx| {
+    ///     s.write_file(cx).expect("Failed to write file");
+    /// });
+    /// ```
+    pub fn write_file(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        // Get the current file path
+        let file_path = self
+            .current_file_path
+            .as_ref()
+            .ok_or_else(|| "No file path set for current buffer".to_string())?
+            .clone();
+
+        // Get buffer content
+        let buffer_item = self.active_buffer(cx);
+        let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
+
+        // Write to disk
+        std::fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+
+        // Update saved text baseline to mark buffer as clean
+        buffer_item.update(cx, |item, _cx| {
+            item.set_saved_text(content);
+        });
+
+        tracing::info!("Wrote buffer to {:?}", file_path);
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+
+        Ok(())
+    }
 }
 
 /// Build the list of all available commands from action metadata.

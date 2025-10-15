@@ -253,6 +253,8 @@ actions!(
     [
         /// Quit the application
         QuitApp,
+        /// Write current buffer to disk
+        WriteFile,
     ]
 );
 
@@ -777,6 +779,12 @@ action_metadata!(
 
 // Application actions
 action_metadata!(QuitApp, "quit", "Quit the application", ["q", "quit"]);
+action_metadata!(
+    WriteFile,
+    "write",
+    "Write the current buffer to disk",
+    ["w", "write"]
+);
 
 // View actions
 action_metadata!(
@@ -1083,6 +1091,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // Application actions
     names.insert(TypeId::of::<QuitApp>(), QuitApp::action_name());
+    names.insert(TypeId::of::<WriteFile>(), WriteFile::action_name());
 
     // View actions
     names.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::action_name());
@@ -1369,6 +1378,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // Application actions
     descriptions.insert(TypeId::of::<QuitApp>(), QuitApp::description());
+    descriptions.insert(TypeId::of::<WriteFile>(), WriteFile::description());
 
     // View actions
     descriptions.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::description());
@@ -1641,6 +1651,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
 
     // Application actions
     help.insert(TypeId::of::<QuitApp>(), QuitApp::help_text());
+    help.insert(TypeId::of::<WriteFile>(), WriteFile::help_text());
 
     // View actions
     help.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::help_text());
@@ -1678,6 +1689,7 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 
     // Application actions
     aliases.insert(TypeId::of::<QuitApp>(), QuitApp::aliases());
+    aliases.insert(TypeId::of::<WriteFile>(), WriteFile::aliases());
 
     // View actions
     aliases.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::aliases());
@@ -1694,3 +1706,6 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }
+
+#[cfg(test)]
+mod write_file;

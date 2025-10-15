@@ -26,9 +26,9 @@
 
 pub mod cursor_notation;
 
-use crate::Stoat;
-use gpui::{AppContext, Context, Entity, TestAppContext};
-use std::path::PathBuf;
+use crate::{actions::*, Stoat};
+use gpui::{Action, AppContext, Context, Entity, TestAppContext};
+use std::{any::TypeId, path::PathBuf};
 use text::Point;
 
 /// Wrapper around [`Entity<Stoat>`] that provides test-oriented helper methods.
@@ -145,6 +145,149 @@ impl<'a> TestStoat<'a> {
     pub fn selection(&self) -> crate::cursor::Selection {
         self.cx
             .read_entity(&self.entity, |s, _| s.selection().clone())
+    }
+
+    /// Get the test repository path.
+    ///
+    /// Returns the path to the temporary git repository created by [`init_git`](Self::init_git),
+    /// or [`None`] if no git repository has been initialized.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let stoat = Stoat::test(cx).init_git();
+    /// let repo_path = stoat.repo_path().unwrap();
+    /// let file_path = repo_path.join("test.txt");
+    /// ```
+    pub fn repo_path(&self) -> Option<&std::path::Path> {
+        self.repo_path.as_deref()
+    }
+
+    /// Set the current file path on the Stoat instance.
+    ///
+    /// Updates the `current_file_path` field on the underlying [`Stoat`] entity.
+    /// This is useful in tests to associate a buffer with a file path before
+    /// calling file operations like [`write_file`](crate::Stoat::write_file).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file path to associate with the current buffer
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stoat = Stoat::test(cx).init_git();
+    /// let file_path = stoat.repo_path().unwrap().join("test.txt");
+    /// stoat.set_file_path(file_path.clone());
+    /// stoat.update(|s, cx| {
+    ///     s.write_file(cx).expect("write failed");
+    /// });
+    /// ```
+    pub fn set_file_path(&mut self, path: PathBuf) {
+        self.update(|s, _cx| {
+            s.current_file_path = Some(path);
+        });
+    }
+
+    /// Dispatch an action to the Stoat entity.
+    ///
+    /// This provides a type-safe way to test actions, routing them to the appropriate
+    /// Stoat methods just like the GUI's action handlers do. This ensures tests exercise
+    /// the same code paths as the real editor.
+    ///
+    /// # Arguments
+    ///
+    /// * `action` - The action to dispatch (e.g., [`WriteFile`], [`InsertText`], [`MoveLeft`])
+    ///
+    /// # Panics
+    ///
+    /// Panics if the action fails or if the action type is not supported. The panic
+    /// location will point to the caller's dispatch site using `#[track_caller]`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stoat = Stoat::test(cx).init_git();
+    /// let file_path = stoat.repo_path().unwrap().join("test.txt");
+    /// stoat.set_file_path(file_path);
+    ///
+    /// // Dispatch actions - no error handling needed!
+    /// stoat.dispatch(EnterInsertMode);
+    /// stoat.dispatch(InsertText("Hello".to_string()));
+    /// stoat.dispatch(WriteFile);
+    /// ```
+    #[track_caller]
+    pub fn dispatch<A: Action>(&mut self, action: A) {
+        let type_id = TypeId::of::<A>();
+
+        // Match on action TypeId and call corresponding Stoat method
+        // Movement actions
+        if type_id == TypeId::of::<MoveLeft>() {
+            self.update(|s, cx| s.move_left(cx));
+        } else if type_id == TypeId::of::<MoveRight>() {
+            self.update(|s, cx| s.move_right(cx));
+        } else if type_id == TypeId::of::<MoveUp>() {
+            self.update(|s, cx| s.move_up(cx));
+        } else if type_id == TypeId::of::<MoveDown>() {
+            self.update(|s, cx| s.move_down(cx));
+        } else if type_id == TypeId::of::<MoveWordLeft>() {
+            self.update(|s, cx| s.move_word_left(cx));
+        } else if type_id == TypeId::of::<MoveWordRight>() {
+            self.update(|s, cx| s.move_word_right(cx));
+        } else if type_id == TypeId::of::<MoveToLineStart>() {
+            self.update(|s, cx| s.move_to_line_start(cx));
+        } else if type_id == TypeId::of::<MoveToLineEnd>() {
+            self.update(|s, cx| s.move_to_line_end(cx));
+        } else if type_id == TypeId::of::<MoveToFileStart>() {
+            self.update(|s, cx| s.move_to_file_start(cx));
+        } else if type_id == TypeId::of::<MoveToFileEnd>() {
+            self.update(|s, cx| s.move_to_file_end(cx));
+        } else if type_id == TypeId::of::<PageUp>() {
+            self.update(|s, cx| s.page_up(cx));
+        } else if type_id == TypeId::of::<PageDown>() {
+            self.update(|s, cx| s.page_down(cx));
+        }
+        // Edit actions
+        else if type_id == TypeId::of::<DeleteLeft>() {
+            self.update(|s, cx| s.delete_left(cx));
+        } else if type_id == TypeId::of::<DeleteRight>() {
+            self.update(|s, cx| s.delete_right(cx));
+        } else if type_id == TypeId::of::<DeleteWordLeft>() {
+            self.update(|s, cx| s.delete_word_left(cx));
+        } else if type_id == TypeId::of::<DeleteWordRight>() {
+            self.update(|s, cx| s.delete_word_right(cx));
+        } else if type_id == TypeId::of::<NewLine>() {
+            self.update(|s, cx| s.new_line(cx));
+        } else if type_id == TypeId::of::<DeleteLine>() {
+            self.update(|s, cx| s.delete_line(cx));
+        } else if type_id == TypeId::of::<DeleteToEndOfLine>() {
+            self.update(|s, cx| s.delete_to_end_of_line(cx));
+        }
+        // Mode actions
+        else if type_id == TypeId::of::<EnterInsertMode>() {
+            self.update(|s, cx| s.enter_insert_mode(cx));
+        } else if type_id == TypeId::of::<EnterNormalMode>() {
+            self.update(|s, cx| s.enter_normal_mode(cx));
+        } else if type_id == TypeId::of::<EnterVisualMode>() {
+            self.update(|s, cx| s.enter_visual_mode(cx));
+        }
+        // Parameterized actions
+        else if type_id == TypeId::of::<InsertText>() {
+            let action = unsafe { &*(&action as *const A as *const InsertText) };
+            self.update(|s, cx| s.insert_text(&action.0, cx));
+        } else if type_id == TypeId::of::<SetMode>() {
+            let action = unsafe { &*(&action as *const A as *const SetMode) };
+            self.update(|s, cx| s.set_mode_by_name(&action.0, cx));
+        }
+        // File actions
+        else if type_id == TypeId::of::<WriteFile>() {
+            self.update(|s, cx| {
+                s.write_file(cx)
+                    .unwrap_or_else(|e| panic!("WriteFile action failed: {}", e))
+            });
+        } else {
+            panic!("Unsupported action type: {}", std::any::type_name::<A>());
+        }
     }
 
     /// Initialize a git repository for testing.
