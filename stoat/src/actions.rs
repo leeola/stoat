@@ -1808,7 +1808,6 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }
 
-#[cfg(test)]
+mod edit;
 mod git;
-#[cfg(test)]
 mod write_file;

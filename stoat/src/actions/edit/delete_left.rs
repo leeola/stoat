@@ -1,0 +1,199 @@
+//! Delete left action implementation and tests.
+//!
+//! This module implements the [`delete_left`](crate::Stoat::delete_left) action, which deletes
+//! the character before the cursor (backspace). Like [`insert_text`](crate::Stoat::insert_text),
+//! this action routes to different buffers based on the current mode, handling input deletion
+//! for finders and palettes.
+//!
+//! The implementation carefully handles UTF-8 character boundaries to ensure multi-byte characters
+//! are deleted correctly without breaking the string encoding.
+
+use crate::Stoat;
+use gpui::Context;
+use text::Bias;
+
+impl Stoat {
+    /// Delete character before cursor.
+    ///
+    /// Routes deletion to the appropriate buffer based on the current mode. Handles UTF-8
+    /// character boundaries correctly to avoid breaking multi-byte characters. In finder and
+    /// palette modes, triggers re-filtering after deletion.
+    ///
+    /// # Behavior
+    ///
+    /// - File finder mode: Deletes last character from input, triggers file filtering
+    /// - Command palette mode: Deletes last character from input, triggers command filtering
+    /// - Buffer finder mode: Deletes last character from input, triggers buffer filtering
+    /// - Normal mode: Deletes character before cursor, clips to valid UTF-8 boundary
+    /// - At start of line: Does nothing (no-op)
+    ///
+    /// # Implementation
+    ///
+    /// Uses [`BufferSnapshot::clip_point`] with [`Bias::Left`] to find the correct character
+    /// boundary, ensuring we never break a multi-byte UTF-8 character.
+    ///
+    /// # Related Actions
+    ///
+    /// - [`delete_right`](crate::Stoat::delete_right) - Delete character after cursor
+    /// - [`delete_word_left`](crate::Stoat::delete_word_left) - Delete previous word
+    pub fn delete_left(&mut self, cx: &mut Context<Self>) {
+        // Route to file finder input buffer if in file_finder mode
+        if self.mode == "file_finder" {
+            if let Some(input_buffer) = &self.file_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(char_boundary..len, "")]);
+                    });
+
+                    // Re-filter files based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_files(&query, cx);
+                }
+            }
+            return;
+        }
+
+        // Route to command palette input buffer if in command_palette mode
+        if self.mode == "command_palette" {
+            if let Some(input_buffer) = &self.command_palette_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(char_boundary..len, "")]);
+                    });
+
+                    // Re-filter commands based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_commands(&query);
+                }
+            }
+            return;
+        }
+
+        // Route to buffer finder input buffer if in buffer_finder mode
+        if self.mode == "buffer_finder" {
+            if let Some(input_buffer) = &self.buffer_finder_input {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    // Delete last character from input buffer
+                    // Find char boundary to handle multi-byte UTF-8 characters
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(char_boundary..len, "")]);
+                    });
+
+                    // Re-filter buffers based on new query
+                    let query = input_buffer.read(cx).snapshot().text();
+                    self.filter_buffers(&query, cx);
+                }
+            }
+            return;
+        }
+
+        // Main buffer deletion for all other modes
+        let cursor = self.cursor.position();
+        if cursor.column == 0 {
+            return; // At start of line
+        }
+
+        // Naive calculation: one position to the left
+        let target_point = text::Point::new(cursor.row, cursor.column.saturating_sub(1));
+
+        // Clip to valid character boundary
+        let (clipped_point, clipped_offset, cursor_offset) = {
+            let buffer = self.active_buffer(cx).read(cx).buffer();
+            let buffer_read = buffer.read(cx);
+            let snapshot = buffer_read.snapshot();
+            let clipped = snapshot.clip_point(target_point, Bias::Left);
+            let clipped_offset = buffer_read.point_to_offset(clipped);
+            let cursor_offset = buffer_read.point_to_offset(cursor);
+            (clipped, clipped_offset, cursor_offset)
+        };
+
+        // Perform the edit
+        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
+        buffer.update(cx, |buffer, _| {
+            buffer.edit([(clipped_offset..cursor_offset, "")]);
+        });
+
+        // Move cursor to clipped position
+        self.cursor.move_to(clipped_point);
+
+        // Reparse
+        self.active_buffer(cx).update(cx, |item, cx| {
+            let _ = item.reparse(cx);
+        });
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn deletes_character_before_cursor(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello", cx);
+            s.delete_left(cx);
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "Hell");
+            assert_eq!(s.cursor.position(), text::Point::new(0, 4));
+        });
+    }
+
+    #[gpui::test]
+    fn no_op_at_start_of_line(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Hi", cx);
+            s.set_cursor_position(text::Point::new(0, 0));
+            s.delete_left(cx);
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "Hi");
+        });
+    }
+
+    #[gpui::test]
+    fn handles_multi_byte_utf8(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello 世界", cx);
+            s.delete_left(cx);
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "Hello 世");
+        });
+    }
+}
