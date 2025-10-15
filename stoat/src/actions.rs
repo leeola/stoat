@@ -1810,4 +1810,6 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
 
 mod edit;
 mod git;
+#[allow(clippy::module_inception)]
+mod r#move;
 mod write_file;
