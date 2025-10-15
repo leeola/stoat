@@ -52,68 +52,6 @@ impl Stoat {
         self.scroll.scroll_to(bounded_position);
     }
 
-    // ==== Mode actions ====
-
-    /// Enter insert mode
-    pub fn enter_insert_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "insert".to_string();
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    /// Enter normal mode
-    pub fn enter_normal_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "normal".to_string();
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    /// Enter visual mode
-    ///
-    /// Transitions to Visual mode for text selection. Movement commands extend the
-    /// selection rather than moving the cursor.
-    ///
-    /// # Behavior
-    ///
-    /// - Sets editor mode to Visual
-    /// - Selection is anchored at current cursor position
-    /// - Movement commands now extend selection
-    /// - Can transition from Normal or Insert mode
-    /// - Typically bound to 'v' key
-    ///
-    /// # Related
-    ///
-    /// See also [`Self::enter_normal_mode`] for returning to command mode.
-    pub fn enter_visual_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "visual".to_string();
-        debug!("Entering visual mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    /// Enter space mode (leader key)
-    pub fn enter_space_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "space".to_string();
-        tracing::info!("Entering space mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    /// Enter pane mode (window management)
-    pub fn enter_pane_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "pane".to_string();
-        debug!("Entering pane mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    pub fn enter_git_filter_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "git_filter".to_string();
-        debug!("Entering git_filter mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
     /// Set the active KeyContext (action handler).
     ///
     /// Changes which UI is rendered (e.g., TextEditor, Git modal, FileFinder).
