@@ -42,8 +42,13 @@ impl Stoat {
         self.git_status_branch_info = None;
         self.git_status_previous_mode = None;
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+        // Restore previous KeyContext (this auto-applies the default mode for that context)
+        if let Some(previous_context) = self.git_status_previous_key_context.take() {
+            self.handle_set_key_context(previous_context, cx);
+        } else {
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
+        }
     }
 }
 

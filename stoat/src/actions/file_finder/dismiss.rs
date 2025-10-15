@@ -47,7 +47,12 @@ impl Stoat {
         self.file_finder_preview_task = None;
         self.file_finder_previous_mode = None;
 
-        cx.notify();
+        // Restore previous KeyContext (this auto-applies the default mode for that context)
+        if let Some(previous_context) = self.file_finder_previous_key_context.take() {
+            self.handle_set_key_context(previous_context, cx);
+        } else {
+            cx.notify();
+        }
     }
 }
 

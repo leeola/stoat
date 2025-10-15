@@ -43,8 +43,13 @@ impl Stoat {
         self.buffer_finder_selected = 0;
         self.buffer_finder_previous_mode = None;
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+        // Restore previous KeyContext (this auto-applies the default mode for that context)
+        if let Some(previous_context) = self.buffer_finder_previous_key_context.take() {
+            self.handle_set_key_context(previous_context, cx);
+        } else {
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
+        }
     }
 }
 

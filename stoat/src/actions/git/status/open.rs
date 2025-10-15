@@ -40,8 +40,11 @@ impl Stoat {
     pub fn open_git_status(&mut self, cx: &mut Context<Self>) {
         debug!("Opening git status");
 
-        // Save current mode to restore later
+        // Save current mode and context to restore later
+        // TODO: Context restoration should be configurable via keymap once we have
+        // concrete use cases to guide the design of keymap-based abstractions
         self.git_status_previous_mode = Some(self.mode.clone());
+        self.git_status_previous_key_context = Some(self.key_context);
 
         // Use worktree root to discover repository
         let root_path = self.worktree.lock().root().to_path_buf();

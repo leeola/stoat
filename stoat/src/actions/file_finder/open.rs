@@ -32,8 +32,11 @@ impl Stoat {
     pub fn open_file_finder(&mut self, cx: &mut Context<Self>) {
         debug!("Opening file finder");
 
-        // Save current mode
+        // Save current mode and context
+        // TODO: Context restoration should be configurable via keymap once we have
+        // concrete use cases to guide the design of keymap-based abstractions
         self.file_finder_previous_mode = Some(self.mode.clone());
+        self.file_finder_previous_key_context = Some(self.key_context);
         self.key_context = crate::stoat::KeyContext::FileFinder;
         self.mode = "file_finder".to_string();
 

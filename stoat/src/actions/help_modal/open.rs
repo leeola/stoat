@@ -47,8 +47,11 @@ impl Stoat {
     pub fn open_help_modal(&mut self, cx: &mut Context<Self>) {
         debug!("Opening help modal");
 
-        // Save current mode to restore later
+        // Save current mode and context to restore later
+        // TODO: Context restoration should be configurable via keymap once we have
+        // concrete use cases to guide the design of keymap-based abstractions
         self.help_modal_previous_mode = Some(self.mode.clone());
+        self.help_modal_previous_key_context = Some(self.key_context);
         self.key_context = crate::stoat::KeyContext::HelpModal;
         self.mode = "help_modal".to_string();
 

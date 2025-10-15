@@ -46,8 +46,11 @@ impl Stoat {
     pub fn open_command_palette(&mut self, _keymap: &gpui::Keymap, cx: &mut Context<Self>) {
         debug!(from_mode = self.mode(), "Opening command palette");
 
-        // Save current mode to restore later
+        // Save current mode and context to restore later
+        // TODO: Context restoration should be configurable via keymap once we have
+        // concrete use cases to guide the design of keymap-based abstractions
         self.command_palette_previous_mode = Some(self.mode.clone());
+        self.command_palette_previous_key_context = Some(self.key_context);
 
         // Build command list from action metadata
         let commands = build_command_list();

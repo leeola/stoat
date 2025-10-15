@@ -37,8 +37,11 @@ impl Stoat {
     pub fn open_buffer_finder(&mut self, visible_buffer_ids: &[BufferId], cx: &mut Context<Self>) {
         debug!("Opening buffer finder");
 
-        // Save current mode
+        // Save current mode and context
+        // TODO: Context restoration should be configurable via keymap once we have
+        // concrete use cases to guide the design of keymap-based abstractions
         self.buffer_finder_previous_mode = Some(self.mode.clone());
+        self.buffer_finder_previous_key_context = Some(self.key_context);
         self.key_context = crate::stoat::KeyContext::BufferFinder;
         self.mode = "buffer_finder".to_string();
 
