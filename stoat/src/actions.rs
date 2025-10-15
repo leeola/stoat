@@ -195,6 +195,25 @@ actions!(
     ]
 );
 
+// Git repository actions
+actions!(
+    stoat,
+    [
+        /// Stage file changes for commit
+        GitStageFile,
+        /// Stage all changes for commit
+        GitStageAll,
+        /// Unstage file changes
+        GitUnstageFile,
+        /// Unstage all changes
+        GitUnstageAll,
+        /// Stage the current hunk
+        GitStageHunk,
+        /// Unstage the current hunk
+        GitUnstageHunk,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat,
@@ -730,6 +749,44 @@ action_metadata!(
     "Cycle through diff comparison modes: All Changes, Unstaged, and Staged"
 );
 
+// Git repository actions
+action_metadata!(
+    GitStageFile,
+    "stage file",
+    "Stage the current file's changes for commit",
+    ["stage", "add"]
+);
+action_metadata!(
+    GitStageAll,
+    "stage all",
+    "Stage all changes in the repository for commit",
+    ["stage-all", "add-all"]
+);
+action_metadata!(
+    GitUnstageFile,
+    "unstage file",
+    "Unstage the current file's changes",
+    ["unstage", "reset"]
+);
+action_metadata!(
+    GitUnstageAll,
+    "unstage all",
+    "Unstage all changes in the repository",
+    ["unstage-all", "reset-all"]
+);
+action_metadata!(
+    GitStageHunk,
+    "stage hunk",
+    "Stage the current hunk for commit",
+    ["stage-hunk", "add-hunk"]
+);
+action_metadata!(
+    GitUnstageHunk,
+    "unstage hunk",
+    "Unstage the current hunk",
+    ["unstage-hunk", "reset-hunk"]
+);
+
 // Pane management actions
 action_metadata!(
     SplitRight,
@@ -1053,6 +1110,20 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewCycleComparisonMode::action_name(),
     );
 
+    // Git repository actions
+    names.insert(TypeId::of::<GitStageFile>(), GitStageFile::action_name());
+    names.insert(TypeId::of::<GitStageAll>(), GitStageAll::action_name());
+    names.insert(
+        TypeId::of::<GitUnstageFile>(),
+        GitUnstageFile::action_name(),
+    );
+    names.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::action_name());
+    names.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::action_name());
+    names.insert(
+        TypeId::of::<GitUnstageHunk>(),
+        GitUnstageHunk::action_name(),
+    );
+
     // Buffer finder actions
     names.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1340,6 +1411,20 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewCycleComparisonMode::description(),
     );
 
+    // Git repository actions
+    descriptions.insert(TypeId::of::<GitStageFile>(), GitStageFile::description());
+    descriptions.insert(TypeId::of::<GitStageAll>(), GitStageAll::description());
+    descriptions.insert(
+        TypeId::of::<GitUnstageFile>(),
+        GitUnstageFile::description(),
+    );
+    descriptions.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::description());
+    descriptions.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::description());
+    descriptions.insert(
+        TypeId::of::<GitUnstageHunk>(),
+        GitUnstageHunk::description(),
+    );
+
     // Buffer finder actions
     descriptions.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1616,6 +1701,14 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         DiffReviewCycleComparisonMode::help_text(),
     );
 
+    // Git repository actions
+    help.insert(TypeId::of::<GitStageFile>(), GitStageFile::help_text());
+    help.insert(TypeId::of::<GitStageAll>(), GitStageAll::help_text());
+    help.insert(TypeId::of::<GitUnstageFile>(), GitUnstageFile::help_text());
+    help.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::help_text());
+    help.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::help_text());
+    help.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::help_text());
+
     // Buffer finder actions
     help.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1697,6 +1790,14 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     // Help actions
     aliases.insert(TypeId::of::<OpenHelpOverlay>(), OpenHelpOverlay::aliases());
 
+    // Git repository actions
+    aliases.insert(TypeId::of::<GitStageFile>(), GitStageFile::aliases());
+    aliases.insert(TypeId::of::<GitStageAll>(), GitStageAll::aliases());
+    aliases.insert(TypeId::of::<GitUnstageFile>(), GitUnstageFile::aliases());
+    aliases.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::aliases());
+    aliases.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::aliases());
+    aliases.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::aliases());
+
     // Add more aliases here as needed
 
     aliases
@@ -1707,5 +1808,7 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }
 
+#[cfg(test)]
+mod git;
 #[cfg(test)]
 mod write_file;

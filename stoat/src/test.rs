@@ -285,6 +285,38 @@ impl<'a> TestStoat<'a> {
                 s.write_file(cx)
                     .unwrap_or_else(|e| panic!("WriteFile action failed: {}", e))
             });
+        }
+        // Git actions
+        else if type_id == TypeId::of::<GitStageFile>() {
+            self.update(|s, cx| {
+                s.git_stage_file(cx)
+                    .unwrap_or_else(|e| panic!("GitStageFile action failed: {}", e))
+            });
+        } else if type_id == TypeId::of::<GitStageAll>() {
+            self.update(|s, cx| {
+                s.git_stage_all(cx)
+                    .unwrap_or_else(|e| panic!("GitStageAll action failed: {}", e))
+            });
+        } else if type_id == TypeId::of::<GitUnstageFile>() {
+            self.update(|s, cx| {
+                s.git_unstage_file(cx)
+                    .unwrap_or_else(|e| panic!("GitUnstageFile action failed: {}", e))
+            });
+        } else if type_id == TypeId::of::<GitUnstageAll>() {
+            self.update(|s, cx| {
+                s.git_unstage_all(cx)
+                    .unwrap_or_else(|e| panic!("GitUnstageAll action failed: {}", e))
+            });
+        } else if type_id == TypeId::of::<GitStageHunk>() {
+            self.update(|s, cx| {
+                s.git_stage_hunk(cx)
+                    .unwrap_or_else(|e| panic!("GitStageHunk action failed: {}", e))
+            });
+        } else if type_id == TypeId::of::<GitUnstageHunk>() {
+            self.update(|s, cx| {
+                s.git_unstage_hunk(cx)
+                    .unwrap_or_else(|e| panic!("GitUnstageHunk action failed: {}", e))
+            });
         } else {
             panic!("Unsupported action type: {}", std::any::type_name::<A>());
         }

@@ -3644,8 +3644,6 @@ impl Stoat {
 }
 
 /// Build the list of all available commands from action metadata.
-///
-/// Iterates through all registered actions with metadata and builds command information
 /// including name, description, aliases, and TypeId for dispatch. This includes all
 /// actions with metadata, regardless of whether they have keybindings.
 ///
