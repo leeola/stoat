@@ -190,6 +190,8 @@ actions!(
         DiffReviewResetProgress,
         /// Exit diff review mode
         DiffReviewDismiss,
+        /// Cycle through comparison modes (All/Unstaged/Staged)
+        DiffReviewCycleComparisonMode,
     ]
 );
 
@@ -720,6 +722,11 @@ action_metadata!(
     "dismiss review",
     "Exit diff review mode and return to the previous mode"
 );
+action_metadata!(
+    DiffReviewCycleComparisonMode,
+    "cycle mode",
+    "Cycle through diff comparison modes: All Changes, Unstaged, and Staged"
+);
 
 // Pane management actions
 action_metadata!(
@@ -1033,6 +1040,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewDismiss>(),
         DiffReviewDismiss::action_name(),
     );
+    names.insert(
+        TypeId::of::<DiffReviewCycleComparisonMode>(),
+        DiffReviewCycleComparisonMode::action_name(),
+    );
 
     // Buffer finder actions
     names.insert(
@@ -1315,6 +1326,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewDismiss>(),
         DiffReviewDismiss::description(),
     );
+    descriptions.insert(
+        TypeId::of::<DiffReviewCycleComparisonMode>(),
+        DiffReviewCycleComparisonMode::description(),
+    );
 
     // Buffer finder actions
     descriptions.insert(
@@ -1585,6 +1600,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewDismiss>(),
         DiffReviewDismiss::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewCycleComparisonMode>(),
+        DiffReviewCycleComparisonMode::help_text(),
     );
 
     // Buffer finder actions

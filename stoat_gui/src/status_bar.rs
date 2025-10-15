@@ -31,6 +31,8 @@ pub struct StatusBar {
     review_progress: Option<(usize, usize)>,
     /// File progress: (current_file, total_files)
     review_file_progress: Option<(usize, usize)>,
+    /// Diff comparison mode (only shown in diff_review mode)
+    comparison_mode: Option<stoat::diff_review::DiffComparisonMode>,
 }
 
 impl StatusBar {
@@ -42,6 +44,7 @@ impl StatusBar {
         file_path: Option<String>,
         review_progress: Option<(usize, usize)>,
         review_file_progress: Option<(usize, usize)>,
+        comparison_mode: Option<stoat::diff_review::DiffComparisonMode>,
     ) -> Self {
         Self {
             mode_display,
@@ -50,6 +53,7 @@ impl StatusBar {
             file_path,
             review_progress,
             review_file_progress,
+            comparison_mode,
         }
     }
 
@@ -130,10 +134,18 @@ impl RenderOnce for StatusBar {
         let review_progress = self.review_progress_display();
         let file_display = self.file_path.unwrap_or_else(|| "[No file]".to_string());
 
-        // Build right section starting with review progress, then git info
+        // Build right section starting with comparison mode, review progress, then git info
         let mut right_div = div().flex().items_center().gap_2();
 
-        // Add review progress first if present
+        // Add comparison mode first if present (in diff review)
+        if let Some(mode) = self.comparison_mode {
+            let mode_text = format!("[{}]", mode.display_name());
+            right_div = right_div
+                .child(div().text_color(rgb(0x4ec9b0)).child(mode_text))
+                .child(div().text_color(rgb(0x808080)).child("|"));
+        }
+
+        // Add review progress next if present
         if let Some(progress) = review_progress {
             right_div = right_div
                 .child(div().text_color(rgb(0x4ec9b0)).child(progress))

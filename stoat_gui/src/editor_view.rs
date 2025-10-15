@@ -810,6 +810,18 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_diff_review_cycle_comparison_mode(
+        &mut self,
+        _: &DiffReviewCycleComparisonMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.diff_review_cycle_comparison_mode(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_command_palette_next(
         &mut self,
         _: &CommandPaletteNext,
@@ -1014,6 +1026,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_diff_review_next_unreviewed_hunk))
             .on_action(cx.listener(Self::handle_diff_review_reset_progress))
             .on_action(cx.listener(Self::handle_diff_review_dismiss))
+            .on_action(cx.listener(Self::handle_diff_review_cycle_comparison_mode))
             .on_action(cx.listener(Self::handle_command_palette_next))
             .on_action(cx.listener(Self::handle_command_palette_prev))
             .on_action(cx.listener(Self::handle_command_palette_execute))

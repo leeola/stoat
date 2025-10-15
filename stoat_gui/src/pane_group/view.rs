@@ -1232,6 +1232,12 @@ impl Render for PaneGroupView {
                     stoat.current_file_path().map(|p| p.display().to_string()),
                     stoat.diff_review_progress(),
                     stoat.diff_review_file_progress(),
+                    // Only show comparison mode when in diff_review mode
+                    if mode_name == "diff_review" {
+                        Some(stoat.diff_comparison_mode())
+                    } else {
+                        None
+                    },
                 );
 
                 // Calculate minimap scroll position for later update
@@ -1480,7 +1486,16 @@ impl Render for PaneGroupView {
             )
             .when_some(
                 status_bar_data,
-                |div, (mode, branch, files, path, review_progress, review_file_progress)| {
+                |div,
+                 (
+                    mode,
+                    branch,
+                    files,
+                    path,
+                    review_progress,
+                    review_file_progress,
+                    comparison_mode,
+                )| {
                     div.child(StatusBar::new(
                         mode,
                         branch,
@@ -1488,6 +1503,7 @@ impl Render for PaneGroupView {
                         path,
                         review_progress,
                         review_file_progress,
+                        comparison_mode,
                     ))
                 },
             )

@@ -2867,8 +2867,8 @@ impl Stoat {
 
     /// Open diff review mode.
     ///
-    /// Scans the repository for all modified files, loads the first file and its diff,
-    /// and enters diff_review mode for hunk-by-hunk review.
+    /// Scans the repository for all modified files, pre-computes diffs for all files
+    /// in the current comparison mode, and enters diff_review mode for hunk-by-hunk review.
     ///
     /// Following Zed's ProjectDiff pattern but simplified for stoat's modal architecture.
     pub fn open_diff_review(&mut self, cx: &mut Context<Self>) {
@@ -2897,28 +2897,24 @@ impl Stoat {
             );
 
             // Load the saved file
-            if let Some(saved_file) = self
+            if let Some(saved_file_path) = self
                 .diff_review_files
                 .get(self.diff_review_current_file_idx)
             {
-                let abs_path = repo.workdir().join(&saved_file.path);
+                let abs_path = repo.workdir().join(saved_file_path);
 
                 if let Err(e) = self.load_file(&abs_path, cx) {
                     tracing::error!("Failed to load saved file {:?}: {}", abs_path, e);
                     return;
                 }
 
-                // Update diff for this file
-                let buffer_item = self.active_buffer(cx);
-                if let Some(diff) = buffer_item.read(cx).diff() {
-                    let hunk_count = diff.hunks.len();
-                    if let Some(file_mut) = self
-                        .diff_review_files
-                        .get_mut(self.diff_review_current_file_idx)
-                    {
-                        file_mut.diff = Some(diff.clone());
-                        file_mut.hunk_count = hunk_count;
-                    }
+                // Compute diff respecting the comparison mode
+                if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                    // Update the buffer item's diff for display
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(diff));
+                    });
                 }
             }
 
@@ -2935,7 +2931,7 @@ impl Stoat {
         }
 
         // No existing state - start fresh review session
-        // Gather modified files using existing git_status code
+        // Scan git status to get list of modified files
         let entries = match crate::git_status::gather_git_status(repo.inner()) {
             Ok(entries) => entries,
             Err(e) => {
@@ -2949,42 +2945,64 @@ impl Stoat {
             return;
         }
 
-        // Convert to DiffReviewFile entries
-        self.diff_review_files = entries
+        // Deduplicate files and store paths
+        let mut seen = std::collections::HashSet::new();
+        let file_paths: Vec<std::path::PathBuf> = entries
             .into_iter()
-            .map(|entry| crate::diff_review::DiffReviewFile::new(entry.path.clone(), entry.status))
+            .filter(|e| seen.insert(e.path.clone()))
+            .map(|e| e.path)
             .collect();
 
-        // Load first file and compute its diff
-        if let Some(first_file) = self.diff_review_files.first() {
-            let abs_path = repo.workdir().join(&first_file.path);
+        if file_paths.is_empty() {
+            debug!("No unique files to review");
+            return;
+        }
 
-            // Load the file into buffer
+        // Store file list
+        self.diff_review_files = file_paths.clone();
+
+        // Find first file with hunks by loading and checking on-demand
+        let mut first_file_idx = None;
+        for (idx, file_path) in file_paths.iter().enumerate() {
+            let abs_path = repo.workdir().join(file_path);
+
+            // Load file
             if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                return;
+                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                continue;
             }
 
-            // Get the buffer's diff (already computed by load_file)
-            let buffer_item = self.active_buffer(cx);
-            if let Some(diff) = buffer_item.read(cx).diff() {
-                let hunk_count = diff.hunks.len();
-                tracing::info!(
-                    "Diff review: loaded first file with {} hunks (all visible)",
-                    hunk_count
-                );
-                // Now update the file
-                if let Some(first_file_mut) = self.diff_review_files.first_mut() {
-                    first_file_mut.diff = Some(diff.clone());
-                    first_file_mut.hunk_count = hunk_count;
+            // Compute diff
+            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                if !diff.hunks.is_empty() {
+                    // Found first file with hunks
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(diff.clone()));
+                    });
+
+                    first_file_idx = Some(idx);
+                    tracing::info!(
+                        "Diff review: found first file with {} hunks in {} mode",
+                        diff.hunks.len(),
+                        self.diff_review_comparison_mode.display_name()
+                    );
+                    break;
                 }
-            } else {
-                tracing::info!("Diff review: first file has NO diff");
             }
         }
 
-        // Initialize state to start
-        self.diff_review_current_file_idx = 0;
+        let first_idx = match first_file_idx {
+            Some(idx) => idx,
+            None => {
+                debug!("No files with hunks in current comparison mode");
+                self.diff_review_files.clear();
+                return;
+            },
+        };
+
+        // Initialize state to start at first file with hunks
+        self.diff_review_current_file_idx = first_idx;
         self.diff_review_current_hunk_idx = 0;
         self.diff_review_approved_hunks.clear();
 
@@ -3009,19 +3027,32 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
-            return;
-        }
+        // Get hunk count from buffer diff
+        let hunk_count = {
+            let buffer_item = self.active_buffer(cx);
+            let item = buffer_item.read(cx);
+            match item.diff() {
+                Some(diff) => diff.hunks.len(),
+                None => return,
+            }
+        };
 
-        let current_file = &self.diff_review_files[self.diff_review_current_file_idx];
+        tracing::debug!(
+            "diff_review_next_hunk: file_idx={}, hunk_idx={}, hunk_count={}",
+            self.diff_review_current_file_idx,
+            self.diff_review_current_hunk_idx,
+            hunk_count
+        );
 
         // Try to move to next hunk in current file
-        if self.diff_review_current_hunk_idx + 1 < current_file.hunk_count {
+        if self.diff_review_current_hunk_idx + 1 < hunk_count {
             // Move to next hunk in current file
             self.diff_review_current_hunk_idx += 1;
+            tracing::debug!("Moving to next hunk: {}", self.diff_review_current_hunk_idx);
             self.jump_to_current_hunk(cx);
         } else {
             // At last hunk, try next file
+            tracing::debug!("At last hunk, loading next file");
             self.load_next_file(cx);
         }
 
@@ -3045,7 +3076,7 @@ impl Stoat {
             // Go to previous hunk in current file
             self.diff_review_current_hunk_idx -= 1;
             self.jump_to_current_hunk(cx);
-        } else if self.diff_review_current_file_idx > 0 {
+        } else {
             // Go to previous file's last hunk
             self.load_prev_file(cx);
         }
@@ -3062,19 +3093,23 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
-            return;
-        }
+        // Get current file path
+        let current_file_path = match self
+            .diff_review_files
+            .get(self.diff_review_current_file_idx)
+        {
+            Some(path) => path.clone(),
+            None => return,
+        };
 
         // Mark current hunk as approved
-        let current_file = &self.diff_review_files[self.diff_review_current_file_idx];
         self.diff_review_approved_hunks
-            .entry(current_file.path.clone())
+            .entry(current_file_path.clone())
             .or_default()
             .insert(self.diff_review_current_hunk_idx);
 
         debug!(
-            file = ?current_file.path,
+            file = ?current_file_path,
             hunk = self.diff_review_current_hunk_idx,
             "Approved hunk"
         );
@@ -3114,21 +3149,25 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
-            return;
-        }
+        // Get current file path
+        let current_file_path = match self
+            .diff_review_files
+            .get(self.diff_review_current_file_idx)
+        {
+            Some(path) => path.clone(),
+            None => return,
+        };
 
-        let current_file = &self.diff_review_files[self.diff_review_current_file_idx];
         let approved_hunks = self
             .diff_review_approved_hunks
-            .entry(current_file.path.clone())
+            .entry(current_file_path.clone())
             .or_default();
 
         if approved_hunks.contains(&self.diff_review_current_hunk_idx) {
             // Currently approved - unapprove it
             approved_hunks.remove(&self.diff_review_current_hunk_idx);
             debug!(
-                file = ?current_file.path,
+                file = ?current_file_path,
                 hunk = self.diff_review_current_hunk_idx,
                 "Unapproved hunk"
             );
@@ -3136,7 +3175,7 @@ impl Stoat {
             // Not approved - approve it
             approved_hunks.insert(self.diff_review_current_hunk_idx);
             debug!(
-                file = ?current_file.path,
+                file = ?current_file_path,
                 hunk = self.diff_review_current_hunk_idx,
                 "Approved hunk"
             );
@@ -3145,8 +3184,9 @@ impl Stoat {
 
     /// Jump to next unreviewed hunk across all files.
     ///
-    /// Skips approved hunks, searching across files to find the next unreviewed one.
-    /// Wraps around to the beginning if needed. Exits review mode if all hunks reviewed.
+    /// Searches files on-demand for the next unreviewed hunk. Loads each file,
+    /// computes diff, and checks for unreviewed hunks. Wraps around to the beginning
+    /// if needed. Exits review mode if all hunks reviewed.
     pub fn diff_review_next_unreviewed_hunk(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -3156,22 +3196,39 @@ impl Stoat {
             return;
         }
 
-        // Search from current position forward
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match crate::git_repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
+
         let start_file = self.diff_review_current_file_idx;
         let start_hunk = self.diff_review_current_hunk_idx + 1; // Start from next hunk
+        let file_count = self.diff_review_files.len();
 
-        // Search in current file first
         let empty_set = std::collections::HashSet::new();
-        if let Some(file) = self.diff_review_files.get(start_file) {
-            let approved_hunks = self
-                .diff_review_approved_hunks
-                .get(&file.path)
-                .unwrap_or(&empty_set);
 
-            if let Some(hunk_idx) =
-                file.next_unreviewed_hunk(start_hunk.saturating_sub(1), approved_hunks)
-            {
-                // Found unreviewed hunk in current file
+        // Helper to check if a file has an unreviewed hunk at/after start_hunk_idx
+        let find_unreviewed_in_file =
+            |file_path: &std::path::PathBuf, start_hunk_idx: usize| -> Option<usize> {
+                let approved_hunks = self
+                    .diff_review_approved_hunks
+                    .get(file_path)
+                    .unwrap_or(&empty_set);
+
+                // Get hunk count from current buffer diff if this is the current file
+                let hunk_count = {
+                    let buffer_item = self.active_buffer(cx);
+                    let item = buffer_item.read(cx);
+                    item.diff().map(|d| d.hunks.len()).unwrap_or(0)
+                };
+
+                (start_hunk_idx..hunk_count).find(|idx| !approved_hunks.contains(idx))
+            };
+
+        // Search in current file first (from start_hunk onward)
+        if let Some(current_file_path) = self.diff_review_files.get(start_file) {
+            if let Some(hunk_idx) = find_unreviewed_in_file(current_file_path, start_hunk) {
                 self.diff_review_current_hunk_idx = hunk_idx;
                 self.jump_to_current_hunk(cx);
                 cx.notify();
@@ -3179,49 +3236,41 @@ impl Stoat {
             }
         }
 
-        // Search remaining files
-        for file_idx in (start_file + 1)..self.diff_review_files.len() {
-            // Extract data we need before mutably borrowing self
-            let (file_path, first_unreviewed) = {
-                let file = &self.diff_review_files[file_idx];
+        // Search remaining files (load each on-demand)
+        for offset in 1..file_count {
+            let file_idx = (start_file + offset) % file_count;
+            if file_idx == start_file {
+                break; // Back to start - handle this case separately
+            }
+
+            // Clone file path to avoid borrow conflicts
+            let file_path = self.diff_review_files[file_idx].clone();
+            let abs_path = repo.workdir().join(&file_path);
+
+            // Load file
+            if let Err(e) = self.load_file(&abs_path, cx) {
+                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                continue;
+            }
+
+            // Compute diff
+            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                let buffer_item = self.active_buffer(cx);
+                buffer_item.update(cx, |item, _| {
+                    item.set_diff(Some(diff.clone()));
+                });
+
+                // Check for unreviewed hunks in this file
                 let approved_hunks = self
                     .diff_review_approved_hunks
-                    .get(&file.path)
+                    .get(&file_path)
                     .unwrap_or(&empty_set);
 
-                // Find first unreviewed hunk
-                let first_unreviewed =
-                    (0..file.hunk_count).find(|hunk_idx| !approved_hunks.contains(hunk_idx));
-
-                (file.path.clone(), first_unreviewed)
-            };
-
-            // Process the first unreviewed hunk if found
-            if let Some(hunk_idx) = first_unreviewed {
-                // Found unreviewed hunk - load file and jump
-                self.diff_review_current_file_idx = file_idx;
-                self.diff_review_current_hunk_idx = hunk_idx;
-
-                // Load the file
-                let root_path = self.worktree.lock().root().to_path_buf();
-                if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
-                    let abs_path = repo.workdir().join(&file_path);
-
-                    if let Err(e) = self.load_file(&abs_path, cx) {
-                        tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                        continue;
-                    }
-
-                    // Update diff for this file
-                    let buffer_item = self.active_buffer(cx);
-                    if let Some(diff) = buffer_item.read(cx).diff() {
-                        let hunk_count = diff.hunks.len();
-                        if let Some(file_mut) = self.diff_review_files.get_mut(file_idx) {
-                            file_mut.diff = Some(diff.clone());
-                            file_mut.hunk_count = hunk_count;
-                        }
-                    }
-
+                if let Some(hunk_idx) =
+                    (0..diff.hunks.len()).find(|idx| !approved_hunks.contains(idx))
+                {
+                    self.diff_review_current_file_idx = file_idx;
+                    self.diff_review_current_hunk_idx = hunk_idx;
                     self.jump_to_current_hunk(cx);
                     cx.notify();
                     return;
@@ -3229,67 +3278,14 @@ impl Stoat {
             }
         }
 
-        // No unreviewed found forward - wrap around and search from beginning
-        for file_idx in 0..start_file {
-            // Extract data we need before mutably borrowing self
-            let (file_path, first_unreviewed) = {
-                let file = &self.diff_review_files[file_idx];
-                let approved_hunks = self
-                    .diff_review_approved_hunks
-                    .get(&file.path)
-                    .unwrap_or(&empty_set);
-
-                // Find first unreviewed hunk
-                let first_unreviewed =
-                    (0..file.hunk_count).find(|hunk_idx| !approved_hunks.contains(hunk_idx));
-
-                (file.path.clone(), first_unreviewed)
-            };
-
-            // Process the first unreviewed hunk if found
-            if let Some(hunk_idx) = first_unreviewed {
-                // Found unreviewed hunk - load file and jump
-                self.diff_review_current_file_idx = file_idx;
-                self.diff_review_current_hunk_idx = hunk_idx;
-
-                // Load the file
-                let root_path = self.worktree.lock().root().to_path_buf();
-                if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
-                    let abs_path = repo.workdir().join(&file_path);
-
-                    if let Err(e) = self.load_file(&abs_path, cx) {
-                        tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                        continue;
-                    }
-
-                    // Update diff for this file
-                    let buffer_item = self.active_buffer(cx);
-                    if let Some(diff) = buffer_item.read(cx).diff() {
-                        let hunk_count = diff.hunks.len();
-                        if let Some(file_mut) = self.diff_review_files.get_mut(file_idx) {
-                            file_mut.diff = Some(diff.clone());
-                            file_mut.hunk_count = hunk_count;
-                        }
-                    }
-
-                    self.jump_to_current_hunk(cx);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-
-        // Search current file from beginning up to starting hunk
-        if let Some(file) = self.diff_review_files.get(start_file) {
+        // Search current file from beginning up to start_hunk
+        if let Some(current_file_path) = self.diff_review_files.get(start_file) {
             let approved_hunks = self
                 .diff_review_approved_hunks
-                .get(&file.path)
+                .get(current_file_path)
                 .unwrap_or(&empty_set);
 
-            if let Some(hunk_idx) =
-                (0..start_hunk).find(|hunk_idx| !approved_hunks.contains(hunk_idx))
-            {
-                // Found unreviewed hunk before starting position
+            if let Some(hunk_idx) = (0..start_hunk).find(|idx| !approved_hunks.contains(idx)) {
                 self.diff_review_current_hunk_idx = hunk_idx;
                 self.jump_to_current_hunk(cx);
                 cx.notify();
@@ -3304,50 +3300,112 @@ impl Stoat {
 
     /// Reset all review progress and start from beginning.
     ///
-    /// Clears all approved hunks and resets to file 0, hunk 0. Keeps the file list.
+    /// Clears all approved hunks and resets to file 0, hunk 0.
     /// Use this to start a fresh review pass.
     pub fn diff_review_reset_progress(&mut self, cx: &mut Context<Self>) {
-        if self.diff_review_files.is_empty() {
-            return;
-        }
-
         debug!("Resetting diff review progress");
 
         // Clear all approved hunks
         self.diff_review_approved_hunks.clear();
 
-        // Reset to start
-        self.diff_review_current_file_idx = 0;
-        self.diff_review_current_hunk_idx = 0;
+        // If in review mode, load first file and jump to first hunk
+        if self.mode == "diff_review" && !self.diff_review_files.is_empty() {
+            let root_path = self.worktree.lock().root().to_path_buf();
+            if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
+                // Clone file list to avoid borrow conflicts
+                let files = self.diff_review_files.clone();
+                // Find first file with hunks by loading files on-demand
+                for (idx, file_path) in files.iter().enumerate() {
+                    let abs_path = repo.workdir().join(file_path);
 
-        // Load first file if in review mode
-        if self.mode == "diff_review" {
-            if let Some(first_file) = self.diff_review_files.first() {
-                let root_path = self.worktree.lock().root().to_path_buf();
-                if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
-                    let abs_path = repo.workdir().join(&first_file.path);
-
+                    // Load file
                     if let Err(e) = self.load_file(&abs_path, cx) {
-                        tracing::error!("Failed to load first file {:?}: {}", abs_path, e);
-                        return;
+                        tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                        continue;
                     }
 
-                    // Update diff for this file
-                    let buffer_item = self.active_buffer(cx);
-                    if let Some(diff) = buffer_item.read(cx).diff() {
-                        let hunk_count = diff.hunks.len();
-                        if let Some(file_mut) = self.diff_review_files.first_mut() {
-                            file_mut.diff = Some(diff.clone());
-                            file_mut.hunk_count = hunk_count;
+                    // Compute diff
+                    if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                        if !diff.hunks.is_empty() {
+                            // Found first file with hunks
+                            let buffer_item = self.active_buffer(cx);
+                            buffer_item.update(cx, |item, _| {
+                                item.set_diff(Some(diff.clone()));
+                            });
+
+                            // Reset to start
+                            self.diff_review_current_file_idx = idx;
+                            self.diff_review_current_hunk_idx = 0;
+
+                            self.jump_to_current_hunk(cx);
+                            cx.notify();
+                            return;
                         }
                     }
-
-                    self.jump_to_current_hunk(cx);
                 }
             }
         }
 
         cx.notify();
+    }
+
+    /// Cycle through diff comparison modes in diff review.
+    ///
+    /// Rotates through WorkingVsHead -> WorkingVsIndex -> IndexVsHead -> WorkingVsHead.
+    /// Recomputes the diff for the new comparison mode using the centralized hotpath.
+    ///
+    /// # Related
+    ///
+    /// - [`Stoat::cycle_diff_comparison_mode`] - Cycles the mode setting
+    /// - [`Stoat::compute_diff_for_review_mode`] - Centralized diff computation hotpath
+    pub fn diff_review_cycle_comparison_mode(&mut self, cx: &mut Context<Self>) {
+        if self.mode != "diff_review" {
+            return;
+        }
+
+        debug!("Cycling diff comparison mode");
+
+        // Cycle to next mode
+        self.cycle_diff_comparison_mode();
+        let new_mode = self.diff_comparison_mode();
+        debug!("New comparison mode: {:?}", new_mode);
+
+        // Get current file path
+        let current_file_path = match self
+            .diff_review_files
+            .get(self.diff_review_current_file_idx)
+        {
+            Some(path) => path.clone(),
+            None => return,
+        };
+
+        // Get absolute path
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match crate::git_repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
+        let abs_path = repo.workdir().join(&current_file_path);
+
+        // Recompute diff for new comparison mode
+        if let Some(new_diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+            // Update the buffer item diff
+            let buffer_item = self.active_buffer(cx);
+            buffer_item.update(cx, |item, _cx| {
+                item.set_diff(Some(new_diff.clone()));
+            });
+
+            // Reset hunk index if it's now out of range
+            let hunk_count = new_diff.hunks.len();
+            if self.diff_review_current_hunk_idx >= hunk_count {
+                self.diff_review_current_hunk_idx = if hunk_count > 0 { 0 } else { 0 };
+            }
+
+            // Jump to current hunk (or first hunk if current is out of range)
+            self.jump_to_current_hunk(cx);
+        }
+
+        cx.emit(crate::stoat::StoatEvent::Changed);
     }
 
     // Helper methods for diff review
@@ -3361,13 +3419,17 @@ impl Stoat {
     /// - If hunk fits in viewport: centers the hunk
     /// - If hunk is too large: positions top of hunk at 1/3 from viewport top
     fn jump_to_current_hunk(&mut self, cx: &mut Context<Self>) {
-        if self.diff_review_current_file_idx >= self.diff_review_files.len() {
-            return;
-        }
-
-        let current_file = &self.diff_review_files[self.diff_review_current_file_idx];
-        let Some(diff) = &current_file.diff else {
-            return;
+        // Get the diff from the buffer item (has fresh anchors) instead of GitIndex (has stale
+        // anchors)
+        let buffer_item = self.active_buffer(cx);
+        let (diff, buffer_snapshot) = {
+            let item = buffer_item.read(cx);
+            let diff = match item.diff() {
+                Some(d) => d.clone(),
+                None => return,
+            };
+            let buffer_snapshot = item.buffer().read(cx).snapshot();
+            (diff, buffer_snapshot)
         };
 
         if self.diff_review_current_hunk_idx >= diff.hunks.len() {
@@ -3375,15 +3437,11 @@ impl Stoat {
         }
 
         let hunk = &diff.hunks[self.diff_review_current_hunk_idx];
-        let buffer_item = self.active_buffer(cx);
-        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 
         // Convert hunk anchors to points
         let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot);
         let hunk_end = hunk.buffer_range.end.to_point(&buffer_snapshot);
 
-        // Clone path for debug logging
-        let file_path = current_file.path.clone();
         let hunk_idx = self.diff_review_current_hunk_idx;
         let start_row = hunk_start.row;
 
@@ -3413,98 +3471,126 @@ impl Stoat {
             self.ensure_cursor_visible();
         }
 
-        debug!(
-            file = ?file_path,
-            hunk = hunk_idx,
-            line = start_row,
-            "Jumped to hunk"
-        );
+        debug!(hunk = hunk_idx, line = start_row, "Jumped to hunk");
     }
 
     /// Load next file in diff review.
     ///
-    /// Cross-file navigation: loads the next file, computes diff,
-    /// and jumps to its first hunk. Wraps to first file if at the end.
+    /// Uses pre-computed indices from GitIndex for O(1) navigation to the next file with hunks.
+    /// Wraps to first file if at the end.
     fn load_next_file(&mut self, cx: &mut Context<Self>) {
-        // Check if there's a next file, or wrap to first
-        let file_idx = if self.diff_review_current_file_idx + 1 >= self.diff_review_files.len() {
-            // At last file - wrap to first
-            debug!("Wrapping to first file");
-            0
-        } else {
-            self.diff_review_current_file_idx + 1
-        };
-        let file = &self.diff_review_files[file_idx];
+        if self.diff_review_files.is_empty() {
+            return;
+        }
 
-        // Load the file
         let root_path = self.worktree.lock().root().to_path_buf();
-        if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
-            let abs_path = repo.workdir().join(&file.path);
+        let repo = match crate::git_repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
 
+        let file_count = self.diff_review_files.len();
+        let current_idx = self.diff_review_current_file_idx;
+
+        // Loop through files starting from next one, looking for one with hunks
+        for offset in 1..=file_count {
+            let next_idx = (current_idx + offset) % file_count;
+            let file_path = &self.diff_review_files[next_idx];
+            let abs_path = repo.workdir().join(file_path);
+
+            // Load file
             if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                return;
+                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                continue;
             }
 
-            // Update diff for this file
-            let buffer_item = self.active_buffer(cx);
-            if let Some(diff) = buffer_item.read(cx).diff() {
-                let hunk_count = diff.hunks.len();
-                if let Some(file_mut) = self.diff_review_files.get_mut(file_idx) {
-                    file_mut.diff = Some(diff.clone());
-                    file_mut.hunk_count = hunk_count;
+            // Compute diff and check if it has hunks
+            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                if !diff.hunks.is_empty() {
+                    // Found file with hunks - set it and jump to first hunk
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(diff.clone()));
+                    });
+
+                    debug!(
+                        "Loaded next file with {} hunks at idx={}",
+                        diff.hunks.len(),
+                        next_idx
+                    );
+
+                    self.diff_review_current_file_idx = next_idx;
+                    self.diff_review_current_hunk_idx = 0;
+                    self.jump_to_current_hunk(cx);
+                    return;
                 }
             }
-
-            // Update indices to first hunk of next file
-            self.diff_review_current_file_idx = file_idx;
-            self.diff_review_current_hunk_idx = 0;
-
-            self.jump_to_current_hunk(cx);
         }
+
+        debug!("No more files with hunks in current comparison mode");
     }
 
-    /// Load previous file.
+    /// Load previous file in diff review.
     ///
-    /// Cross-file navigation in reverse: loads the previous file and jumps to its last hunk.
+    /// Uses pre-computed indices from GitIndex for O(1) navigation to the previous file with hunks.
     /// Wraps to last file if at the beginning.
     fn load_prev_file(&mut self, cx: &mut Context<Self>) {
-        let file_idx = if self.diff_review_current_file_idx == 0 {
-            // At first file - wrap to last
-            debug!("Wrapping to last file");
-            self.diff_review_files.len() - 1
-        } else {
-            self.diff_review_current_file_idx - 1
-        };
-        let file = &self.diff_review_files[file_idx];
+        if self.diff_review_files.is_empty() {
+            return;
+        }
 
-        // Load the file
         let root_path = self.worktree.lock().root().to_path_buf();
-        if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
-            let abs_path = repo.workdir().join(&file.path);
+        let repo = match crate::git_repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
 
+        let file_count = self.diff_review_files.len();
+        let current_idx = self.diff_review_current_file_idx;
+
+        // Loop through files backwards starting from previous one, looking for one with hunks
+        for offset in 1..=file_count {
+            let prev_idx = if current_idx >= offset {
+                current_idx - offset
+            } else {
+                file_count - (offset - current_idx)
+            };
+
+            let file_path = &self.diff_review_files[prev_idx];
+            let abs_path = repo.workdir().join(file_path);
+
+            // Load file
             if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                return;
+                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                continue;
             }
 
-            // Update diff for this file
-            let buffer_item = self.active_buffer(cx);
-            if let Some(diff) = buffer_item.read(cx).diff() {
-                let hunk_count = diff.hunks.len();
-                if let Some(file_mut) = self.diff_review_files.get_mut(file_idx) {
-                    file_mut.diff = Some(diff.clone());
-                    file_mut.hunk_count = hunk_count;
+            // Compute diff and check if it has hunks
+            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+                if !diff.hunks.is_empty() {
+                    // Found file with hunks - set it and jump to last hunk
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(diff.clone()));
+                    });
+
+                    debug!(
+                        "Loaded prev file with {} hunks at idx={}",
+                        diff.hunks.len(),
+                        prev_idx
+                    );
+
+                    // Jump to last hunk in previous file
+                    let last_hunk_idx = diff.hunks.len().saturating_sub(1);
+                    self.diff_review_current_file_idx = prev_idx;
+                    self.diff_review_current_hunk_idx = last_hunk_idx;
+                    self.jump_to_current_hunk(cx);
+                    return;
                 }
             }
-
-            // Update indices to last hunk
-            self.diff_review_current_file_idx = file_idx;
-            let file = &self.diff_review_files[file_idx];
-            self.diff_review_current_hunk_idx = file.hunk_count.saturating_sub(1);
-
-            self.jump_to_current_hunk(cx);
         }
+
+        debug!("No more files with hunks in current comparison mode");
     }
 }
 

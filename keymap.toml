@@ -900,6 +900,11 @@ key = ": q"
 action = "DiffReviewDismiss"
 context = "Editor && mode == diff_review"
 
+[[bindings]]
+key = "c"
+action = "DiffReviewCycleComparisonMode"
+context = "Editor && mode == diff_review"
+
 # Help - Context-sensitive help system
 [[bindings]]
 key = "?"

@@ -235,12 +235,22 @@ pub struct Stoat {
     pub(crate) git_dirty_count: usize,
 
     // Diff review state
-    pub(crate) diff_review_files: Vec<crate::diff_review::DiffReviewFile>,
+    /// List of modified files for diff review.
+    ///
+    /// Populated when entering diff review mode. Diffs are computed on-demand when
+    /// loading each file, using
+    /// [`compute_diff_for_review_mode`](Self::compute_diff_for_review_mode).
+    pub(crate) diff_review_files: Vec<PathBuf>,
     pub(crate) diff_review_current_file_idx: usize,
     pub(crate) diff_review_current_hunk_idx: usize,
     pub(crate) diff_review_approved_hunks:
         std::collections::HashMap<PathBuf, std::collections::HashSet<usize>>,
     pub(crate) diff_review_previous_mode: Option<String>,
+    /// Comparison mode for diff review (working vs HEAD, working vs index, or index vs HEAD).
+    ///
+    /// Determines which git refs are compared when computing diffs in review mode.
+    /// Default is [`WorkingVsHead`](crate::diff_review::DiffComparisonMode::WorkingVsHead).
+    pub(crate) diff_review_comparison_mode: crate::diff_review::DiffComparisonMode,
 
     /// Current file path (for status bar display)
     pub(crate) current_file_path: Option<PathBuf>,
@@ -346,6 +356,7 @@ impl Stoat {
             diff_review_current_hunk_idx: 0,
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
+            diff_review_comparison_mode: crate::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
             worktree,
             parent_stoat: None,
@@ -408,6 +419,7 @@ impl Stoat {
             diff_review_current_hunk_idx: 0,
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
+            diff_review_comparison_mode: self.diff_review_comparison_mode,
             current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: None,
@@ -568,7 +580,7 @@ impl Stoat {
     /// Check if we're currently in diff review mode.
     ///
     /// Returns `true` if diff review mode is active. Since we persist state when
-    /// exiting review mode (for position restoration), we check both mode and files.
+    /// exiting review mode (for position restoration), we check both mode and files list.
     /// Used by GUI to adjust gutter width and show diff backgrounds.
     pub fn is_in_diff_review(&self) -> bool {
         self.mode == "diff_review" && !self.diff_review_files.is_empty()
@@ -576,26 +588,13 @@ impl Stoat {
 
     /// Get diff review progress as (reviewed_count, total_count).
     ///
-    /// Returns [`None`] if not in review mode. Used by status bar to show progress like "5/30".
+    /// Returns [`None`] since we no longer pre-compute all hunks. With on-demand loading,
+    /// we can't know the total number of hunks without loading all files.
     ///
-    /// # Returns
-    ///
-    /// `Some((reviewed, total))` where:
-    /// - `reviewed`: Number of approved hunks across all files
-    /// - `total`: Total number of hunks across all files
+    /// Future: Could scan files to count hunks without computing full diffs, or show
+    /// file-level progress instead.
     pub fn diff_review_progress(&self) -> Option<(usize, usize)> {
-        if self.diff_review_files.is_empty() {
-            return None;
-        }
-
-        let total: usize = self.diff_review_files.iter().map(|f| f.hunk_count).sum();
-        let reviewed: usize = self
-            .diff_review_approved_hunks
-            .values()
-            .map(|set| set.len())
-            .sum();
-
-        Some((reviewed, total))
+        None
     }
 
     /// Get current file progress in review as (current_file, total_files).
@@ -606,7 +605,7 @@ impl Stoat {
     ///
     /// `Some((current, total))` where both are 1-indexed for display
     pub fn diff_review_file_progress(&self) -> Option<(usize, usize)> {
-        if self.diff_review_files.is_empty() {
+        if !self.is_in_diff_review() {
             return None;
         }
 
@@ -621,6 +620,64 @@ impl Stoat {
     /// Returns the parent editor entity if this is a minimap, or `None` for regular editors.
     pub fn parent_stoat(&self) -> Option<&WeakEntity<Stoat>> {
         self.parent_stoat.as_ref()
+    }
+
+    /// Get the current diff comparison mode.
+    ///
+    /// Returns the active comparison mode used in diff review for determining which
+    /// git refs are compared (working vs HEAD, working vs index, or index vs HEAD).
+    ///
+    /// # Returns
+    ///
+    /// The current [`DiffComparisonMode`](crate::diff_review::DiffComparisonMode)
+    pub fn diff_comparison_mode(&self) -> crate::diff_review::DiffComparisonMode {
+        self.diff_review_comparison_mode
+    }
+
+    /// Set the diff comparison mode.
+    ///
+    /// Changes which git refs are compared in diff review mode. This affects which hunks
+    /// are visible when reviewing files.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The new comparison mode to use
+    ///
+    /// # Usage
+    ///
+    /// This method can be called from an action to switch between reviewing all changes,
+    /// only unstaged changes, or only staged changes. Future PRs will add keybindings
+    /// to cycle through modes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Switch to viewing only unstaged changes
+    /// stoat.set_diff_comparison_mode(DiffComparisonMode::WorkingVsIndex);
+    /// ```
+    pub fn set_diff_comparison_mode(&mut self, mode: crate::diff_review::DiffComparisonMode) {
+        self.diff_review_comparison_mode = mode;
+    }
+
+    /// Cycle to the next diff comparison mode.
+    ///
+    /// Rotates through comparison modes in order: WorkingVsHead -> WorkingVsIndex ->
+    /// IndexVsHead -> WorkingVsHead. This is a convenience method for toggling between
+    /// modes via a single keybinding.
+    ///
+    /// # Usage
+    ///
+    /// This method is designed to be called from an action bound to a key. Future PRs
+    /// will add the action and keybinding.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // User presses keybinding to cycle comparison mode
+    /// stoat.cycle_diff_comparison_mode();
+    /// ```
+    pub fn cycle_diff_comparison_mode(&mut self) {
+        self.diff_review_comparison_mode = self.diff_review_comparison_mode.next();
     }
 
     /// Get viewport height in lines
@@ -762,6 +819,99 @@ impl Stoat {
         Ok(())
     }
 
+    /// Compute diff for the currently active buffer respecting the diff review comparison mode.
+    ///
+    /// Uses [`diff_review_comparison_mode`](Self::diff_review_comparison_mode) to determine
+    /// which git refs to compare. This method is used by diff review to compute diffs based
+    /// on whether we're reviewing all changes, only unstaged, or only staged changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to compute diff for
+    /// * `cx` - GPUI context
+    ///
+    /// # Returns
+    ///
+    /// [`Some(BufferDiff)`] if diff computation succeeds, [`None`] if git operations fail
+    /// or if the file is not in a git repository.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // After loading a file, recompute its diff for review mode
+    /// if let Some(diff) = self.compute_diff_for_review_mode(&file_path, cx) {
+    ///     buffer_item.update(cx, |item, _| item.set_diff(Some(diff)));
+    /// }
+    /// ```
+    pub(crate) fn compute_diff_for_review_mode(
+        &self,
+        path: &std::path::Path,
+        cx: &App,
+    ) -> Option<BufferDiff> {
+        use crate::diff_review::DiffComparisonMode;
+
+        let repo = Repository::discover(path).ok()?;
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let buffer_id = buffer_snapshot.remote_id();
+
+        tracing::debug!(
+            "compute_diff_for_review_mode: mode={:?}, path={:?}",
+            self.diff_review_comparison_mode,
+            path
+        );
+
+        let diff = match self.diff_review_comparison_mode {
+            DiffComparisonMode::WorkingVsHead => {
+                // Compare working tree against HEAD (default)
+                let base_content = repo.head_content(path).ok()?;
+                tracing::debug!(
+                    "WorkingVsHead: base_len={}, working_len={}",
+                    base_content.len(),
+                    buffer_snapshot.text().len()
+                );
+                BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?
+            },
+            DiffComparisonMode::WorkingVsIndex => {
+                // Compare working tree against index (unstaged changes + untracked files)
+                // For untracked files, index_content() will fail, so use empty string as base
+                let base_content = repo.index_content(path).unwrap_or_else(|_| String::new());
+                tracing::debug!(
+                    "WorkingVsIndex: base_len={}, working_len={}",
+                    base_content.len(),
+                    buffer_snapshot.text().len()
+                );
+                BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?
+            },
+            DiffComparisonMode::IndexVsHead => {
+                // Compare index against HEAD (staged changes only)
+                // For this mode, we need to load index content as the "new" text
+                // and HEAD as the "old" text. Since our buffer has working tree content,
+                // we need to temporarily use index content.
+                let head_content = repo.head_content(path).ok()?;
+                let index_content = repo.index_content(path).ok()?;
+                tracing::debug!(
+                    "IndexVsHead: head_len={}, index_len={}",
+                    head_content.len(),
+                    index_content.len()
+                );
+
+                // Create a temporary buffer with index content to compute the diff
+                use std::num::NonZeroU64;
+                let temp_buffer_id = BufferId::from(NonZeroU64::new(999999).unwrap());
+                let temp_buffer = text::Buffer::new(0, temp_buffer_id, &index_content);
+                let temp_snapshot = temp_buffer.snapshot();
+
+                // IMPORTANT: Use the real buffer_id, not temp_buffer_id, so anchors
+                // can be resolved against the actual buffer later
+                BufferDiff::new(buffer_id, head_content, &temp_snapshot).ok()?
+            },
+        };
+
+        tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
+        Some(diff)
+    }
+
     /// Create a minimap instance for this editor.
     ///
     /// Following Zed's architecture, the minimap is just another [`Stoat`] instance
@@ -826,6 +976,7 @@ impl Stoat {
             diff_review_current_hunk_idx: 0,
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
+            diff_review_comparison_mode: crate::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),

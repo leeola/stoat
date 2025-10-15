@@ -164,6 +164,9 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         },
         "DiffReviewResetProgress" => Ok(KeyBinding::new(key, DiffReviewResetProgress, context)),
         "DiffReviewDismiss" => Ok(KeyBinding::new(key, DiffReviewDismiss, context)),
+        "DiffReviewCycleComparisonMode" => {
+            Ok(KeyBinding::new(key, DiffReviewCycleComparisonMode, context))
+        },
 
         // Help actions
         "OpenHelpOverlay" => Ok(KeyBinding::new(key, OpenHelpOverlay, context)),

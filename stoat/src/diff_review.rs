@@ -36,6 +36,88 @@
 use crate::git_diff::BufferDiff;
 use std::path::PathBuf;
 
+/// Mode for comparing different git states during diff review.
+///
+/// Determines which version of the file to use as the "base" for diff computation.
+/// This controls whether we're reviewing all changes, only unstaged changes, or only
+/// staged changes.
+///
+/// # Usage
+///
+/// Used by [`Stoat`](crate::Stoat) to determine which diffs to compute when loading
+/// files in diff review mode. The mode can be changed to filter which hunks are visible.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Review all changes (working tree vs HEAD)
+/// let mode = DiffComparisonMode::WorkingVsHead;
+///
+/// // Review only unstaged changes (working tree vs index)
+/// let mode = DiffComparisonMode::WorkingVsIndex;
+///
+/// // Review only staged changes (index vs HEAD)
+/// let mode = DiffComparisonMode::IndexVsHead;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DiffComparisonMode {
+    /// Compare working tree vs HEAD (shows all changes).
+    ///
+    /// This is the default mode. Diffs show all changes in the working tree
+    /// compared to the last commit, regardless of staging state.
+    WorkingVsHead,
+
+    /// Compare working tree vs index (shows unstaged changes only).
+    ///
+    /// Diffs show only changes that are in the working tree but not yet staged.
+    /// Useful for reviewing changes before staging them.
+    WorkingVsIndex,
+
+    /// Compare index vs HEAD (shows staged changes only).
+    ///
+    /// Diffs show only changes that are staged in the index but not yet committed.
+    /// Useful for reviewing what will be included in the next commit.
+    IndexVsHead,
+}
+
+impl Default for DiffComparisonMode {
+    fn default() -> Self {
+        Self::WorkingVsHead
+    }
+}
+
+impl DiffComparisonMode {
+    /// Get human-readable display name for this mode.
+    ///
+    /// Returns a short description suitable for UI display.
+    ///
+    /// # Returns
+    ///
+    /// Static string describing the comparison mode
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::WorkingVsHead => "All Changes",
+            Self::WorkingVsIndex => "Unstaged",
+            Self::IndexVsHead => "Staged",
+        }
+    }
+
+    /// Cycle to the next comparison mode.
+    ///
+    /// Rotates through modes: WorkingVsHead -> WorkingVsIndex -> IndexVsHead -> WorkingVsHead.
+    ///
+    /// # Returns
+    ///
+    /// The next mode in the cycle
+    pub fn next(&self) -> Self {
+        match self {
+            Self::WorkingVsHead => Self::WorkingVsIndex,
+            Self::WorkingVsIndex => Self::IndexVsHead,
+            Self::IndexVsHead => Self::WorkingVsHead,
+        }
+    }
+}
+
 /// Information about a file in diff review mode.
 ///
 /// Contains the file path, its git status, and the computed diff hunks.
