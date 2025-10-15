@@ -3,13 +3,13 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
-use gpui::{AppContext, Context};
+use gpui::Context;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use std::{num::NonZeroU64, path::PathBuf};
-use text::{Buffer, BufferId, ToPoint};
+use std::path::PathBuf;
+use text::{Buffer, ToPoint};
 use tracing::{debug, warn};
 
 impl Stoat {
@@ -228,60 +228,8 @@ impl Stoat {
     /// # Related
     ///
     /// See also [`Self::move_to_file_end`] for end-of-file movement.
-    // ==== Command palette actions ====
 
-    /// Open the command palette modal.
-    ///
-    /// Builds a list of all available commands from the keymap bindings and creates
-    /// an input buffer for fuzzy search. Transitions to command_palette mode.
-    ///
-    /// # Arguments
-    ///
-    /// * `keymap` - The keymap to extract commands from
-    ///
-    /// # Behavior
-    ///
-    /// - Saves current mode to restore later
-    /// - Builds command list from all keymap bindings
-    /// - Creates empty input buffer for search query
-    /// - Initializes filtered commands list (initially all commands)
-    /// - Sets mode to "command_palette"
-    ///
-    /// # Related
-    ///
-    /// See also:
-    /// - [`Self::command_palette_dismiss`] - close command palette
-    /// - [`Self::command_palette_next`] - navigate down
-    /// - [`Self::command_palette_prev`] - navigate up
-    /// - [`Self::command_palette_execute`] - execute selected command
-    pub fn open_command_palette(&mut self, _keymap: &gpui::Keymap, cx: &mut Context<Self>) {
-        debug!(from_mode = self.mode(), "Opening command palette");
-
-        // Save current mode to restore later
-        self.command_palette_previous_mode = Some(self.mode.clone());
-
-        // Build command list from action metadata
-        let commands = build_command_list();
-        debug!(command_count = commands.len(), "Built command list");
-
-        // Create input buffer for search query
-        let buffer_id = BufferId::from(NonZeroU64::new(3).unwrap()); // Use ID 3 for command palette
-        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
-
-        // Initialize command palette state
-        self.command_palette_input = Some(input_buffer);
-        self.command_palette_commands = commands.clone();
-        self.command_palette_filtered = commands;
-        self.command_palette_selected = 0;
-
-        // Enter command_palette mode
-        self.key_context = crate::stoat::KeyContext::CommandPalette;
-        self.mode = "command_palette".into();
-        debug!("Entered command_palette mode");
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
+    // ==== Command palette helper methods (not actions) ====
 
     /// Filter commands based on fuzzy search query.
     ///
@@ -385,67 +333,7 @@ impl Stoat {
         self.command_palette_selected = 0;
     }
 
-    /// Move to the next command in the command palette list.
-    ///
-    /// Moves the selection highlight down to the next command in the filtered list.
-    /// If at the end of the list, stays at the last command.
-    pub fn command_palette_next(&mut self, cx: &mut Context<Self>) {
-        if self.mode() != "command_palette" {
-            return;
-        }
-
-        if self.command_palette_selected + 1 < self.command_palette_filtered.len() {
-            self.command_palette_selected += 1;
-            debug!(
-                selected = self.command_palette_selected,
-                "Command palette: next"
-            );
-        }
-
-        cx.notify();
-    }
-
-    /// Move to the previous command in the command palette list.
-    ///
-    /// Moves the selection highlight up to the previous command in the filtered list.
-    /// If at the beginning of the list, stays at the first command.
-    pub fn command_palette_prev(&mut self, cx: &mut Context<Self>) {
-        if self.mode() != "command_palette" {
-            return;
-        }
-
-        if self.command_palette_selected > 0 {
-            self.command_palette_selected -= 1;
-            debug!(
-                selected = self.command_palette_selected,
-                "Command palette: prev"
-            );
-        }
-
-        cx.notify();
-    }
-
-    /// Dismiss the command palette and return to the previous mode.
-    ///
-    /// Closes the command palette modal, clears all state, and returns
-    /// to the mode that was active before opening the palette.
-    pub fn command_palette_dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.mode() != "command_palette" {
-            return;
-        }
-
-        debug!("Dismissing command palette");
-
-        // Clear command palette state
-        self.command_palette_input = None;
-        self.command_palette_commands.clear();
-        self.command_palette_filtered.clear();
-        self.command_palette_selected = 0;
-        self.command_palette_previous_mode = None;
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
+    // ==== Command palette state accessors ====
 
     /// Get the TypeId of the currently selected command.
     ///
@@ -917,7 +805,7 @@ impl Stoat {
 /// # Returns
 ///
 /// A vector of [`CommandInfo`] structs representing all available commands
-fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
+pub fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
     let mut commands = Vec::new();
 
     // Iterate through all actions with metadata
