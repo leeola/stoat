@@ -5,7 +5,8 @@ use gpui::Context;
 use tracing::debug;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter visual mode.
     ///
     /// Transitions to Visual mode for text selection. Movement commands extend the

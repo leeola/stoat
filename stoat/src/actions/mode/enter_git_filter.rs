@@ -5,7 +5,8 @@ use gpui::Context;
 use tracing::debug;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter git filter mode.
     ///
     /// Transitions to git_filter mode which allows selecting a filter type for the git status view.

@@ -4,7 +4,8 @@ use crate::Stoat;
 use gpui::Context;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter insert mode.
     ///
     /// Transitions to insert mode where text input is directly inserted into the buffer.

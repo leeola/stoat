@@ -5,7 +5,8 @@ use gpui::Context;
 use tracing::debug;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter pane mode (window management).
     ///
     /// Transitions to pane mode which enables window management commands like splitting,

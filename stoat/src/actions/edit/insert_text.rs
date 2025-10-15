@@ -4,8 +4,10 @@
 //! text insertion at the cursor position. The action routes input to different buffers depending
 //! on the current mode:
 //! - In [`file_finder`](crate::Stoat::open_file_finder) mode, inserts into the file finder input
-//! - In [`command_palette`](crate::Stoat::open_command_palette) mode, inserts into the palette input
-//! - In [`buffer_finder`](crate::Stoat::open_buffer_finder) mode, inserts into the buffer finder input
+//! - In [`command_palette`](crate::Stoat::open_command_palette) mode, inserts into the palette
+//!   input
+//! - In [`buffer_finder`](crate::Stoat::open_buffer_finder) mode, inserts into the buffer finder
+//!   input
 //! - Otherwise, inserts into the main buffer at the cursor position
 //!
 //! After insertion, the cursor moves forward by the length of the inserted text, and the buffer

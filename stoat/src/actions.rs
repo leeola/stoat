@@ -1808,7 +1808,9 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }
 
+mod buffer_finder;
 mod edit;
+mod file_finder;
 mod git;
 mod mode;
 #[allow(clippy::module_inception)]

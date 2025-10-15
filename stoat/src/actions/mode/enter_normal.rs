@@ -4,7 +4,8 @@ use crate::Stoat;
 use gpui::Context;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter normal mode.
     ///
     /// Transitions to normal mode where keys trigger movement and command actions instead

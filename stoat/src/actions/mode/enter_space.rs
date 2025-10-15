@@ -4,7 +4,8 @@ use crate::Stoat;
 use gpui::Context;
 
 impl Stoat {
-    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal methods
+    // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
+    // methods
     /// Enter space mode (leader key).
     ///
     /// Transitions to space mode which acts as a leader key for additional command sequences.
