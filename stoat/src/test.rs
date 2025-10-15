@@ -28,6 +28,7 @@ pub mod cursor_notation;
 
 use crate::Stoat;
 use gpui::{AppContext, Context, Entity, TestAppContext};
+use std::path::PathBuf;
 use text::Point;
 
 /// Wrapper around [`Entity<Stoat>`] that provides test-oriented helper methods.
@@ -65,6 +66,8 @@ use text::Point;
 pub struct TestStoat<'a> {
     entity: Entity<Stoat>,
     cx: &'a mut TestAppContext,
+    temp_dir: Option<tempfile::TempDir>,
+    repo_path: Option<PathBuf>,
 }
 
 impl<'a> TestStoat<'a> {
@@ -89,7 +92,12 @@ impl<'a> TestStoat<'a> {
             stoat
         });
 
-        Self { entity, cx }
+        Self {
+            entity,
+            cx,
+            temp_dir: None,
+            repo_path: None,
+        }
     }
 
     /// Get access to the underlying [`Entity<Stoat>`].
@@ -139,6 +147,88 @@ impl<'a> TestStoat<'a> {
             .read_entity(&self.entity, |s, _| s.selection().clone())
     }
 
+    /// Initialize a git repository for testing.
+    ///
+    /// Creates a temporary directory, initializes a git repository in it, and configures
+    /// basic git settings (user.name and user.email). The temp directory is kept alive
+    /// for the lifetime of this [`TestStoat`] instance.
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - `git` command is not found on PATH
+    /// - `git init` fails
+    /// - Git configuration commands fail
+    ///
+    /// # Returns
+    ///
+    /// Returns `self` for method chaining.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// #[gpui::test]
+    /// fn test_with_git(cx: &mut TestAppContext) {
+    ///     let stoat = Stoat::test(cx).init_git();
+    ///     // Test git operations...
+    /// }
+    /// ```
+    pub fn init_git(mut self) -> Self {
+        use std::process::Command;
+
+        // Create temporary directory
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Initialize git repository
+        let output = Command::new("git")
+            .args(&["init"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to execute git init - is git installed?");
+
+        if !output.status.success() {
+            panic!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Configure git user.name
+        let output = Command::new("git")
+            .args(&["config", "user.name", "Test User"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to execute git config user.name");
+
+        if !output.status.success() {
+            panic!(
+                "git config user.name failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Configure git user.email
+        let output = Command::new("git")
+            .args(&["config", "user.email", "test@example.com"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("Failed to execute git config user.email");
+
+        if !output.status.success() {
+            panic!(
+                "git config user.email failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Store temp_dir and repo_path
+        self.temp_dir = Some(temp_dir);
+        self.repo_path = Some(repo_path);
+
+        self
+    }
+
     /// Create a TestStoat with cursor and selection from marked notation.
     ///
     /// Uses the cursor notation DSL to specify initial cursor/selection positions.
@@ -160,7 +250,7 @@ impl<'a> TestStoat<'a> {
 
         let mut test_stoat = Self::new(&parsed.text, cx);
 
-        test_stoat.update(|s, cx| {
+        test_stoat.update(|s, _cx| {
             // Set cursor position if we have one
             if let Some(&offset) = parsed.cursors.first() {
                 let point = offset_to_point(&parsed.text, offset);
