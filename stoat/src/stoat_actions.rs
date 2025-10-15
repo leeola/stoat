@@ -534,6 +534,19 @@ impl Stoat {
                 continue;
             }
 
+            // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
+            if self.diff_comparison_mode() == crate::diff_review::DiffComparisonMode::IndexVsHead {
+                if let Ok(index_content) = repo.index_content(&abs_path) {
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, cx| {
+                        item.buffer().update(cx, |buffer, _| {
+                            let len = buffer.len();
+                            buffer.edit([(0..len, index_content.as_str())]);
+                        });
+                    });
+                }
+            }
+
             // Compute diff and check if it has hunks
             if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
                 if !diff.hunks.is_empty() {
@@ -593,6 +606,19 @@ impl Stoat {
             if let Err(e) = self.load_file(&abs_path, cx) {
                 tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
                 continue;
+            }
+
+            // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
+            if self.diff_comparison_mode() == crate::diff_review::DiffComparisonMode::IndexVsHead {
+                if let Ok(index_content) = repo.index_content(&abs_path) {
+                    let buffer_item = self.active_buffer(cx);
+                    buffer_item.update(cx, |item, cx| {
+                        item.buffer().update(cx, |buffer, _| {
+                            let len = buffer.len();
+                            buffer.edit([(0..len, index_content.as_str())]);
+                        });
+                    });
+                }
             }
 
             // Compute diff and check if it has hunks

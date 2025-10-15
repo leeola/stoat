@@ -900,26 +900,16 @@ impl Stoat {
             },
             DiffComparisonMode::IndexVsHead => {
                 // Compare index against HEAD (staged changes only)
-                // For this mode, we need to load index content as the "new" text
-                // and HEAD as the "old" text. Since our buffer has working tree content,
-                // we need to temporarily use index content.
+                // The buffer should already contain index content (updated by caller),
+                // so we can use the real buffer snapshot directly.
                 let head_content = repo.head_content(path).ok()?;
-                let index_content = repo.index_content(path).ok()?;
                 tracing::debug!(
-                    "IndexVsHead: head_len={}, index_len={}",
+                    "IndexVsHead: head_len={}, buffer_len={}",
                     head_content.len(),
-                    index_content.len()
+                    buffer_snapshot.text().len()
                 );
 
-                // Create a temporary buffer with index content to compute the diff
-                use std::num::NonZeroU64;
-                let temp_buffer_id = BufferId::from(NonZeroU64::new(999999).unwrap());
-                let temp_buffer = text::Buffer::new(0, temp_buffer_id, &index_content);
-                let temp_snapshot = temp_buffer.snapshot();
-
-                // IMPORTANT: Use the real buffer_id, not temp_buffer_id, so anchors
-                // can be resolved against the actual buffer later
-                BufferDiff::new(buffer_id, head_content, &temp_snapshot).ok()?
+                BufferDiff::new(buffer_id, head_content, &buffer_snapshot).ok()?
             },
         };
 

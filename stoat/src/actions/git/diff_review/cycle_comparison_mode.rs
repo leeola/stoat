@@ -67,6 +67,22 @@ impl Stoat {
         };
         let abs_path = repo.workdir().join(&current_file_path);
 
+        // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
+        if new_mode == crate::diff_review::DiffComparisonMode::IndexVsHead {
+            if let Ok(index_content) = repo.index_content(&abs_path) {
+                let buffer_item = self.active_buffer(cx);
+                buffer_item.update(cx, |item, cx| {
+                    item.buffer().update(cx, |buffer, _| {
+                        let len = buffer.len();
+                        buffer.edit([(0..len, index_content.as_str())]);
+                    });
+                });
+            }
+        } else {
+            // For other modes, reload file to get working tree content
+            let _ = self.load_file(&abs_path, cx);
+        }
+
         // Recompute diff for new comparison mode
         if let Some(new_diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
             // Update the buffer item diff

@@ -100,8 +100,8 @@ mod tests {
             let buffer_item = s.active_buffer(cx);
             buffer_item.update(cx, |item, cx| {
                 let buffer = item.buffer();
-                buffer.update(cx, |buf, cx| {
-                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5")], cx);
+                buffer.update(cx, |buf, _cx| {
+                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5")]);
                 });
             });
         });
@@ -127,8 +127,8 @@ mod tests {
             let buffer_item = s.active_buffer(cx);
             buffer_item.update(cx, |item, cx| {
                 let buffer = item.buffer();
-                buffer.update(cx, |buf, cx| {
-                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5")], cx);
+                buffer.update(cx, |buf, _cx| {
+                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5")]);
                 });
             });
 
@@ -157,8 +157,8 @@ mod tests {
             let buffer_item = s.active_buffer(cx);
             buffer_item.update(cx, |item, cx| {
                 let buffer = item.buffer();
-                buffer.update(cx, |buf, cx| {
-                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10")], cx);
+                buffer.update(cx, |buf, _cx| {
+                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7\nLine 8\nLine 9\nLine 10")]);
                 });
             });
         });
@@ -192,8 +192,8 @@ mod tests {
             let buffer_item = s.active_buffer(cx);
             buffer_item.update(cx, |item, cx| {
                 let buffer = item.buffer();
-                buffer.update(cx, |buf, cx| {
-                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3")], cx);
+                buffer.update(cx, |buf, _cx| {
+                    buf.edit(vec![(0..0, "Line 1\nLine 2\nLine 3")]);
                 });
             });
         });

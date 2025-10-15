@@ -28,7 +28,7 @@ pub mod cursor_notation;
 
 use crate::{actions::*, Stoat};
 use gpui::{Action, AppContext, Context, Entity, TestAppContext};
-use std::{any::TypeId, path::PathBuf};
+use std::{any::TypeId, path::PathBuf, sync::Arc};
 use text::Point;
 
 /// Wrapper around [`Entity<Stoat>`] that provides test-oriented helper methods.
@@ -145,6 +145,38 @@ impl<'a> TestStoat<'a> {
     pub fn selection(&self) -> crate::cursor::Selection {
         self.cx
             .read_entity(&self.entity, |s, _| s.selection().clone())
+    }
+
+    /// Get diff review file list.
+    ///
+    /// Returns the list of files being reviewed in diff review mode.
+    /// Empty if not in diff review mode.
+    pub fn diff_review_files(&self) -> Vec<PathBuf> {
+        self.cx
+            .read_entity(&self.entity, |s, _| s.diff_review_files.clone())
+    }
+
+    /// Get current file/hunk position in diff review.
+    ///
+    /// Returns `(file_idx, hunk_idx)` tuple representing current position.
+    pub fn diff_review_position(&self) -> (usize, usize) {
+        self.cx.read_entity(&self.entity, |s, _| {
+            (
+                s.diff_review_current_file_idx,
+                s.diff_review_current_hunk_idx,
+            )
+        })
+    }
+
+    /// Get hunk count for active buffer.
+    ///
+    /// Returns the number of hunks in the currently active buffer's diff,
+    /// or `None` if no diff is loaded.
+    pub fn hunk_count(&self) -> Option<usize> {
+        self.cx.read_entity(&self.entity, |s, cx| {
+            let buffer_item = s.active_buffer(cx);
+            buffer_item.read(cx).diff().map(|d| d.hunks.len())
+        })
     }
 
     /// Get the test repository path.
@@ -399,7 +431,14 @@ impl<'a> TestStoat<'a> {
 
         // Store temp_dir and repo_path
         self.temp_dir = Some(temp_dir);
-        self.repo_path = Some(repo_path);
+        self.repo_path = Some(repo_path.clone());
+
+        // Update the Stoat's worktree to point to the temp repo
+        self.update(|s, _cx| {
+            s.worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
+                repo_path,
+            )));
+        });
 
         self
     }
