@@ -3,108 +3,16 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{PreviewData, load_file_preview, load_text_only},
+    file_finder::{load_file_preview, load_text_only, PreviewData},
     stoat::Stoat,
 };
 use gpui::Context;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use std::path::PathBuf;
 use text::{Buffer, ToPoint};
-use tracing::{debug, warn};
+use tracing::debug;
 
 impl Stoat {
-    /// Handle scroll wheel/trackpad events
-    pub fn handle_scroll(
-        &mut self,
-        delta: &crate::scroll::ScrollDelta,
-        fast_scroll: bool,
-        cx: &mut Context<Self>,
-    ) {
-        // Scroll sensitivity values
-        let base_sensitivity = 1.0;
-        let fast_multiplier = 3.0;
-
-        // Line height for delta conversion
-        let line_height = 20.0; // Default line height in pixels
-
-        // Calculate new scroll position using existing infrastructure
-        let new_position = self.scroll.apply_scroll_delta(
-            delta,
-            line_height,
-            base_sensitivity,
-            fast_multiplier,
-            fast_scroll,
-        );
-
-        // Apply bounds checking
-        let buffer_item = self.active_buffer(cx).read(cx);
-        let buffer = buffer_item.buffer().read(cx);
-        let max_point = buffer.max_point();
-        let max_scroll_y = (max_point.row as f32).max(0.0);
-
-        let bounded_position = gpui::point(
-            new_position.x.max(0.0),
-            new_position.y.max(0.0).min(max_scroll_y),
-        );
-
-        // Update scroll position
-        self.scroll.scroll_to(bounded_position);
-    }
-
-    /// Set the active KeyContext (action handler).
-    ///
-    /// Changes which UI is rendered (e.g., TextEditor, Git modal, FileFinder).
-    /// The KeyContext determines the high-level "what's showing" while mode
-    /// determines "how you interact with it".
-    ///
-    /// This is the action handler version that emits events and notifications.
-    ///
-    /// # Arguments
-    ///
-    /// * `context` - The KeyContext to activate
-    ///
-    /// # Example
-    ///
-    /// When opening git status, we use `SetKeyContext(Git)` which sets context to Git
-    /// and mode to "git_status" (the default mode for Git context from keymap.toml).
-    /// Within Git context, we can switch between git_status and git_filter modes without
-    /// the modal disappearing.
-    pub fn handle_set_key_context(
-        &mut self,
-        context: crate::stoat::KeyContext,
-        cx: &mut Context<Self>,
-    ) {
-        // Set the new context
-        self.set_key_context(context);
-
-        // Look up and set the default mode for this context
-        if let Some(meta) = self.get_key_context_meta(context) {
-            let default_mode = meta.default_mode.clone();
-            self.set_mode(&default_mode);
-            debug!(context = ?context, mode = %default_mode, "Set KeyContext with default mode");
-        } else {
-            warn!(context = ?context, "No metadata found for KeyContext, mode unchanged");
-        }
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
-    /// Set the active mode within the current KeyContext.
-    ///
-    /// Changes which keybindings are active without changing the rendered UI.
-    /// Used for transitions like git_status to git_filter within the Git context.
-    ///
-    /// # Arguments
-    ///
-    /// * `mode_name` - Name of the mode to activate
-    pub fn set_mode_by_name(&mut self, mode_name: &str, cx: &mut Context<Self>) {
-        self.mode = mode_name.to_string();
-        debug!(mode = mode_name, "Set mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-    }
-
     // ==== File finder helper methods (not actions) ====
 
     /// Load preview for selected file.
@@ -474,39 +382,6 @@ impl Stoat {
         self.current_file_path.as_deref()
     }
 
-    // ==== Help modal actions ====
-
-    /// Open help modal.
-    ///
-    /// Displays full help modal with comprehensive keybinding reference.
-    pub fn open_help_modal(&mut self, cx: &mut Context<Self>) {
-        debug!("Opening help modal");
-
-        // Save current mode to restore later
-        self.help_modal_previous_mode = Some(self.mode.clone());
-        self.key_context = crate::stoat::KeyContext::HelpModal;
-        self.mode = "help_modal".to_string();
-
-        cx.notify();
-    }
-
-    /// Dismiss help modal.
-    ///
-    /// Clears help modal state. Mode and KeyContext transitions are now handled
-    /// by the [`SetKeyContext`](crate::actions::SetKeyContext) action bound to Escape.
-    pub fn help_modal_dismiss(&mut self, cx: &mut Context<Self>) {
-        if self.mode != "help_modal" {
-            return;
-        }
-
-        debug!("Dismissing help modal");
-
-        // Clear help modal state
-        self.help_modal_previous_mode = None;
-
-        cx.notify();
-    }
-
     // ==== Buffer finder helper methods (not actions) ====
 
     /// Filter buffers based on query string.
@@ -746,55 +621,6 @@ impl Stoat {
         }
 
         debug!("No more files with hunks in current comparison mode");
-    }
-
-    // ==== File operations ====
-
-    /// Write the current buffer to disk.
-    ///
-    /// Writes the contents of the active buffer to its associated file path on disk.
-    /// After a successful write, the buffer's saved text baseline is updated to mark
-    /// the buffer as "clean" (no unsaved changes).
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the write succeeds, or `Err(String)` with an error message if:
-    /// - No file path is associated with the current buffer
-    /// - The write operation fails
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// stoat.update(|s, cx| {
-    ///     s.write_file(cx).expect("Failed to write file");
-    /// });
-    /// ```
-    pub fn write_file(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        // Get the current file path
-        let file_path = self
-            .current_file_path
-            .as_ref()
-            .ok_or_else(|| "No file path set for current buffer".to_string())?
-            .clone();
-
-        // Get buffer content
-        let buffer_item = self.active_buffer(cx);
-        let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
-
-        // Write to disk
-        std::fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
-
-        // Update saved text baseline to mark buffer as clean
-        buffer_item.update(cx, |item, _cx| {
-            item.set_saved_text(content);
-        });
-
-        tracing::info!("Wrote buffer to {:?}", file_path);
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
-
-        Ok(())
     }
 }
 

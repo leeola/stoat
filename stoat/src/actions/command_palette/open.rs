@@ -1,7 +1,7 @@
 //! Command palette open action implementation and tests.
 
 use crate::{stoat::Stoat, stoat_actions::build_command_list};
-use gpui::Context;
+use gpui::{AppContext, Context};
 use std::num::NonZeroU64;
 use text::{Buffer, BufferId};
 use tracing::debug;

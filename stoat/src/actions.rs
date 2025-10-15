@@ -1809,11 +1809,16 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
 }
 
 mod buffer_finder;
+mod command_palette;
 mod edit;
 mod file_finder;
 mod git;
+mod help_modal;
 mod mode;
 #[allow(clippy::module_inception)]
 mod r#move;
+mod scroll;
 mod select;
+mod set_key_context;
+mod set_mode;
 mod write_file;
