@@ -37,14 +37,15 @@ impl Stoat {
             let token_start = token.range.start.to_offset(&buffer_snapshot);
             let token_end = token.range.end.to_offset(&buffer_snapshot);
 
-            if token_end <= cursor_offset {
+            // Skip tokens that start at or before cursor (vim `w` behavior)
+            if token_start <= cursor_offset {
                 token_cursor.next();
                 continue;
             }
 
+            // Found first symbol after cursor
             if token.kind.is_symbol() {
-                let selection_start = cursor_offset.max(token_start);
-                found_symbol = Some(selection_start..token_end);
+                found_symbol = Some(token_start..token_end);
                 break;
             }
 
@@ -74,8 +75,9 @@ mod tests {
             s.set_cursor_position(text::Point::new(0, 0));
             s.select_next_symbol(cx);
             let sel = s.cursor.selection();
-            assert_eq!(sel.start, text::Point::new(0, 0));
-            assert_eq!(sel.end, text::Point::new(0, 5));
+            // Vim `w` behavior: skip "hello", select "world"
+            assert_eq!(sel.start, text::Point::new(0, 6));
+            assert_eq!(sel.end, text::Point::new(0, 11));
         });
     }
 }
