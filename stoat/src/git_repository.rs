@@ -324,7 +324,7 @@ impl Repository {
                 })?;
                 // IndexVsHead doesn't need untracked files (they're not in the index)
                 self.repo
-                    .diff_tree_to_index(Some(&tree), None, None)
+                    .diff_tree_to_index(Some(&tree), None, Some(&mut opts))
                     .map_err(|e| {
                         GitError::GitOperationFailed(format!("Failed to create diff: {e}"))
                     })?

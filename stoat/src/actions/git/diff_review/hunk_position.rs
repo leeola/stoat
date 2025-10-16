@@ -246,4 +246,83 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    fn staged_only_shows_same_count_across_modes(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state with 2 files
+        let file1 = repo_path.join("file1.txt");
+        let file2 = repo_path.join("file2.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
+        std::fs::write(&file2, "foo\nbar\nbaz\nqux\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+
+        // Modify both files with multiple hunks each, stage ALL changes
+        std::fs::write(&file1, "HUNK1\nline 2\nline 3\nHUNK2\nline 5\n").unwrap();
+        std::fs::write(&file2, "HUNK3\nbar\nbaz\nHUNK4\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+
+        stoat.update(|s, cx| {
+            // Open in WorkingVsHead mode (default)
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::WorkingVsHead
+            );
+
+            let position_all = s.diff_review_hunk_position(cx);
+            let (current_all, total_all) =
+                position_all.expect("Should have position in WorkingVsHead");
+
+            // Cycle to IndexVsHead (staged only)
+            s.diff_review_cycle_comparison_mode(cx);
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::IndexVsHead
+            );
+
+            let position_staged = s.diff_review_hunk_position(cx);
+            let (current_staged, total_staged) =
+                position_staged.expect("Should have position in IndexVsHead");
+
+            // BUG: These should be equal since all changes are staged
+            assert_eq!(
+                total_all, total_staged,
+                "All changes are staged, so WorkingVsHead ({}/{}) should match IndexVsHead ({}/{})",
+                current_all, total_all, current_staged, total_staged
+            );
+
+            // Try navigating in IndexVsHead mode to see if position goes beyond total
+            s.diff_review_next_hunk(cx);
+            let pos2 = s.diff_review_hunk_position(cx);
+            if let Some((current, total)) = pos2 {
+                assert!(
+                    current <= total,
+                    "Current position {} should not exceed total {}",
+                    current,
+                    total
+                );
+            }
+        });
+    }
 }
