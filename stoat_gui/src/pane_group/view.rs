@@ -1,4 +1,5 @@
 use crate::{
+    about_modal::AboutModal,
     command_overlay::CommandOverlay,
     command_palette::CommandPalette,
     editor_view::EditorView,
@@ -22,10 +23,10 @@ use std::{
 };
 use stoat::{
     actions::{
-        ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, HelpModalDismiss,
-        OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder, OpenGitStatus,
-        OpenHelpModal, OpenHelpOverlay, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight,
-        SplitUp, ToggleMinimap,
+        AboutModalDismiss, ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+        HelpModalDismiss, OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview,
+        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, ShowMinimapOnScroll,
+        SplitDown, SplitLeft, SplitRight, SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     stoat::KeyContext,
@@ -445,6 +446,40 @@ impl PaneGroupView {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
                     stoat.help_modal_dismiss(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    /// Handle opening the about modal.
+    fn handle_open_about_modal(
+        &mut self,
+        _: &OpenAboutModal,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_about_modal(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    /// Handle dismissing the about modal.
+    fn handle_about_modal_dismiss(
+        &mut self,
+        _: &AboutModalDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.about_modal_dismiss(cx);
                 });
             });
         }
@@ -1373,6 +1408,8 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_open_help_overlay))
                     .on_action(cx.listener(Self::handle_open_help_modal))
                     .on_action(cx.listener(Self::handle_help_modal_dismiss))
+                    .on_action(cx.listener(Self::handle_open_about_modal))
+                    .on_action(cx.listener(Self::handle_about_modal_dismiss))
                     .on_action(cx.listener(Self::handle_toggle_minimap))
                     .on_action(cx.listener(Self::handle_show_minimap_on_scroll))
                     .child(self.render_member(self.pane_group.root(), 0))
@@ -1445,6 +1482,10 @@ impl Render for PaneGroupView {
                     .when(key_context == KeyContext::HelpModal, |div| {
                         // Render help modal when in HelpModal context
                         div.child(HelpModal::new())
+                    })
+                    .when(key_context == KeyContext::AboutModal, |div| {
+                        // Render about modal when in AboutModal context
+                        div.child(AboutModal::new())
                     })
                     // Render minimap as fixed overlay on the right side with opacity
                     // Only render if opacity > 0 (minimap_visible) to avoid performance impact

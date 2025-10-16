@@ -33,6 +33,10 @@ default_mode = "diff_review"
 name = "HelpModal"
 default_mode = "help_modal"
 
+[[contexts]]
+name = "AboutModal"
+default_mode = "about_modal"
+
 # Editor Modes
 [[modes]]
 name = "normal"
@@ -87,6 +91,11 @@ previous = "normal"
 [[modes]]
 name = "help_modal"
 display_name = "HELP"
+previous = "normal"
+
+[[modes]]
+name = "about_modal"
+display_name = "ABOUT"
 previous = "normal"
 
 # Normal Mode - Vim-style navigation and commands
@@ -916,3 +925,9 @@ context = "Editor && mode == normal"
 key = "escape"
 action = "SetKeyContext(TextEditor)"
 context = "Editor && mode == help_modal"
+
+# About Modal Mode - Version and build info
+[[bindings]]
+key = "escape"
+action = "SetKeyContext(TextEditor)"
+context = "Editor && mode == about_modal"

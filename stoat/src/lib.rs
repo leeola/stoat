@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod buffer_item;
 pub mod buffer_store;
+pub mod build_info;
 pub mod cursor;
 pub mod diff_review;
 pub mod display_buffer;

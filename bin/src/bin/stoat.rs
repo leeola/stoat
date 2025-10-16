@@ -26,6 +26,13 @@ fn main() {
 
     tracing::info!("Starting Stoat editor");
 
+    let build_info = stoat::build_info::build_info();
+    tracing::info!(
+        commit = build_info.commit_hash,
+        dirty = build_info.dirty,
+        "Build information"
+    );
+
     let cli = Cli::parse();
 
     // Handle subcommands

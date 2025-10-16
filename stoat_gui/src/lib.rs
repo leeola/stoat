@@ -1,3 +1,4 @@
+pub mod about_modal;
 pub mod app;
 pub mod command_overlay;
 pub mod command_palette;

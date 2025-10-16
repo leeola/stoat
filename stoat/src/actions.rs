@@ -298,6 +298,10 @@ actions!(
         OpenHelpModal,
         /// Dismiss help modal
         HelpModalDismiss,
+        /// Open about modal
+        OpenAboutModal,
+        /// Dismiss about modal
+        AboutModalDismiss,
     ]
 );
 
@@ -873,6 +877,17 @@ action_metadata!(
     "dismiss help",
     "Close the help modal and return to the previous mode"
 );
+action_metadata!(
+    OpenAboutModal,
+    "about",
+    "Show information about Stoat including version and build details",
+    ["about"]
+);
+action_metadata!(
+    AboutModalDismiss,
+    "dismiss about",
+    "Close the about modal and return to the previous mode"
+);
 
 // KeyContext and Mode actions
 action_metadata!(
@@ -1181,6 +1196,14 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<HelpModalDismiss>(),
         HelpModalDismiss::action_name(),
     );
+    names.insert(
+        TypeId::of::<OpenAboutModal>(),
+        OpenAboutModal::action_name(),
+    );
+    names.insert(
+        TypeId::of::<AboutModalDismiss>(),
+        AboutModalDismiss::action_name(),
+    );
 
     // KeyContext and Mode actions
     names.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::action_name());
@@ -1482,6 +1505,14 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<HelpModalDismiss>(),
         HelpModalDismiss::description(),
     );
+    descriptions.insert(
+        TypeId::of::<OpenAboutModal>(),
+        OpenAboutModal::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<AboutModalDismiss>(),
+        AboutModalDismiss::description(),
+    );
 
     // KeyContext and Mode actions
     descriptions.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::description());
@@ -1763,6 +1794,11 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<HelpModalDismiss>(),
         HelpModalDismiss::help_text(),
     );
+    help.insert(TypeId::of::<OpenAboutModal>(), OpenAboutModal::help_text());
+    help.insert(
+        TypeId::of::<AboutModalDismiss>(),
+        AboutModalDismiss::help_text(),
+    );
 
     // KeyContext and Mode actions
     help.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::help_text());
@@ -1789,6 +1825,7 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 
     // Help actions
     aliases.insert(TypeId::of::<OpenHelpOverlay>(), OpenHelpOverlay::aliases());
+    aliases.insert(TypeId::of::<OpenAboutModal>(), OpenAboutModal::aliases());
 
     // Git repository actions
     aliases.insert(TypeId::of::<GitStageFile>(), GitStageFile::aliases());
@@ -1808,6 +1845,7 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
 }
 
+mod about_modal;
 mod buffer_finder;
 mod command_palette;
 mod edit;

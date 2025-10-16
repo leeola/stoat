@@ -200,6 +200,12 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<HelpModalDismiss>() {
         window.dispatch_action(Box::new(HelpModalDismiss), cx);
     }
+    // About actions
+    else if type_id == TypeId::of::<OpenAboutModal>() {
+        window.dispatch_action(Box::new(OpenAboutModal), cx);
+    } else if type_id == TypeId::of::<AboutModalDismiss>() {
+        window.dispatch_action(Box::new(AboutModalDismiss), cx);
+    }
     // View actions
     else if type_id == TypeId::of::<ToggleMinimap>() {
         window.dispatch_action(Box::new(ToggleMinimap), cx);
