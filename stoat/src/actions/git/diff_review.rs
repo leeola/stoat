@@ -6,6 +6,7 @@
 mod approve_hunk;
 mod cycle_comparison_mode;
 mod dismiss;
+mod hunk_position;
 mod next_hunk;
 mod next_unreviewed_hunk;
 mod open;

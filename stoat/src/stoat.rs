@@ -630,6 +630,99 @@ impl Stoat {
         ))
     }
 
+    /// Get current hunk position across all files in diff review.
+    ///
+    /// Computes the global hunk position by scanning all files in the current comparison
+    /// mode and counting hunks. Used by status bar to show "Patch X/Y" progress indicator.
+    ///
+    /// # Workflow
+    ///
+    /// 1. Discovers git repository from worktree root
+    /// 2. For each file: reads content from disk and git, counts hunks directly
+    /// 3. Adds current hunk index + 1 to get current position
+    /// 4. Continues scanning remaining files to get total count
+    ///
+    /// # Returns
+    ///
+    /// `Some((current, total))` where both are 1-indexed for display, or [`None`] if not in
+    /// diff review mode or if git operations fail.
+    ///
+    /// # Performance
+    ///
+    /// This method computes hunk counts for all files on every call to get accurate counts.
+    /// Uses [`crate::git_diff::count_hunks`] which is fast (no buffer allocations).
+    /// Called from GUI status bar rendering, so should be fast enough for typical usage.
+    /// Consider caching if performance becomes an issue.
+    ///
+    /// # Related
+    ///
+    /// - [`crate::git_diff::count_hunks`] - fast hunk counting from text
+    /// - [`diff_comparison_mode`](Self::diff_comparison_mode) - determines which refs to compare
+    pub fn diff_review_hunk_position(&self, _cx: &App) -> Option<(usize, usize)> {
+        if !self.is_in_diff_review() {
+            tracing::debug!("diff_review_hunk_position: not in diff review mode");
+            return None;
+        }
+
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(e) => {
+                tracing::error!(
+                    "diff_review_hunk_position: failed to discover repository at {:?}: {}",
+                    root_path,
+                    e
+                );
+                return None;
+            },
+        };
+
+        // Use git2's diff API to count hunks efficiently
+        let hunk_counts = match repo.count_hunks_by_file(self.diff_review_comparison_mode) {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::error!("diff_review_hunk_position: failed to count hunks: {}", e);
+                return None;
+            },
+        };
+
+        let mut total_hunks = 0;
+        let mut hunks_before_current = 0;
+
+        for (file_idx, file_path) in self.diff_review_files.iter().enumerate() {
+            // Look up hunk count for this file (0 if not in the map)
+            let hunk_count = hunk_counts.get(file_path).copied().unwrap_or(0);
+
+            if file_idx < self.diff_review_current_file_idx {
+                hunks_before_current += hunk_count;
+            }
+
+            total_hunks += hunk_count;
+        }
+
+        if total_hunks == 0 {
+            tracing::debug!(
+                "diff_review_hunk_position: no hunks found across {} files in {:?} mode",
+                self.diff_review_files.len(),
+                self.diff_review_comparison_mode
+            );
+            return Some((0, 0));
+        }
+
+        let current_position = hunks_before_current + self.diff_review_current_hunk_idx + 1;
+
+        tracing::debug!(
+            "diff_review_hunk_position: position {}/{} (current_file={}, current_hunk={}, mode={:?})",
+            current_position,
+            total_hunks,
+            self.diff_review_current_file_idx,
+            self.diff_review_current_hunk_idx,
+            self.diff_review_comparison_mode
+        );
+
+        Some((current_position, total_hunks))
+    }
+
     /// Get the parent stoat if this is a minimap.
     ///
     /// Returns the parent editor entity if this is a minimap, or `None` for regular editors.

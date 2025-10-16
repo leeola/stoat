@@ -34,7 +34,10 @@
 //! - [`git_diff`](crate::git_diff) - Uses this to get base content for diff computation
 //! - [`BufferItem`](crate::BufferItem) - Stores computed diffs
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 /// Errors that can occur during git operations.
@@ -253,6 +256,108 @@ impl Repository {
     /// Reference to the underlying git2 repository
     pub fn inner(&self) -> &git2::Repository {
         &self.repo
+    }
+
+    /// Count hunks per file for a given diff comparison mode.
+    ///
+    /// Uses git2's diff API to efficiently compute hunk counts for all modified files.
+    /// This is much faster than manually reading files and computing diffs, and correctly
+    /// handles new untracked files (compares them against an empty base).
+    ///
+    /// # Arguments
+    ///
+    /// * `comparison_mode` - Which git refs to compare (WorkingVsHead, WorkingVsIndex, IndexVsHead)
+    ///
+    /// # Returns
+    ///
+    /// HashMap mapping file paths (relative to repo root) to their hunk counts.
+    /// Returns empty map if no files have changes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let repo = Repository::discover(Path::new("."))?;
+    /// let counts = repo.count_hunks_by_file(DiffComparisonMode::WorkingVsHead)?;
+    /// for (path, count) in counts {
+    ///     println!("{:?}: {} hunks", path, count);
+    /// }
+    /// ```
+    pub fn count_hunks_by_file(
+        &self,
+        comparison_mode: crate::diff_review::DiffComparisonMode,
+    ) -> Result<HashMap<PathBuf, usize>, GitError> {
+        use crate::diff_review::DiffComparisonMode;
+
+        // Create diff based on comparison mode
+        // Configure diff options to include untracked files with full content
+        // Use 0 context lines to match BufferDiff behavior (only show changed lines)
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true);
+        opts.recurse_untracked_dirs(true);
+        opts.show_untracked_content(true);
+        opts.context_lines(0);
+
+        let diff = match comparison_mode {
+            DiffComparisonMode::WorkingVsHead => {
+                let head = self.repo.head().map_err(|e| {
+                    GitError::GitOperationFailed(format!("Failed to get HEAD: {e}"))
+                })?;
+                let tree = head.peel_to_tree().map_err(|e| {
+                    GitError::GitOperationFailed(format!("Failed to get tree: {e}"))
+                })?;
+                self.repo
+                    .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
+                    .map_err(|e| {
+                        GitError::GitOperationFailed(format!("Failed to create diff: {e}"))
+                    })?
+            },
+            DiffComparisonMode::WorkingVsIndex => self
+                .repo
+                .diff_index_to_workdir(None, Some(&mut opts))
+                .map_err(|e| GitError::GitOperationFailed(format!("Failed to create diff: {e}")))?,
+            DiffComparisonMode::IndexVsHead => {
+                let head = self.repo.head().map_err(|e| {
+                    GitError::GitOperationFailed(format!("Failed to get HEAD: {e}"))
+                })?;
+                let tree = head.peel_to_tree().map_err(|e| {
+                    GitError::GitOperationFailed(format!("Failed to get tree: {e}"))
+                })?;
+                // IndexVsHead doesn't need untracked files (they're not in the index)
+                self.repo
+                    .diff_tree_to_index(Some(&tree), None, None)
+                    .map_err(|e| {
+                        GitError::GitOperationFailed(format!("Failed to create diff: {e}"))
+                    })?
+            },
+        };
+
+        // Count hunks per file using foreach
+        // Use RefCell for interior mutability since both closures need mutable access
+        use std::cell::RefCell;
+        let hunk_counts: RefCell<HashMap<PathBuf, usize>> = RefCell::new(HashMap::new());
+
+        diff.foreach(
+            &mut |delta, _progress| {
+                // File callback - initialize count for this file
+                if let Some(path) = delta.new_file().path() {
+                    hunk_counts.borrow_mut().insert(path.to_path_buf(), 0);
+                }
+                true
+            },
+            None,
+            Some(&mut |delta, _hunk| {
+                // Hunk callback - increment count for this file
+                if let Some(path) = delta.new_file().path() {
+                    let mut counts = hunk_counts.borrow_mut();
+                    *counts.entry(path.to_path_buf()).or_insert(0) += 1;
+                }
+                true
+            }),
+            None,
+        )
+        .map_err(|e| GitError::GitOperationFailed(format!("Failed to iterate diff: {e}")))?;
+
+        Ok(hunk_counts.into_inner())
     }
 
     /// Convert an absolute or relative path to a path relative to the repository root.

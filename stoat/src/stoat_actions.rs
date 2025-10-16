@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{PreviewData, load_file_preview, load_text_only},
+    file_finder::{load_file_preview, load_text_only, PreviewData},
     stoat::Stoat,
 };
 use gpui::Context;

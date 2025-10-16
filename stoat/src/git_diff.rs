@@ -358,6 +358,44 @@ fn compute_diff(
     Ok(hunks)
 }
 
+/// Count hunks in a diff without creating full BufferDiff.
+///
+/// Fast utility for counting the number of change hunks between two texts.
+/// Used by diff review to compute total hunk counts across all files.
+///
+/// # Arguments
+///
+/// * `base_text` - Old text (from git)
+/// * `modified_text` - New text (from working tree or index)
+///
+/// # Returns
+///
+/// Number of hunks in the diff, or 0 if diff computation fails
+///
+/// # Example
+///
+/// ```ignore
+/// let head_content = repo.head_content(&path)?;
+/// let working_content = std::fs::read_to_string(&path)?;
+/// let hunk_count = count_hunks(&head_content, &working_content);
+/// ```
+pub fn count_hunks(base_text: &str, modified_text: &str) -> usize {
+    let mut diff_options = git2::DiffOptions::new();
+    diff_options.context_lines(0);
+    diff_options.ignore_whitespace(false);
+
+    match git2::Patch::from_buffers(
+        base_text.as_bytes(),
+        None,
+        modified_text.as_bytes(),
+        None,
+        Some(&mut diff_options),
+    ) {
+        Ok(patch) => patch.num_hunks(),
+        Err(_) => 0,
+    }
+}
+
 /// Convert a line number to a byte offset in text.
 ///
 /// Helper function for diff computation. Handles line counting and byte indexing.
