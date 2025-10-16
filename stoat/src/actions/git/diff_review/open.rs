@@ -94,6 +94,8 @@ impl Stoat {
                                 let len = buffer.len();
                                 buffer.edit([(0..len, index_content.as_str())]);
                             });
+                            // Reparse to update syntax highlighting tokens
+                            let _ = item.reparse(cx);
                         });
                     }
                 }
@@ -171,6 +173,8 @@ impl Stoat {
                             let len = buffer.len();
                             buffer.edit([(0..len, index_content.as_str())]);
                         });
+                        // Reparse to update syntax highlighting tokens
+                        let _ = item.reparse(cx);
                     });
                 }
             }
@@ -225,6 +229,35 @@ impl Stoat {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use text::ToPoint;
+
+    /// Helper: Assert that cursor is at the current hunk's start position.
+    ///
+    /// This verifies the exact symptom of the bug: "no cursor" means cursor
+    /// goes to wrong position (like 0,0) instead of being at the hunk.
+    fn assert_cursor_at_hunk(stoat: &Stoat, cx: &gpui::App) {
+        let buffer_item = stoat.active_buffer(cx);
+        let diff = buffer_item.read(cx).diff().expect("Diff should be loaded");
+
+        if stoat.diff_review_current_hunk_idx >= diff.hunks.len() {
+            panic!(
+                "Hunk index {} out of range (only {} hunks)",
+                stoat.diff_review_current_hunk_idx,
+                diff.hunks.len()
+            );
+        }
+
+        let hunk = &diff.hunks[stoat.diff_review_current_hunk_idx];
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot);
+
+        let cursor = stoat.cursor_position();
+        assert_eq!(
+            cursor.row, hunk_start.row,
+            "Cursor should be at hunk {} start (row {}), but is at row {}",
+            stoat.diff_review_current_hunk_idx, hunk_start.row, cursor.row
+        );
+    }
 
     #[gpui::test]
     fn opens_diff_review_with_correct_state(cx: &mut TestAppContext) {
@@ -421,6 +454,506 @@ mod tests {
             assert!(
                 diff_final.is_some(),
                 "Diff should still be loaded after pressing next"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn indexed_mode_wraparound_cursor_position(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state
+        let file1 = repo_path.join("file1.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify file and stage changes (working tree = index for now)
+        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review in default mode
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+            assert_eq!(s.diff_review_files.len(), 1);
+
+            // Cycle to IndexVsHead mode
+            s.diff_review_cycle_comparison_mode(cx);
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::IndexVsHead
+            );
+
+            // Verify cursor is at hunk before pressing next
+            assert_cursor_at_hunk(s, cx);
+
+            // Press next - with only 1 file and 1 hunk, this wraps around
+            s.diff_review_next_hunk(cx);
+
+            // BUG CHECK: Cursor should still be at hunk start, not at Point(0,0)
+            assert_cursor_at_hunk(s, cx);
+
+            // Verify we're still at file 0, hunk 0 (wrapped around)
+            assert_eq!(s.diff_review_current_file_idx, 0);
+            assert_eq!(s.diff_review_current_hunk_idx, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn indexed_mode_with_working_tree_changes(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state
+        let file1 = repo_path.join("file1.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify and stage: line 2 -> STAGED
+        std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Further modify working tree: STAGED -> WORKING (unstaged change)
+        std::fs::write(&file1, "line 1\nWORKING\nline 3\n").unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review in default WorkingVsHead mode
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+
+            // In WorkingVsHead mode, buffer should contain "WORKING"
+            let buffer_item = s.active_buffer(cx);
+            let buffer_text = buffer_item.read(cx).buffer().read(cx).text();
+            assert!(
+                buffer_text.contains("WORKING"),
+                "Buffer should contain working tree content in WorkingVsHead mode"
+            );
+
+            // Cycle to IndexVsHead mode
+            s.diff_review_cycle_comparison_mode(cx);
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::IndexVsHead
+            );
+
+            // BUG CHECK: In IndexVsHead mode, buffer should contain "STAGED", not "WORKING"
+            let buffer_item_after = s.active_buffer(cx);
+            let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
+            assert!(
+                buffer_text_after.contains("STAGED"),
+                "Buffer should contain index content (STAGED) in IndexVsHead mode, but got: {}",
+                buffer_text_after
+            );
+            assert!(
+                !buffer_text_after.contains("WORKING"),
+                "Buffer should NOT contain working tree content (WORKING) in IndexVsHead mode"
+            );
+
+            // BUG CHECK: Cursor should be at hunk start
+            assert_cursor_at_hunk(s, cx);
+
+            // BUG CHECK: Diff should show index vs HEAD (STAGED vs line 2), not working vs HEAD
+            let diff = buffer_item_after
+                .read(cx)
+                .diff()
+                .expect("Diff should be loaded");
+            assert_eq!(diff.hunks.len(), 1, "Should have 1 hunk for staged change");
+        });
+    }
+
+    #[gpui::test]
+    fn indexed_mode_next_with_different_working_tree(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state
+        let file1 = repo_path.join("file1.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify and stage: line 2 -> STAGED
+        std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Further modify working tree: STAGED -> WORKING (unstaged change)
+        std::fs::write(&file1, "line 1\nWORKING\nline 3\n").unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+
+            // Cycle to IndexVsHead mode
+            s.diff_review_cycle_comparison_mode(cx);
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::IndexVsHead
+            );
+
+            // Verify initial state is correct
+            assert_cursor_at_hunk(s, cx);
+            let buffer_item_before = s.active_buffer(cx);
+            let buffer_text_before = buffer_item_before.read(cx).buffer().read(cx).text();
+            assert!(
+                buffer_text_before.contains("STAGED"),
+                "Buffer should contain STAGED before navigation"
+            );
+
+            // Press next - this wraps around and reloads the file
+            s.diff_review_next_hunk(cx);
+
+            // BUG CHECK: After wraparound, buffer should STILL contain "STAGED", not "WORKING"
+            let buffer_item_after = s.active_buffer(cx);
+            let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
+            assert!(
+                buffer_text_after.contains("STAGED"),
+                "Buffer should contain index content (STAGED) after next/wraparound, but got: {}",
+                buffer_text_after
+            );
+            assert!(
+                !buffer_text_after.contains("WORKING"),
+                "Buffer should NOT contain working tree content (WORKING) after wraparound"
+            );
+
+            // BUG CHECK: Cursor should still be at hunk start after wraparound
+            assert_cursor_at_hunk(s, cx);
+
+            // BUG CHECK: Diff should still be valid with correct hunks
+            let diff_after = buffer_item_after
+                .read(cx)
+                .diff()
+                .expect("Diff should be loaded");
+            assert_eq!(
+                diff_after.hunks.len(),
+                1,
+                "Should still have 1 hunk after wraparound"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn unstaged_mode_with_no_unstaged_changes(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state
+        let file1 = repo_path.join("file1.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify and stage - NO unstaged changes (working tree = index)
+        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review in default WorkingVsHead mode
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+
+            // Verify we have a diff in WorkingVsHead mode
+            let buffer_item_before = s.active_buffer(cx);
+            let diff_before = buffer_item_before.read(cx).diff();
+            assert!(diff_before.is_some(), "Should have diff in WorkingVsHead mode");
+            assert_eq!(
+                diff_before.unwrap().hunks.len(),
+                1,
+                "Should have 1 hunk in WorkingVsHead"
+            );
+
+            // Cursor should be at hunk
+            assert_cursor_at_hunk(s, cx);
+            let cursor_before_switch = s.cursor_position();
+            // Cursor is at hunk, which should be row 1 (line 2 modified)
+            assert!(
+                cursor_before_switch.row >= 1,
+                "Cursor should be at hunk (row >= 1) before switching modes"
+            );
+
+            // Cycle to WorkingVsIndex mode (unstaged only)
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+            );
+
+            // BUG A: Diff should be cleared (no unstaged changes)
+            // Since working tree = index, there are no unstaged changes
+            let buffer_item_after = s.active_buffer(cx);
+            let diff_after = buffer_item_after.read(cx).diff();
+
+            // EXPECTED: diff should be None or have 0 hunks
+            // ACTUAL: diff still has old hunks from WorkingVsHead
+            assert!(
+                diff_after.is_none() || diff_after.unwrap().hunks.is_empty(),
+                "Diff should be cleared in WorkingVsIndex when no unstaged changes, but has {} hunks",
+                diff_after.map(|d| d.hunks.len()).unwrap_or(0)
+            );
+
+            // BUG C: Cursor should be reset to file start when there are no hunks
+            // EXPECTED: cursor at Point(0, 0) (file start)
+            // ACTUAL: cursor stays at old hunk position (row 1)
+            let cursor_after_switch = s.cursor_position();
+            assert_eq!(
+                cursor_after_switch.row, 0,
+                "BUG C: Cursor should be reset to row 0 when switching to mode with no hunks, but is at row {}",
+                cursor_after_switch.row
+            );
+            assert_eq!(
+                cursor_after_switch.column, 0,
+                "BUG C: Cursor should be reset to column 0 when switching to mode with no hunks, but is at column {}",
+                cursor_after_switch.column
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn unstaged_mode_next_with_no_hunks(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create initial committed state
+        let file1 = repo_path.join("file1.txt");
+        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify and stage - NO unstaged changes (working tree = index)
+        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review and cycle to WorkingVsIndex mode
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+
+            // Cycle to WorkingVsIndex mode (unstaged only)
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+            );
+
+            // At this point: Bug A and Bug C from previous test
+            // Note: we're in WorkingVsIndex mode with 0 hunks, cursor is at stale position
+
+            // Now press next (j) to move to next hunk
+            s.diff_review_next_hunk(cx);
+
+            // BUG A: Diff should STILL be cleared (no unstaged changes)
+            // After pressing next, load_next_file wraps around but should not show hunks
+            let buffer_item_after_next = s.active_buffer(cx);
+            let diff_after_next = buffer_item_after_next.read(cx).diff();
+
+            assert!(
+                diff_after_next.is_none() || diff_after_next.unwrap().hunks.is_empty(),
+                "Diff should be cleared after next in WorkingVsIndex when no unstaged changes, but has {} hunks",
+                diff_after_next.map(|d| d.hunks.len()).unwrap_or(0)
+            );
+
+            // BUG B: Cursor should be reset to file start after pressing next in mode with no hunks
+            // EXPECTED: cursor at Point(0, 0) (file start)
+            // ACTUAL: cursor stays at stale position or becomes invalid
+            let cursor_after_next = s.cursor_position();
+            assert_eq!(
+                cursor_after_next.row, 0,
+                "BUG B: Cursor should be reset to row 0 after pressing next in mode with no hunks, but is at row {}",
+                cursor_after_next.row
+            );
+            assert_eq!(
+                cursor_after_next.column, 0,
+                "BUG B: Cursor should be reset to column 0 after pressing next in mode with no hunks, but is at column {}",
+                cursor_after_next.column
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn indexed_mode_has_broken_syntax_highlighting(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let repo_path = stoat.repo_path().unwrap();
+
+        // Create a Rust file with clear syntax that needs highlighting
+        let file1 = repo_path.join("example.rs");
+        std::fs::write(
+            &file1,
+            "fn main() {\n    println!(\"hello\");\n    let x = 42;\n}\n",
+        )
+        .unwrap();
+
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(&["commit", "-m", "Initial"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Modify and stage: change line 2
+        std::fs::write(
+            &file1,
+            "fn main() {\n    println!(\"STAGED\");\n    let x = 42;\n}\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .args(&["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Further modify working tree: STAGED -> WORKING
+        std::fs::write(
+            &file1,
+            "fn main() {\n    println!(\"WORKING\");\n    let x = 42;\n}\n",
+        )
+        .unwrap();
+
+        stoat.update(|s, cx| {
+            // Open diff review in WorkingVsHead mode
+            s.open_diff_review(cx);
+            assert_eq!(s.mode(), "diff_review");
+
+            // In WorkingVsHead mode, verify syntax highlighting works
+            let buffer_item_before = s.active_buffer(cx);
+            let buffer_snapshot_before = buffer_item_before.read(cx).buffer().read(cx).snapshot();
+            let token_snapshot_before = buffer_item_before.read(cx).token_snapshot();
+            let token_count_before = token_snapshot_before.token_count(&buffer_snapshot_before);
+
+            // Should have tokens for Rust syntax (fn, println, let, etc.)
+            assert!(
+                token_count_before > 0,
+                "Should have syntax tokens in WorkingVsHead mode"
+            );
+
+            // Cycle to IndexVsHead mode
+            s.diff_review_cycle_comparison_mode(cx);
+            s.diff_review_cycle_comparison_mode(cx);
+            assert_eq!(
+                s.diff_comparison_mode(),
+                crate::diff_review::DiffComparisonMode::IndexVsHead
+            );
+
+            // ROOT CAUSE BUG: After switching to IndexVsHead, we replaced buffer content
+            // but never called reparse(), so token_map is out of sync
+            let buffer_item_after = s.active_buffer(cx);
+
+            // Verify buffer contains index content (STAGED)
+            let buffer_text = buffer_item_after.read(cx).buffer().read(cx).text();
+            assert!(
+                buffer_text.contains("STAGED"),
+                "Buffer should contain index content (STAGED)"
+            );
+
+            // BUG CHECK: Token count should still be valid (not zero, not stale)
+            let buffer_snapshot_after = buffer_item_after.read(cx).buffer().read(cx).snapshot();
+            let token_snapshot_after = buffer_item_after.read(cx).token_snapshot();
+            let token_count_after = token_snapshot_after.token_count(&buffer_snapshot_after);
+
+            // BUG: Token versions don't match buffer version
+            // The token_map version is from before the edit, but buffer version is after
+            let buffer_version = buffer_snapshot_after.version().clone();
+            let token_version = token_snapshot_after.version.clone();
+
+            // EXPECTED: buffer_version == token_version (tokens are in sync)
+            // ACTUAL: buffer_version != token_version (tokens are stale)
+            assert_eq!(
+                buffer_version, token_version,
+                "BUG: Token version {:?} doesn't match buffer version {:?}. \
+                 Syntax highlighting is out of sync! Root cause: buffer.edit() was called \
+                 but reparse() was not called to update token_map.",
+                token_version, buffer_version
+            );
+
+            tracing::info!(
+                "Before: {} tokens. After mode switch: {} tokens. Buffer version: {:?}, Token version: {:?}",
+                token_count_before, token_count_after, buffer_version, token_version
             );
         });
     }

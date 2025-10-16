@@ -76,6 +76,8 @@ impl Stoat {
                         let len = buffer.len();
                         buffer.edit([(0..len, index_content.as_str())]);
                     });
+                    // Reparse to update syntax highlighting tokens
+                    let _ = item.reparse(cx);
                 });
             }
         } else {
@@ -97,8 +99,19 @@ impl Stoat {
                 self.diff_review_current_hunk_idx = if hunk_count > 0 { 0 } else { 0 };
             }
 
-            // Jump to current hunk (or first hunk if current is out of range)
-            self.jump_to_current_hunk(cx);
+            if hunk_count > 0 {
+                self.jump_to_current_hunk(cx);
+            } else {
+                // No hunks in new mode - reset cursor to file start
+                self.cursor.move_to(text::Point::new(0, 0));
+            }
+        } else {
+            // No diff for new mode - clear old diff and reset cursor
+            let buffer_item = self.active_buffer(cx);
+            buffer_item.update(cx, |item, _| {
+                item.set_diff(None);
+            });
+            self.cursor.move_to(text::Point::new(0, 0));
         }
 
         cx.emit(crate::stoat::StoatEvent::Changed);

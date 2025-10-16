@@ -3,7 +3,7 @@
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
 use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
+    file_finder::{PreviewData, load_file_preview, load_text_only},
     stoat::Stoat,
 };
 use gpui::Context;
@@ -543,6 +543,8 @@ impl Stoat {
                             let len = buffer.len();
                             buffer.edit([(0..len, index_content.as_str())]);
                         });
+                        // Reparse to update syntax highlighting tokens
+                        let _ = item.reparse(cx);
                     });
                 }
             }
@@ -571,6 +573,13 @@ impl Stoat {
         }
 
         debug!("No more files with hunks in current comparison mode");
+
+        // Clear old diff and reset cursor when no files have hunks
+        let buffer_item = self.active_buffer(cx);
+        buffer_item.update(cx, |item, _| {
+            item.set_diff(None);
+        });
+        self.cursor.move_to(text::Point::new(0, 0));
     }
 
     /// Load previous file in diff review.
@@ -617,6 +626,8 @@ impl Stoat {
                             let len = buffer.len();
                             buffer.edit([(0..len, index_content.as_str())]);
                         });
+                        // Reparse to update syntax highlighting tokens
+                        let _ = item.reparse(cx);
                     });
                 }
             }
@@ -647,6 +658,13 @@ impl Stoat {
         }
 
         debug!("No more files with hunks in current comparison mode");
+
+        // Clear old diff and reset cursor when no files have hunks
+        let buffer_item = self.active_buffer(cx);
+        buffer_item.update(cx, |item, _| {
+            item.set_diff(None);
+        });
+        self.cursor.move_to(text::Point::new(0, 0));
     }
 }
 
