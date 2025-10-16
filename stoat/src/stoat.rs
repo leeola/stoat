@@ -660,7 +660,6 @@ impl Stoat {
     /// - [`diff_comparison_mode`](Self::diff_comparison_mode) - determines which refs to compare
     pub fn diff_review_hunk_position(&self, _cx: &App) -> Option<(usize, usize)> {
         if !self.is_in_diff_review() {
-            tracing::debug!("diff_review_hunk_position: not in diff review mode");
             return None;
         }
 
