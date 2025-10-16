@@ -276,12 +276,12 @@ mod tests {
 
         // Git add and commit
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -329,8 +329,7 @@ mod tests {
             assert_eq!(
                 s.cursor_position().row,
                 hunk_start_row,
-                "Cursor should be at start of first hunk (row {})",
-                hunk_start_row
+                "Cursor should be at start of first hunk (row {hunk_start_row})"
             );
 
             // Verify no approvals yet
@@ -354,12 +353,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -367,7 +366,7 @@ mod tests {
         // Modify file and stage changes (no unstaged changes - working tree = index)
         std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -470,12 +469,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -483,7 +482,7 @@ mod tests {
         // Modify file and stage changes (working tree = index for now)
         std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -529,12 +528,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -542,7 +541,7 @@ mod tests {
         // Modify and stage: line 2 -> STAGED
         std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -576,8 +575,7 @@ mod tests {
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
                 buffer_text_after.contains("STAGED"),
-                "Buffer should contain index content (STAGED) in IndexVsHead mode, but got: {}",
-                buffer_text_after
+                "Buffer should contain index content (STAGED) in IndexVsHead mode, but got: {buffer_text_after}"
             );
             assert!(
                 !buffer_text_after.contains("WORKING"),
@@ -608,12 +606,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -621,7 +619,7 @@ mod tests {
         // Modify and stage: line 2 -> STAGED
         std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -659,8 +657,7 @@ mod tests {
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
                 buffer_text_after.contains("STAGED"),
-                "Buffer should contain index content (STAGED) after next/wraparound, but got: {}",
-                buffer_text_after
+                "Buffer should contain index content (STAGED) after next/wraparound, but got: {buffer_text_after}"
             );
             assert!(
                 !buffer_text_after.contains("WORKING"),
@@ -695,12 +692,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -708,7 +705,7 @@ mod tests {
         // Modify and stage - NO unstaged changes (working tree = index)
         std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -786,12 +783,12 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -799,7 +796,7 @@ mod tests {
         // Modify and stage - NO unstaged changes (working tree = index)
         std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -866,12 +863,12 @@ mod tests {
         .unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
+            .args(["commit", "-m", "Initial"])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -883,7 +880,7 @@ mod tests {
         )
         .unwrap();
         Command::new("git")
-            .args(&["add", "."])
+            .args(["add", "."])
             .current_dir(repo_path)
             .output()
             .unwrap();
@@ -945,10 +942,9 @@ mod tests {
             // ACTUAL: buffer_version != token_version (tokens are stale)
             assert_eq!(
                 buffer_version, token_version,
-                "BUG: Token version {:?} doesn't match buffer version {:?}. \
+                "BUG: Token version {token_version:?} doesn't match buffer version {buffer_version:?}. \
                  Syntax highlighting is out of sync! Root cause: buffer.edit() was called \
-                 but reparse() was not called to update token_map.",
-                token_version, buffer_version
+                 but reparse() was not called to update token_map."
             );
 
             tracing::info!(

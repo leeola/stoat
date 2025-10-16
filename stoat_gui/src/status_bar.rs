@@ -90,7 +90,7 @@ impl StatusBar {
         let ellipsis = "...";
 
         for component in components.iter().rev().skip(1) {
-            let candidate = format!("{}/{}", component, result);
+            let candidate = format!("{component}/{result}");
             if candidate.len() + ellipsis.len() <= max_chars {
                 result = candidate;
             } else {
@@ -98,7 +98,7 @@ impl StatusBar {
             }
         }
 
-        format!("{}{}", ellipsis, result)
+        format!("{ellipsis}{result}")
     }
 
     /// Format git branch and ahead/behind for display.
@@ -189,7 +189,7 @@ impl RenderOnce for StatusBar {
 
             // Add hunk position
             if let Some((current, total)) = self.hunk_position {
-                let patch_text = format!("Patch {}/{}", current, total);
+                let patch_text = format!("Patch {current}/{total}");
                 center = center
                     .child(div().text_color(rgb(0x4ec9b0)).child(patch_text))
                     .child(div().text_color(rgb(0x808080)).child("|"));
@@ -197,7 +197,7 @@ impl RenderOnce for StatusBar {
 
             // Add file progress
             if let Some((current, total_files)) = self.review_file_progress {
-                let file_text = format!("File {}/{}", current, total_files);
+                let file_text = format!("File {current}/{total_files}");
                 center = center.child(div().text_color(rgb(0x4ec9b0)).child(file_text));
             }
 

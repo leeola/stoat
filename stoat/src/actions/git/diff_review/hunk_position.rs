@@ -20,13 +20,13 @@ mod tests {
         std::fs::write(&file2, "foo\nbar\nbaz\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
-            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -45,8 +45,7 @@ mod tests {
             assert_eq!(
                 position,
                 Some((1, 2)),
-                "First hunk should show position 1/2, not {:?}",
-                position
+                "First hunk should show position 1/2, not {position:?}"
             );
 
             // Navigate to next hunk (which is in file2)
@@ -58,8 +57,7 @@ mod tests {
             assert_eq!(
                 position_after,
                 Some((2, 2)),
-                "Second hunk should show position 2/2, not {:?}",
-                position_after
+                "Second hunk should show position 2/2, not {position_after:?}"
             );
         });
     }
@@ -76,21 +74,21 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
-            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
         // Modify and stage line 2 only (1 staged hunk at line 2)
         std::fs::write(&file1, "line 1\nSTAGED\nline 3\nline 4\nline 5\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -111,8 +109,7 @@ mod tests {
             let position_all = s.diff_review_hunk_position(cx);
             assert!(
                 matches!(position_all, Some((1, 2))),
-                "WorkingVsHead should show 1/2, got {:?}",
-                position_all
+                "WorkingVsHead should show 1/2, got {position_all:?}"
             );
 
             // Cycle to WorkingVsIndex (unstaged only) - should see 1 hunk
@@ -125,8 +122,7 @@ mod tests {
             let position_unstaged = s.diff_review_hunk_position(cx);
             assert!(
                 matches!(position_unstaged, Some((1, 1))),
-                "WorkingVsIndex should show 1/1 (only unstaged hunk), got {:?}",
-                position_unstaged
+                "WorkingVsIndex should show 1/1 (only unstaged hunk), got {position_unstaged:?}"
             );
 
             // Cycle to IndexVsHead (staged only) - should see 1 hunk
@@ -139,8 +135,7 @@ mod tests {
             let position_staged = s.diff_review_hunk_position(cx);
             assert!(
                 matches!(position_staged, Some((1, 1))),
-                "IndexVsHead should show 1/1 (only staged hunk), got {:?}",
-                position_staged
+                "IndexVsHead should show 1/1 (only staged hunk), got {position_staged:?}"
             );
         });
     }
@@ -157,13 +152,13 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
-            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -183,16 +178,14 @@ mod tests {
             let position = s.diff_review_hunk_position(cx);
             assert!(
                 position.is_some(),
-                "Patch counter should work even with new untracked files, got {:?}",
-                position
+                "Patch counter should work even with new untracked files, got {position:?}"
             );
 
             // Should have 2 total hunks: 1 from file1, 1 from file2 (entire file is a hunk)
             let (current, total) = position.unwrap();
             assert_eq!(
                 total, 2,
-                "Should have 2 total hunks (1 from modified file1, 1 from new file2), got {}/{}",
-                current, total
+                "Should have 2 total hunks (1 from modified file1, 1 from new file2), got {current}/{total}"
             );
         });
     }
@@ -209,13 +202,13 @@ mod tests {
         std::fs::write(&file1, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
-            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -231,8 +224,7 @@ mod tests {
             assert_eq!(
                 position1,
                 Some((1, 2)),
-                "First hunk should be 1/2, got {:?}",
-                position1
+                "First hunk should be 1/2, got {position1:?}"
             );
 
             // Navigate to second hunk
@@ -241,8 +233,7 @@ mod tests {
             assert_eq!(
                 position2,
                 Some((2, 2)),
-                "Second hunk should be 2/2, got {:?}",
-                position2
+                "Second hunk should be 2/2, got {position2:?}"
             );
         });
     }
@@ -261,13 +252,13 @@ mod tests {
         std::fs::write(&file2, "foo\nbar\nbaz\nqux\n").unwrap();
 
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
         Command::new("git")
-            .args(&["commit", "-m", "Initial"])
-            .current_dir(&repo_path)
+            .args(["commit", "-m", "Initial"])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -275,8 +266,8 @@ mod tests {
         std::fs::write(&file1, "HUNK1\nline 2\nline 3\nHUNK2\nline 5\n").unwrap();
         std::fs::write(&file2, "HUNK3\nbar\nbaz\nHUNK4\n").unwrap();
         Command::new("git")
-            .args(&["add", "."])
-            .current_dir(&repo_path)
+            .args(["add", "."])
+            .current_dir(repo_path)
             .output()
             .unwrap();
 
@@ -308,8 +299,7 @@ mod tests {
             // BUG: These should be equal since all changes are staged
             assert_eq!(
                 total_all, total_staged,
-                "All changes are staged, so WorkingVsHead ({}/{}) should match IndexVsHead ({}/{})",
-                current_all, total_all, current_staged, total_staged
+                "All changes are staged, so WorkingVsHead ({current_all}/{total_all}) should match IndexVsHead ({current_staged}/{total_staged})"
             );
 
             // Try navigating in IndexVsHead mode to see if position goes beyond total
@@ -318,9 +308,7 @@ mod tests {
             if let Some((current, total)) = pos2 {
                 assert!(
                     current <= total,
-                    "Current position {} should not exceed total {}",
-                    current,
-                    total
+                    "Current position {current} should not exceed total {total}"
                 );
             }
         });

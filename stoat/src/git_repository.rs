@@ -427,19 +427,19 @@ mod tests {
         let path = dir.path().to_path_buf();
 
         Command::new("git")
-            .args(&["init"])
+            .args(["init"])
             .current_dir(&path)
             .output()
             .expect("Failed to init git repo");
 
         Command::new("git")
-            .args(&["config", "user.name", "Test"])
+            .args(["config", "user.name", "Test"])
             .current_dir(&path)
             .output()
             .expect("Failed to configure git");
 
         Command::new("git")
-            .args(&["config", "user.email", "test@example.com"])
+            .args(["config", "user.email", "test@example.com"])
             .current_dir(&path)
             .output()
             .expect("Failed to configure git");
@@ -477,13 +477,13 @@ mod tests {
         fs::write(&file_path, "hello world\n").expect("Failed to write file");
 
         Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(&path)
             .output()
             .expect("Failed to git add");
 
         Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(&path)
             .output()
             .expect("Failed to git commit");
@@ -504,13 +504,13 @@ mod tests {
         fs::write(&file_path, "hello\n").expect("Failed to write file");
 
         Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(&path)
             .output()
             .expect("Failed to git add");
 
         Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(&path)
             .output()
             .expect("Failed to git commit");

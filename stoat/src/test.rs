@@ -315,39 +315,39 @@ impl<'a> TestStoat<'a> {
         else if type_id == TypeId::of::<WriteFile>() {
             self.update(|s, cx| {
                 s.write_file(cx)
-                    .unwrap_or_else(|e| panic!("WriteFile action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("WriteFile action failed: {e}"))
             });
         }
         // Git actions
         else if type_id == TypeId::of::<GitStageFile>() {
             self.update(|s, cx| {
                 s.git_stage_file(cx)
-                    .unwrap_or_else(|e| panic!("GitStageFile action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitStageFile action failed: {e}"))
             });
         } else if type_id == TypeId::of::<GitStageAll>() {
             self.update(|s, cx| {
                 s.git_stage_all(cx)
-                    .unwrap_or_else(|e| panic!("GitStageAll action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitStageAll action failed: {e}"))
             });
         } else if type_id == TypeId::of::<GitUnstageFile>() {
             self.update(|s, cx| {
                 s.git_unstage_file(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageFile action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitUnstageFile action failed: {e}"))
             });
         } else if type_id == TypeId::of::<GitUnstageAll>() {
             self.update(|s, cx| {
                 s.git_unstage_all(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageAll action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitUnstageAll action failed: {e}"))
             });
         } else if type_id == TypeId::of::<GitStageHunk>() {
             self.update(|s, cx| {
                 s.git_stage_hunk(cx)
-                    .unwrap_or_else(|e| panic!("GitStageHunk action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitStageHunk action failed: {e}"))
             });
         } else if type_id == TypeId::of::<GitUnstageHunk>() {
             self.update(|s, cx| {
                 s.git_unstage_hunk(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageHunk action failed: {}", e))
+                    .unwrap_or_else(|e| panic!("GitUnstageHunk action failed: {e}"))
             });
         } else {
             panic!("Unsupported action type: {}", std::any::type_name::<A>());
@@ -389,7 +389,7 @@ impl<'a> TestStoat<'a> {
 
         // Initialize git repository
         let output = Command::new("git")
-            .args(&["init"])
+            .args(["init"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git init - is git installed?");
@@ -403,7 +403,7 @@ impl<'a> TestStoat<'a> {
 
         // Configure git user.name
         let output = Command::new("git")
-            .args(&["config", "user.name", "Test User"])
+            .args(["config", "user.name", "Test User"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git config user.name");
@@ -417,7 +417,7 @@ impl<'a> TestStoat<'a> {
 
         // Configure git user.email
         let output = Command::new("git")
-            .args(&["config", "user.email", "test@example.com"])
+            .args(["config", "user.email", "test@example.com"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git config user.email");
@@ -564,15 +564,13 @@ fn offset_to_point(text: &str, offset: usize) -> Point {
 /// Convert Point (row, column) to absolute byte offset.
 fn point_to_offset(text: &str, point: Point) -> usize {
     let mut offset = 0;
-    let mut row = 0;
 
-    for line in text.lines() {
-        if row == point.row {
+    for (row, line) in text.lines().enumerate() {
+        if row == point.row as usize {
             return offset + point.column as usize;
         }
 
         offset += line.len() + 1; // +1 for \n
-        row += 1;
     }
 
     // Point is past the end
@@ -769,7 +767,7 @@ mod tests {
         for offset in offsets {
             let point = offset_to_point(text, offset);
             let back = point_to_offset(text, point);
-            assert_eq!(offset, back, "Round trip failed for offset {}", offset);
+            assert_eq!(offset, back, "Round trip failed for offset {offset}");
         }
     }
 }

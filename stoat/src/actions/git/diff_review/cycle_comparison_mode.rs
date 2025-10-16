@@ -96,7 +96,7 @@ impl Stoat {
             // Reset hunk index if it's now out of range
             let hunk_count = new_diff.hunks.len();
             if self.diff_review_current_hunk_idx >= hunk_count {
-                self.diff_review_current_hunk_idx = if hunk_count > 0 { 0 } else { 0 };
+                self.diff_review_current_hunk_idx = 0;
             }
 
             if hunk_count > 0 {

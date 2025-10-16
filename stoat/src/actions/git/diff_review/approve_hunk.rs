@@ -75,7 +75,7 @@ mod tests {
                 // Verify hunk was marked as approved
                 let file_path = &s.diff_review_files[s.diff_review_current_file_idx];
                 if let Some(approved) = s.diff_review_approved_hunks.get(file_path) {
-                    assert!(approved.len() > 0);
+                    assert!(!approved.is_empty());
                 }
             }
         });

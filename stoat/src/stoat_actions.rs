@@ -119,24 +119,6 @@ impl Stoat {
         self.file_finder_preview.as_ref()
     }
 
-    // ==== File navigation actions ====
-
-    /// Move cursor to the start of the file.
-    ///
-    /// Positions the cursor at the very beginning of the buffer (row 0, column 0),
-    /// regardless of current position.
-    ///
-    /// # Behavior
-    ///
-    /// - Moves cursor to (0, 0)
-    /// - Resets goal column for vertical movement
-    /// - Works from any position in the buffer
-    /// - Triggers scroll animation to make cursor visible
-    ///
-    /// # Related
-    ///
-    /// See also [`Self::move_to_file_end`] for end-of-file movement.
-
     // ==== Command palette helper methods (not actions) ====
 
     /// Filter commands based on fuzzy search query.

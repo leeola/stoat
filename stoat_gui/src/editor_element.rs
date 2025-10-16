@@ -924,8 +924,8 @@ fn apply_modified_range_backgrounds(
                 } else {
                     run.background_color
                 },
-                underline: run.underline.clone(),
-                strikethrough: run.strikethrough.clone(),
+                underline: run.underline,
+                strikethrough: run.strikethrough,
             });
         }
 

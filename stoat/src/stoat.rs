@@ -69,7 +69,7 @@ impl KeyContext {
             "CommandPalette" => Ok(Self::CommandPalette),
             "DiffReview" => Ok(Self::DiffReview),
             "HelpModal" => Ok(Self::HelpModal),
-            _ => Err(format!("Unknown KeyContext: {}", s)),
+            _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }
 }

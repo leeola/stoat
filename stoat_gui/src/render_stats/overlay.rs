@@ -42,7 +42,7 @@ impl RenderStatsOverlay {
         let avg_ms = tracker.avg_frame_time_ms();
 
         // Create frame time text - show ms as primary metric
-        let frame_text = format!("Frame: {:.1}ms", avg_ms);
+        let frame_text = format!("Frame: {avg_ms:.1}ms");
         let font = Font {
             family: SharedString::from("Menlo"),
             features: Default::default(),

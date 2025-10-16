@@ -44,11 +44,11 @@ impl Stoat {
             .arg("-A")
             .current_dir(repo_dir)
             .output()
-            .map_err(|e| format!("Failed to execute git add -A: {}", e))?;
+            .map_err(|e| format!("Failed to execute git add -A: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git add -A failed: {}", stderr));
+            return Err(format!("git add -A failed: {stderr}"));
         }
 
         tracing::info!("Staged all changes in repository at {:?}", repo_dir);
@@ -86,7 +86,7 @@ mod tests {
 
         // Verify all files are staged
         let output = std::process::Command::new("git")
-            .args(&["status", "--porcelain"])
+            .args(["status", "--porcelain"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git status");
@@ -96,18 +96,15 @@ mod tests {
         // All files should be staged (status starts with 'A ')
         assert!(
             status.contains("A  file1.txt"),
-            "file1.txt should be staged, got: {}",
-            status
+            "file1.txt should be staged, got: {status}"
         );
         assert!(
             status.contains("A  file2.txt"),
-            "file2.txt should be staged, got: {}",
-            status
+            "file2.txt should be staged, got: {status}"
         );
         assert!(
             status.contains("A  file3.txt"),
-            "file3.txt should be staged, got: {}",
-            status
+            "file3.txt should be staged, got: {status}"
         );
     }
 

@@ -179,14 +179,12 @@ mod tests {
                 assert_eq!(
                     s.key_context(),
                     context,
-                    "Failed to set context {:?}",
-                    context
+                    "Failed to set context {context:?}"
                 );
                 assert_eq!(
                     s.mode(),
                     expected_mode,
-                    "Wrong default mode for context {:?}",
-                    context
+                    "Wrong default mode for context {context:?}"
                 );
             }
         });

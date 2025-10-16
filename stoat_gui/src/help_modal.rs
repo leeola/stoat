@@ -31,6 +31,12 @@ use gpui::{
 #[derive(IntoElement)]
 pub struct HelpModal {}
 
+impl Default for HelpModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HelpModal {
     /// Create a new help modal renderer.
     pub fn new() -> Self {

@@ -60,23 +60,23 @@ impl Stoat {
 
         let hunk_index = diff
             .hunk_for_row(cursor_row, &buffer_snapshot)
-            .ok_or_else(|| format!("No hunk at cursor row {}", cursor_row))?;
+            .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
 
         let hunk = &diff.hunks[hunk_index];
 
         // Generate patch for this hunk
         let patch =
-            super::hunk_patch::generate_hunk_patch(&diff, hunk, &buffer_snapshot, &file_path)?;
+            super::hunk_patch::generate_hunk_patch(diff, hunk, &buffer_snapshot, &file_path)?;
 
         // Apply patch to staging area
         let mut child = std::process::Command::new("git")
-            .args(&["apply", "--cached", "--unidiff-zero", "-"])
+            .args(["apply", "--cached", "--unidiff-zero", "-"])
             .current_dir(repo_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Failed to spawn git apply: {}", e))?;
+            .map_err(|e| format!("Failed to spawn git apply: {e}"))?;
 
         {
             use std::io::Write;
@@ -86,16 +86,16 @@ impl Stoat {
                 .ok_or_else(|| "Failed to open stdin".to_string())?;
             stdin
                 .write_all(patch.as_bytes())
-                .map_err(|e| format!("Failed to write patch to stdin: {}", e))?;
+                .map_err(|e| format!("Failed to write patch to stdin: {e}"))?;
         }
 
         let output = child
             .wait_with_output()
-            .map_err(|e| format!("Failed to wait for git apply: {}", e))?;
+            .map_err(|e| format!("Failed to wait for git apply: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git apply failed: {}", stderr));
+            return Err(format!("git apply failed: {stderr}"));
         }
 
         tracing::info!("Staged hunk at row {} in {:?}", cursor_row, file_path);
@@ -120,13 +120,13 @@ mod tests {
 
         // Commit initial version
         std::process::Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git add");
 
         std::process::Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git commit");
@@ -169,7 +169,7 @@ mod tests {
 
         // Verify hunk is staged
         let output = std::process::Command::new("git")
-            .args(&["diff", "--cached"])
+            .args(["diff", "--cached"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to execute git diff --cached");
@@ -177,8 +177,7 @@ mod tests {
         let diff_output = String::from_utf8_lossy(&output.stdout);
         assert!(
             diff_output.contains("new line"),
-            "Staged diff should contain the new line, got: {}",
-            diff_output
+            "Staged diff should contain the new line, got: {diff_output}"
         );
     }
 
@@ -210,13 +209,13 @@ mod tests {
         std::fs::write(&file_path, "line 1\n").expect("Failed to write file");
 
         std::process::Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git add");
 
         std::process::Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git commit");

@@ -45,11 +45,11 @@ impl Stoat {
             .arg("HEAD")
             .current_dir(repo_dir)
             .output()
-            .map_err(|e| format!("Failed to execute git reset HEAD: {}", e))?;
+            .map_err(|e| format!("Failed to execute git reset HEAD: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git reset HEAD failed: {}", stderr));
+            return Err(format!("git reset HEAD failed: {stderr}"));
         }
 
         tracing::info!("Unstaged all changes in repository at {:?}", repo_dir);
@@ -75,13 +75,13 @@ mod tests {
         std::fs::write(&init_file, "init").expect("Failed to write init file");
 
         std::process::Command::new("git")
-            .args(&["add", "init.txt"])
+            .args(["add", "init.txt"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to git add");
 
         std::process::Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to git commit");
@@ -96,14 +96,14 @@ mod tests {
         std::fs::write(&file3, "content 3").expect("Failed to write file3");
 
         std::process::Command::new("git")
-            .args(&["add", "-A"])
+            .args(["add", "-A"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to git add");
 
         // Verify files are staged
         let output = std::process::Command::new("git")
-            .args(&["diff", "--cached", "--name-only"])
+            .args(["diff", "--cached", "--name-only"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git diff --cached");
@@ -120,7 +120,7 @@ mod tests {
 
         // Verify no files are staged
         let output = std::process::Command::new("git")
-            .args(&["diff", "--cached", "--name-only"])
+            .args(["diff", "--cached", "--name-only"])
             .current_dir(&repo_path)
             .output()
             .expect("Failed to execute git diff --cached");
@@ -128,8 +128,7 @@ mod tests {
         let staged_files = String::from_utf8_lossy(&output.stdout);
         assert!(
             staged_files.trim().is_empty(),
-            "No files should be staged after unstage all, got: {}",
-            staged_files
+            "No files should be staged after unstage all, got: {staged_files}"
         );
     }
 

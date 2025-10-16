@@ -66,7 +66,7 @@ impl Stoat {
         let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
 
         // Write to disk
-        std::fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+        std::fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
 
         // Update saved text baseline to mark buffer as clean
         buffer_item.update(cx, |item, _cx| {

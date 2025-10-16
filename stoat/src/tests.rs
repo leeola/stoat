@@ -673,7 +673,7 @@ fn move_to_file_end_single_line(cx: &mut TestAppContext) {
 #[gpui::test]
 fn page_up_basic(cx: &mut TestAppContext) {
     // Create 40 lines of text
-    let lines: Vec<String> = (0..40).map(|i| format!("line {}", i)).collect();
+    let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
     let mut stoat = Stoat::test_with_text(&lines.join("\n"), cx);
 
     stoat.update(|s, cx| {
@@ -719,7 +719,7 @@ fn page_up_at_start(cx: &mut TestAppContext) {
 #[gpui::test]
 fn page_down_basic(cx: &mut TestAppContext) {
     // Create 40 lines of text
-    let lines: Vec<String> = (0..40).map(|i| format!("line {}", i)).collect();
+    let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
     let mut stoat = Stoat::test_with_text(&lines.join("\n"), cx);
 
     stoat.update(|s, cx| {
@@ -736,7 +736,7 @@ fn page_down_basic(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn page_down_near_end(cx: &mut TestAppContext) {
-    let lines: Vec<String> = (0..20).map(|i| format!("line {}", i)).collect();
+    let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
     let mut stoat = Stoat::test_with_text(&lines.join("\n"), cx);
 
     stoat.update(|s, cx| {
@@ -1426,7 +1426,7 @@ fn table_driven_move_left(cx: &mut TestAppContext) {
 
     for (input, expected, description) in cases {
         let mut stoat = Stoat::test_with_cursor_notation(input, cx)
-            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+            .unwrap_or_else(|e| panic!("Failed to parse input '{input}': {e}"));
 
         stoat.update(|s, cx| {
             s.move_left(cx);
@@ -1437,9 +1437,7 @@ fn table_driven_move_left(cx: &mut TestAppContext) {
         assert_eq!(
             stoat.to_cursor_notation(),
             expected,
-            "Failed: {} (input: '{}')",
-            description,
-            input
+            "Failed: {description} (input: '{input}')"
         );
     }
 }
@@ -1460,7 +1458,7 @@ fn table_driven_move_right(cx: &mut TestAppContext) {
 
     for (input, expected, description) in cases {
         let mut stoat = Stoat::test_with_cursor_notation(input, cx)
-            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+            .unwrap_or_else(|e| panic!("Failed to parse input '{input}': {e}"));
 
         stoat.update(|s, cx| {
             s.move_right(cx);
@@ -1469,9 +1467,7 @@ fn table_driven_move_right(cx: &mut TestAppContext) {
         assert_eq!(
             stoat.to_cursor_notation(),
             expected,
-            "Failed: {} (input: '{}')",
-            description,
-            input
+            "Failed: {description} (input: '{input}')"
         );
     }
 }
@@ -1489,7 +1485,7 @@ fn table_driven_delete_left(cx: &mut TestAppContext) {
 
     for (input, expected, description) in cases {
         let mut stoat = Stoat::test_with_cursor_notation(input, cx)
-            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+            .unwrap_or_else(|e| panic!("Failed to parse input '{input}': {e}"));
 
         stoat.update(|s, cx| {
             s.delete_left(cx);
@@ -1498,9 +1494,7 @@ fn table_driven_delete_left(cx: &mut TestAppContext) {
         assert_eq!(
             stoat.to_cursor_notation(),
             expected,
-            "Failed: {} (input: '{}')",
-            description,
-            input
+            "Failed: {description} (input: '{input}')"
         );
     }
 }
@@ -1517,21 +1511,19 @@ fn table_driven_selections(cx: &mut TestAppContext) {
 
     for (input, expected_text, description) in cases {
         let stoat = Stoat::test_with_cursor_notation(input, cx)
-            .unwrap_or_else(|e| panic!("Failed to parse input '{}': {}", input, e));
+            .unwrap_or_else(|e| panic!("Failed to parse input '{input}': {e}"));
 
         assert_eq!(
             stoat.buffer_text(),
             expected_text,
-            "Text mismatch for: {}",
-            description
+            "Text mismatch for: {description}"
         );
 
         // Verify selection exists
         let selection = stoat.selection();
         assert!(
             !selection.is_empty(),
-            "Selection should not be empty for: {}",
-            description
+            "Selection should not be empty for: {description}"
         );
     }
 }

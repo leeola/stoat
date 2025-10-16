@@ -1000,9 +1000,9 @@ impl Render for PaneGroupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // Track scroll position for ScrollHint mode
         // Extract early to avoid borrow conflicts with later code
-        let current_scroll_y = self.pane_editors.get(&self.active_pane).and_then(|editor| {
+        let current_scroll_y = self.pane_editors.get(&self.active_pane).map(|editor| {
             let stoat = editor.read(cx).stoat.read(cx);
-            Some(stoat.scroll_position().y)
+            stoat.scroll_position().y
         });
 
         // Update scroll hint state if in ScrollHint mode

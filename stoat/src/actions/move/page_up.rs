@@ -45,7 +45,7 @@ mod tests {
         stoat.update(|s, cx| {
             let mut lines = vec![];
             for i in 0..50 {
-                lines.push(format!("Line {}", i));
+                lines.push(format!("Line {i}"));
             }
             s.insert_text(&lines.join("\n"), cx);
             s.set_cursor_position(text::Point::new(40, 0));

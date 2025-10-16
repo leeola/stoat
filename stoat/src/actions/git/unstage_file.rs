@@ -50,11 +50,11 @@ impl Stoat {
             )
             .current_dir(repo_dir)
             .output()
-            .map_err(|e| format!("Failed to execute git reset HEAD: {}", e))?;
+            .map_err(|e| format!("Failed to execute git reset HEAD: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git reset HEAD failed: {}", stderr));
+            return Err(format!("git reset HEAD failed: {stderr}"));
         }
 
         tracing::info!("Unstaged file {:?}", file_path);
@@ -79,13 +79,13 @@ mod tests {
         std::fs::write(&file_path, "initial").expect("Failed to write file");
 
         std::process::Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git add");
 
         std::process::Command::new("git")
-            .args(&["commit", "-m", "Initial commit"])
+            .args(["commit", "-m", "Initial commit"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git commit");
@@ -94,14 +94,14 @@ mod tests {
         std::fs::write(&file_path, "modified content").expect("Failed to write file");
 
         std::process::Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to git add");
 
         // Verify file is staged
         let output = std::process::Command::new("git")
-            .args(&["diff", "--cached", "--name-only"])
+            .args(["diff", "--cached", "--name-only"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to execute git diff --cached");
@@ -118,7 +118,7 @@ mod tests {
 
         // Verify file is no longer staged
         let output = std::process::Command::new("git")
-            .args(&["diff", "--cached", "--name-only"])
+            .args(["diff", "--cached", "--name-only"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to execute git diff --cached");
@@ -126,8 +126,7 @@ mod tests {
         let staged_files = String::from_utf8_lossy(&output.stdout);
         assert!(
             !staged_files.contains("test.txt"),
-            "File should not be staged after unstaging, got: {}",
-            staged_files
+            "File should not be staged after unstaging, got: {staged_files}"
         );
     }
 

@@ -59,8 +59,8 @@ pub(super) fn generate_hunk_patch(
     let mut patch = String::new();
 
     // File headers
-    patch.push_str(&format!("--- a/{}\n", file_name));
-    patch.push_str(&format!("+++ b/{}\n", file_name));
+    patch.push_str(&format!("--- a/{file_name}\n"));
+    patch.push_str(&format!("+++ b/{file_name}\n"));
 
     // Get hunk line numbers
     let buffer_start = hunk.buffer_range.start.to_point(buffer_snapshot);
@@ -86,8 +86,7 @@ pub(super) fn generate_hunk_patch(
 
     // Hunk header
     patch.push_str(&format!(
-        "@@ -{},{} +{},{} @@\n",
-        old_start, old_lines, new_start, new_lines
+        "@@ -{old_start},{old_lines} +{new_start},{new_lines} @@\n"
     ));
 
     // Hunk content
@@ -100,19 +99,19 @@ pub(super) fn generate_hunk_patch(
             let content = &buffer_text[start_offset..end_offset];
 
             for line in content.lines() {
-                patch.push_str(&format!("+{}\n", line));
+                patch.push_str(&format!("+{line}\n"));
             }
         },
         DiffHunkStatus::Deleted => {
             // Deleted lines - get from base text
             for line in base_content.lines() {
-                patch.push_str(&format!("-{}\n", line));
+                patch.push_str(&format!("-{line}\n"));
             }
         },
         DiffHunkStatus::Modified => {
             // Modified - show deletion then addition
             for line in base_content.lines() {
-                patch.push_str(&format!("-{}\n", line));
+                patch.push_str(&format!("-{line}\n"));
             }
 
             let buffer_text = buffer_snapshot.text();
@@ -121,7 +120,7 @@ pub(super) fn generate_hunk_patch(
             let content = &buffer_text[start_offset..end_offset];
 
             for line in content.lines() {
-                patch.push_str(&format!("+{}\n", line));
+                patch.push_str(&format!("+{line}\n"));
             }
         },
     }

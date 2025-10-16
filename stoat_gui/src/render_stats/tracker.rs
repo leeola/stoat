@@ -88,8 +88,10 @@ impl FrameTimer {
     /// occurs (keyboard press, mouse event) and ending when rendering completes.
     ///
     /// TODO: Change `record_frame()` to a two-phase measurement:
+    ///
     /// - `start_frame()`: Called in action handlers when user input triggers work
     /// - `end_frame()`: Called at end of paint phase
+    ///
     /// This would measure true input-to-screen latency instead of inter-frame gaps.
     pub fn avg_frame_time_ms(&self) -> f64 {
         if self.frame_times.is_empty() {

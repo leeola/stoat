@@ -48,11 +48,11 @@ impl Stoat {
             )
             .current_dir(repo_dir)
             .output()
-            .map_err(|e| format!("Failed to execute git add: {}", e))?;
+            .map_err(|e| format!("Failed to execute git add: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git add failed: {}", stderr));
+            return Err(format!("git add failed: {stderr}"));
         }
 
         tracing::info!("Staged file {:?}", file_path);
@@ -81,7 +81,7 @@ mod tests {
         stoat.dispatch(GitStageFile);
 
         let output = std::process::Command::new("git")
-            .args(&["status", "--porcelain"])
+            .args(["status", "--porcelain"])
             .current_dir(stoat.repo_path().unwrap())
             .output()
             .expect("Failed to execute git status");
@@ -89,8 +89,7 @@ mod tests {
         let status = String::from_utf8_lossy(&output.stdout);
         assert!(
             status.starts_with("A "),
-            "File should be staged (status should start with 'A '), got: {}",
-            status
+            "File should be staged (status should start with 'A '), got: {status}"
         );
     }
 
