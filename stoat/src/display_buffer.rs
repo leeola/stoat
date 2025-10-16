@@ -235,12 +235,11 @@ impl DisplayBuffer {
 
                         hunk_idx += 1;
                     } else {
-                        // For Modified hunks: don't show phantom deleted rows, compute intra-line
-                        // diff For Added hunks: show phantom deleted rows
-                        // if in review mode
+                        // For Modified and Added hunks: show phantom deleted rows in review mode
+                        // Modified hunks also compute intra-line diff for word-level highlighting
                         let is_modified = matches!(hunk.status, DiffHunkStatus::Modified);
 
-                        if show_phantom_rows && has_deleted_content && !is_modified {
+                        if show_phantom_rows && has_deleted_content {
                             let deleted_text = diff.base_text_for_hunk(idx);
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
@@ -610,10 +609,10 @@ mod tests {
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
 
-        // Should have 3 rows: 1 normal, 1 modified, 1 normal
-        // Modified hunks no longer show phantom deleted rows - they show intra-line highlighting
-        // instead
-        assert_eq!(display_buffer.row_count(), 3);
+        // Should have 4 rows: 1 normal, 1 phantom deleted ("line 2"), 1 modified ("modified"), 1
+        // normal Modified hunks show both old content (phantom) and new content (with intra-line
+        // highlighting)
+        assert_eq!(display_buffer.row_count(), 4);
 
         let rows: Vec<_> = display_buffer.rows().collect();
 
@@ -630,6 +629,66 @@ mod tests {
             !modified_rows[0].modified_ranges.is_empty(),
             "Modified row should have non-empty modified_ranges for intra-line diff"
         );
+    }
+
+    #[test]
+    fn modified_line_shows_both_versions() {
+        let buffer = create_buffer("line 1\nhello universe\nline 3");
+        let snapshot = buffer.snapshot();
+
+        // Base text with original mid-line content
+        let base_text = "line 1\nhello world\nline 3";
+        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+            .expect("Failed to create diff");
+
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+
+        // Should have 4 rows: 1 normal, 1 phantom deleted, 1 modified, 1 normal
+        assert_eq!(
+            display_buffer.row_count(),
+            4,
+            "Should have normal + phantom deleted + modified + normal rows"
+        );
+
+        let rows: Vec<_> = display_buffer.rows().collect();
+
+        // Row 0 should be normal
+        assert_eq!(rows[0].content, "line 1");
+        assert_eq!(rows[0].diff_status, None);
+
+        // Row 1 should be phantom deleted with old content
+        assert_eq!(rows[1].buffer_row, None, "Row 1 should be phantom");
+        assert_eq!(
+            rows[1].diff_status,
+            Some(DiffHunkStatus::Deleted),
+            "Row 1 should be marked Deleted"
+        );
+        assert_eq!(
+            rows[1].content, "hello world",
+            "Phantom row should show old content"
+        );
+
+        // Row 2 should be modified with new content
+        assert_eq!(rows[2].buffer_row, Some(1), "Row 2 should be buffer row 1");
+        assert_eq!(
+            rows[2].diff_status,
+            Some(DiffHunkStatus::Modified),
+            "Row 2 should be marked Modified"
+        );
+        assert_eq!(
+            rows[2].content, "hello universe",
+            "Modified row should show new content"
+        );
+
+        // Modified row should have word-level highlighting on "universe"
+        assert!(
+            !rows[2].modified_ranges.is_empty(),
+            "Modified row should have non-empty modified_ranges for changed word"
+        );
+
+        // Row 3 should be normal
+        assert_eq!(rows[3].content, "line 3");
+        assert_eq!(rows[3].diff_status, None);
     }
 
     #[test]
