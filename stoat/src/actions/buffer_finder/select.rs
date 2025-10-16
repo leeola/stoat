@@ -50,7 +50,7 @@ impl Stoat {
                 self.active_buffer_id = Some(buffer_id);
 
                 // Update current_file_path for status bar (None for unnamed buffers)
-                self.current_file_path = entry.path.clone();
+                self.current_file_path = entry.path.as_ref().map(|p| self.normalize_file_path(p));
 
                 // Update activation history
                 self.buffer_store

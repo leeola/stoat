@@ -833,6 +833,41 @@ impl Stoat {
         }
     }
 
+    /// Normalize a file path for display.
+    ///
+    /// Converts any path (absolute or relative) to a clean relative path:
+    /// - Strips worktree root prefix from absolute paths
+    /// - Removes leading `./` prefix if present
+    ///
+    /// This is the single source of truth for path normalization in the editor.
+    /// All code that stores [`current_file_path`](Self::current_file_path) should use this.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to normalize (absolute or relative)
+    ///
+    /// # Returns
+    ///
+    /// Normalized path relative to worktree root without `./` prefix
+    pub(crate) fn normalize_file_path(&self, path: &std::path::Path) -> PathBuf {
+        let root = self.worktree.lock().root().to_path_buf();
+
+        // Canonicalize root to handle relative paths like "."
+        // This converts "." to absolute path (e.g., /Users/lee/projects/stoat)
+        // so strip_prefix works correctly with absolute paths from diff review
+        let absolute_root = root.canonicalize().unwrap_or(root);
+
+        let relative = path.strip_prefix(&absolute_root).unwrap_or(path);
+
+        // Strip leading "./" if present
+        let path_str = relative.display().to_string();
+        if let Some(cleaned) = path_str.strip_prefix("./") {
+            PathBuf::from(cleaned)
+        } else {
+            relative.to_path_buf()
+        }
+    }
+
     /// Load a file into the buffer.
     ///
     /// Reads file content, detects language from extension, updates buffer,
@@ -918,8 +953,8 @@ impl Stoat {
         // Update active_buffer_id
         self.active_buffer_id = Some(buffer_id);
 
-        // Update current file path for status bar
-        self.current_file_path = Some(path_buf);
+        // Update current file path for status bar (normalized)
+        self.current_file_path = Some(self.normalize_file_path(&path_buf));
 
         self.cursor.move_to(text::Point::new(0, 0));
         cx.notify();

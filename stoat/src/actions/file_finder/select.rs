@@ -43,10 +43,7 @@ impl Stoat {
             let root = self.worktree.lock().snapshot().root().to_path_buf();
             let abs_path = root.join(relative_path);
 
-            // Store file path for status bar
-            self.current_file_path = Some(relative_path.clone());
-
-            // Load file (uses load_file to ensure diff computation)
+            // Load file (automatically normalizes and stores path for status bar)
             if let Err(e) = self.load_file(&abs_path, cx) {
                 tracing::error!("Failed to load file {:?}: {}", abs_path, e);
             }
