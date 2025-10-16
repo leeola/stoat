@@ -175,6 +175,9 @@ pub struct Stoat {
     /// Currently active buffer ID
     pub(crate) active_buffer_id: Option<BufferId>,
 
+    /// Initial buffer ID (for auto-drop when empty)
+    pub(crate) initial_buffer_id: Option<BufferId>,
+
     /// Cursor position management
     pub(crate) cursor: CursorManager,
 
@@ -284,9 +287,8 @@ impl Stoat {
         // Allocate buffer ID from BufferStore to prevent collisions
         let buffer_id = buffer_store.update(cx, |store, _cx| store.allocate_buffer_id());
 
-        // Create initial welcome buffer
-        let welcome_text = "Welcome to Stoat v4!\n\nPress 'i' to enter insert mode.\nType some text.\nPress Esc to return to normal mode.\n\nPress 'h', 'j', 'k', 'l' to move in normal mode.";
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, welcome_text));
+        // Create initial empty buffer
+        let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
 
         // Register buffer in BufferStore (weak ref) and store strong ref in open_buffers
@@ -295,6 +297,7 @@ impl Stoat {
         });
         let open_buffers = vec![buffer_item.clone()];
         let active_buffer_id = Some(buffer_id);
+        let initial_buffer_id = Some(buffer_id);
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
@@ -321,6 +324,7 @@ impl Stoat {
             buffer_store,
             open_buffers,
             active_buffer_id,
+            initial_buffer_id,
             cursor: CursorManager::new(),
             scroll: ScrollPosition::new(),
             viewport_lines: None,
@@ -389,6 +393,7 @@ impl Stoat {
             buffer_store: self.buffer_store.clone(),
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
+            initial_buffer_id: None,
             cursor: self.cursor.clone(),
             scroll: self.scroll.clone(),
             viewport_lines: self.viewport_lines,
@@ -958,7 +963,65 @@ impl Stoat {
         self.cursor.move_to(text::Point::new(0, 0));
         cx.notify();
 
+        // Drop initial buffer if it's still empty
+        self.maybe_drop_initial_buffer(cx);
+
         Ok(())
+    }
+
+    /// Drop the initial buffer if it's still empty.
+    ///
+    /// Called when opening a new buffer to automatically clean up the empty initial buffer
+    /// that was created when stoat started. If the user has typed any text in the initial
+    /// buffer, it will be kept.
+    ///
+    /// This method:
+    /// - Returns early if no initial buffer is tracked
+    /// - Returns early if the initial buffer is currently active (safety check)
+    /// - Checks if the initial buffer is empty
+    /// - If empty: removes from open_buffers and closes in buffer_store
+    /// - Always clears initial_buffer_id after checking (only check once)
+    fn maybe_drop_initial_buffer(&mut self, cx: &mut Context<Self>) {
+        // If we've already processed or no initial buffer, return early
+        let Some(init_id) = self.initial_buffer_id else {
+            return;
+        };
+
+        // Don't process if initial buffer is the active one (safety check)
+        if Some(init_id) == self.active_buffer_id {
+            tracing::debug!("Initial buffer {:?} is active, not dropping", init_id);
+            return;
+        }
+
+        // Get the initial buffer
+        let Some(buffer_item) = self.buffer_store.read(cx).get_buffer(init_id) else {
+            // Buffer already gone, clear the tracking
+            tracing::debug!("Initial buffer {:?} already dropped", init_id);
+            self.initial_buffer_id = None;
+            return;
+        };
+
+        // Check if it's empty
+        let is_empty = buffer_item.read(cx).buffer().read(cx).text().is_empty();
+
+        if is_empty {
+            // Drop the initial buffer
+            tracing::debug!("Dropping empty initial buffer {:?}", init_id);
+
+            // Remove from open_buffers
+            self.open_buffers
+                .retain(|b| b.read(cx).buffer().read(cx).remote_id() != init_id);
+
+            // Close in buffer store
+            self.buffer_store.update(cx, |store, _cx| {
+                store.close_buffer(init_id);
+            });
+        } else {
+            tracing::debug!("Initial buffer {:?} has content, keeping it", init_id);
+        }
+
+        // Clear initial_buffer_id so we don't check again
+        self.initial_buffer_id = None;
     }
 
     /// Compute diff for the currently active buffer respecting the diff review comparison mode.
@@ -1068,6 +1131,7 @@ impl Stoat {
             buffer_store: self.buffer_store.clone(),
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
+            initial_buffer_id: None,
             cursor: CursorManager::new(), // New cursor for minimap
             scroll: self.scroll.clone(),  // Clone scroll state (will be synced)
             viewport_lines: None,         // Will be set by layout
