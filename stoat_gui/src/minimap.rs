@@ -194,6 +194,7 @@ impl MinimapLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::px;
 
     #[test]
     fn calculate_minimap_scroll_full_viewport() {
