@@ -404,6 +404,14 @@ impl Stoat {
         }
     }
 
+    /// Get the global configuration.
+    ///
+    /// Returns a reference to the [`Config`](crate::config::Config) loaded at application startup.
+    /// Used by the GUI layer to access font settings and other user preferences.
+    pub fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
+
     /// Clone this Stoat for a split pane.
     ///
     /// Creates a new Stoat instance that shares the same [`BufferItem`] (text buffer)

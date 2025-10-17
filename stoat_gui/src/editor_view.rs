@@ -19,8 +19,9 @@ impl EditorView {
     pub fn new(stoat: Entity<Stoat>, cx: &mut Context<'_, Self>) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Create cached editor style once (Arc makes cloning cheap)
-        let editor_style = Arc::new(EditorStyle::default());
+        // Create cached editor style once from config (Arc makes cloning cheap)
+        let config = stoat.read(cx).config().clone();
+        let editor_style = Arc::new(EditorStyle::new(&config));
 
         Self {
             stoat,

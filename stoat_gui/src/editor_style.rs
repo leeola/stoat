@@ -41,14 +41,18 @@ pub struct EditorStyle {
     pub highlight_map: HighlightMap,
 }
 
-impl Default for EditorStyle {
-    fn default() -> Self {
+impl EditorStyle {
+    /// Create a new editor style from configuration.
+    ///
+    /// Takes font settings (family and size) from the provided [`stoat::Config`].
+    /// Other style properties use hardcoded defaults.
+    pub fn new(config: &stoat::Config) -> Self {
         let syntax_theme = SyntaxTheme::default();
         let highlight_map = HighlightMap::new(&syntax_theme);
 
         // Create font once (stable font ID for GPUI's LineLayoutCache)
         let font = Font {
-            family: SharedString::from("Menlo"),
+            family: SharedString::from(config.buffer_font_family.clone()),
             features: Default::default(),
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
@@ -59,7 +63,7 @@ impl Default for EditorStyle {
             text_color: rgb(0xcccccc).into(),
             background: rgb(0x1e1e1e).into(),
             line_height: px(20.0),
-            font_size: px(14.0),
+            font_size: px(config.buffer_font_size),
             font,
             padding: px(4.0),
             show_line_numbers: true,

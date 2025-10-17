@@ -186,15 +186,18 @@ impl PaneGroupView {
                 style: gpui::FontStyle::Normal,
                 fallbacks: None,
             };
-            let minimap_style = std::sync::Arc::new(crate::editor_style::EditorStyle {
-                font_size: gpui::px(crate::minimap::MINIMAP_FONT_SIZE), // 2.0px
-                line_height: gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT), // 2.5px
-                font: minimap_font,
-                show_line_numbers: false,
-                show_diff_indicators: false,
-                show_minimap: false, // Minimap doesn't render its own minimap
-                ..crate::editor_style::EditorStyle::default()
-            });
+
+            // Get config from the stoat to create base style, then override minimap-specific
+            // settings
+            let config = initial_stoat.read(cx).config().clone();
+            let mut minimap_style = crate::editor_style::EditorStyle::new(&config);
+            minimap_style.font_size = gpui::px(crate::minimap::MINIMAP_FONT_SIZE); // 2.0px
+            minimap_style.line_height = gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT); // 2.5px
+            minimap_style.font = minimap_font;
+            minimap_style.show_line_numbers = false;
+            minimap_style.show_diff_indicators = false;
+            minimap_style.show_minimap = false; // Minimap doesn't render its own minimap
+            let minimap_style = std::sync::Arc::new(minimap_style);
 
             // Create minimap EditorView with custom style
             let minimap_view = cx.new(|cx| {

@@ -78,10 +78,38 @@ use std::path::{Path, PathBuf};
 ///
 /// The config is loaded from TOML format using [`serde`]. Unknown fields in the
 /// config file are ignored to allow forward compatibility.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    // Empty foundation - fields will be added here as configuration options are needed
+    /// Font family for the editor buffer text.
+    ///
+    /// Defaults to "Courier" which is available cross-platform (macOS, Linux, Windows).
+    /// Common alternatives include "Monaco", "Menlo", "Consolas", or "JetBrains Mono".
+    #[serde(default = "default_buffer_font_family")]
+    pub buffer_font_family: String,
+
+    /// Font size for the editor buffer text in points.
+    ///
+    /// Defaults to 15.0 to match Zed's default buffer font size.
+    #[serde(default = "default_buffer_font_size")]
+    pub buffer_font_size: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            buffer_font_family: default_buffer_font_family(),
+            buffer_font_size: default_buffer_font_size(),
+        }
+    }
+}
+
+fn default_buffer_font_family() -> String {
+    "Courier".to_string()
+}
+
+fn default_buffer_font_size() -> f32 {
+    15.0
 }
 
 impl Config {
@@ -345,5 +373,41 @@ mod tests {
         let result = Config::load_with_overrides(Some(&config_path));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn default_font_settings() {
+        let config = Config::default();
+        assert_eq!(config.buffer_font_family, "Courier");
+        assert_eq!(config.buffer_font_size, 15.0);
+    }
+
+    #[test]
+    fn loads_custom_font_settings() {
+        let tmp_dir = tempdir().unwrap();
+        let config_path = tmp_dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+buffer_font_family = "JetBrains Mono"
+buffer_font_size = 18.0
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.buffer_font_family, "JetBrains Mono");
+        assert_eq!(config.buffer_font_size, 18.0);
+    }
+
+    #[test]
+    fn uses_defaults_for_missing_font_fields() {
+        let tmp_dir = tempdir().unwrap();
+        let config_path = tmp_dir.path().join("config.toml");
+        std::fs::write(&config_path, "# config with no font fields\n").unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.buffer_font_family, "Courier");
+        assert_eq!(config.buffer_font_size, 15.0);
     }
 }
