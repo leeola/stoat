@@ -9,18 +9,16 @@ use text::{Point, ToOffset};
 impl Stoat {
     /// Move all cursors left by one word (symbol).
     ///
-    /// Each cursor moves independently to the start of the previous word/symbol.
-    /// Uses token analysis to identify word boundaries.
-    ///
-    /// In visual mode, delegates to [`Self::select_prev_symbol`] to extend selection.
+    /// Each cursor moves independently to the start of the previous word/symbol and collapses
+    /// any existing selections. Uses token analysis to identify word boundaries.
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
+    ///
+    /// # Related Actions
+    ///
+    /// - [`select_prev_symbol`](crate::Stoat::select_prev_symbol) - Extend selection to previous
+    ///   word (used in visual mode)
     pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
-        // In anchored selection mode, use selection extension instead of cursor movement
-        if self.is_mode_anchored() {
-            self.select_prev_symbol(cx);
-            return;
-        }
         let (buffer_snapshot, token_snapshot) = {
             let buffer_item = self.active_buffer(cx).read(cx);
             let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();

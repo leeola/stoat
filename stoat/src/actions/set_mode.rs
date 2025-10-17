@@ -285,10 +285,10 @@ mod tests {
             // Enter visual mode
             s.set_mode_by_name("visual", cx);
 
-            // Call move_word_left - in visual mode this should delegate to select_prev_symbol
-            s.move_word_left(cx);
+            // In visual mode, 'b' key is bound to select_prev_symbol (not move_word_left)
+            s.select_prev_symbol(cx);
 
-            // In visual mode, move_word_left should extend the selection backward
+            // Selection should extend backward
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
             assert_eq!(selections[0].tail(), text::Point::new(0, 8)); // anchor stays

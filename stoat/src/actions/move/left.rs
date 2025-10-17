@@ -7,9 +7,10 @@ use text::{Bias, Point};
 impl Stoat {
     /// Move all cursors left one character.
     ///
-    /// Each cursor moves independently to the previous character position. Correctly handles
-    /// multi-byte UTF-8 characters by clipping to the nearest character boundary. Uses
-    /// [`SelectionsCollection`](crate::SelectionsCollection) for multi-cursor support.
+    /// Each cursor moves independently to the previous character position and collapses any
+    /// existing selections. Correctly handles multi-byte UTF-8 characters by clipping to the
+    /// nearest character boundary. Uses [`SelectionsCollection`](crate::SelectionsCollection)
+    /// for multi-cursor support.
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     ///
@@ -17,13 +18,8 @@ impl Stoat {
     ///
     /// - [`move_right`](crate::Stoat::move_right) - Move right one character
     /// - [`move_word_left`](crate::Stoat::move_word_left) - Move left one word
+    /// - [`select_left`](crate::Stoat::select_left) - Extend selection left (used in visual mode)
     pub fn move_left(&mut self, cx: &mut Context<Self>) {
-        // In anchored selection mode, use selection extension instead of cursor movement
-        if self.is_mode_anchored() {
-            self.select_left(cx);
-            return;
-        }
-
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
