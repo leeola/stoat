@@ -35,47 +35,76 @@ impl Stoat {
     /// - [`delete_to_end_of_line`](crate::Stoat::delete_to_end_of_line) - Delete to line end only
     /// - [`new_line`](crate::Stoat::new_line) - Insert new line
     pub fn delete_line(&mut self, cx: &mut Context<Self>) {
-        let cursor = self.cursor.position();
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let buffer_snapshot = buffer.read(cx).snapshot();
 
-        // Get buffer snapshot to determine line boundaries
-        let (line_start, line_end) = {
-            let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer = buffer_item.buffer().read(cx);
-            let row_count = buffer.row_count();
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<text::Point>(&buffer_snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
+            }
+        }
 
-            let line_start = text::Point::new(cursor.row, 0);
+        // Collect deletion ranges for all selections
+        let selections = self.selections.all::<text::Point>(&buffer_snapshot);
+        let mut edits = Vec::new();
+        let row_count = buffer_snapshot.row_count();
 
-            // Include newline if not last line
-            let line_end = if cursor.row < row_count - 1 {
-                text::Point::new(cursor.row + 1, 0)
+        for selection in &selections {
+            let pos = selection.head();
+            let line_start = text::Point::new(pos.row, 0);
+
+            let line_end = if pos.row < row_count - 1 {
+                text::Point::new(pos.row + 1, 0)
             } else {
-                // Last line - delete to end of line
-                let line_len = buffer.line_len(cursor.row);
-                text::Point::new(cursor.row, line_len)
+                let line_len = buffer_snapshot.line_len(pos.row);
+                text::Point::new(pos.row, line_len)
             };
 
-            (line_start, line_end)
-        };
+            debug!(row = pos.row, from = ?line_start, to = ?line_end, "Deleting line");
 
-        debug!(row = cursor.row, from = ?line_start, to = ?line_end, "Deleting line");
+            let start_offset = buffer_snapshot.point_to_offset(line_start);
+            let end_offset = buffer_snapshot.point_to_offset(line_end);
+            edits.push((start_offset..end_offset, ""));
+        }
 
-        // Perform deletion
-        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
-        buffer.update(cx, |buffer, _| {
-            let start_offset = buffer.point_to_offset(line_start);
-            let end_offset = buffer.point_to_offset(line_end);
-            buffer.edit([(start_offset..end_offset, "")]);
-        });
+        // Apply all deletions at once
+        if !edits.is_empty() {
+            let buffer = buffer.clone();
+            buffer.update(cx, |buffer, _| {
+                buffer.edit(edits);
+            });
 
-        // Move cursor to line start
-        self.cursor.move_to(line_start);
+            // Get updated selections (anchors have auto-adjusted)
+            let snapshot = buffer.read(cx).snapshot();
+            let updated_selections = self.selections.all::<text::Point>(&snapshot);
 
-        // Reparse
-        self.active_buffer(cx).update(cx, |item, cx| {
-            let _ = item.reparse(cx);
-        });
+            // Sync cursor to last selection
+            if let Some(last) = updated_selections.last() {
+                self.cursor.move_to(last.head());
+            }
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
+            // Reparse
+            buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+        }
+
         cx.notify();
     }
 }

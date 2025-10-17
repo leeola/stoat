@@ -438,10 +438,10 @@ fn select_next_symbol_basic(cx: &mut TestAppContext) {
         s.select_next_symbol(cx);
     });
 
-    // When cursor is at (0,0), which is the start of "fn", select_next_symbol
-    // skips "fn" and selects "foo" - this matches vim `w` behavior
+    // When cursor is at (0,0), select_next_symbol skips "fn" and extends to end of "foo"
+    // Selection extends from cursor position (0,0) to end of "foo" (0,6)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 3));
+    assert_eq!(selection.start, Point::new(0, 0));
     assert_eq!(selection.end, Point::new(0, 6));
 }
 
@@ -454,9 +454,9 @@ fn select_next_symbol_skips_punctuation(cx: &mut TestAppContext) {
         s.select_next_symbol(cx);
     });
 
-    // Should skip ")" and select "Result"
+    // Selection extends from cursor (0,7) to end of "Result" (0,18)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 12));
+    assert_eq!(selection.start, Point::new(0, 7));
     assert_eq!(selection.end, Point::new(0, 18));
 }
 
@@ -469,10 +469,10 @@ fn select_prev_symbol_basic(cx: &mut TestAppContext) {
         s.select_prev_symbol(cx);
     });
 
-    // Should select "Result" with cursor on left (reversed)
+    // Selection extends from "Result" start (0,12) back to cursor (0,22), reversed
     let selection = stoat.selection();
     assert_eq!(selection.start, Point::new(0, 12));
-    assert_eq!(selection.end, Point::new(0, 18));
+    assert_eq!(selection.end, Point::new(0, 22));
     assert!(selection.reversed);
 }
 
@@ -563,9 +563,9 @@ fn select_symbols_skip_whitespace(cx: &mut TestAppContext) {
         s.select_next_symbol(cx);
     });
 
-    // Should skip spaces and select "42"
+    // Selection extends from cursor (0,1) to end of "42" (0,6)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 4));
+    assert_eq!(selection.start, Point::new(0, 1));
     assert_eq!(selection.end, Point::new(0, 6));
 }
 
@@ -578,9 +578,9 @@ fn select_symbols_skip_newlines(cx: &mut TestAppContext) {
         s.select_next_symbol(cx);
     });
 
-    // Should skip newlines/spaces and select "foo"
+    // Selection extends from cursor (0,1) to end of "foo" (2,5)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(2, 2));
+    assert_eq!(selection.start, Point::new(0, 1));
     assert_eq!(selection.end, Point::new(2, 5));
 }
 

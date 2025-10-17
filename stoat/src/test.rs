@@ -142,9 +142,21 @@ impl<'a> TestStoat<'a> {
     /// Get the current selection.
     ///
     /// Returns a copy of the current selection including start, end, and reversed flag.
+    /// Now reads from the multi-cursor API for compatibility with migrated actions.
     pub fn selection(&self) -> crate::cursor::Selection {
-        self.cx
-            .read_entity(&self.entity, |s, _| s.selection().clone())
+        self.cx.read_entity(&self.entity, |s, cx| {
+            // Get newest selection from multi-cursor API
+            let buffer_item = s.active_buffer(cx);
+            let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+            let sel = s.selections.newest::<text::Point>(&buffer_snapshot);
+
+            // Convert to legacy cursor::Selection format
+            crate::cursor::Selection {
+                start: sel.start,
+                end: sel.end,
+                reversed: sel.reversed,
+            }
+        })
     }
 
     /// Get diff review file list.
@@ -464,26 +476,38 @@ impl<'a> TestStoat<'a> {
 
         let mut test_stoat = Self::new(&parsed.text, cx);
 
-        test_stoat.update(|s, _cx| {
+        test_stoat.update(|s, cx| {
             // Set cursor position if we have one
             if let Some(&offset) = parsed.cursors.first() {
                 let point = offset_to_point(&parsed.text, offset);
                 s.set_cursor_position(point);
             }
 
-            // Set selection if we have one
+            // Set selection if we have one (use multi-cursor API)
             if let Some(sel) = parsed.selections.first() {
                 let start = offset_to_point(&parsed.text, sel.range.start);
                 let end = offset_to_point(&parsed.text, sel.range.end);
 
-                // Create selection with proper cursor position and reversed flag
-                let selection = crate::cursor::Selection {
-                    start,
-                    end,
-                    reversed: sel.cursor_at_start,
-                };
+                // Get buffer snapshot for anchor-based storage
+                let buffer_item = s.active_buffer(cx);
+                let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 
-                s.cursor.set_selection(selection);
+                // Create selection using multi-cursor API
+                let id = s.selections.next_id();
+                s.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start,
+                        end,
+                        reversed: sel.cursor_at_start,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
+
+                // Sync cursor position for backward compat
+                let cursor_pos = if sel.cursor_at_start { start } else { end };
+                s.cursor.move_to(cursor_pos);
             }
         });
 
@@ -690,9 +714,22 @@ mod tests {
     fn to_cursor_notation_selection(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_text("hello", cx);
 
-        stoat.update(|s, _cx| {
-            let sel = crate::cursor::Selection::new(Point::new(0, 0), Point::new(0, 5));
-            s.cursor.set_selection(sel);
+        stoat.update(|s, cx| {
+            // Create selection using multi-cursor API
+            let buffer_item = s.active_buffer(cx);
+            let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![text::Selection {
+                    id,
+                    start: Point::new(0, 0),
+                    end: Point::new(0, 5),
+                    reversed: false,
+                    goal: text::SelectionGoal::None,
+                }],
+                &buffer_snapshot,
+            );
+            s.cursor.move_to(Point::new(0, 5));
         });
 
         assert_eq!(stoat.to_cursor_notation(), "<|hello||>");

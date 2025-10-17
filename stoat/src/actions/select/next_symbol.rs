@@ -1,64 +1,101 @@
 //! Select next symbol action implementation and tests.
+//!
+//! Demonstrates multi-cursor selection extension to next symbol.
 
 use crate::Stoat;
 use gpui::Context;
 use std::ops::Range;
-use text::ToOffset;
+use text::{Point, ToOffset};
 
 impl Stoat {
-    /// Select the next symbol from the current cursor position.
+    /// Extend all selections to the next symbol.
+    ///
+    /// Each selection extends independently by finding the next symbol from its head position
+    /// and extending to it while keeping the tail (anchor) fixed. Uses vim `w` behavior:
+    /// skips symbols that start at or before the cursor.
+    ///
+    /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_next_symbol(&mut self, cx: &mut Context<Self>) {
-        let (buffer_snapshot, token_snapshot) = {
+        let (snapshot, token_snapshot) = {
             let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
+            let snapshot = buffer_item.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item.token_snapshot();
-            (buffer_snapshot, token_snapshot)
+            (snapshot, token_snapshot)
         };
 
-        let current_selection = self.cursor.selection();
-        if !current_selection.is_empty() && current_selection.reversed {
-            let start = current_selection.start;
-            let end = current_selection.end;
-            let selection = crate::cursor::Selection::new(start, end);
-            self.cursor.set_selection(selection);
-            cx.notify();
-            return;
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &snapshot,
+                );
+            }
         }
 
-        let cursor_pos = self.cursor.position();
-        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
-
-        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
-        token_cursor.next();
-
-        let mut found_symbol: Option<Range<usize>> = None;
-
-        while let Some(token) = token_cursor.item() {
-            let token_start = token.range.start.to_offset(&buffer_snapshot);
-            let token_end = token.range.end.to_offset(&buffer_snapshot);
-
-            // Skip tokens that start at or before cursor (vim `w` behavior)
-            if token_start <= cursor_offset {
-                token_cursor.next();
+        // Operate on all selections
+        let mut selections = self.selections.all::<Point>(&snapshot);
+        for selection in &mut selections {
+            // Handle reversed selection: flip it to non-reversed
+            if !selection.is_empty() && selection.reversed {
+                let start = selection.start;
+                let end = selection.end;
+                selection.start = start;
+                selection.end = end;
+                selection.reversed = false;
                 continue;
             }
 
-            // Found first symbol after cursor
-            if token.kind.is_symbol() {
-                found_symbol = Some(token_start..token_end);
-                break;
+            let head = selection.head();
+            let cursor_offset = snapshot.point_to_offset(head);
+
+            let mut token_cursor = token_snapshot.cursor(&snapshot);
+            token_cursor.next();
+
+            let mut found_symbol: Option<Range<usize>> = None;
+
+            while let Some(token) = token_cursor.item() {
+                let token_start = token.range.start.to_offset(&snapshot);
+                let token_end = token.range.end.to_offset(&snapshot);
+
+                // Skip tokens that start at or before cursor (vim `w` behavior)
+                if token_start <= cursor_offset {
+                    token_cursor.next();
+                    continue;
+                }
+
+                // Found first symbol after cursor
+                if token.kind.is_symbol() {
+                    found_symbol = Some(token_start..token_end);
+                    break;
+                }
+
+                token_cursor.next();
             }
 
-            token_cursor.next();
+            if let Some(range) = found_symbol {
+                let selection_end = snapshot.offset_to_point(range.end);
+                // Extend selection by moving head to end of symbol
+                selection.set_head(selection_end, text::SelectionGoal::None);
+            }
         }
 
-        if let Some(ref range) = found_symbol {
-            let selection_start = buffer_snapshot.offset_to_point(range.start);
-            let selection_end = buffer_snapshot.offset_to_point(range.end);
-            let selection = crate::cursor::Selection::new(selection_start, selection_end);
-            self.cursor.set_selection(selection);
-            cx.notify();
+        // Store back and sync cursor
+        self.selections.select(selections.clone(), &snapshot);
+        if let Some(last) = selections.last() {
+            self.cursor.move_to(last.head());
         }
+
+        cx.notify();
     }
 }
 
@@ -74,10 +111,55 @@ mod tests {
             s.insert_text("hello world", cx);
             s.set_cursor_position(text::Point::new(0, 0));
             s.select_next_symbol(cx);
-            let sel = s.cursor.selection();
+
+            // Verify using new multi-cursor API
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
             // Vim `w` behavior: skip "hello", select "world"
-            assert_eq!(sel.start, text::Point::new(0, 6));
-            assert_eq!(sel.end, text::Point::new(0, 11));
+            assert_eq!(selections[0].head(), text::Point::new(0, 11));
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+        });
+    }
+
+    #[gpui::test]
+    fn extends_multiple_selections_independently(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("hello world\nfoo bar", cx);
+
+            // Create two cursors
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(0, 0), // Start of "hello"
+                        end: text::Point::new(0, 0),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(1, 0), // Start of "foo"
+                        end: text::Point::new(1, 0),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            // Extend both selections to next symbol
+            s.select_next_symbol(cx);
+
+            // Verify both extended independently
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 2);
+            assert_eq!(selections[0].head(), text::Point::new(0, 11)); // "world"
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+            assert_eq!(selections[1].head(), text::Point::new(1, 7)); // "bar"
+            assert_eq!(selections[1].tail(), text::Point::new(1, 0));
         });
     }
 }

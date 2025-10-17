@@ -118,41 +118,73 @@ impl Stoat {
             return;
         }
 
-        // Main buffer deletion for all other modes
-        let cursor = self.cursor.position();
-        if cursor.column == 0 {
-            return; // At start of line
+        // Main buffer deletion with multi-cursor support
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let snapshot = buffer.read(cx).snapshot();
+
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &snapshot,
+                );
+            }
         }
 
-        // Naive calculation: one position to the left
-        let target_point = text::Point::new(cursor.row, cursor.column.saturating_sub(1));
+        // Collect deletion ranges for all selections
+        let selections = self.selections.all::<text::Point>(&snapshot);
+        let mut edits = Vec::new();
 
-        // Clip to valid character boundary
-        let (clipped_point, clipped_offset, cursor_offset) = {
-            let buffer = self.active_buffer(cx).read(cx).buffer();
-            let buffer_read = buffer.read(cx);
-            let snapshot = buffer_read.snapshot();
-            let clipped = snapshot.clip_point(target_point, Bias::Left);
-            let clipped_offset = buffer_read.point_to_offset(clipped);
-            let cursor_offset = buffer_read.point_to_offset(cursor);
-            (clipped, clipped_offset, cursor_offset)
-        };
+        for selection in &selections {
+            let pos = selection.head();
+            if pos.column > 0 {
+                // Naive calculation: one position to the left
+                let target_point = text::Point::new(pos.row, pos.column.saturating_sub(1));
 
-        // Perform the edit
-        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
-        buffer.update(cx, |buffer, _| {
-            buffer.edit([(clipped_offset..cursor_offset, "")]);
-        });
+                // Clip to valid character boundary
+                let clipped = snapshot.clip_point(target_point, Bias::Left);
+                let clipped_offset = snapshot.point_to_offset(clipped);
+                let pos_offset = snapshot.point_to_offset(pos);
 
-        // Move cursor to clipped position
-        self.cursor.move_to(clipped_point);
+                edits.push((clipped_offset..pos_offset, ""));
+            }
+        }
 
-        // Reparse
-        self.active_buffer(cx).update(cx, |item, cx| {
-            let _ = item.reparse(cx);
-        });
+        // Apply all deletions at once
+        if !edits.is_empty() {
+            let buffer = buffer.clone();
+            buffer.update(cx, |buffer, _| {
+                buffer.edit(edits);
+            });
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
+            // Get updated selections (anchors have auto-adjusted)
+            let snapshot = buffer.read(cx).snapshot();
+            let updated_selections = self.selections.all::<text::Point>(&snapshot);
+
+            // Sync cursor to last selection
+            if let Some(last) = updated_selections.last() {
+                self.cursor.move_to(last.head());
+            }
+
+            // Reparse
+            buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+        }
+
         cx.notify();
     }
 }
@@ -194,6 +226,48 @@ mod tests {
             s.delete_left(cx);
             let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
             assert_eq!(content, "Hello 世");
+        });
+    }
+
+    #[gpui::test]
+    fn deletes_at_multiple_cursors(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("abc\ndef\nghi", cx);
+
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(0, 3),
+                        end: text::Point::new(0, 3),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(1, 3),
+                        end: text::Point::new(1, 3),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 2,
+                        start: text::Point::new(2, 3),
+                        end: text::Point::new(2, 3),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            s.delete_left(cx);
+
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "ab\nde\ngh");
         });
     }
 }

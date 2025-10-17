@@ -92,20 +92,86 @@ impl Stoat {
             return;
         }
 
-        // Main buffer insertion for all other modes
-        let cursor = self.cursor.position();
-        let buffer = self.active_buffer(cx).read(cx).buffer().clone();
+        // Main buffer insertion with multi-cursor support
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let snapshot = buffer.read(cx).snapshot();
+
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &snapshot,
+                );
+            }
+        }
+
+        // Collect insertion points for all selections (sorted by offset ascending)
+        let mut selections_with_offsets: Vec<_> = self
+            .selections
+            .all::<text::Point>(&snapshot)
+            .into_iter()
+            .map(|sel| {
+                let offset = snapshot.point_to_offset(sel.head());
+                (offset, sel)
+            })
+            .collect();
+        selections_with_offsets.sort_by_key(|(offset, _)| *offset);
+
+        // Collect all edits to apply at once
+        let edits: Vec<_> = selections_with_offsets
+            .iter()
+            .map(|(offset, _)| (*offset..*offset, text))
+            .collect();
+
+        // Apply all insertions at once
+        let buffer = buffer.clone();
+        let text_byte_len = text.len();
         buffer.update(cx, |buffer, _| {
-            let offset = buffer.point_to_offset(cursor);
-            buffer.edit([(offset..offset, text)]);
+            buffer.edit(edits);
         });
 
-        // Move cursor forward
-        let new_col = cursor.column + text.len() as u32;
-        self.cursor.move_to(text::Point::new(cursor.row, new_col));
+        // Calculate new positions accounting for all prior insertions
+        let snapshot = buffer.read(cx).snapshot();
+        let mut new_selections = Vec::new();
+        let id_start = self.selections.next_id();
+
+        for (i, (old_offset, _)) in selections_with_offsets.iter().enumerate() {
+            // Each insertion before this one shifts this position forward by text_byte_len
+            let shift = i * text_byte_len;
+            // The cursor ends up after the inserted text at this position
+            let new_offset = old_offset + shift + text_byte_len;
+            let new_pos = snapshot.offset_to_point(new_offset);
+
+            new_selections.push(text::Selection {
+                id: id_start + i,
+                start: new_pos,
+                end: new_pos,
+                reversed: false,
+                goal: text::SelectionGoal::None,
+            });
+        }
+
+        // Update selections to new positions
+        self.selections.select(new_selections.clone(), &snapshot);
+
+        // Sync cursor to last selection
+        if let Some(last) = new_selections.last() {
+            self.cursor.move_to(last.head());
+        }
 
         // Reparse for syntax highlighting
-        self.active_buffer(cx).update(cx, |item, cx| {
+        buffer_item.update(cx, |item, cx| {
             let _ = item.reparse(cx);
         });
 
@@ -151,6 +217,48 @@ mod tests {
             assert_eq!(s.cursor.position(), text::Point::new(0, 2));
             s.insert_text("!", cx);
             assert_eq!(s.cursor.position(), text::Point::new(0, 3));
+        });
+    }
+
+    #[gpui::test]
+    fn inserts_at_multiple_cursors(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("line1\nline2\nline3", cx);
+
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(0, 5),
+                        end: text::Point::new(0, 5),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(1, 5),
+                        end: text::Point::new(1, 5),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 2,
+                        start: text::Point::new(2, 5),
+                        end: text::Point::new(2, 5),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            s.insert_text("!", cx);
+
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "line1!\nline2!\nline3!");
         });
     }
 }

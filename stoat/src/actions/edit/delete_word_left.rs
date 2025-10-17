@@ -37,72 +37,96 @@ impl Stoat {
     /// - [`delete_word_right`](crate::Stoat::delete_word_right) - Delete next word
     /// - [`delete_left`](crate::Stoat::delete_left) - Delete single character
     pub fn delete_word_left(&mut self, cx: &mut Context<Self>) {
-        // Get buffer and token snapshots
-        let (buffer_snapshot, token_snapshot) = {
-            let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
-            let token_snapshot = buffer_item.token_snapshot();
-            (buffer_snapshot, token_snapshot)
-        };
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let token_snapshot = buffer_item.read(cx).token_snapshot();
 
+        // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
-        let cursor_offset = buffer_snapshot.point_to_offset(cursor_pos);
-
-        let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
-        token_cursor.next();
-
-        let mut prev_symbol_start: Option<usize> = None;
-
-        // Iterate through tokens to find the previous symbol
-        while let Some(token) = token_cursor.item() {
-            let token_start = token.range.start.to_offset(&buffer_snapshot);
-            let token_end = token.range.end.to_offset(&buffer_snapshot);
-
-            // If we've passed the cursor, we're done
-            if token_start >= cursor_offset {
-                break;
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<text::Point>(&buffer_snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
             }
+        }
 
-            // Check if this token is a symbol
-            if token.kind.is_symbol() {
-                // If cursor is inside or at the end of this token, delete from start to cursor
-                if token_start < cursor_offset && cursor_offset <= token_end {
-                    prev_symbol_start = Some(token_start);
+        // Collect deletion ranges for all selections
+        let selections = self.selections.all::<text::Point>(&buffer_snapshot);
+        let mut edits = Vec::new();
+
+        for selection in &selections {
+            let pos = selection.head();
+            let pos_offset = buffer_snapshot.point_to_offset(pos);
+
+            let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
+            token_cursor.next();
+
+            let mut prev_symbol_start: Option<usize> = None;
+
+            // Iterate through tokens to find the previous symbol
+            while let Some(token) = token_cursor.item() {
+                let token_start = token.range.start.to_offset(&buffer_snapshot);
+                let token_end = token.range.end.to_offset(&buffer_snapshot);
+
+                if token_start >= pos_offset {
                     break;
                 }
 
-                // Track symbols that end strictly before cursor
-                if token_end < cursor_offset {
-                    prev_symbol_start = Some(token_start);
+                if token.kind.is_symbol() {
+                    if token_start < pos_offset && pos_offset <= token_end {
+                        prev_symbol_start = Some(token_start);
+                        break;
+                    }
+
+                    if token_end < pos_offset {
+                        prev_symbol_start = Some(token_start);
+                    }
                 }
+
+                token_cursor.next();
             }
 
-            token_cursor.next();
+            if let Some(start_offset) = prev_symbol_start {
+                edits.push((start_offset..pos_offset, ""));
+            }
         }
 
-        // Delete from symbol start to cursor if found
-        if let Some(start_offset) = prev_symbol_start {
-            let delete_start = buffer_snapshot.offset_to_point(start_offset);
-
-            // Perform deletion
-            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
+        // Apply all deletions at once
+        if !edits.is_empty() {
+            let buffer = buffer.clone();
             buffer.update(cx, |buffer, _| {
-                let start = buffer.point_to_offset(delete_start);
-                let end = buffer.point_to_offset(cursor_pos);
-                buffer.edit([(start..end, "")]);
+                buffer.edit(edits);
             });
 
-            // Move cursor to deletion start
-            self.cursor.move_to(delete_start);
+            // Get updated selections (anchors have auto-adjusted)
+            let snapshot = buffer.read(cx).snapshot();
+            let updated_selections = self.selections.all::<text::Point>(&snapshot);
+
+            // Sync cursor to last selection
+            if let Some(last) = updated_selections.last() {
+                self.cursor.move_to(last.head());
+            }
 
             // Reparse
-            self.active_buffer(cx).update(cx, |item, cx| {
+            buffer_item.update(cx, |item, cx| {
                 let _ = item.reparse(cx);
             });
 
             cx.emit(crate::stoat::StoatEvent::Changed);
-            cx.notify();
         }
+
+        cx.notify();
     }
 }
 

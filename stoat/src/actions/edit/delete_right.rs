@@ -27,44 +27,75 @@ impl Stoat {
     /// - [`delete_left`](crate::Stoat::delete_left) - Delete character before cursor
     /// - [`delete_word_right`](crate::Stoat::delete_word_right) - Delete next word
     pub fn delete_right(&mut self, cx: &mut Context<Self>) {
-        let cursor = self.cursor.position();
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let snapshot = buffer.read(cx).snapshot();
 
-        // Read buffer info in separate scope to release locks
-        let (line_len, max_row) = {
-            let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer = buffer_item.buffer().read(cx);
-            (buffer.line_len(cursor.row), buffer.max_point().row)
-        };
-
-        if cursor.column < line_len {
-            // Delete character on same line
-            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
-            buffer.update(cx, |buffer, _| {
-                let start = buffer.point_to_offset(cursor);
-                let end = buffer.point_to_offset(text::Point::new(cursor.row, cursor.column + 1));
-                buffer.edit([(start..end, "")]);
-            });
-
-            // Cursor stays in place
-        } else if cursor.row < max_row {
-            // At line end: merge with next line
-            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
-            buffer.update(cx, |buffer, _| {
-                let start = buffer.point_to_offset(cursor);
-                let end = buffer.point_to_offset(text::Point::new(cursor.row + 1, 0));
-                buffer.edit([(start..end, "")]);
-            });
-
-            // Cursor stays in place
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &snapshot,
+                );
+            }
         }
-        // Else: at buffer end, no-op
 
-        // Reparse
-        self.active_buffer(cx).update(cx, |item, cx| {
-            let _ = item.reparse(cx);
-        });
+        // Collect deletion ranges for all selections
+        let selections = self.selections.all::<text::Point>(&snapshot);
+        let mut edits = Vec::new();
+        let max_row = snapshot.max_point().row;
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
+        for selection in &selections {
+            let pos = selection.head();
+            let line_len = snapshot.line_len(pos.row);
+
+            if pos.column < line_len {
+                // Delete character on same line
+                let start = snapshot.point_to_offset(pos);
+                let end = snapshot.point_to_offset(text::Point::new(pos.row, pos.column + 1));
+                edits.push((start..end, ""));
+            } else if pos.row < max_row {
+                // At line end: merge with next line
+                let start = snapshot.point_to_offset(pos);
+                let end = snapshot.point_to_offset(text::Point::new(pos.row + 1, 0));
+                edits.push((start..end, ""));
+            }
+        }
+
+        // Apply all deletions at once
+        if !edits.is_empty() {
+            let buffer = buffer.clone();
+            buffer.update(cx, |buffer, _| {
+                buffer.edit(edits);
+            });
+
+            // Get updated selections (anchors have auto-adjusted)
+            let snapshot = buffer.read(cx).snapshot();
+            let updated_selections = self.selections.all::<text::Point>(&snapshot);
+
+            // Sync cursor to last selection
+            if let Some(last) = updated_selections.last() {
+                self.cursor.move_to(last.head());
+            }
+
+            // Reparse
+            buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+
+            cx.emit(crate::stoat::StoatEvent::Changed);
+        }
+
         cx.notify();
     }
 }
@@ -107,6 +138,48 @@ mod tests {
             s.delete_right(cx);
             let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
             assert_eq!(content, "Hi");
+        });
+    }
+
+    #[gpui::test]
+    fn deletes_at_multiple_cursors(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("abc\ndef\nghi", cx);
+
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(0, 0),
+                        end: text::Point::new(0, 0),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(1, 0),
+                        end: text::Point::new(1, 0),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 2,
+                        start: text::Point::new(2, 0),
+                        end: text::Point::new(2, 0),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            s.delete_right(cx);
+
+            let content = s.active_buffer(cx).read(cx).buffer().read(cx).text();
+            assert_eq!(content, "bc\nef\nhi");
         });
     }
 }

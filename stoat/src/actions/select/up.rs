@@ -1,33 +1,78 @@
 //! Select up action implementation and tests.
+//!
+//! Demonstrates multi-cursor selection extension upward with goal column preservation.
 
 use crate::Stoat;
 use gpui::Context;
+use text::Point;
 
 impl Stoat {
-    /// Extend selection up by one line.
+    /// Extend all selections up by one line.
+    ///
+    /// Each selection extends independently by moving its head up while preserving goal column
+    /// and keeping the tail (anchor) fixed.
+    ///
+    /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_up(&mut self, cx: &mut Context<Self>) {
-        let selection = self.cursor.selection().clone();
-        let cursor_pos = selection.cursor_position();
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let snapshot = buffer.read(cx).snapshot();
 
-        if cursor_pos.row > 0 {
-            let target_row = cursor_pos.row - 1;
-            let line_len = {
-                let buffer_item = self.active_buffer(cx).read(cx);
-                let buffer = buffer_item.buffer().read(cx);
-                buffer.line_len(target_row)
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                let goal =
+                    text::SelectionGoal::HorizontalPosition(self.cursor.goal_column() as f64);
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal,
+                    }],
+                    &snapshot,
+                );
+            }
+        }
+
+        // Operate on all selections
+        let mut selections = self.selections.all::<Point>(&snapshot);
+        for selection in &mut selections {
+            let head = selection.head();
+            if head.row > 0 {
+                let target_row = head.row - 1;
+                let line_len = snapshot.line_len(target_row);
+
+                // Determine goal column from selection's goal or current column
+                let goal_column = match selection.goal {
+                    text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
+                    _ => head.column,
+                };
+
+                let target_column = goal_column.min(line_len);
+                let new_head = Point::new(target_row, target_column);
+
+                // Extend selection by moving head, keeping tail fixed
+                selection.set_head(
+                    new_head,
+                    text::SelectionGoal::HorizontalPosition(goal_column as f64),
+                );
+            }
+        }
+
+        // Store back and sync cursor
+        self.selections.select(selections.clone(), &snapshot);
+        if let Some(last) = selections.last() {
+            let goal_col = match last.goal {
+                text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
+                _ => last.head().column,
             };
-
-            let target_column = self.cursor.goal_column().min(line_len);
-            let new_pos = text::Point::new(target_row, target_column);
-
-            let new_selection = if selection.is_empty() {
-                crate::cursor::Selection::new(cursor_pos, new_pos)
-            } else {
-                let anchor = selection.anchor_position();
-                crate::cursor::Selection::new(anchor, new_pos)
-            };
-
-            self.cursor.set_selection(new_selection);
+            self.cursor.move_to(last.head());
+            self.cursor.set_goal_column(goal_col);
         }
 
         cx.notify();
@@ -46,8 +91,55 @@ mod tests {
             s.insert_text("Line1\nLine2", cx);
             s.set_cursor_position(text::Point::new(1, 0));
             s.select_up(cx);
-            let sel = s.cursor.selection();
-            assert!(!sel.is_empty());
+
+            // Verify using new multi-cursor API
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert!(!selections[0].is_empty());
+            assert_eq!(selections[0].head(), text::Point::new(0, 0));
+            assert_eq!(selections[0].tail(), text::Point::new(1, 0));
+        });
+    }
+
+    #[gpui::test]
+    fn extends_multiple_selections_independently(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Line 1\nLine 2\nLine 3\nLine 4", cx);
+
+            // Create two cursors on different lines
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(1, 3),
+                        end: text::Point::new(1, 3),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(3, 3),
+                        end: text::Point::new(3, 3),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            // Extend both selections up
+            s.select_up(cx);
+
+            // Verify both extended independently
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 2);
+            assert_eq!(selections[0].head(), text::Point::new(0, 3));
+            assert_eq!(selections[0].tail(), text::Point::new(1, 3));
+            assert_eq!(selections[1].head(), text::Point::new(2, 3));
+            assert_eq!(selections[1].tail(), text::Point::new(3, 3));
         });
     }
 }

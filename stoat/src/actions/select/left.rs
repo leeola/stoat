@@ -1,27 +1,59 @@
 //! Select left action implementation and tests.
+//!
+//! Demonstrates multi-cursor selection extension to the left.
 
 use crate::Stoat;
 use gpui::Context;
-use text::Bias;
+use text::{Bias, Point};
 
 impl Stoat {
-    /// Extend selection left by one character.
+    /// Extend all selections left by one character.
+    ///
+    /// Each selection extends independently by moving its head left while keeping
+    /// the tail (anchor) fixed. Correctly handles multi-byte UTF-8 characters.
+    ///
+    /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_left(&mut self, cx: &mut Context<Self>) {
-        let selection = self.cursor.selection().clone();
-        let cursor_pos = selection.cursor_position();
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let snapshot = buffer.read(cx).snapshot();
 
-        if cursor_pos.column > 0 {
-            let target = text::Point::new(cursor_pos.row, cursor_pos.column - 1);
-            let snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
-            let new_pos = snapshot.clip_point(target, Bias::Left);
+        // Auto-sync from cursor if single selection (backward compat)
+        let cursor_pos = self.cursor.position();
+        if self.selections.count() == 1 {
+            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            if newest_sel.head() != cursor_pos {
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: cursor_pos,
+                        end: cursor_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &snapshot,
+                );
+            }
+        }
 
-            let new_selection = if selection.is_empty() {
-                crate::cursor::Selection::new(cursor_pos, new_pos)
-            } else {
-                let anchor = selection.anchor_position();
-                crate::cursor::Selection::new(anchor, new_pos)
-            };
-            self.cursor.set_selection(new_selection);
+        // Operate on all selections
+        let mut selections = self.selections.all::<Point>(&snapshot);
+        for selection in &mut selections {
+            let head = selection.head();
+            if head.column > 0 {
+                let target = Point::new(head.row, head.column - 1);
+                let new_head = snapshot.clip_point(target, Bias::Left);
+
+                // Extend selection by moving head, keeping tail fixed
+                selection.set_head(new_head, text::SelectionGoal::None);
+            }
+        }
+
+        // Store back and sync cursor
+        self.selections.select(selections.clone(), &snapshot);
+        if let Some(last) = selections.last() {
+            self.cursor.move_to(last.head());
         }
 
         cx.notify();
@@ -39,8 +71,55 @@ mod tests {
         stoat.update(|s, cx| {
             s.insert_text("Hello", cx);
             s.select_left(cx);
-            let sel = s.cursor.selection();
-            assert!(!sel.is_empty());
+
+            // Verify using new multi-cursor API
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert!(!selections[0].is_empty());
+            assert_eq!(selections[0].head(), text::Point::new(0, 4));
+            assert_eq!(selections[0].tail(), text::Point::new(0, 5));
+        });
+    }
+
+    #[gpui::test]
+    fn extends_multiple_selections_independently(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello\nWorld", cx);
+
+            // Create two cursors
+            let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![
+                    text::Selection {
+                        id,
+                        start: text::Point::new(0, 5), // End of "Hello"
+                        end: text::Point::new(0, 5),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                    text::Selection {
+                        id: id + 1,
+                        start: text::Point::new(1, 5), // End of "World"
+                        end: text::Point::new(1, 5),
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    },
+                ],
+                &buffer_snapshot,
+            );
+
+            // Extend both selections left
+            s.select_left(cx);
+
+            // Verify both extended independently
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 2);
+            assert_eq!(selections[0].head(), text::Point::new(0, 4));
+            assert_eq!(selections[0].tail(), text::Point::new(0, 5));
+            assert_eq!(selections[1].head(), text::Point::new(1, 4));
+            assert_eq!(selections[1].tail(), text::Point::new(1, 5));
         });
     }
 }
