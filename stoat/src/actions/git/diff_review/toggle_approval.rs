@@ -86,19 +86,21 @@ mod tests {
 
                 // Toggle on
                 s.diff_review_toggle_approval(cx);
-                assert!(s
-                    .diff_review_approved_hunks
-                    .get(file_path)
-                    .map(|set| set.contains(&hunk_idx))
-                    .unwrap_or(false));
+                assert!(
+                    s.diff_review_approved_hunks
+                        .get(file_path)
+                        .map(|set| set.contains(&hunk_idx))
+                        .unwrap_or(false)
+                );
 
                 // Toggle off
                 s.diff_review_toggle_approval(cx);
-                assert!(!s
-                    .diff_review_approved_hunks
-                    .get(file_path)
-                    .map(|set| set.contains(&hunk_idx))
-                    .unwrap_or(false));
+                assert!(
+                    !s.diff_review_approved_hunks
+                        .get(file_path)
+                        .map(|set| set.contains(&hunk_idx))
+                        .unwrap_or(false)
+                );
             }
         });
     }

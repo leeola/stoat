@@ -139,9 +139,18 @@ impl Stoat {
     /// - Resets selection to first item
     pub fn filter_commands(&mut self, query: &str) {
         tracing::info!("filter_commands called with query: '{}'", query);
+
+        // Filter out hidden commands unless show_hidden is true
+        let visible_commands: Vec<_> = self
+            .command_palette_commands
+            .iter()
+            .filter(|cmd| self.command_palette_show_hidden || !cmd.hidden)
+            .cloned()
+            .collect();
+
         if query.is_empty() {
-            // No query: show all commands
-            self.command_palette_filtered = self.command_palette_commands.clone();
+            // No query: show all visible commands
+            self.command_palette_filtered = visible_commands;
         } else {
             // Parse pattern for smart fuzzy matching
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
@@ -150,8 +159,7 @@ impl Stoat {
             let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
 
             // Build indexed search strings, including aliases
-            let indexed_strings: Vec<(usize, String)> = self
-                .command_palette_commands
+            let indexed_strings: Vec<(usize, String)> = visible_commands
                 .iter()
                 .enumerate()
                 .map(|(idx, cmd)| {
@@ -169,7 +177,7 @@ impl Stoat {
             let mut scored_commands: Vec<(usize, u32)> = indexed_strings
                 .iter()
                 .filter_map(|(idx, search_text)| {
-                    let cmd = &self.command_palette_commands[*idx];
+                    let cmd = &visible_commands[*idx];
 
                     // Check for exact alias match (case-insensitive)
                     let query_lower = query.to_lowercase();
@@ -215,7 +223,7 @@ impl Stoat {
             // Convert back to CommandInfo
             self.command_palette_filtered = scored_commands
                 .into_iter()
-                .map(|(idx, _score)| self.command_palette_commands[idx].clone())
+                .map(|(idx, _score)| visible_commands[idx].clone())
                 .collect();
         }
 
@@ -678,11 +686,18 @@ pub fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
             tracing::info!("Command {} has aliases: {:?}", name, aliases);
         }
 
+        // Get hidden flag (false if not in map)
+        let hidden = crate::actions::HIDDEN
+            .get(type_id)
+            .copied()
+            .unwrap_or(false);
+
         commands.push(crate::stoat::CommandInfo {
             name: name.to_string(),
             description: description.to_string(),
             aliases,
             type_id: *type_id,
+            hidden,
         });
     }
 

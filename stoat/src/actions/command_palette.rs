@@ -4,3 +4,4 @@ mod dismiss;
 mod next;
 mod open;
 mod prev;
+mod toggle_hidden;

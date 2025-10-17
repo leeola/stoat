@@ -141,6 +141,8 @@ pub fn dispatch_command_by_type_id(
         window.dispatch_action(Box::new(CommandPalettePrev), cx);
     } else if type_id == TypeId::of::<CommandPaletteDismiss>() {
         window.dispatch_action(Box::new(CommandPaletteDismiss), cx);
+    } else if type_id == TypeId::of::<ToggleCommandPaletteHidden>() {
+        window.dispatch_action(Box::new(ToggleCommandPaletteHidden), cx);
     }
     // Git status actions
     else if type_id == TypeId::of::<OpenGitStatus>() {

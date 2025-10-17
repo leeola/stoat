@@ -3,7 +3,7 @@
 //! Actions are dispatched through GPUI's action system and handled by [`crate::Stoat`].
 
 use crate::stoat::KeyContext;
-use gpui::{actions, Action};
+use gpui::{Action, actions};
 use std::{any::TypeId, collections::HashMap, sync::LazyLock};
 
 // Editing actions
@@ -125,6 +125,8 @@ actions!(
         CommandPaletteExecute,
         /// Dismiss command palette
         CommandPaletteDismiss,
+        /// Toggle showing hidden commands in palette
+        ToggleCommandPaletteHidden,
     ]
 );
 
@@ -352,12 +354,20 @@ pub trait ActionMetadata {
     fn aliases() -> &'static [&'static str] {
         &[]
     }
+
+    /// Whether this command should be hidden from the command palette by default.
+    ///
+    /// Hidden commands are typically context-specific actions that cannot be executed
+    /// from the command palette (e.g., dismiss actions for modals).
+    fn hidden() -> bool {
+        false
+    }
 }
 
 /// Helper macro to implement [`ActionMetadata`] for an action type.
 macro_rules! action_metadata {
-    // Without aliases (backward compatible)
-    ($type:ty, $help:expr, $desc:expr) => {
+    // Hidden with aliases
+    ($type:ty, $help:expr, $desc:expr, [$($alias:expr),* $(,)?], hidden) => {
         impl ActionMetadata for $type {
             fn action_name() -> &'static str {
                 stringify!($type)
@@ -370,9 +380,37 @@ macro_rules! action_metadata {
             fn description() -> &'static str {
                 $desc
             }
+
+            fn aliases() -> &'static [&'static str] {
+                &[$($alias),*]
+            }
+
+            fn hidden() -> bool {
+                true
+            }
         }
     };
-    // With aliases
+    // Hidden without aliases
+    ($type:ty, $help:expr, $desc:expr, hidden) => {
+        impl ActionMetadata for $type {
+            fn action_name() -> &'static str {
+                stringify!($type)
+            }
+
+            fn help_text() -> &'static str {
+                $help
+            }
+
+            fn description() -> &'static str {
+                $desc
+            }
+
+            fn hidden() -> bool {
+                true
+            }
+        }
+    };
+    // With aliases (not hidden)
     ($type:ty, $help:expr, $desc:expr, [$($alias:expr),* $(,)?]) => {
         impl ActionMetadata for $type {
             fn action_name() -> &'static str {
@@ -389,6 +427,22 @@ macro_rules! action_metadata {
 
             fn aliases() -> &'static [&'static str] {
                 &[$($alias),*]
+            }
+        }
+    };
+    // Without aliases (backward compatible, not hidden)
+    ($type:ty, $help:expr, $desc:expr) => {
+        impl ActionMetadata for $type {
+            fn action_name() -> &'static str {
+                stringify!($type)
+            }
+
+            fn help_text() -> &'static str {
+                $help
+            }
+
+            fn description() -> &'static str {
+                $desc
             }
         }
     };
@@ -579,7 +633,8 @@ action_metadata!(
 action_metadata!(
     FileFinderDismiss,
     "dismiss finder",
-    "Close the file finder without opening a file"
+    "Close the file finder without opening a file",
+    hidden
 );
 
 // Buffer finder actions
@@ -606,7 +661,8 @@ action_metadata!(
 action_metadata!(
     BufferFinderDismiss,
     "dismiss finder",
-    "Close the buffer finder without switching buffers"
+    "Close the buffer finder without switching buffers",
+    hidden
 );
 
 // Command palette actions
@@ -633,7 +689,13 @@ action_metadata!(
 action_metadata!(
     CommandPaletteDismiss,
     "dismiss palette",
-    "Close the command palette without executing a command"
+    "Close the command palette without executing a command",
+    hidden
+);
+action_metadata!(
+    ToggleCommandPaletteHidden,
+    "toggle hidden",
+    "Toggle showing hidden commands in the command palette"
 );
 
 // Git status actions
@@ -660,7 +722,8 @@ action_metadata!(
 action_metadata!(
     GitStatusDismiss,
     "dismiss status",
-    "Close the git status modal without opening a file"
+    "Close the git status modal without opening a file",
+    hidden
 );
 action_metadata!(
     GitStatusCycleFilter,
@@ -745,7 +808,8 @@ action_metadata!(
 action_metadata!(
     DiffReviewDismiss,
     "dismiss review",
-    "Exit diff review mode and return to the previous mode"
+    "Exit diff review mode and return to the previous mode",
+    hidden
 );
 action_metadata!(
     DiffReviewCycleComparisonMode,
@@ -875,7 +939,8 @@ action_metadata!(
 action_metadata!(
     HelpModalDismiss,
     "dismiss help",
-    "Close the help modal and return to the previous mode"
+    "Close the help modal and return to the previous mode",
+    hidden
 );
 action_metadata!(
     OpenAboutModal,
@@ -886,7 +951,8 @@ action_metadata!(
 action_metadata!(
     AboutModalDismiss,
     "dismiss about",
-    "Close the about modal and return to the previous mode"
+    "Close the about modal and return to the previous mode",
+    hidden
 );
 
 // KeyContext and Mode actions
@@ -1040,6 +1106,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ToggleCommandPaletteHidden>(),
+        ToggleCommandPaletteHidden::action_name(),
     );
 
     // Git status actions
@@ -1350,6 +1420,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::description(),
     );
+    descriptions.insert(
+        TypeId::of::<ToggleCommandPaletteHidden>(),
+        ToggleCommandPaletteHidden::description(),
+    );
 
     // Git status actions
     descriptions.insert(TypeId::of::<OpenGitStatus>(), OpenGitStatus::description());
@@ -1654,6 +1728,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<CommandPaletteDismiss>(),
         CommandPaletteDismiss::help_text(),
     );
+    help.insert(
+        TypeId::of::<ToggleCommandPaletteHidden>(),
+        ToggleCommandPaletteHidden::help_text(),
+    );
 
     // Git status actions
     help.insert(TypeId::of::<OpenGitStatus>(), OpenGitStatus::help_text());
@@ -1843,6 +1921,21 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 /// Get the aliases for a given action.
 pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
     ALIASES.get(&action.type_id()).copied().unwrap_or(&[])
+}
+
+/// Map from TypeId to hidden flag for command palette filtering
+pub static HIDDEN: LazyLock<HashMap<TypeId, bool>> = LazyLock::new(|| {
+    let hidden = HashMap::new();
+
+    // Actions hidden from command palette by default (dismiss actions, etc.)
+    // Hidden actions are marked via the action_metadata! macro with the 'hidden' parameter
+
+    hidden
+});
+
+/// Get the hidden flag for a given action.
+pub fn hidden(action: &dyn Action) -> bool {
+    HIDDEN.get(&action.type_id()).copied().unwrap_or(false)
 }
 
 mod about_modal;

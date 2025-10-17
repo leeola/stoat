@@ -152,6 +152,8 @@ pub struct CommandInfo {
     pub aliases: Vec<&'static str>,
     /// TypeId for dispatching the action
     pub type_id: std::any::TypeId,
+    /// Whether this command is hidden from command palette by default
+    pub hidden: bool,
 }
 
 /// Events emitted by Stoat
@@ -221,6 +223,7 @@ pub struct Stoat {
     pub(crate) command_palette_selected: usize,
     pub(crate) command_palette_previous_mode: Option<String>,
     pub(crate) command_palette_previous_key_context: Option<KeyContext>,
+    pub(crate) command_palette_show_hidden: bool,
 
     // Buffer finder state
     pub(crate) buffer_finder_input: Option<Entity<Buffer>>,
@@ -356,6 +359,7 @@ impl Stoat {
             command_palette_selected: 0,
             command_palette_previous_mode: None,
             command_palette_previous_key_context: None,
+            command_palette_show_hidden: false,
             buffer_finder_input: None,
             buffer_finder_buffers: Vec::new(),
             buffer_finder_filtered: Vec::new(),
@@ -427,6 +431,7 @@ impl Stoat {
             command_palette_selected: 0,
             command_palette_previous_mode: None,
             command_palette_previous_key_context: None,
+            command_palette_show_hidden: false,
             buffer_finder_input: None,
             buffer_finder_buffers: Vec::new(),
             buffer_finder_filtered: Vec::new(),
@@ -1167,6 +1172,7 @@ impl Stoat {
             command_palette_selected: 0,
             command_palette_previous_mode: None,
             command_palette_previous_key_context: None,
+            command_palette_show_hidden: false,
             buffer_finder_input: None,
             buffer_finder_buffers: Vec::new(),
             buffer_finder_filtered: Vec::new(),

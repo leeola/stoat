@@ -756,6 +756,11 @@ key = "backspace"
 action = "DeleteLeft"
 context = "Editor && mode == command_palette"
 
+[[bindings]]
+key = "ctrl-h"
+action = "ToggleCommandPaletteHidden"
+context = "Editor && mode == command_palette"
+
 # Git Status Mode - View modified files
 [[bindings]]
 key = "escape"
