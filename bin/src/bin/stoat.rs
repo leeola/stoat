@@ -12,6 +12,9 @@ pub struct Cli {
 pub enum Command {
     #[command(about = "Launch GUI with v4 architecture", name = "gui")]
     Gui {
+        #[arg(short, long, env = "STOAT_CONFIG", help = "Path to config file")]
+        config: Option<std::path::PathBuf>,
+
         #[arg(help = "Files to open")]
         paths: Vec<std::path::PathBuf>,
     },
@@ -37,9 +40,9 @@ fn main() {
 
     // Handle subcommands
     match cli.command {
-        Some(Command::Gui { paths }) => {
+        Some(Command::Gui { config, paths }) => {
             // Launch GUI
-            if let Err(e) = stoat_bin::commands::gui::run(paths) {
+            if let Err(e) = stoat_bin::commands::gui::run(config, paths) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }

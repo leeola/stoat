@@ -512,7 +512,7 @@ impl PaneGroupView {
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(Stoat::new)
+            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -557,7 +557,7 @@ impl PaneGroupView {
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(Stoat::new)
+            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -602,7 +602,7 @@ impl PaneGroupView {
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(Stoat::new)
+            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -647,7 +647,7 @@ impl PaneGroupView {
         let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(Stoat::new)
+            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 

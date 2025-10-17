@@ -22,6 +22,7 @@ enum_dispatch = "0.3"
 toml = "0.8"
 serde = { workspace = true }
 thiserror = { workspace = true }
+dirs = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [
   "vendored-libgit2",
   "vendored-openssl",

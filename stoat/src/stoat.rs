@@ -14,7 +14,7 @@ use crate::{
     worktree::{Entry, Worktree},
 };
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
-use nucleo_matcher::{Config, Matcher};
+use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
@@ -168,6 +168,12 @@ pub enum StoatEvent {
 /// Key difference from old stoat: methods take `&mut Context<Self>` instead of `&mut App`.
 /// This enables spawning self-updating async tasks.
 pub struct Stoat {
+    /// Global configuration loaded from config.toml
+    ///
+    /// Initialized at startup by loading from the platform-specific config directory.
+    /// Used to configure editor behavior like fonts, themes, and keybindings.
+    pub(crate) config: crate::config::Config,
+
     /// Buffer storage and management (tracks with WeakEntity)
     pub(crate) buffer_store: Entity<BufferStore>,
 
@@ -292,7 +298,12 @@ impl Stoat {
     /// Create new Stoat entity.
     ///
     /// Takes `&mut Context<Self>` to follow Zed's Buffer pattern.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Global configuration loaded from config.toml
+    /// * `cx` - GPUI context for entity creation
+    pub fn new(config: crate::config::Config, cx: &mut Context<Self>) -> Self {
         // Create buffer store
         let buffer_store = cx.new(|_| BufferStore::new());
 
@@ -333,6 +344,7 @@ impl Stoat {
             };
 
         Self {
+            config,
             buffer_store,
             open_buffers,
             active_buffer_id,
@@ -352,7 +364,7 @@ impl Stoat {
             file_finder_previous_key_context: None,
             file_finder_preview: None,
             file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),
@@ -405,6 +417,7 @@ impl Stoat {
     /// Used by [`PaneGroupView`] when splitting panes to create multiple views of the same buffer.
     pub fn clone_for_split(&self) -> Self {
         Self {
+            config: self.config.clone(),
             buffer_store: self.buffer_store.clone(),
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
@@ -424,7 +437,7 @@ impl Stoat {
             file_finder_previous_key_context: None,
             file_finder_preview: None,
             file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),
@@ -1146,6 +1159,7 @@ impl Stoat {
 
         // Create minimap in a special mode
         cx.new(|_cx| Self {
+            config: self.config.clone(),
             buffer_store: self.buffer_store.clone(),
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
@@ -1165,7 +1179,7 @@ impl Stoat {
             file_finder_previous_key_context: None,
             file_finder_preview: None,
             file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),

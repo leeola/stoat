@@ -6483,6 +6483,7 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs 5.0.1",
  "enum_dispatch",
  "git2",
  "gpui",

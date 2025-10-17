@@ -3,8 +3,14 @@ use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowO
 use std::rc::Rc;
 use stoat::Stoat;
 
-pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_paths(
+    config_path: Option<std::path::PathBuf>,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
+        // Load configuration with optional override from CLI --config or STOAT_CONFIG env var
+        let config = stoat::Config::load_with_overrides(config_path.as_deref()).unwrap_or_default();
+
         // Register keybindings
         let keymap = Rc::new(stoat::keymap::create_default_keymap());
         cx.bind_keys(keymap.bindings().cloned());
@@ -33,7 +39,7 @@ pub fn run_with_paths(paths: Vec<std::path::PathBuf>) -> Result<(), Box<dyn std:
             move |window, cx| {
                 // Create Stoat entity
                 let stoat = cx.new(|cx| {
-                    let mut stoat = Stoat::new(cx);
+                    let mut stoat = Stoat::new(config.clone(), cx);
 
                     // Load first file if provided
                     if !paths.is_empty() {

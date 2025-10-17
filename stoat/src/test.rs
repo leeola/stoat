@@ -76,7 +76,7 @@ impl<'a> TestStoat<'a> {
     /// Called by [`Stoat::test`] and [`Stoat::test_with_text`].
     pub fn new(text: &str, cx: &'a mut TestAppContext) -> Self {
         let entity = cx.new(|cx| {
-            let stoat = Stoat::new(cx);
+            let stoat = Stoat::new(crate::config::Config::default(), cx);
 
             // Always update the buffer to replace welcome text (even with empty string)
             // Use Rust language for better tokenization in tests

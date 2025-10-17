@@ -1,12 +1,18 @@
 use std::path::PathBuf;
 
 #[cfg(feature = "gui")]
-pub fn run(paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-    stoat_gui::run_with_paths(paths)
+pub fn run(
+    config_path: Option<PathBuf>,
+    paths: Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    stoat_gui::run_with_paths(config_path, paths)
 }
 
 #[cfg(not(feature = "gui"))]
-pub fn run(_paths: Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    _config_path: Option<PathBuf>,
+    _paths: Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Error: gui feature not enabled");
     eprintln!("Run with: cargo run --features gui --bin stoat -- gui");
     std::process::exit(1);
