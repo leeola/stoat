@@ -57,7 +57,22 @@ impl Stoat {
                     .update(cx, |store, _cx| store.activate_buffer(buffer_id));
 
                 // Reset cursor to beginning (could be improved to save/restore per-buffer cursor)
-                self.cursor.move_to(text::Point::new(0, 0));
+                let target_pos = text::Point::new(0, 0);
+                self.cursor.move_to(target_pos);
+
+                // Sync selections to cursor position
+                let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: target_pos,
+                        end: target_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
 
                 debug!(buffer_id = ?buffer_id, "Switched to buffer");
             } else {

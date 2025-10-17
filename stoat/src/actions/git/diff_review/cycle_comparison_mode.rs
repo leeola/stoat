@@ -103,7 +103,22 @@ impl Stoat {
                 self.jump_to_current_hunk(cx);
             } else {
                 // No hunks in new mode - reset cursor to file start
-                self.cursor.move_to(text::Point::new(0, 0));
+                let target_pos = text::Point::new(0, 0);
+                self.cursor.move_to(target_pos);
+
+                // Sync selections to cursor position
+                let buffer_snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: target_pos,
+                        end: target_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
             }
         } else {
             // No diff for new mode - clear old diff and reset cursor
@@ -111,7 +126,23 @@ impl Stoat {
             buffer_item.update(cx, |item, _| {
                 item.set_diff(None);
             });
-            self.cursor.move_to(text::Point::new(0, 0));
+
+            let target_pos = text::Point::new(0, 0);
+            self.cursor.move_to(target_pos);
+
+            // Sync selections to cursor position
+            let buffer_snapshot = self.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = self.selections.next_id();
+            self.selections.select(
+                vec![text::Selection {
+                    id,
+                    start: target_pos,
+                    end: target_pos,
+                    reversed: false,
+                    goal: text::SelectionGoal::None,
+                }],
+                &buffer_snapshot,
+            );
         }
 
         cx.emit(crate::stoat::StoatEvent::Changed);

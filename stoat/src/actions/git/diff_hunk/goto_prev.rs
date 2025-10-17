@@ -53,7 +53,24 @@ impl Stoat {
 
             if let Some(hunk) = prev_hunk {
                 let target_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
-                self.cursor.move_to(text::Point::new(target_row, 0));
+                let target_pos = text::Point::new(target_row, 0);
+
+                // Update cursor
+                self.cursor.move_to(target_pos);
+
+                // Sync selections to cursor position
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: target_pos,
+                        end: target_pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
+
                 self.ensure_cursor_visible();
 
                 tracing::debug!("Jumped to previous diff hunk at row {}", target_row);
