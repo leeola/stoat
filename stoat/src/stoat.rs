@@ -1092,8 +1092,13 @@ impl Stoat {
         // Update current file path for status bar (normalized)
         self.current_file_path = Some(self.normalize_file_path(&path_buf));
 
-        // Reset cursor to origin
+        // Reset cursor and selections to origin
         self.cursor.move_to(text::Point::new(0, 0));
+
+        // Initialize new selections for the new buffer
+        let new_snapshot = buffer_item_entity.read(cx).buffer().read(cx).snapshot();
+        self.selections = SelectionsCollection::new(&new_snapshot);
+
         cx.notify();
 
         // Drop initial buffer if it's still empty
