@@ -24,10 +24,22 @@ impl Stoat {
         };
 
         // Auto-sync from cursor if single selection (backward compat)
+        // In normal mode, replace existing non-empty selections with empty selection at cursor
+        // so each 'w' creates a new selection instead of extending the old one
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&snapshot);
-            if newest_sel.head() != cursor_pos {
+            let should_reset = if self.mode == "normal" || self.mode == "insert" {
+                // In normal/insert mode, reset if:
+                // 1. There's a non-empty selection (for ww behavior), OR
+                // 2. Head doesn't match cursor (for cursor/selection sync)
+                !newest_sel.is_empty() || newest_sel.head() != cursor_pos
+            } else {
+                // In visual mode, only reset if head doesn't match cursor
+                newest_sel.head() != cursor_pos
+            };
+
+            if should_reset {
                 let id = self.selections.next_id();
                 self.selections.select(
                     vec![text::Selection {
@@ -67,8 +79,8 @@ impl Stoat {
                 let token_start = token.range.start.to_offset(&snapshot);
                 let token_end = token.range.end.to_offset(&snapshot);
 
-                // Skip tokens that start at or before cursor (vim `w` behavior)
-                if token_start <= cursor_offset {
+                // Skip tokens that start before cursor
+                if token_start < cursor_offset {
                     token_cursor.next();
                     continue;
                 }
@@ -83,9 +95,18 @@ impl Stoat {
             }
 
             if let Some(range) = found_symbol {
-                let selection_end = snapshot.offset_to_point(range.end);
-                // Extend selection by moving head to end of symbol
-                selection.set_head(selection_end, text::SelectionGoal::None);
+                if self.mode == "normal" || self.mode == "insert" {
+                    // In normal/insert mode: select just the symbol itself
+                    let selection_start = snapshot.offset_to_point(range.start);
+                    let selection_end = snapshot.offset_to_point(range.end);
+                    selection.start = selection_start;
+                    selection.end = selection_end;
+                    selection.reversed = false;
+                } else {
+                    // In visual mode: extend from current tail to symbol end
+                    let selection_end = snapshot.offset_to_point(range.end);
+                    selection.set_head(selection_end, text::SelectionGoal::None);
+                }
             }
         }
 
@@ -115,9 +136,9 @@ mod tests {
             // Verify using new multi-cursor API
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            // Vim `w` behavior: skip "hello", select "world"
-            assert_eq!(selections[0].head(), text::Point::new(0, 11));
-            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+            // In normal mode: select the symbol at/after cursor ("hello")
+            assert_eq!(selections[0].head(), text::Point::new(0, 5)); // end of "hello"
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0)); // start of "hello"
         });
     }
 
@@ -156,10 +177,11 @@ mod tests {
             // Verify both extended independently
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 11)); // "world"
-            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
-            assert_eq!(selections[1].head(), text::Point::new(1, 7)); // "bar"
-            assert_eq!(selections[1].tail(), text::Point::new(1, 0));
+            // In normal mode: each selects the symbol at/after cursor
+            assert_eq!(selections[0].head(), text::Point::new(0, 5)); // end of "hello"
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0)); // start of "hello"
+            assert_eq!(selections[1].head(), text::Point::new(1, 3)); // end of "foo"
+            assert_eq!(selections[1].tail(), text::Point::new(1, 0)); // start of "foo"
         });
     }
 }

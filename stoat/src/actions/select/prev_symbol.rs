@@ -23,10 +23,22 @@ impl Stoat {
         };
 
         // Auto-sync from cursor if single selection (backward compat)
+        // In normal mode, replace existing non-empty selections with empty selection at cursor
+        // so each 'b' creates a new selection instead of extending the old one
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&snapshot);
-            if newest_sel.head() != cursor_pos {
+            let should_reset = if self.mode == "normal" || self.mode == "insert" {
+                // In normal/insert mode, reset if:
+                // 1. There's a non-empty selection (for bb behavior), OR
+                // 2. Head doesn't match cursor (for cursor/selection sync)
+                !newest_sel.is_empty() || newest_sel.head() != cursor_pos
+            } else {
+                // In visual mode, only reset if head doesn't match cursor
+                newest_sel.head() != cursor_pos
+            };
+
+            if should_reset {
                 let id = self.selections.next_id();
                 self.selections.select(
                     vec![text::Selection {
@@ -71,13 +83,12 @@ impl Stoat {
                 }
 
                 if token.kind.is_symbol() {
-                    if token_start < cursor_offset && cursor_offset <= token_end {
-                        prev_symbol = Some((token_start, cursor_offset));
-                        break;
-                    }
-
-                    if token_end < cursor_offset {
+                    // Remember symbols that start before cursor
+                    if token_start < cursor_offset {
                         prev_symbol = Some((token_start, token_end));
+                    } else {
+                        // Token starts at or after cursor, we've found all previous symbols
+                        break;
                     }
                 }
 
@@ -87,9 +98,19 @@ impl Stoat {
             let found_symbol: Option<Range<usize>> = prev_symbol.map(|(start, end)| start..end);
 
             if let Some(range) = found_symbol {
-                let selection_start = snapshot.offset_to_point(range.start);
-                // Extend selection by moving head to start of symbol
-                selection.set_head(selection_start, text::SelectionGoal::None);
+                if self.mode == "normal" || self.mode == "insert" {
+                    // In normal/insert mode: select just the symbol itself
+                    let selection_start = snapshot.offset_to_point(range.start);
+                    let selection_end = snapshot.offset_to_point(range.end);
+                    // For reversed selection: start=head, end=tail
+                    selection.start = selection_start; // head (where cursor moves to)
+                    selection.end = selection_end; // tail (where we came from)
+                    selection.reversed = true;
+                } else {
+                    // In visual mode: extend from current tail to symbol start
+                    let selection_start = snapshot.offset_to_point(range.start);
+                    selection.set_head(selection_start, text::SelectionGoal::None);
+                }
             }
         }
 
