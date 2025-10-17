@@ -18,6 +18,12 @@ impl Stoat {
     /// - [`move_right`](crate::Stoat::move_right) - Move right one character
     /// - [`move_word_left`](crate::Stoat::move_word_left) - Move left one word
     pub fn move_left(&mut self, cx: &mut Context<Self>) {
+        // In anchored selection mode, use selection extension instead of cursor movement
+        if self.is_mode_anchored() {
+            self.select_left(cx);
+            return;
+        }
+
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

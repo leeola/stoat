@@ -683,6 +683,19 @@ impl Stoat {
         self.modes.get(name)
     }
 
+    /// Check if the current mode has anchored selection behavior.
+    ///
+    /// Returns `true` if the current mode's metadata has `anchored_selection` set to `true`.
+    /// This is used by movement and selection actions to determine whether to extend
+    /// selections (in anchored mode) or collapse them (in non-anchored mode).
+    ///
+    /// Modes with anchored selections include visual, visual_line, and visual_block.
+    pub fn is_mode_anchored(&self) -> bool {
+        self.get_mode(&self.mode)
+            .map(|m| m.anchored_selection)
+            .unwrap_or(false)
+    }
+
     /// Get current KeyContext.
     ///
     /// Returns the active [`KeyContext`] controlling UI rendering and keybinding groups.

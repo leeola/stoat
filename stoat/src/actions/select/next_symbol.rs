@@ -24,19 +24,19 @@ impl Stoat {
         };
 
         // Auto-sync from cursor if single selection (backward compat)
-        // In normal mode, replace existing non-empty selections with empty selection at cursor
-        // so each 'w' creates a new selection instead of extending the old one
+        // In non-anchored mode, replace existing non-empty selections with empty selection at
+        // cursor so each 'w' creates a new selection instead of extending the old one
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&snapshot);
-            let should_reset = if self.mode == "normal" || self.mode == "insert" {
-                // In normal/insert mode, reset if:
+            let should_reset = if self.is_mode_anchored() {
+                // In anchored selection mode, only reset if head doesn't match cursor
+                newest_sel.head() != cursor_pos
+            } else {
+                // In non-anchored mode, reset if:
                 // 1. There's a non-empty selection (for ww behavior), OR
                 // 2. Head doesn't match cursor (for cursor/selection sync)
                 !newest_sel.is_empty() || newest_sel.head() != cursor_pos
-            } else {
-                // In visual mode, only reset if head doesn't match cursor
-                newest_sel.head() != cursor_pos
             };
 
             if should_reset {
@@ -95,17 +95,17 @@ impl Stoat {
             }
 
             if let Some(range) = found_symbol {
-                if self.mode == "normal" || self.mode == "insert" {
-                    // In normal/insert mode: select just the symbol itself
+                if self.is_mode_anchored() {
+                    // In anchored selection mode: extend from current tail to symbol end
+                    let selection_end = snapshot.offset_to_point(range.end);
+                    selection.set_head(selection_end, text::SelectionGoal::None);
+                } else {
+                    // In non-anchored mode: select just the symbol itself
                     let selection_start = snapshot.offset_to_point(range.start);
                     let selection_end = snapshot.offset_to_point(range.end);
                     selection.start = selection_start;
                     selection.end = selection_end;
                     selection.reversed = false;
-                } else {
-                    // In visual mode: extend from current tail to symbol end
-                    let selection_end = snapshot.offset_to_point(range.end);
-                    selection.set_head(selection_end, text::SelectionGoal::None);
                 }
             }
         }

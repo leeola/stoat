@@ -243,4 +243,57 @@ mod tests {
             assert_eq!(selections[0].head(), text::Point::new(0, 2));
         });
     }
+
+    #[gpui::test]
+    fn visual_mode_b_extends_selection_backward(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("foo bar baz", cx);
+            s.set_cursor_position(text::Point::new(0, 8)); // Start at 'b' in "baz"
+
+            // Enter visual mode
+            s.set_mode_by_name("visual", cx);
+
+            // Press b once (select_prev_symbol in visual mode)
+            s.select_prev_symbol(cx);
+
+            // Selection should extend backward from (0,8) to start of "bar" (0,4)
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].tail(), text::Point::new(0, 8)); // anchor at start position
+            assert_eq!(selections[0].head(), text::Point::new(0, 4)); // head at start of "bar"
+            assert!(selections[0].reversed);
+
+            // Press b again - should extend further back to "foo" (0,0)
+            s.select_prev_symbol(cx);
+
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].tail(), text::Point::new(0, 8)); // anchor should stay at start
+            assert_eq!(selections[0].head(), text::Point::new(0, 0)); // head should be at start of "foo"
+            assert!(selections[0].reversed);
+        });
+    }
+
+    #[gpui::test]
+    fn visual_mode_cursor_back_extends_selection(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("foo bar baz", cx);
+            s.set_cursor_position(text::Point::new(0, 8)); // Start at 'b' in "baz"
+
+            // Enter visual mode
+            s.set_mode_by_name("visual", cx);
+
+            // Call move_word_left - in visual mode this should delegate to select_prev_symbol
+            s.move_word_left(cx);
+
+            // In visual mode, move_word_left should extend the selection backward
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].tail(), text::Point::new(0, 8)); // anchor stays
+            assert_eq!(selections[0].head(), text::Point::new(0, 4)); // extends to "bar"
+            assert!(selections[0].reversed);
+        });
+    }
 }

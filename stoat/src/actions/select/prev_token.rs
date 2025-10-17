@@ -23,19 +23,19 @@ impl Stoat {
         };
 
         // Auto-sync from cursor if single selection (backward compat)
-        // In normal mode, replace existing non-empty selections with empty selection at cursor
-        // so each 'B' creates a new selection instead of extending the old one
+        // In non-anchored mode, replace existing non-empty selections with empty selection at
+        // cursor so each 'B' creates a new selection instead of extending the old one
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&snapshot);
-            let should_reset = if self.mode == "normal" || self.mode == "insert" {
-                // In normal/insert mode, reset if:
+            let should_reset = if self.is_mode_anchored() {
+                // In anchored selection mode, only reset if head doesn't match cursor
+                newest_sel.head() != cursor_pos
+            } else {
+                // In non-anchored mode, reset if:
                 // 1. There's a non-empty selection (for BB behavior), OR
                 // 2. Head doesn't match cursor (for cursor/selection sync)
                 !newest_sel.is_empty() || newest_sel.head() != cursor_pos
-            } else {
-                // In visual mode, only reset if head doesn't match cursor
-                newest_sel.head() != cursor_pos
             };
 
             if should_reset {
@@ -98,18 +98,18 @@ impl Stoat {
             let found_token: Option<Range<usize>> = prev_token.map(|(start, end)| start..end);
 
             if let Some(range) = found_token {
-                if self.mode == "normal" || self.mode == "insert" {
-                    // In normal/insert mode: select just the token itself
+                if self.is_mode_anchored() {
+                    // In anchored selection mode: extend from current tail to token start
+                    let selection_start = snapshot.offset_to_point(range.start);
+                    selection.set_head(selection_start, text::SelectionGoal::None);
+                } else {
+                    // In non-anchored mode: select just the token itself
                     let selection_start = snapshot.offset_to_point(range.start);
                     let selection_end = snapshot.offset_to_point(range.end);
                     // For reversed selection: start=head, end=tail
                     selection.start = selection_start; // head (where cursor moves to)
                     selection.end = selection_end; // tail (where we came from)
                     selection.reversed = true;
-                } else {
-                    // In visual mode: extend from current tail to token start
-                    let selection_start = snapshot.offset_to_point(range.start);
-                    selection.set_head(selection_start, text::SelectionGoal::None);
                 }
             }
         }
