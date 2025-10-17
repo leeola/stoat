@@ -11,6 +11,7 @@ use crate::{
     git_diff::BufferDiff,
     git_repository::Repository,
     scroll::ScrollPosition,
+    selections::SelectionsCollection,
     worktree::{Entry, Worktree},
 };
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
@@ -190,7 +191,17 @@ pub struct Stoat {
     /// Initial buffer ID (for auto-drop when empty)
     pub(crate) initial_buffer_id: Option<BufferId>,
 
-    /// Cursor position management
+    /// Multi-cursor selection management using Zed's architecture
+    ///
+    /// Stores selections as [`Selection<Anchor>`] for persistence across buffer edits.
+    /// Uses [`Arc`] for cheap cloning and lazy anchor resolution for performance.
+    /// See [`SelectionsCollection`] for details.
+    pub(crate) selections: SelectionsCollection,
+
+    /// Legacy single-cursor manager (for backward compatibility during migration)
+    ///
+    /// This field is maintained alongside selections to avoid breaking existing code.
+    /// New code should use the selections field and related methods for multi-cursor support.
     pub(crate) cursor: CursorManager,
 
     /// Scroll position with animation
@@ -312,7 +323,7 @@ impl Stoat {
 
         // Create initial empty buffer
         let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
-        let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::PlainText, cx));
+        let buffer_item = cx.new(|cx| BufferItem::new(buffer.clone(), Language::PlainText, cx));
 
         // Register buffer in BufferStore (weak ref) and store strong ref in open_buffers
         buffer_store.update(cx, |store, _cx| {
@@ -321,6 +332,11 @@ impl Stoat {
         let open_buffers = vec![buffer_item.clone()];
         let active_buffer_id = Some(buffer_id);
         let initial_buffer_id = Some(buffer_id);
+
+        // Initialize cursor and selections at origin
+        let cursor = CursorManager::new();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+        let selections = SelectionsCollection::new(&buffer_snapshot);
 
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
 
@@ -349,7 +365,8 @@ impl Stoat {
             open_buffers,
             active_buffer_id,
             initial_buffer_id,
-            cursor: CursorManager::new(),
+            selections,
+            cursor,
             scroll: ScrollPosition::new(),
             viewport_lines: None,
             mode: "normal".into(),
@@ -419,7 +436,7 @@ impl Stoat {
     /// This follows Zed's performant pattern: share expensive buffer data via [`Entity`],
     /// but maintain independent view state per pane.
     ///
-    /// The cursor and scroll positions are copied to the new instance, so the split starts
+    /// The selections and scroll positions are copied to the new instance, so the split starts
     /// at the same view, but subsequent movements are independent.
     ///
     /// Used by [`PaneGroupView`] when splitting panes to create multiple views of the same buffer.
@@ -430,6 +447,7 @@ impl Stoat {
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
             initial_buffer_id: None,
+            selections: self.selections.clone(),
             cursor: self.cursor.clone(),
             scroll: self.scroll.clone(),
             viewport_lines: self.viewport_lines,
@@ -562,17 +580,63 @@ impl Stoat {
         self.active_buffer_id
     }
 
-    /// Get cursor position
+    /// Get all active selections resolved to Point positions.
+    ///
+    /// Returns all non-overlapping selections with anchors resolved to concrete
+    /// Point positions using the active buffer's snapshot. This is the primary
+    /// way to access selections for most operations.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let selections: Vec<Selection<Point>> = stoat.active_selections(cx);
+    /// for sel in selections {
+    ///     println!("Selection from {:?} to {:?}", sel.start, sel.end);
+    /// }
+    /// ```
+    pub fn active_selections(&self, cx: &App) -> Vec<text::Selection<Point>> {
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        self.selections.all(&buffer_snapshot)
+    }
+
+    /// Get the newest (primary) selection resolved to Point.
+    ///
+    /// Returns the most recently created selection, which is typically the one
+    /// the user interacts with when only one cursor is active.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let selection = stoat.newest_selection(cx);
+    /// let cursor_pos = selection.head();
+    /// ```
+    pub fn newest_selection(&self, cx: &App) -> text::Selection<Point> {
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        self.selections.newest(&buffer_snapshot)
+    }
+
+    /// Get cursor position (legacy single-cursor API).
+    ///
+    /// Returns the position from the cursor field for backward compatibility.
+    /// For multi-cursor support, use [`newest_selection`](Self::newest_selection).
     pub fn cursor_position(&self) -> Point {
         self.cursor.position()
     }
 
-    /// Set cursor position
+    /// Set cursor position (legacy single-cursor API).
+    ///
+    /// Updates the cursor field for backward compatibility.
+    /// For multi-cursor support, use [`SelectionsCollection::select`].
     pub fn set_cursor_position(&mut self, position: Point) {
         self.cursor.move_to(position);
     }
 
-    /// Get current selection
+    /// Get current selection (legacy single-cursor API).
+    ///
+    /// Returns the selection from the cursor field for backward compatibility.
+    /// For multi-cursor support, use [`active_selections`](Self::active_selections).
     pub fn selection(&self) -> &crate::cursor::Selection {
         self.cursor.selection()
     }
@@ -852,6 +916,8 @@ impl Stoat {
     }
 
     /// Ensure cursor is visible
+    ///
+    /// Scrolls the viewport to ensure the cursor is visible with padding above and below.
     pub fn ensure_cursor_visible(&mut self) {
         let Some(viewport_lines) = self.viewport_lines else {
             return;
@@ -999,6 +1065,7 @@ impl Stoat {
         // Update current file path for status bar (normalized)
         self.current_file_path = Some(self.normalize_file_path(&path_buf));
 
+        // Reset cursor to origin
         self.cursor.move_to(text::Point::new(0, 0));
         cx.notify();
 
@@ -1172,10 +1239,11 @@ impl Stoat {
             open_buffers: self.open_buffers.clone(),
             active_buffer_id: self.active_buffer_id,
             initial_buffer_id: None,
-            cursor: CursorManager::new(), // New cursor for minimap
-            scroll: self.scroll.clone(),  // Clone scroll state (will be synced)
-            viewport_lines: None,         // Will be set by layout
-            mode: "minimap".into(),       // Special mode for minimap
+            selections: self.selections.clone(), // Clone selections for minimap
+            cursor: CursorManager::new(),        // New cursor for minimap
+            scroll: self.scroll.clone(),         // Clone scroll state (will be synced)
+            viewport_lines: None,                // Will be set by layout
+            mode: "minimap".into(),              // Special mode for minimap
             modes: self.modes.clone(),
             key_context: KeyContext::TextEditor, // Minimap always in editor context
             contexts: self.contexts.clone(),

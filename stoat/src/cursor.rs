@@ -1,9 +1,28 @@
-//! Cursor and selection management for the editor
+//! Legacy single-cursor management (DEPRECATED).
 //!
-//! This module provides efficient cursor positioning and text selection
-//! functionality, following patterns from Zed for optimal performance.
-//! Cursors track positions in the buffer and manage selection ranges,
-//! enabling text editing operations and visual feedback.
+//! # DEPRECATED
+//!
+//! This module is deprecated in favor of [`crate::selections::SelectionsCollection`]
+//! which provides multi-cursor support using Zed's architecture with anchor-based
+//! storage for persistence across buffer edits.
+//!
+//! ## Migration Guide
+//!
+//! - Replace `CursorManager` with [`SelectionsCollection`](crate::SelectionsCollection)
+//! - Use [`Stoat::active_selections()`](crate::Stoat::active_selections) instead of direct cursor
+//!   access
+//! - Store positions as [`text::Selection<Anchor>`] for persistence
+//! - Resolve to [`Point`] or other dimensions when needed for operations
+//!
+//! ## Why Migrate?
+//!
+//! - **Multi-cursor support**: Multiple independent cursors/selections
+//! - **Persistence**: Anchors survive buffer edits without manual tracking
+//! - **Performance**: Arc-based cloning, lazy resolution, efficient merging
+//! - **Compatibility**: Matches Zed's proven architecture
+//!
+//! See [`actions::move::right`](crate::actions::move::right) for an example
+//! of multi-cursor action implementation.
 
 use std::cmp::{max, min};
 use text::Point;
