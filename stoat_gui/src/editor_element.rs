@@ -355,6 +355,17 @@ impl Element for EditorElement {
             cx,
         );
 
+        // Paint selections (before text)
+        if !is_minimap {
+            self.paint_selections(
+                bounds,
+                &prepaint.line_layouts,
+                prepaint.gutter_width,
+                window,
+                cx,
+            );
+        }
+
         // Collect buffer line positions for cursor/gutter rendering (only real buffer rows, not
         // phantoms)
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
@@ -703,6 +714,189 @@ impl EditorElement {
             border_widths: 0.0.into(),
             border_style: gpui::BorderStyle::default(),
         });
+    }
+
+    /// Paint selections as highlighted backgrounds
+    fn paint_selections(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_positions: &[ShapedLineLayout],
+        gutter_width: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // Get selections from stoat
+        let stoat = self.view.read(cx).stoat.read(cx);
+        let buffer_item = stoat.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let selections = stoat.active_selections(cx);
+
+        // Selection background color (subtle blue with transparency)
+        let selection_color = gpui::Hsla {
+            h: 210.0 / 360.0, // blue hue
+            s: 0.7,
+            l: 0.5,
+            a: 0.3,
+        };
+
+        // Font for measuring text width
+        let font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+
+        for selection in selections {
+            if selection.is_empty() {
+                continue; // Skip empty selections (just cursor)
+            }
+
+            let start = selection.start;
+            let end = selection.end;
+
+            // Handle single-line vs multi-line selections
+            if start.row == end.row {
+                // Single-line selection
+                if let Some(layout) = line_positions
+                    .iter()
+                    .find(|l| l.buffer_row == Some(start.row))
+                {
+                    let line_text = buffer_snapshot
+                        .text_for_range(
+                            text::Point::new(start.row, 0)..text::Point::new(start.row, end.column),
+                        )
+                        .collect::<String>();
+
+                    let text_before_start = if start.column > 0 {
+                        line_text
+                            .chars()
+                            .take(start.column as usize)
+                            .collect::<String>()
+                    } else {
+                        String::new()
+                    };
+
+                    let selected_text = line_text
+                        .chars()
+                        .skip(start.column as usize)
+                        .take((end.column - start.column) as usize)
+                        .collect::<String>();
+
+                    // Measure text widths
+                    let start_x_offset = self.measure_text_width(&text_before_start, &font, window);
+                    let selection_width = self.measure_text_width(&selected_text, &font, window);
+
+                    let selection_bounds = Bounds {
+                        origin: point(
+                            bounds.origin.x + gutter_width + self.style.padding + start_x_offset,
+                            layout.y_position,
+                        ),
+                        size: size(selection_width, self.style.line_height),
+                    };
+
+                    window.paint_quad(gpui::PaintQuad {
+                        bounds: selection_bounds,
+                        corner_radii: 0.0.into(),
+                        background: selection_color.into(),
+                        border_color: gpui::transparent_black(),
+                        border_widths: 0.0.into(),
+                        border_style: gpui::BorderStyle::default(),
+                    });
+                }
+            } else {
+                // Multi-line selection
+                for row in start.row..=end.row {
+                    if let Some(layout) = line_positions.iter().find(|l| l.buffer_row == Some(row))
+                    {
+                        let (col_start, col_end) = if row == start.row {
+                            // First line: from start.column to end of line
+                            let line_end = buffer_snapshot.line_len(row);
+                            (start.column, line_end)
+                        } else if row == end.row {
+                            // Last line: from beginning to end.column
+                            (0, end.column)
+                        } else {
+                            // Middle lines: entire line
+                            let line_end = buffer_snapshot.line_len(row);
+                            (0, line_end)
+                        };
+
+                        let line_text = buffer_snapshot
+                            .text_for_range(
+                                text::Point::new(row, 0)..text::Point::new(row, col_end),
+                            )
+                            .collect::<String>();
+
+                        let text_before_start = if col_start > 0 {
+                            line_text
+                                .chars()
+                                .take(col_start as usize)
+                                .collect::<String>()
+                        } else {
+                            String::new()
+                        };
+
+                        let selected_text = line_text
+                            .chars()
+                            .skip(col_start as usize)
+                            .take((col_end - col_start) as usize)
+                            .collect::<String>();
+
+                        // Measure text widths
+                        let start_x_offset =
+                            self.measure_text_width(&text_before_start, &font, window);
+                        let selection_width =
+                            self.measure_text_width(&selected_text, &font, window);
+
+                        let selection_bounds = Bounds {
+                            origin: point(
+                                bounds.origin.x
+                                    + gutter_width
+                                    + self.style.padding
+                                    + start_x_offset,
+                                layout.y_position,
+                            ),
+                            size: size(selection_width, self.style.line_height),
+                        };
+
+                        window.paint_quad(gpui::PaintQuad {
+                            bounds: selection_bounds,
+                            corner_radii: 0.0.into(),
+                            background: selection_color.into(),
+                            border_color: gpui::transparent_black(),
+                            border_widths: 0.0.into(),
+                            border_style: gpui::BorderStyle::default(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Measure the width of text when rendered
+    fn measure_text_width(&self, text: &str, font: &Font, window: &mut Window) -> Pixels {
+        if text.is_empty() {
+            return Pixels::ZERO;
+        }
+
+        let text_shared = SharedString::from(text.to_string());
+        let text_run = TextRun {
+            len: text_shared.len(),
+            font: font.clone(),
+            color: self.style.text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+
+        let shaped =
+            window
+                .text_system()
+                .shape_line(text_shared, self.style.font_size, &[text_run], None);
+
+        shaped.width
     }
 
     /// Paint git diff indicators in the gutter

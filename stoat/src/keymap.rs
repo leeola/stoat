@@ -32,6 +32,7 @@ struct ModeConfig {
     name: String,
     display_name: String,
     previous: Option<String>,
+    anchored_selection: Option<bool>,
 }
 
 /// Individual key binding configuration
@@ -246,10 +247,20 @@ pub fn parse_modes_from_config() -> HashMap<String, Mode> {
         .modes
         .into_iter()
         .map(|mode_config| {
+            let anchored_selection = mode_config.anchored_selection.unwrap_or(false);
             let mode = if let Some(previous) = mode_config.previous {
-                Mode::with_previous(mode_config.name.clone(), mode_config.display_name, previous)
+                Mode::with_previous(
+                    mode_config.name.clone(),
+                    mode_config.display_name,
+                    previous,
+                    anchored_selection,
+                )
             } else {
-                Mode::new(mode_config.name.clone(), mode_config.display_name)
+                Mode::new(
+                    mode_config.name.clone(),
+                    mode_config.display_name,
+                    anchored_selection,
+                )
             };
             (mode_config.name, mode)
         })

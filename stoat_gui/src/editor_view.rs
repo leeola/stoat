@@ -446,6 +446,18 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_enter_visual_mode(
+        &mut self,
+        _: &EnterVisualMode,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.enter_visual_mode(cx);
+        });
+        cx.notify();
+    }
+
     fn handle_set_key_context(
         &mut self,
         action: &SetKeyContext,
@@ -994,6 +1006,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_page_down))
             .on_action(cx.listener(Self::handle_enter_insert_mode))
             .on_action(cx.listener(Self::handle_enter_normal_mode))
+            .on_action(cx.listener(Self::handle_enter_visual_mode))
             .on_action(cx.listener(Self::handle_enter_space_mode))
             .on_action(cx.listener(Self::handle_enter_pane_mode))
             .on_action(cx.listener(Self::handle_enter_git_filter_mode))

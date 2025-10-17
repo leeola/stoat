@@ -2,7 +2,6 @@
 
 use crate::Stoat;
 use gpui::Context;
-use tracing::debug;
 
 impl Stoat {
     // TODO: Mode transitions probably shouldn't be actions - consider refactoring to internal
@@ -24,10 +23,7 @@ impl Stoat {
     ///
     /// See also [`Self::enter_normal_mode`] for returning to command mode.
     pub fn enter_visual_mode(&mut self, cx: &mut Context<Self>) {
-        self.mode = "visual".to_string();
-        debug!("Entering visual mode");
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+        self.set_mode_by_name("visual", cx);
     }
 }
 

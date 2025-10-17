@@ -113,15 +113,27 @@ pub struct Mode {
     /// ignoring the actual previous mode. Used for overlay modes like file_finder
     /// and command_palette that should always return to normal.
     pub previous: Option<String>,
+    /// Whether entering this mode should initialize an anchored selection at the cursor.
+    ///
+    /// When `true`, entering this mode creates an empty selection at the current cursor
+    /// position, which serves as an anchor point. Subsequent movement commands will extend
+    /// the selection from this anchor. Used for visual selection modes (visual, visual_line,
+    /// visual_block).
+    pub anchored_selection: bool,
 }
 
 impl Mode {
     /// Create a new mode with the given name and display name.
-    pub fn new(name: impl Into<String>, display_name: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        display_name: impl Into<String>,
+        anchored_selection: bool,
+    ) -> Self {
         Self {
             name: name.into(),
             display_name: display_name.into(),
             previous: None,
+            anchored_selection,
         }
     }
 
@@ -130,11 +142,13 @@ impl Mode {
         name: impl Into<String>,
         display_name: impl Into<String>,
         previous: impl Into<String>,
+        anchored_selection: bool,
     ) -> Self {
         Self {
             name: name.into(),
             display_name: display_name.into(),
             previous: Some(previous.into()),
+            anchored_selection,
         }
     }
 }

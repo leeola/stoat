@@ -62,6 +62,36 @@ impl Stoat {
     /// - [`crate::actions::SetKeyContext`] - switches UI context
     /// - Keymap bindings - define which keys are active in each mode
     pub fn set_mode_by_name(&mut self, mode_name: &str, cx: &mut Context<Self>) {
+        // Check if entering a mode with anchored selection
+        if let Some(mode_meta) = self.get_mode(mode_name) {
+            if mode_meta.anchored_selection && self.mode != mode_name {
+                let cursor_pos = self.cursor.position();
+                let buffer_item = self.active_buffer(cx);
+                let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+                // Initialize selection at cursor if needed
+                if self.selections.count() == 1 {
+                    let newest = self.selections.newest::<text::Point>(&snapshot);
+                    if newest.is_empty() && newest.head() == cursor_pos {
+                        // Already have empty selection at cursor - good
+                    } else {
+                        // Create new empty selection at cursor to anchor this mode
+                        let id = self.selections.next_id();
+                        self.selections.select(
+                            vec![text::Selection {
+                                id,
+                                start: cursor_pos,
+                                end: cursor_pos,
+                                reversed: false,
+                                goal: text::SelectionGoal::None,
+                            }],
+                            &snapshot,
+                        );
+                    }
+                }
+            }
+        }
+
         self.mode = mode_name.to_string();
         debug!(mode = mode_name, "Set mode");
         cx.emit(crate::stoat::StoatEvent::Changed);
@@ -153,6 +183,64 @@ mod tests {
                 // Context should be unchanged
                 assert_eq!(s.key_context(), initial_context);
             }
+        });
+    }
+
+    #[gpui::test]
+    fn initializes_selection_on_visual_mode_entry(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Line 1\nLine 2\nLine 3", cx);
+            s.set_cursor_position(text::Point::new(1, 3));
+
+            // Enter visual mode
+            s.set_mode_by_name("visual", cx);
+
+            // Should have selection at cursor position
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].start, text::Point::new(1, 3));
+            assert_eq!(selections[0].end, text::Point::new(1, 3));
+        });
+    }
+
+    #[gpui::test]
+    fn visual_mode_j_extends_selection_down(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Line 1\nLine 2\nLine 3", cx);
+            s.set_cursor_position(text::Point::new(0, 2));
+
+            // Enter visual mode
+            s.set_mode_by_name("visual", cx);
+
+            // Press j (SelectDown in visual mode)
+            s.select_down(cx);
+
+            // Selection should extend from (0,2) to (1,2)
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].tail(), text::Point::new(0, 2));
+            assert_eq!(selections[0].head(), text::Point::new(1, 2));
+        });
+    }
+
+    #[gpui::test]
+    fn visual_mode_k_extends_selection_up(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("Line 1\nLine 2\nLine 3", cx);
+            s.set_cursor_position(text::Point::new(1, 2));
+
+            // Enter visual mode and move up
+            s.set_mode_by_name("visual", cx);
+            s.select_up(cx);
+
+            // Selection should extend from (1,2) to (0,2)
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].tail(), text::Point::new(1, 2));
+            assert_eq!(selections[0].head(), text::Point::new(0, 2));
         });
     }
 }

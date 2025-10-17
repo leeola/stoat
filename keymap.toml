@@ -49,6 +49,7 @@ display_name = "INSERT"
 [[modes]]
 name = "visual"
 display_name = "VISUAL"
+anchored_selection = true
 
 [[modes]]
 name = "pane"
