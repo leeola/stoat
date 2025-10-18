@@ -205,6 +205,26 @@ impl BufferStore {
         self.get_buffer(*buffer_id)
     }
 
+    /// Get the file path for a buffer ID.
+    ///
+    /// Returns the file path associated with a buffer, or [`None`] if the buffer doesn't exist
+    /// or has no associated file path (unnamed/scratch buffer).
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_id` - The buffer ID to look up
+    ///
+    /// # Returns
+    ///
+    /// Reference to the file path, or [`None`] if buffer has no path
+    ///
+    /// # Usage
+    ///
+    /// Used by [`crate::Stoat::write_all`] to get paths for all open buffers when saving.
+    pub fn get_path(&self, buffer_id: BufferId) -> Option<&PathBuf> {
+        self.buffers.get(&buffer_id)?.path.as_ref()
+    }
+
     /// Close a buffer.
     ///
     /// Removes the buffer from storage and activation history.

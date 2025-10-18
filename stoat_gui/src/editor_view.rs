@@ -913,6 +913,15 @@ impl EditorView {
         cx.notify();
     }
 
+    fn handle_write_all(&mut self, _: &WriteAll, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.stoat.update(cx, |stoat, cx| {
+            if let Err(e) = stoat.write_all(cx) {
+                tracing::error!("WriteAll action failed: {}", e);
+            }
+        });
+        cx.notify();
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -1060,6 +1069,7 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_command_palette_execute))
             .on_action(cx.listener(Self::handle_command_palette_dismiss))
             .on_action(cx.listener(Self::handle_write_file))
+            .on_action(cx.listener(Self::handle_write_all))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_scroll_wheel(cx.listener(
                 |view: &mut EditorView,

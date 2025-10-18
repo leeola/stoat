@@ -217,6 +217,8 @@ pub fn dispatch_command_by_type_id(
     // File actions
     else if type_id == TypeId::of::<WriteFile>() {
         window.dispatch_action(Box::new(WriteFile), cx);
+    } else if type_id == TypeId::of::<WriteAll>() {
+        window.dispatch_action(Box::new(WriteAll), cx);
     }
     // Application actions
     else if type_id == TypeId::of::<QuitApp>() {

@@ -276,6 +276,8 @@ actions!(
         QuitApp,
         /// Write current buffer to disk
         WriteFile,
+        /// Write all modified buffers to disk
+        WriteAll,
     ]
 );
 
@@ -910,6 +912,12 @@ action_metadata!(
     "Write the current buffer to disk",
     ["w", "write"]
 );
+action_metadata!(
+    WriteAll,
+    "write all",
+    "Write all modified buffers to disk",
+    ["wa", "wall"]
+);
 
 // View actions
 action_metadata!(
@@ -1248,6 +1256,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     // Application actions
     names.insert(TypeId::of::<QuitApp>(), QuitApp::action_name());
     names.insert(TypeId::of::<WriteFile>(), WriteFile::action_name());
+    names.insert(TypeId::of::<WriteAll>(), WriteAll::action_name());
 
     // View actions
     names.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::action_name());
@@ -1561,6 +1570,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     // Application actions
     descriptions.insert(TypeId::of::<QuitApp>(), QuitApp::description());
     descriptions.insert(TypeId::of::<WriteFile>(), WriteFile::description());
+    descriptions.insert(TypeId::of::<WriteAll>(), WriteAll::description());
 
     // View actions
     descriptions.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::description());
@@ -1854,6 +1864,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     // Application actions
     help.insert(TypeId::of::<QuitApp>(), QuitApp::help_text());
     help.insert(TypeId::of::<WriteFile>(), WriteFile::help_text());
+    help.insert(TypeId::of::<WriteAll>(), WriteAll::help_text());
 
     // View actions
     help.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::help_text());
@@ -1897,6 +1908,7 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     // Application actions
     aliases.insert(TypeId::of::<QuitApp>(), QuitApp::aliases());
     aliases.insert(TypeId::of::<WriteFile>(), WriteFile::aliases());
+    aliases.insert(TypeId::of::<WriteAll>(), WriteAll::aliases());
 
     // View actions
     aliases.insert(TypeId::of::<ToggleMinimap>(), ToggleMinimap::aliases());
