@@ -27,6 +27,7 @@ git2 = { version = "0.20", default-features = false, features = [
   "vendored-libgit2",
   "vendored-openssl",
 ] }
+tempfile = "3.12"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

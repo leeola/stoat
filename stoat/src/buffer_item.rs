@@ -6,10 +6,10 @@
 use crate::git_diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::{sync::Arc, time::SystemTime};
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
-use text::{Buffer, BufferSnapshot};
+use text::{Buffer, BufferSnapshot, LineEnding};
 
 /// A text buffer with syntax highlighting and git diff support.
 ///
@@ -33,6 +33,12 @@ pub struct BufferItem {
 
     /// Saved text content for modification tracking (None for unnamed buffers never saved)
     saved_text: Option<String>,
+
+    /// Modification time when file was last saved (None for unnamed buffers or never saved)
+    saved_mtime: Option<SystemTime>,
+
+    /// Line ending style for the buffer (detected on load, preserved on save)
+    line_ending: LineEnding,
 }
 
 impl BufferItem {
@@ -51,6 +57,8 @@ impl BufferItem {
             language,
             diff: None,
             saved_text: None,
+            saved_mtime: None,
+            line_ending: LineEnding::default(),
         }
     }
 
@@ -171,6 +179,97 @@ impl BufferItem {
     /// the baseline for detecting modifications.
     pub fn set_saved_text(&mut self, text: String) {
         self.saved_text = Some(text);
+    }
+
+    /// Set the saved modification time baseline for conflict detection.
+    ///
+    /// Call this after saving a file to establish the baseline for detecting
+    /// external modifications. The mtime represents the modification time on
+    /// disk when the file was last saved.
+    ///
+    /// # Related
+    ///
+    /// - [`has_conflict`](#method.has_conflict) - Detect concurrent modifications
+    pub fn set_saved_mtime(&mut self, mtime: SystemTime) {
+        self.saved_mtime = Some(mtime);
+    }
+
+    /// Get the line ending style for this buffer.
+    ///
+    /// Returns the detected line ending from when the file was loaded,
+    /// or the platform default for new buffers.
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
+    /// Set the line ending style for this buffer.
+    ///
+    /// Called by [`Stoat::load_file`](crate::Stoat::load_file) after detecting
+    /// the line ending style from file contents. The detected style is preserved
+    /// when saving via [`Stoat::write_file`](crate::Stoat::write_file).
+    ///
+    /// # Arguments
+    ///
+    /// * `line_ending` - The line ending style to use
+    ///
+    /// # Related
+    ///
+    /// - [`line_ending`](#method.line_ending) - Get the current line ending
+    pub fn set_line_ending(&mut self, line_ending: LineEnding) {
+        self.line_ending = line_ending;
+    }
+
+    /// Check if the file has been modified externally since last save.
+    ///
+    /// Compares the current file modification time on disk with the saved mtime baseline.
+    /// Returns `true` if the file has been modified externally while this buffer also has
+    /// unsaved changes, indicating a conflict that may result in data loss if the buffer
+    /// is saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the file to check for conflicts
+    /// * `cx` - Application context for reading buffer state
+    ///
+    /// # Returns
+    ///
+    /// `true` if there's a conflict (file modified externally + buffer has unsaved changes),
+    /// `false` otherwise
+    ///
+    /// # Conflict Detection Logic
+    ///
+    /// A conflict exists when all of these conditions are met:
+    /// 1. File exists on disk
+    /// 2. We have a saved mtime baseline (file was previously saved)
+    /// 3. File's current mtime is newer than our saved mtime
+    /// 4. Buffer has unsaved modifications
+    ///
+    /// # Related
+    ///
+    /// - [`set_saved_mtime`](#method.set_saved_mtime) - Set the baseline mtime
+    /// - [`is_modified`](#method.is_modified) - Check for unsaved changes
+    pub fn has_conflict(&self, file_path: &std::path::Path, cx: &App) -> bool {
+        // Only a conflict if we have unsaved changes
+        if !self.is_modified(cx) {
+            return false;
+        }
+
+        // Need a saved mtime to compare against
+        let Some(saved_mtime) = self.saved_mtime else {
+            return false;
+        };
+
+        // Get current mtime from disk
+        let Ok(metadata) = std::fs::metadata(file_path) else {
+            return false;
+        };
+
+        let Ok(current_mtime) = metadata.modified() else {
+            return false;
+        };
+
+        // Conflict if file modified since our last save
+        current_mtime > saved_mtime
     }
 
     /// Get the base text for a specific diff hunk.

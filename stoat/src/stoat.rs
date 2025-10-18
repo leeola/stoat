@@ -1048,6 +1048,12 @@ impl Stoat {
             })
             .ok_or_else(|| "Failed to create buffer".to_string())?;
 
+        // Get mtime after reading file
+        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+
+        // Detect line ending from file contents
+        let line_ending = text::LineEnding::detect(&contents);
+
         // Update the buffer content
         buffer_item_entity.update(cx, |item, cx| {
             item.buffer().update(cx, |buffer, _| {
@@ -1055,8 +1061,12 @@ impl Stoat {
                 buffer.edit([(0..len, contents.as_str())]);
             });
             let _ = item.reparse(cx);
-            // Set saved text baseline for modification tracking
+            // Set saved text baseline, mtime, and line ending for modification tracking
             item.set_saved_text(contents.clone());
+            if let Some(mtime) = mtime {
+                item.set_saved_mtime(mtime);
+            }
+            item.set_line_ending(line_ending);
         });
 
         // Store strong reference in open_buffers if not already present
