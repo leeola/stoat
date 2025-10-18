@@ -146,4 +146,107 @@ mod tests {
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "Line 1\nLine 2\nLine 3");
     }
+
+    #[gpui::test]
+    fn modifies_buffer_and_writes(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = stoat.repo_path().unwrap().join("modify_test.txt");
+        stoat.set_file_path(file_path.clone());
+
+        // Insert initial text
+        stoat.dispatch(EnterInsertMode);
+        stoat.dispatch(InsertText("Initial".to_string()));
+        stoat.dispatch(EnterNormalMode);
+
+        // Modify: append more text
+        stoat.dispatch(MoveToLineEnd);
+        stoat.dispatch(EnterInsertMode);
+        stoat.dispatch(InsertText(" text here".to_string()));
+
+        // Write to disk
+        stoat.dispatch(WriteFile);
+
+        // Verify on disk
+        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
+        assert_eq!(contents, "Initial text here");
+    }
+
+    #[gpui::test]
+    fn multiple_edits_then_write(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = stoat.repo_path().unwrap().join("complex_edit.txt");
+        stoat.set_file_path(file_path.clone());
+
+        // Complex editing sequence: insert, delete, move, insert again
+        stoat.dispatch(EnterInsertMode);
+        stoat.dispatch(InsertText("First".to_string()));
+        stoat.dispatch(NewLine);
+        stoat.dispatch(InsertText("Second".to_string()));
+        stoat.dispatch(NewLine);
+        stoat.dispatch(InsertText("Third".to_string()));
+        stoat.dispatch(EnterNormalMode);
+
+        // Move and delete a word
+        stoat.dispatch(MoveToFileStart);
+        stoat.dispatch(MoveWordRight);
+        stoat.dispatch(DeleteWordRight);
+
+        // Write to disk
+        stoat.dispatch(WriteFile);
+
+        // Verify complex edit result on disk (Second line should be deleted)
+        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
+        assert_eq!(contents, "First\nThird");
+    }
+
+    #[gpui::test]
+    fn write_updates_saved_baseline(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = stoat.repo_path().unwrap().join("baseline_test.txt");
+        stoat.set_file_path(file_path.clone());
+
+        // Insert text (buffer becomes dirty)
+        stoat.dispatch(EnterInsertMode);
+        stoat.dispatch(InsertText("Content".to_string()));
+        stoat.dispatch(EnterNormalMode);
+
+        // Write to disk (should mark buffer as clean)
+        stoat.dispatch(WriteFile);
+
+        // Verify buffer is marked as clean by checking saved text baseline
+        stoat.update(|s, cx| {
+            let buffer_item = s.active_buffer(cx);
+            assert!(
+                !buffer_item.read(cx).is_modified(cx),
+                "Buffer should be clean (not modified) after write"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn write_preserves_existing_content(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = stoat.repo_path().unwrap().join("preserve_test.txt");
+
+        // Create file with existing content
+        std::fs::write(&file_path, "Existing content").expect("Failed to write initial file");
+
+        // Load the file
+        stoat.update(|s, cx| {
+            s.load_file(&file_path, cx).expect("Failed to load file");
+        });
+
+        // Modify the buffer
+        stoat.dispatch(EnterNormalMode);
+        stoat.dispatch(MoveToLineEnd);
+        stoat.dispatch(EnterInsertMode);
+        stoat.dispatch(InsertText(" modified".to_string()));
+
+        // Write back to disk
+        stoat.dispatch(WriteFile);
+
+        // Verify file has updated content
+        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
+        assert_eq!(contents, "Existing content modified");
+    }
 }
