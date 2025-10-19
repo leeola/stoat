@@ -2,26 +2,29 @@
 //!
 //! This module implements the [`insert_text`](crate::Stoat::insert_text) action, which handles
 //! text insertion at the cursor position. The action routes input to different buffers depending
-//! on the current mode:
-//! - In [`file_finder`](crate::Stoat::open_file_finder) mode, inserts into the file finder input
-//! - In [`command_palette`](crate::Stoat::open_command_palette) mode, inserts into the palette
+//! on the current [`KeyContext`]:
+//! - In [`FileFinder`](crate::stoat::KeyContext::FileFinder) context, inserts into the file finder
 //!   input
-//! - In [`buffer_finder`](crate::Stoat::open_buffer_finder) mode, inserts into the buffer finder
-//!   input
-//! - Otherwise, inserts into the main buffer at the cursor position
+//! - In [`CommandPalette`](crate::stoat::KeyContext::CommandPalette) context, inserts into the
+//!   palette input
+//! - In [`BufferFinder`](crate::stoat::KeyContext::BufferFinder) context, inserts into the buffer
+//!   finder input
+//! - In [`TextEditor`](crate::stoat::KeyContext::TextEditor) context with insert mode, inserts into
+//!   the main buffer
 //!
 //! After insertion, the cursor moves forward by the length of the inserted text, and the buffer
 //! is reparsed for syntax highlighting.
 
-use crate::Stoat;
+use crate::{stoat::KeyContext, Stoat};
 use gpui::Context;
 
 impl Stoat {
     /// Insert text at the cursor position.
     ///
-    /// Routes text insertion to the appropriate buffer based on the current mode. In finder
-    /// and palette modes, text is inserted into the respective input buffers and triggers
-    /// filtering. In normal mode, text is inserted into the main buffer at the cursor position.
+    /// Routes text insertion to the appropriate buffer based on the current [`KeyContext`].
+    /// In finder and palette contexts, text is inserted into the respective input buffers and
+    /// triggers filtering. In [`TextEditor`](KeyContext::TextEditor) context with insert mode,
+    /// text is inserted into the main buffer at the cursor position.
     ///
     /// # Parameters
     ///
@@ -30,18 +33,23 @@ impl Stoat {
     ///
     /// # Behavior
     ///
-    /// - File finder mode: Inserts at end of input buffer, triggers file filtering
-    /// - Command palette mode: Inserts at end of input buffer, triggers command filtering
-    /// - Buffer finder mode: Inserts at end of input buffer, triggers buffer filtering
-    /// - Normal mode: Inserts at cursor position, moves cursor forward, triggers reparse
+    /// - [`FileFinder`](KeyContext::FileFinder) context: Inserts at end of input buffer, triggers
+    ///   file filtering
+    /// - [`CommandPalette`](KeyContext::CommandPalette) context: Inserts at end of input buffer,
+    ///   triggers command filtering
+    /// - [`BufferFinder`](KeyContext::BufferFinder) context: Inserts at end of input buffer,
+    ///   triggers buffer filtering
+    /// - [`TextEditor`](KeyContext::TextEditor) context with insert mode: Inserts at cursor
+    ///   position, moves cursor forward, triggers reparse
+    /// - Other contexts/modes: No-op (text insertion not allowed)
     ///
     /// # Related Actions
     ///
     /// - [`delete_left`](crate::Stoat::delete_left) - Delete character before cursor
     /// - [`new_line`](crate::Stoat::new_line) - Insert newline character
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        // Route to file finder input buffer if in file_finder mode
-        if self.mode == "file_finder" {
+        // Route to file finder input buffer if in FileFinder context
+        if self.key_context == KeyContext::FileFinder {
             if let Some(input_buffer) = &self.file_finder_input {
                 // Insert at end of input buffer
                 let snapshot = input_buffer.read(cx).snapshot();
@@ -58,8 +66,8 @@ impl Stoat {
             return;
         }
 
-        // Route to command palette input buffer if in command_palette mode
-        if self.mode == "command_palette" {
+        // Route to command palette input buffer if in CommandPalette context
+        if self.key_context == KeyContext::CommandPalette {
             if let Some(input_buffer) = &self.command_palette_input {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let end_offset = snapshot.len();
@@ -75,8 +83,8 @@ impl Stoat {
             return;
         }
 
-        // Route to buffer finder input buffer if in buffer_finder mode
-        if self.mode == "buffer_finder" {
+        // Route to buffer finder input buffer if in BufferFinder context
+        if self.key_context == KeyContext::BufferFinder {
             if let Some(input_buffer) = &self.buffer_finder_input {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let end_offset = snapshot.len();
@@ -93,6 +101,7 @@ impl Stoat {
         }
 
         // Main buffer insertion with multi-cursor support
+        // Note: Mode gating (insert vs normal) happens at the action handler level in EditorView
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

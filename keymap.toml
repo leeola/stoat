@@ -103,837 +103,837 @@ previous = "normal"
 [[bindings]]
 key = "h"
 action = "MoveLeft"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "j"
 action = "MoveDown"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "k"
 action = "MoveUp"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "l"
 action = "MoveRight"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "w"
 action = "SelectNextSymbol"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "b"
 action = "SelectPrevSymbol"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "W"
 action = "SelectNextToken"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "B"
 action = "SelectPrevToken"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "0"
 action = "MoveToLineStart"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "$"
 action = "MoveToLineEnd"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "g g"
 action = "MoveToFileStart"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "G"
 action = "MoveToFileEnd"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-b"
 action = "PageUp"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-f"
 action = "PageDown"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-b"
 action = "PageUp"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-f"
 action = "PageDown"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "pageup"
 action = "PageUp"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "pagedown"
 action = "PageDown"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Mode transitions
 [[bindings]]
 key = "i"
 action = "SetMode(insert)"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "v"
 action = "SetMode(visual)"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "escape"
 action = "SetMode(normal)"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "escape"
 action = "SetMode(normal)"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "escape"
 action = "SetMode(normal)"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "space"
 action = "SetMode(space)"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Editing in normal mode
 [[bindings]]
 key = "x"
 action = "DeleteRight"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "shift-x"
 action = "DeleteLeft"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "d d"
 action = "DeleteLine"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "D"
 action = "DeleteToEndOfLine"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Undo/redo in normal mode
 [[bindings]]
 key = "u"
 action = "Undo"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-r"
 action = "Redo"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # File operations in normal mode
 [[bindings]]
 key = "cmd-s"
 action = "Save"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "ctrl-s"
 action = "Save"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Git diff hunks in normal mode
 [[bindings]]
 key = "] h"
 action = "GotoNextHunk"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "[ h"
 action = "GotoPrevHunk"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Insert Mode - Standard text editing
 [[bindings]]
 key = "left"
 action = "MoveLeft"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "right"
 action = "MoveRight"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "up"
 action = "MoveUp"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "down"
 action = "MoveDown"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "alt-left"
 action = "MoveWordLeft"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "alt-right"
 action = "MoveWordRight"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "cmd-left"
 action = "MoveToLineStart"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "cmd-right"
 action = "MoveToLineEnd"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "ctrl-a"
 action = "MoveToLineStart"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "ctrl-e"
 action = "MoveToLineEnd"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 # Deletion in insert mode
 [[bindings]]
 key = "backspace"
 action = "DeleteLeft"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "delete"
 action = "DeleteRight"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "alt-backspace"
 action = "DeleteWordLeft"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "alt-delete"
 action = "DeleteWordRight"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "enter"
 action = "NewLine"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 # File operations in insert mode
 [[bindings]]
 key = "cmd-s"
 action = "Save"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "ctrl-s"
 action = "Save"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 # Undo/redo in insert mode
 [[bindings]]
 key = "cmd-z"
 action = "Undo"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "ctrl-z"
 action = "Undo"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "cmd-shift-z"
 action = "Redo"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 [[bindings]]
 key = "ctrl-shift-z"
 action = "Redo"
-context = "Editor && mode == insert"
+context = "TextEditor && mode == insert"
 
 # Clipboard operations (global)
 [[bindings]]
 key = "cmd-c"
 action = "Copy"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-c"
 action = "Copy"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "cmd-x"
 action = "Cut"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-x"
 action = "Cut"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "cmd-v"
 action = "Paste"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-v"
 action = "Paste"
-context = "Editor"
+context = "TextEditor"
 
 # Visual Mode - Selection operations
 [[bindings]]
 key = "h"
 action = "SelectLeft"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "j"
 action = "SelectDown"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "k"
 action = "SelectUp"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "l"
 action = "SelectRight"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "left"
 action = "SelectLeft"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "right"
 action = "SelectRight"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "up"
 action = "SelectUp"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "down"
 action = "SelectDown"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "w"
 action = "SelectNextSymbol"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "b"
 action = "SelectPrevSymbol"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "W"
 action = "SelectNextToken"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "B"
 action = "SelectPrevToken"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "0"
 action = "SelectToLineStart"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "$"
 action = "SelectToLineEnd"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "y"
 action = "Copy"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "d"
 action = "Cut"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 [[bindings]]
 key = "x"
 action = "Cut"
-context = "Editor && mode == visual"
+context = "TextEditor && mode == visual"
 
 # Global bindings
 [[bindings]]
 key = "cmd-a"
 action = "SelectAll"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-a"
 action = "SelectAll"
-context = "Editor && mode != insert"
+context = "TextEditor && mode != insert"
 
 [[bindings]]
 key = "cmd-q"
 action = "Quit"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-q"
 action = "Quit"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "cmd-o"
 action = "Open"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "ctrl-o"
 action = "Open"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "tab"
 action = "Indent"
-context = "Editor"
+context = "TextEditor"
 
 [[bindings]]
 key = "shift-tab"
 action = "Outdent"
-context = "Editor"
+context = "TextEditor"
 
 # Pane Mode - Window management
 [[bindings]]
 key = "v"
 action = "SplitDown"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "s"
 action = "SplitRight"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-v"
 action = "SplitRight"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-s"
 action = "SplitDown"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "q"
 action = "ClosePane"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "h"
 action = "FocusPaneLeft"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "j"
 action = "FocusPaneDown"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "k"
 action = "FocusPaneUp"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "l"
 action = "FocusPaneRight"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-h"
 action = "FocusPaneLeft"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-j"
 action = "FocusPaneDown"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-k"
 action = "FocusPaneUp"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 [[bindings]]
 key = "ctrl-l"
 action = "FocusPaneRight"
-context = "Editor && mode == pane"
+context = "TextEditor && mode == pane"
 
 # File Finder Mode - Quick file navigation
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "up"
 action = "FileFinderPrev"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "down"
 action = "FileFinderNext"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "ctrl-p"
 action = "FileFinderPrev"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "ctrl-n"
 action = "FileFinderNext"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "backspace"
 action = "DeleteLeft"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 [[bindings]]
 key = "enter"
 action = "FileFinderSelect"
-context = "Editor && mode == file_finder"
+context = "FileFinder"
 
 # Buffer Finder Mode - Quick buffer switching
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "up"
 action = "BufferFinderPrev"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "down"
 action = "BufferFinderNext"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "ctrl-p"
 action = "BufferFinderPrev"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "ctrl-n"
 action = "BufferFinderNext"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "backspace"
 action = "DeleteLeft"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 [[bindings]]
 key = "enter"
 action = "BufferFinderSelect"
-context = "Editor && mode == buffer_finder"
+context = "BufferFinder"
 
 # Space Mode - Leader key for commands
 [[bindings]]
 key = "a"
 action = "SetMode(pane)"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "p"
 action = "OpenFileFinder"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "b"
 action = "OpenBufferFinder"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "g"
 action = "OpenGitStatus"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "d"
 action = "ToggleDiffHunk"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "r"
 action = "OpenDiffReview"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 [[bindings]]
 key = "escape"
 action = "SetMode(normal)"
-context = "Editor && mode == space"
+context = "TextEditor && mode == space"
 
 # Command Palette Mode - Fuzzy command search
 [[bindings]]
 key = ":"
 action = "OpenCommandPalette"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "up"
 action = "CommandPalettePrev"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "down"
 action = "CommandPaletteNext"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "ctrl-p"
 action = "CommandPalettePrev"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "ctrl-n"
 action = "CommandPaletteNext"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "enter"
 action = "CommandPaletteExecute"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "backspace"
 action = "DeleteLeft"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 [[bindings]]
 key = "ctrl-h"
 action = "ToggleCommandPaletteHidden"
-context = "Editor && mode == command_palette"
+context = "CommandPalette"
 
 # Git Status Mode - View modified files
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "j"
 action = "GitStatusNext"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "k"
 action = "GitStatusPrev"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "down"
 action = "GitStatusNext"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "up"
 action = "GitStatusPrev"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "ctrl-n"
 action = "GitStatusNext"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "ctrl-p"
 action = "GitStatusPrev"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "enter"
 action = "GitStatusSelect"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 [[bindings]]
 key = "f"
 action = "SetMode(git_filter)"
-context = "Editor && mode == git_status"
+context = "Git && mode == git_status"
 
 # Git Filter Mode - Quick filter selection
 [[bindings]]
 key = "a"
 action = "GitStatusSetFilterAll"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 [[bindings]]
 key = "s"
 action = "GitStatusSetFilterStaged"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 [[bindings]]
 key = "u"
 action = "GitStatusSetFilterUnstaged"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 [[bindings]]
 key = "w"
 action = "GitStatusSetFilterUnstagedWithUntracked"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 [[bindings]]
 key = "t"
 action = "GitStatusSetFilterUntracked"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 [[bindings]]
 key = "escape"
 action = "SetMode(git_status)"
-context = "Editor && mode == git_filter"
+context = "Git && mode == git_filter"
 
 # Diff Review Mode - Hunk-by-hunk review
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "j"
 action = "DiffReviewNextHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "k"
 action = "DiffReviewPrevHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "down"
 action = "DiffReviewNextHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "up"
 action = "DiffReviewPrevHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "ctrl-n"
 action = "DiffReviewNextHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "ctrl-p"
 action = "DiffReviewPrevHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "space"
 action = "DiffReviewApproveHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "a"
 action = "DiffReviewApproveHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "enter"
 action = "DiffReviewApproveHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "t"
 action = "DiffReviewToggleApproval"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "n"
 action = "DiffReviewNextUnreviewedHunk"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "R"
 action = "DiffReviewResetProgress"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "?"
 action = "OpenHelpOverlay"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = ": q"
 action = "DiffReviewDismiss"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 [[bindings]]
 key = "c"
 action = "DiffReviewCycleComparisonMode"
-context = "Editor && mode == diff_review"
+context = "DiffReview"
 
 # Help - Context-sensitive help system
 [[bindings]]
 key = "?"
 action = "OpenHelpOverlay"
-context = "Editor && mode == normal"
+context = "TextEditor && mode == normal"
 
 # Help Modal Mode - Full help reference
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == help_modal"
+context = "HelpModal"
 
 # About Modal Mode - Version and build info
 [[bindings]]
 key = "escape"
 action = "SetKeyContext(TextEditor)"
-context = "Editor && mode == about_modal"
+context = "AboutModal"

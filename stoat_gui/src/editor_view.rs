@@ -4,7 +4,7 @@ use gpui::{
     KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
 use std::sync::Arc;
-use stoat::{actions::*, scroll, Stoat};
+use stoat::{actions::*, scroll, stoat::KeyContext, Stoat};
 use tracing::debug;
 
 pub struct EditorView {
@@ -47,6 +47,15 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // For TextEditor context, only allow insertion in insert mode
+        // For other contexts (FileFinder, CommandPalette, etc), always allow
+        let key_context = self.stoat.read(cx).key_context();
+        let mode = self.stoat.read(cx).mode().to_string();
+
+        if key_context == KeyContext::TextEditor && mode != "insert" {
+            return; // No-op for normal/visual/etc modes
+        }
+
         self.stoat.update(cx, |stoat, cx| {
             stoat.insert_text(&command.0, cx);
         });
@@ -925,49 +934,27 @@ impl EditorView {
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Debug logging to see what keystroke we receive
         debug!(
             "KeyDownEvent: keystroke={:?}, key_char={:?}",
             event.keystroke, event.keystroke.key_char
         );
 
-        // Handle direct keyboard input in insert, file_finder, buffer_finder, and command_palette
-        // modes
+        let key_context = self.stoat.read(cx).key_context();
         let mode = self.stoat.read(cx).mode().to_string();
-        if mode == "insert"
-            || mode == "file_finder"
-            || mode == "buffer_finder"
-            || mode == "command_palette"
-        {
+
+        // Only dispatch InsertText for contexts/modes that allow text input
+        let should_insert = match key_context {
+            KeyContext::FileFinder | KeyContext::CommandPalette | KeyContext::BufferFinder => true,
+            KeyContext::TextEditor => mode == "insert",
+            _ => false,
+        };
+
+        if should_insert {
             if let Some(key_char) = &event.keystroke.key_char {
-                self.stoat.update(cx, |stoat, cx| {
-                    stoat.insert_text(key_char, cx);
-                });
-
-                // For file finder, update the filtered list
-                if mode == "file_finder" {
-                    let query = self
-                        .stoat
-                        .read(cx)
-                        .file_finder_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-
-                    self.stoat.update(cx, |stoat, cx| {
-                        stoat.filter_files(&query, cx);
-                    });
-                }
-
-                // For command palette, filtering already happens in insert_text
-                // No additional action needed here
-
-                cx.notify();
+                window.dispatch_action(Box::new(InsertText(key_char.clone())), cx);
             }
         }
     }
@@ -991,8 +978,9 @@ impl Render for EditorView {
         div()
             .id("editor")
             .key_context({
+                let context = self.stoat.read(cx).key_context();
                 let mut ctx = gpui::KeyContext::new_with_defaults();
-                ctx.add("Editor");
+                ctx.add(context.as_str());
                 ctx.set("mode", mode.clone());
                 ctx
             })
