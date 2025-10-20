@@ -16,7 +16,7 @@ pub fn run_with_paths(
         cx.bind_keys(keymap.bindings().cloned());
 
         // Register global action handlers
-        cx.on_action(|_: &stoat::actions::QuitApp, cx: &mut App| {
+        cx.on_action(|_: &stoat::actions::QuitAll, cx: &mut App| {
             cx.quit();
         });
 

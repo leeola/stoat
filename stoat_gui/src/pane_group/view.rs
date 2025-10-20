@@ -23,9 +23,9 @@ use std::{
 };
 use stoat::{
     actions::{
-        AboutModalDismiss, ClosePane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+        AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
         HelpModalDismiss, OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview,
-        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, ShowMinimapOnScroll,
+        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll,
         SplitDown, SplitLeft, SplitRight, SplitUp, ToggleMinimap,
     },
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
@@ -847,16 +847,11 @@ impl PaneGroupView {
         }
     }
 
-    /// Handle close pane action
-    fn handle_close_pane(
-        &mut self,
-        _: &ClosePane,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
+    /// Handle quit action - close current view, or quit app if last view
+    fn handle_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<'_, Self>) {
         let pane_to_close = self.active_pane;
 
-        debug!(pane_id = pane_to_close, "Attempting to close pane");
+        debug!(pane_id = pane_to_close, "Attempting to quit/close pane");
 
         // Try to remove the pane from the group
         match self.pane_group.remove(pane_to_close) {
@@ -889,11 +884,13 @@ impl PaneGroupView {
                 }
             },
             Err(e) => {
+                // Cannot close last pane - quit the application instead
                 debug!(
                     pane_id = pane_to_close,
                     error = %e,
-                    "Cannot close pane"
+                    "Last pane - quitting application"
                 );
+                cx.quit();
             },
         }
     }
@@ -1398,7 +1395,7 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_split_down))
                     .on_action(cx.listener(Self::handle_split_left))
                     .on_action(cx.listener(Self::handle_split_right))
-                    .on_action(cx.listener(Self::handle_close_pane))
+                    .on_action(cx.listener(Self::handle_quit))
                     .on_action(cx.listener(Self::handle_focus_pane_up))
                     .on_action(cx.listener(Self::handle_focus_pane_down))
                     .on_action(cx.listener(Self::handle_focus_pane_left))

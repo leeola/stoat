@@ -220,9 +220,13 @@ pub fn dispatch_command_by_type_id(
     } else if type_id == TypeId::of::<WriteAll>() {
         window.dispatch_action(Box::new(WriteAll), cx);
     }
+    // Pane actions
+    else if type_id == TypeId::of::<Quit>() {
+        window.dispatch_action(Box::new(Quit), cx);
+    }
     // Application actions
-    else if type_id == TypeId::of::<QuitApp>() {
-        window.dispatch_action(Box::new(QuitApp), cx);
+    else if type_id == TypeId::of::<QuitAll>() {
+        window.dispatch_action(Box::new(QuitAll), cx);
     }
     // Add more actions as they become available
 }

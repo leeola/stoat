@@ -191,14 +191,14 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "SplitDown" => Ok(KeyBinding::new(key, SplitDown, context)),
         "SplitLeft" => Ok(KeyBinding::new(key, SplitLeft, context)),
         "SplitRight" => Ok(KeyBinding::new(key, SplitRight, context)),
-        "ClosePane" => Ok(KeyBinding::new(key, ClosePane, context)),
+        "Quit" => Ok(KeyBinding::new(key, Quit, context)),
         "FocusPaneUp" => Ok(KeyBinding::new(key, FocusPaneUp, context)),
         "FocusPaneDown" => Ok(KeyBinding::new(key, FocusPaneDown, context)),
         "FocusPaneLeft" => Ok(KeyBinding::new(key, FocusPaneLeft, context)),
         "FocusPaneRight" => Ok(KeyBinding::new(key, FocusPaneRight, context)),
 
         // Application actions
-        "QuitApp" => Ok(KeyBinding::new(key, QuitApp, context)),
+        "QuitAll" => Ok(KeyBinding::new(key, QuitAll, context)),
 
         _ => Err(format!("Unknown action: {}", binding_config.action)),
     }

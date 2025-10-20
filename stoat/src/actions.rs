@@ -255,8 +255,8 @@ actions!(
         SplitLeft,
         /// Split the active pane to the right
         SplitRight,
-        /// Close the active pane
-        ClosePane,
+        /// Quit the current view (close pane, or quit app if last)
+        Quit,
         /// Focus the pane above the current one
         FocusPaneUp,
         /// Focus the pane below the current one
@@ -272,8 +272,8 @@ actions!(
 actions!(
     stoat,
     [
-        /// Quit the application
-        QuitApp,
+        /// Quit the application immediately
+        QuitAll,
         /// Write current buffer to disk
         WriteFile,
         /// Write all modified buffers to disk
@@ -879,9 +879,10 @@ action_metadata!(
     "Split the current pane horizontally, creating a new empty pane above"
 );
 action_metadata!(
-    ClosePane,
-    "close pane",
-    "Close the currently focused pane and remove it from the layout"
+    Quit,
+    "quit",
+    "Close the current view, or quit the application if it's the last view",
+    ["q", "quit"]
 );
 action_metadata!(
     FocusPaneLeft,
@@ -905,7 +906,12 @@ action_metadata!(
 );
 
 // Application actions
-action_metadata!(QuitApp, "quit", "Quit the application", ["q", "quit"]);
+action_metadata!(
+    QuitAll,
+    "quit all",
+    "Quit the application immediately by closing all views",
+    ["qa", "quitall"]
+);
 action_metadata!(
     WriteFile,
     "write",
@@ -1244,7 +1250,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(TypeId::of::<SplitDown>(), SplitDown::action_name());
     names.insert(TypeId::of::<SplitLeft>(), SplitLeft::action_name());
     names.insert(TypeId::of::<SplitRight>(), SplitRight::action_name());
-    names.insert(TypeId::of::<ClosePane>(), ClosePane::action_name());
+    names.insert(TypeId::of::<Quit>(), Quit::action_name());
     names.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::action_name());
     names.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::action_name());
     names.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::action_name());
@@ -1254,7 +1260,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     );
 
     // Application actions
-    names.insert(TypeId::of::<QuitApp>(), QuitApp::action_name());
+    names.insert(TypeId::of::<QuitAll>(), QuitAll::action_name());
     names.insert(TypeId::of::<WriteFile>(), WriteFile::action_name());
     names.insert(TypeId::of::<WriteAll>(), WriteAll::action_name());
 
@@ -1558,7 +1564,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(TypeId::of::<SplitDown>(), SplitDown::description());
     descriptions.insert(TypeId::of::<SplitLeft>(), SplitLeft::description());
     descriptions.insert(TypeId::of::<SplitRight>(), SplitRight::description());
-    descriptions.insert(TypeId::of::<ClosePane>(), ClosePane::description());
+    descriptions.insert(TypeId::of::<Quit>(), Quit::description());
     descriptions.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::description());
     descriptions.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::description());
     descriptions.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::description());
@@ -1568,7 +1574,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     );
 
     // Application actions
-    descriptions.insert(TypeId::of::<QuitApp>(), QuitApp::description());
+    descriptions.insert(TypeId::of::<QuitAll>(), QuitAll::description());
     descriptions.insert(TypeId::of::<WriteFile>(), WriteFile::description());
     descriptions.insert(TypeId::of::<WriteAll>(), WriteAll::description());
 
@@ -1855,14 +1861,14 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<SplitDown>(), SplitDown::help_text());
     help.insert(TypeId::of::<SplitLeft>(), SplitLeft::help_text());
     help.insert(TypeId::of::<SplitRight>(), SplitRight::help_text());
-    help.insert(TypeId::of::<ClosePane>(), ClosePane::help_text());
+    help.insert(TypeId::of::<Quit>(), Quit::help_text());
     help.insert(TypeId::of::<FocusPaneUp>(), FocusPaneUp::help_text());
     help.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::help_text());
     help.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::help_text());
     help.insert(TypeId::of::<FocusPaneRight>(), FocusPaneRight::help_text());
 
     // Application actions
-    help.insert(TypeId::of::<QuitApp>(), QuitApp::help_text());
+    help.insert(TypeId::of::<QuitAll>(), QuitAll::help_text());
     help.insert(TypeId::of::<WriteFile>(), WriteFile::help_text());
     help.insert(TypeId::of::<WriteAll>(), WriteAll::help_text());
 
@@ -1905,8 +1911,11 @@ pub fn help_text(action: &dyn Action) -> Option<&'static str> {
 pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLock::new(|| {
     let mut aliases = HashMap::new();
 
+    // Pane management actions
+    aliases.insert(TypeId::of::<Quit>(), Quit::aliases());
+
     // Application actions
-    aliases.insert(TypeId::of::<QuitApp>(), QuitApp::aliases());
+    aliases.insert(TypeId::of::<QuitAll>(), QuitAll::aliases());
     aliases.insert(TypeId::of::<WriteFile>(), WriteFile::aliases());
     aliases.insert(TypeId::of::<WriteAll>(), WriteAll::aliases());
 
