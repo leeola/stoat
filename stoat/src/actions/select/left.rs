@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor selection extension to the left.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::{Bias, Point};
 

@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! Help modal is a mode-based component like [`crate::command_palette::CommandPalette`]
-//! and [`crate::file_finder::Finder`]. It's rendered when [`stoat::Stoat::mode`]
+//! and [`crate::file_finder::Finder`]. It's rendered when [`crate::Stoat::mode`]
 //! returns `"help_modal"`.
 
 use gpui::{
@@ -18,9 +18,9 @@ use gpui::{
 ///
 /// This is a stateless component that renders the help UI. Interaction is handled
 /// through the normal action system in help_modal mode:
-/// - Escape dismisses via [`stoat::actions::HelpModalDismiss`]
+/// - Escape dismisses via [`crate::actions::HelpModalDismiss`]
 ///
-/// The help modal is displayed when [`stoat::Stoat::mode`] returns `"help_modal"`.
+/// The help modal is displayed when [`crate::Stoat::mode`] returns `"help_modal"`.
 ///
 /// # Content
 ///

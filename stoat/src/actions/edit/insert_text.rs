@@ -15,7 +15,7 @@
 //! After insertion, the cursor moves forward by the length of the inserted text, and the buffer
 //! is reparsed for syntax highlighting.
 
-use crate::{stoat::KeyContext, Stoat};
+use crate::stoat::{KeyContext, Stoat};
 use gpui::Context;
 
 impl Stoat {
@@ -50,7 +50,7 @@ impl Stoat {
     pub fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         // Route to file finder input buffer if in FileFinder context
         if self.key_context == KeyContext::FileFinder {
-            if let Some(input_buffer) = &self.file_finder_input {
+            if let Some(input_buffer) = &self.file_finder_input_ref {
                 // Insert at end of input buffer
                 let snapshot = input_buffer.read(cx).snapshot();
                 let end_offset = snapshot.len();
@@ -59,9 +59,8 @@ impl Stoat {
                     buffer.edit([(end_offset..end_offset, text)]);
                 });
 
-                // Re-filter files based on new query
-                let query = input_buffer.read(cx).snapshot().text();
-                self.filter_files(&query, cx);
+                // FIXME: Filtering moved to PaneGroupView in Step 4
+                // (will be triggered by PaneGroupView observing buffer changes)
             }
             return;
         }

@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor selection extension to previous symbol.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use std::ops::Range;
 use text::{Point, ToOffset};

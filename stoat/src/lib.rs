@@ -1,8 +1,9 @@
-//! Stoat v4 - Editor with proper GPUI Entity pattern.
+//! Stoat - Modern text editor built on GPUI.
 //!
-//! Key architectural change: Stoat methods take `&mut Context<Self>` instead of `&mut App`,
-//! enabling self-updating async tasks.
+//! Combines entity state management with rendering following Zed's Entity-as-View pattern.
+//! All Stoat methods take `&mut Context<Self>` enabling self-updating async tasks.
 
+// Core modules
 pub mod action_metadata;
 pub mod actions;
 pub mod buffer_item;
@@ -25,6 +26,28 @@ pub mod selections;
 pub mod stoat;
 pub mod stoat_actions;
 pub mod worktree;
+
+// UI modules
+pub mod about_modal;
+pub mod app;
+pub mod command_overlay;
+pub mod command_palette;
+pub mod content_view;
+pub mod dispatch;
+pub mod editor_element;
+pub mod editor_style;
+pub mod editor_view;
+pub mod gutter;
+pub mod help_modal;
+pub mod keybinding_hint;
+pub mod keymap_query;
+pub mod minimap;
+pub mod pane_group;
+pub mod render_stats;
+pub mod static_view;
+pub mod status_bar;
+pub mod syntax;
+pub mod workspace_state;
 
 #[cfg(test)]
 pub mod test;

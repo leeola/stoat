@@ -1,6 +1,6 @@
 //! Git status set filter untracked action implementation and tests.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use tracing::debug;
 

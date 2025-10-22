@@ -25,9 +25,9 @@ pub struct StatusBar {
     /// Mode display name (e.g., "NORMAL", "INSERT")
     mode_display: String,
     /// Git branch info (if in repo)
-    branch_info: Option<stoat::git_status::GitBranchInfo>,
+    branch_info: Option<crate::git_status::GitBranchInfo>,
     /// Git status entries for detailed status
-    git_status_files: Vec<stoat::git_status::GitStatusEntry>,
+    git_status_files: Vec<crate::git_status::GitStatusEntry>,
     /// Current file path for display
     file_path: Option<String>,
     /// File progress: (current_file, total_files)
@@ -35,20 +35,20 @@ pub struct StatusBar {
     /// Hunk position: (current_hunk, total_hunks) across all files
     hunk_position: Option<(usize, usize)>,
     /// Diff comparison mode (only shown in diff_review mode)
-    comparison_mode: Option<stoat::diff_review::DiffComparisonMode>,
+    comparison_mode: Option<crate::diff_review::DiffComparisonMode>,
 }
 
 impl StatusBar {
     /// Create a new status bar.
     pub fn new(
         mode_display: String,
-        branch_info: Option<stoat::git_status::GitBranchInfo>,
-        git_status_files: Vec<stoat::git_status::GitStatusEntry>,
+        branch_info: Option<crate::git_status::GitBranchInfo>,
+        git_status_files: Vec<crate::git_status::GitStatusEntry>,
         file_path: Option<String>,
         _review_progress: Option<(usize, usize)>,
         review_file_progress: Option<(usize, usize)>,
         hunk_position: Option<(usize, usize)>,
-        comparison_mode: Option<stoat::diff_review::DiffComparisonMode>,
+        comparison_mode: Option<crate::diff_review::DiffComparisonMode>,
     ) -> Self {
         Self {
             mode_display,

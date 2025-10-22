@@ -44,9 +44,9 @@ pub struct EditorStyle {
 impl EditorStyle {
     /// Create a new editor style from configuration.
     ///
-    /// Takes font settings (family and size) from the provided [`stoat::Config`].
+    /// Takes font settings (family and size) from the provided [`crate::Config`].
     /// Other style properties use hardcoded defaults.
-    pub fn new(config: &stoat::Config) -> Self {
+    pub fn new(config: &crate::Config) -> Self {
         let syntax_theme = SyntaxTheme::default();
         let highlight_map = HighlightMap::new(&syntax_theme);
 

@@ -1,14 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-  "stoat",
-  "stoat_gui",
-  "bin",
-  "text",
-  "stoat_ast",
-  "rope",
-  "agent/claude_code",
-]
+members = ["stoat", "bin", "text", "stoat_ast", "rope", "agent/claude_code"]
 
 [workspace.package]
 edition = "2021"

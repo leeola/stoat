@@ -8,7 +8,7 @@
 //! The implementation carefully handles UTF-8 character boundaries to ensure multi-byte characters
 //! are deleted correctly without breaking the string encoding.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::Bias;
 
@@ -39,7 +39,7 @@ impl Stoat {
     pub fn delete_left(&mut self, cx: &mut Context<Self>) {
         // Route to file finder input buffer if in file_finder mode
         if self.mode == "file_finder" {
-            if let Some(input_buffer) = &self.file_finder_input {
+            if let Some(input_buffer) = &self.file_finder_input_ref {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let len = snapshot.len();
 
@@ -56,9 +56,8 @@ impl Stoat {
                         buffer.edit([(char_boundary..len, "")]);
                     });
 
-                    // Re-filter files based on new query
-                    let query = input_buffer.read(cx).snapshot().text();
-                    self.filter_files(&query, cx);
+                    // FIXME: Filtering moved to PaneGroupView in Step 4
+                    // (will be triggered by PaneGroupView observing buffer changes)
                 }
             }
             return;

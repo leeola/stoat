@@ -6,8 +6,10 @@
 use crate::{
     editor_style::EditorStyle,
     editor_view::EditorView,
+    git_diff::DiffHunkStatus,
     gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
+    DisplayRow,
 };
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
@@ -15,7 +17,6 @@ use gpui::{
     Style, TextRun, Window,
 };
 use std::{collections::HashMap, sync::Arc};
-use stoat::{git_diff::DiffHunkStatus, DisplayRow};
 
 pub struct EditorElement {
     view: Entity<EditorView>,

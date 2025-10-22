@@ -8,7 +8,7 @@
 //! The implementation differentiates between deleting within a symbol (cursor inside a word) and
 //! deleting across symbols (cursor between words), providing vim-like word deletion behavior.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::ToOffset;
 

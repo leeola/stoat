@@ -1,10 +1,15 @@
-use crate::{editor_element::EditorElement, editor_style::EditorStyle};
+use crate::{
+    actions::*,
+    editor_element::EditorElement,
+    editor_style::EditorStyle,
+    scroll,
+    stoat::{KeyContext, Stoat},
+};
 use gpui::{
     div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
 };
 use std::sync::Arc;
-use stoat::{actions::*, scroll, stoat::KeyContext, Stoat};
 use tracing::debug;
 
 pub struct EditorView {
@@ -68,29 +73,9 @@ impl EditorView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let mode = self.stoat.read(cx).mode().to_string();
-
         self.stoat.update(cx, |stoat, cx| {
             stoat.delete_left(cx);
         });
-
-        // For file finder, update the filtered list
-        if mode == "file_finder" {
-            let query = self
-                .stoat
-                .read(cx)
-                .file_finder_input()
-                .map(|buffer| {
-                    let buffer_snapshot = buffer.read(cx).snapshot();
-                    buffer_snapshot.text()
-                })
-                .unwrap_or_default();
-
-            self.stoat.update(cx, |stoat, cx| {
-                stoat.filter_files(&query, cx);
-            });
-        }
-
         cx.notify();
     }
 
@@ -487,58 +472,6 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.set_mode_by_name(&action.0, cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_file_finder_next(
-        &mut self,
-        _: &FileFinderNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.file_finder_next(cx);
-        });
-
-        let _selected = self.stoat.read(cx).file_finder_selected();
-        cx.notify();
-    }
-
-    fn handle_file_finder_prev(
-        &mut self,
-        _: &FileFinderPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.file_finder_prev(cx);
-        });
-
-        let _selected = self.stoat.read(cx).file_finder_selected();
-        cx.notify();
-    }
-
-    fn handle_file_finder_select(
-        &mut self,
-        _: &FileFinderSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.file_finder_select(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_file_finder_dismiss(
-        &mut self,
-        _: &FileFinderDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.file_finder_dismiss(cx);
         });
         cx.notify();
     }
@@ -1023,10 +956,6 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_git_filter_mode))
             .on_action(cx.listener(Self::handle_set_key_context))
             .on_action(cx.listener(Self::handle_set_mode))
-            .on_action(cx.listener(Self::handle_file_finder_next))
-            .on_action(cx.listener(Self::handle_file_finder_prev))
-            .on_action(cx.listener(Self::handle_file_finder_select))
-            .on_action(cx.listener(Self::handle_file_finder_dismiss))
             .on_action(cx.listener(Self::handle_buffer_finder_next))
             .on_action(cx.listener(Self::handle_buffer_finder_prev))
             .on_action(cx.listener(Self::handle_buffer_finder_select))

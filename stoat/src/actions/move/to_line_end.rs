@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor horizontal position movement.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::Point;
 

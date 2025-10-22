@@ -8,7 +8,7 @@
 //! This action is useful for quickly clearing the remainder of a line without affecting the
 //! line structure.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use tracing::debug;
 

@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor selection extension upward with goal column preservation.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::Point;
 

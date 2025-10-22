@@ -3,7 +3,7 @@
 //! Demonstrates multi-cursor vertical movement with goal column preservation.
 //! Works symmetrically with [`move_up`](crate::Stoat::move_up).
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::Point;
 

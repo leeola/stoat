@@ -8,7 +8,7 @@
 //! After deletion, the cursor moves to the beginning of the line (or the next line if the
 //! deleted line was not the last line).
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use tracing::debug;
 

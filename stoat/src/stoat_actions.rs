@@ -2,123 +2,13 @@
 //!
 //! These demonstrate the Context<Self> pattern - methods can spawn self-updating tasks.
 
-use crate::{
-    file_finder::{load_file_preview, load_text_only, PreviewData},
-    stoat::Stoat,
-};
+use crate::stoat::Stoat;
 use gpui::Context;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use std::path::PathBuf;
 use text::{Buffer, ToPoint};
 use tracing::debug;
 
 impl Stoat {
-    // ==== File finder helper methods (not actions) ====
-
-    /// Load preview for selected file.
-    ///
-    /// KEY METHOD: Demonstrates Context<Self> pattern with async tasks.
-    /// Uses `cx.spawn` to get `WeakEntity<Self>` for self-updating.
-    pub fn load_preview_for_selected(&mut self, cx: &mut Context<Self>) {
-        // Cancel existing task
-        self.file_finder_preview_task = None;
-
-        // Get selected file path
-        let relative_path = match self.file_finder_filtered.get(self.file_finder_selected) {
-            Some(path) => path.clone(),
-            None => {
-                self.file_finder_preview = None;
-                return;
-            },
-        };
-
-        // Build absolute path
-        let root = self.worktree.lock().snapshot().root().to_path_buf();
-        let abs_path = root.join(&relative_path);
-        let abs_path_for_highlight = abs_path.clone();
-
-        // Spawn async task with WeakEntity<Self> handle
-        // This is the key pattern: cx.spawn gives us self handle!
-        self.file_finder_preview_task = Some(cx.spawn(async move |this, cx| {
-            // Phase 1: Load plain text immediately
-            if let Some(text) = load_text_only(&abs_path).await {
-                // Update self through entity handle
-                let _ = this.update(cx, |stoat, cx| {
-                    stoat.file_finder_preview = Some(PreviewData::Plain(text));
-                    cx.notify();
-                });
-            }
-
-            // Phase 2: Load syntax-highlighted version
-            if let Some(highlighted) = load_file_preview(&abs_path_for_highlight).await {
-                let _ = this.update(cx, |stoat, cx| {
-                    stoat.file_finder_preview = Some(highlighted);
-                    cx.notify();
-                });
-            }
-        }));
-    }
-
-    /// Filter files based on query
-    pub fn filter_files(&mut self, query: &str, cx: &mut Context<Self>) {
-        if query.is_empty() {
-            // No query: show all files
-            self.file_finder_filtered = self
-                .file_finder_files
-                .iter()
-                .map(|e| PathBuf::from(e.path.as_unix_str()))
-                .collect();
-        } else {
-            // Fuzzy match
-            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-
-            let candidates: Vec<&str> = self
-                .file_finder_files
-                .iter()
-                .map(|e| e.path.as_unix_str())
-                .collect();
-
-            let mut matches = pattern.match_list(candidates, &mut self.file_finder_matcher);
-            matches.sort_by(|a, b| b.1.cmp(&a.1));
-            matches.truncate(100);
-
-            self.file_finder_filtered = matches
-                .into_iter()
-                .map(|(path, _score)| PathBuf::from(path))
-                .collect();
-        }
-
-        // Reset selection
-        self.file_finder_selected = 0;
-
-        // Load preview for newly selected (top) file
-        self.load_preview_for_selected(cx);
-
-        cx.notify();
-    }
-
-    // ==== File finder state accessors ====
-
-    /// Get file finder input buffer
-    pub fn file_finder_input(&self) -> Option<&gpui::Entity<Buffer>> {
-        self.file_finder_input.as_ref()
-    }
-
-    /// Get filtered files
-    pub fn file_finder_filtered(&self) -> &[PathBuf] {
-        &self.file_finder_filtered
-    }
-
-    /// Get selected index
-    pub fn file_finder_selected(&self) -> usize {
-        self.file_finder_selected
-    }
-
-    /// Get preview data
-    pub fn file_finder_preview(&self) -> Option<&PreviewData> {
-        self.file_finder_preview.as_ref()
-    }
-
     // ==== Command palette helper methods (not actions) ====
 
     /// Filter commands based on fuzzy search query.
@@ -383,13 +273,16 @@ impl Stoat {
             // Fuzzy match on buffer display names
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
 
+            // Create a temporary matcher for buffers (uses default config)
+            let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+
             let candidates: Vec<&str> = self
                 .buffer_finder_buffers
                 .iter()
                 .map(|entry| entry.display_name.as_str())
                 .collect();
 
-            let mut matches = pattern.match_list(candidates, &mut self.file_finder_matcher);
+            let mut matches = pattern.match_list(candidates, &mut matcher);
             matches.sort_by(|a, b| b.1.cmp(&a.1));
 
             self.buffer_finder_filtered = matches

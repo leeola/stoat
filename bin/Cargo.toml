@@ -17,14 +17,13 @@ path = "src/lib.rs"
 
 [features]
 default = ["gui"]
-gui = ["stoat", "stoat_gui"]
+gui = ["stoat"]
 
 [lints]
 workspace = true
 
 [dependencies]
 stoat = { path = "../stoat", optional = true }
-stoat_gui = { path = "../stoat_gui", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 clap = { workspace = true, features = ["derive"] }
 tracing.workspace = true

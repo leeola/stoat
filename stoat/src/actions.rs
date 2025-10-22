@@ -1989,7 +1989,6 @@ mod about_modal;
 mod buffer_finder;
 mod command_palette;
 mod edit;
-mod file_finder;
 mod git;
 mod help_modal;
 mod mode;

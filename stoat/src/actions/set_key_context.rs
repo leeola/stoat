@@ -4,7 +4,7 @@
 //! FileFinder, etc.) with automatic mode restoration. KeyContext determines which UI
 //! is rendered while mode determines interaction within that context.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use tracing::{debug, warn};
 

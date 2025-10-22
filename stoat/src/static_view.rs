@@ -109,7 +109,7 @@ impl ContentView for StaticView {
         ViewType::Static
     }
 
-    fn stoat(&self) -> Option<&gpui::Entity<stoat::Stoat>> {
+    fn stoat(&self) -> Option<&gpui::Entity<crate::Stoat>> {
         // Static views are not backed by Stoat
         None
     }

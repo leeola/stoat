@@ -11,7 +11,7 @@ use std::collections::HashSet;
 /// for the current editor mode.
 ///
 /// # Arguments
-/// * `keymap` - The keymap to query (from [`stoat::keymap::create_default_keymap`])
+/// * `keymap` - The keymap to query (from [`crate::keymap::create_default_keymap`])
 /// * `mode` - The editor mode name to get bindings for
 ///
 /// # Returns
@@ -31,7 +31,7 @@ pub fn bindings_for_mode(keymap: &Keymap, mode: &str) -> Vec<(String, String)> {
     // Separate mode-specific and global bindings
     for binding in keymap.bindings() {
         // Skip if no help text
-        let Some(desc) = stoat::actions::help_text(binding.action()) else {
+        let Some(desc) = crate::actions::help_text(binding.action()) else {
             continue;
         };
 

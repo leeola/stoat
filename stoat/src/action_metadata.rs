@@ -19,7 +19,7 @@
 //!
 //! ```rust,ignore
 //! use std::any::TypeId;
-//! use stoat::action_metadata;
+//! use crate::action_metadata;
 //!
 //! let doc = action_metadata::get_documentation(&TypeId::of::<MoveUp>());
 //! assert_eq!(doc, Some("Move cursor up one line"));
@@ -38,7 +38,7 @@
 //!
 //! GPUI's [`Action`] trait provides metadata methods:
 //! - [`Action::documentation()`]: Auto-generated from doc comments
-//! - [`Action::name()`]: Action name (e.g., "stoat::MoveUp")
+//! - [`Action::name()`]: Action name (e.g., "crate::MoveUp")
 //! - [`Action::deprecated_aliases()`]: Old action names
 //! - [`Action::deprecation_message()`]: Why action was deprecated
 //!
@@ -317,8 +317,8 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
 ///
 /// ```rust,ignore
 /// use std::any::TypeId;
-/// use stoat::action_metadata;
-/// use stoat::actions::MoveUp;
+/// use crate::action_metadata;
+/// use crate::actions::MoveUp;
 ///
 /// let doc = action_metadata::get_documentation(&TypeId::of::<MoveUp>());
 /// assert_eq!(doc, Some("Move cursor up one line"));

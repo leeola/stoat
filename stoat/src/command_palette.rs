@@ -1,29 +1,29 @@
 //! Command palette modal for fuzzy command search
 //!
-//! Renders the command palette modal overlay based on state from [`stoat::Stoat`]. This
+//! Renders the command palette modal overlay based on state from [`crate::Stoat`]. This
 //! component is stateless - all state management and input handling happens in the core via the
 //! mode system.
 
+use crate::CommandInfo;
 use gpui::{
     div, prelude::FluentBuilder, px, rgb, rgba, App, FontWeight, InteractiveElement, IntoElement,
     ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
 };
-use stoat::CommandInfo;
 
 /// Command palette modal renderer.
 ///
 /// This is a stateless component that renders the command palette UI based on state from
-/// [`stoat::Stoat`]. All interaction is handled through the normal action system in
+/// [`crate::Stoat`]. All interaction is handled through the normal action system in
 /// command_palette mode:
 ///
-/// - Text input goes to the input buffer via [`stoat::Stoat::insert_text`]
-/// - Backspace deletes from input buffer via [`stoat::Stoat::delete_left`]
+/// - Text input goes to the input buffer via [`crate::Stoat::insert_text`]
+/// - Backspace deletes from input buffer via [`crate::Stoat::delete_left`]
 /// - Arrow keys navigate via
-///   [`stoat::Stoat::command_palette_next`]/[`stoat::Stoat::command_palette_prev`]
-/// - Escape dismisses via [`stoat::Stoat::command_palette_dismiss`]
+///   [`crate::Stoat::command_palette_next`]/[`crate::Stoat::command_palette_prev`]
+/// - Escape dismisses via [`crate::Stoat::command_palette_dismiss`]
 /// - Enter executes via command_palette_execute handler in GUI
 ///
-/// The command palette is displayed when [`stoat::Stoat::mode`] returns `"command_palette"`.
+/// The command palette is displayed when [`crate::Stoat::mode`] returns `"command_palette"`.
 #[derive(IntoElement)]
 pub struct CommandPalette {
     query: String,

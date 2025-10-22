@@ -1,7 +1,6 @@
-use crate::{editor_view::EditorView, pane_group::PaneGroupView};
+use crate::{editor_view::EditorView, pane_group::PaneGroupView, Stoat};
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 use std::rc::Rc;
-use stoat::Stoat;
 
 pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
@@ -9,14 +8,14 @@ pub fn run_with_paths(
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
         // Load configuration with optional override from CLI --config or STOAT_CONFIG env var
-        let config = stoat::Config::load_with_overrides(config_path.as_deref()).unwrap_or_default();
+        let config = crate::Config::load_with_overrides(config_path.as_deref()).unwrap_or_default();
 
         // Register keybindings
-        let keymap = Rc::new(stoat::keymap::create_default_keymap());
+        let keymap = Rc::new(crate::keymap::create_default_keymap());
         cx.bind_keys(keymap.bindings().cloned());
 
         // Register global action handlers
-        cx.on_action(|_: &stoat::actions::QuitAll, cx: &mut App| {
+        cx.on_action(|_: &crate::actions::QuitAll, cx: &mut App| {
             cx.quit();
         });
 

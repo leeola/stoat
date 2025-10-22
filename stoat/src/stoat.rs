@@ -4,18 +4,11 @@
 //! self-updating async tasks.
 
 use crate::{
-    buffer_item::BufferItem,
-    buffer_store::BufferStore,
-    cursor::CursorManager,
-    file_finder::PreviewData,
-    git_diff::BufferDiff,
-    git_repository::Repository,
-    scroll::ScrollPosition,
-    selections::SelectionsCollection,
-    worktree::{Entry, Worktree},
+    buffer_item::BufferItem, buffer_store::BufferStore, cursor::CursorManager,
+    git_diff::BufferDiff, git_repository::Repository, scroll::ScrollPosition,
+    selections::SelectionsCollection, worktree::Worktree,
 };
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
-use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
@@ -236,16 +229,12 @@ pub struct Stoat {
     /// Registry of KeyContexts with their metadata
     pub(crate) contexts: HashMap<KeyContext, KeyContextMeta>,
 
-    // File finder state
-    pub(crate) file_finder_input: Option<Entity<Buffer>>,
-    pub(crate) file_finder_files: Vec<Entry>,
-    pub(crate) file_finder_filtered: Vec<PathBuf>,
-    pub(crate) file_finder_selected: usize,
-    pub(crate) file_finder_previous_mode: Option<String>,
-    pub(crate) file_finder_previous_key_context: Option<KeyContext>,
-    pub(crate) file_finder_preview: Option<PreviewData>,
-    pub(crate) file_finder_preview_task: Option<Task<()>>,
-    pub(crate) file_finder_matcher: Matcher,
+    /// Temporary reference to file_finder input buffer (set when entering FileFinder context)
+    ///
+    /// This is a reference (not the owner) to the file_finder input buffer from WorkspaceState.
+    /// It allows edit actions (insert_text, delete_left) to route to the file finder input
+    /// while maintaining the architectural separation where file_finder state lives in workspace.
+    pub(crate) file_finder_input_ref: Option<Entity<Buffer>>,
 
     // Command palette state
     pub(crate) command_palette_input: Option<Entity<Buffer>>,
@@ -387,15 +376,7 @@ impl Stoat {
             modes,
             key_context,
             contexts,
-            file_finder_input: None,
-            file_finder_files: Vec::new(),
-            file_finder_filtered: Vec::new(),
-            file_finder_selected: 0,
-            file_finder_previous_mode: None,
-            file_finder_previous_key_context: None,
-            file_finder_preview: None,
-            file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
+            file_finder_input_ref: None,
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),
@@ -469,15 +450,7 @@ impl Stoat {
             modes: self.modes.clone(),
             key_context: self.key_context,
             contexts: self.contexts.clone(),
-            file_finder_input: None,
-            file_finder_files: Vec::new(),
-            file_finder_filtered: Vec::new(),
-            file_finder_selected: 0,
-            file_finder_previous_mode: None,
-            file_finder_previous_key_context: None,
-            file_finder_preview: None,
-            file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
+            file_finder_input_ref: None,
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),
@@ -1289,15 +1262,7 @@ impl Stoat {
             modes: self.modes.clone(),
             key_context: KeyContext::TextEditor, // Minimap always in editor context
             contexts: self.contexts.clone(),
-            file_finder_input: None,
-            file_finder_files: Vec::new(),
-            file_finder_filtered: Vec::new(),
-            file_finder_selected: 0,
-            file_finder_previous_mode: None,
-            file_finder_previous_key_context: None,
-            file_finder_preview: None,
-            file_finder_preview_task: None,
-            file_finder_matcher: Matcher::new(MatcherConfig::DEFAULT.match_paths()),
+            file_finder_input_ref: None,
             command_palette_input: None,
             command_palette_commands: Vec::new(),
             command_palette_filtered: Vec::new(),

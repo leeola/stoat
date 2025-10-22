@@ -4,7 +4,7 @@
 //! moves independently, and the selection storage uses anchors for persistence
 //! across buffer edits.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::{Bias, Point};
 

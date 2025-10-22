@@ -36,8 +36,8 @@
 //! }
 //! ```
 
+use crate::Stoat;
 use gpui::{Entity, Focusable, Render};
-use stoat::Stoat;
 
 /// Trait implemented by all view types that can be displayed in panes.
 ///

@@ -4,7 +4,7 @@
 //! events. The scroll handler applies sensitivity multipliers, converts deltas to line
 //! units, and enforces buffer bounds.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

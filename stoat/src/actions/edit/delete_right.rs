@@ -7,7 +7,7 @@
 //! When at the end of a line, this action merges with the next line by deleting the newline
 //! character.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

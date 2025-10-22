@@ -36,8 +36,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! use stoat::git_diff::BufferDiff;
-//! use stoat::git_repository::Repository;
+//! use crate::git_diff::BufferDiff;
+//! use crate::git_repository::Repository;
 //!
 //! let repo = Repository::discover(Path::new("src/main.rs"))?;
 //! let head_content = repo.head_content(Path::new("src/main.rs"))?;

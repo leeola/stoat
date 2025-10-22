@@ -5,7 +5,7 @@
 //! staging workflow alongside [`git_unstage_all`](crate::Stoat::git_unstage_all) for unstaging
 //! all changes and [`git_unstage_hunk`](crate::Stoat::git_unstage_hunk) for unstaging hunks.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

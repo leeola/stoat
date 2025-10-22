@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor selection extension to line start.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::Point;
 

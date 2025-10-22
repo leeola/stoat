@@ -6483,6 +6483,7 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clock",
  "dirs 5.0.1",
  "enum_dispatch",
  "git2",
@@ -6490,7 +6491,9 @@ dependencies = [
  "ignore",
  "nucleo-matcher",
  "parking_lot 0.12.4",
+ "rustc-hash 2.1.1",
  "serde",
+ "smallvec",
  "smol",
  "stoat_rope",
  "stoat_text",
@@ -6533,29 +6536,10 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "stoat",
- "stoat_gui",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "stoat_gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clock",
- "gpui",
- "parking_lot 0.12.4",
- "rustc-hash 2.1.1",
- "smallvec",
- "stoat",
- "stoat_rope",
- "stoat_text",
- "sum_tree",
- "text",
- "tracing",
 ]
 
 [[package]]

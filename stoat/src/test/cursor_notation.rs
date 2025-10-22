@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! use stoat::test::cursor_notation;
+//! use crate::test::cursor_notation;
 //!
 //! // Cursor only
 //! let p = cursor_notation::parse("hello |world").unwrap();

@@ -3,7 +3,7 @@
 //! Provides functionality to switch between modes within the current KeyContext.
 //! Mode determines which keybindings are active without changing the rendered UI.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use tracing::debug;
 

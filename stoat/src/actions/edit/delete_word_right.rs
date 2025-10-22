@@ -8,7 +8,7 @@
 //! The cursor stays at its current position after deletion, making this action useful for
 //! removing forward text without changing cursor placement.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::ToOffset;
 

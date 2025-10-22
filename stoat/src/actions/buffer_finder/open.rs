@@ -1,6 +1,6 @@
 //! Open buffer finder action implementation and tests.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::{AppContext, Context};
 use std::num::NonZeroU64;
 use text::{Buffer, BufferId};

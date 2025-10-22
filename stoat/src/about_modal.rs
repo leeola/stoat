@@ -6,7 +6,7 @@
 //! # Architecture
 //!
 //! About modal is a mode-based component like [`crate::help_modal::HelpModal`].
-//! It's rendered when [`stoat::Stoat::mode`] returns `"about_modal"`.
+//! It's rendered when [`crate::Stoat::mode`] returns `"about_modal"`.
 
 use gpui::{
     div, px, rgb, rgba, App, FontWeight, IntoElement, ParentElement, RenderOnce, Styled, Window,
@@ -16,9 +16,9 @@ use gpui::{
 ///
 /// This is a stateless component that renders the about UI. Interaction is handled
 /// through the normal action system in about_modal mode:
-/// - Escape dismisses via [`stoat::actions::AboutModalDismiss`]
+/// - Escape dismisses via [`crate::actions::AboutModalDismiss`]
 ///
-/// The about modal is displayed when [`stoat::Stoat::mode`] returns `"about_modal"`.
+/// The about modal is displayed when [`crate::Stoat::mode`] returns `"about_modal"`.
 ///
 /// # Content
 ///
@@ -43,7 +43,7 @@ impl AboutModal {
 
     /// Render the about content section.
     fn render_content(&self) -> impl IntoElement {
-        let build_info = stoat::build_info::build_info();
+        let build_info = crate::build_info::build_info();
 
         div()
             .flex()

@@ -6,7 +6,7 @@
 //!
 //! After insertion, the cursor moves to the beginning of the new line.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

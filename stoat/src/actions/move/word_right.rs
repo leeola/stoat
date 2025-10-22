@@ -2,7 +2,7 @@
 //!
 //! Demonstrates multi-cursor word-based movement using token analysis.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::{Point, ToOffset};
 

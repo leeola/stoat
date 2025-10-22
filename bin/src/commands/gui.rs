@@ -5,7 +5,7 @@ pub fn run(
     config_path: Option<PathBuf>,
     paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    stoat_gui::run_with_paths(config_path, paths)
+    stoat::app::run_with_paths(config_path, paths)
 }
 
 #[cfg(not(feature = "gui"))]

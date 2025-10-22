@@ -9,6 +9,7 @@ license-file = "../LICENSE"
 gpui = { workspace = true }
 text = { workspace = true }
 sum_tree = { workspace = true }
+clock = { workspace = true }
 stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
 smol = "2.0"
@@ -17,6 +18,8 @@ tracing = "0.1"
 tracing-subscriber = { workspace = true }
 anyhow.workspace = true
 parking_lot = { workspace = true }
+rustc-hash = "2.0"
+smallvec = { workspace = true }
 ignore = "0.4"
 enum_dispatch = "0.3"
 toml = "0.8"

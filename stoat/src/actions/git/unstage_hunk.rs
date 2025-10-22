@@ -6,7 +6,7 @@
 //! [`git_unstage_file`](crate::Stoat::git_unstage_file) for unstaging entire files and
 //! [`git_unstage_all`](crate::Stoat::git_unstage_all) for unstaging all changes.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

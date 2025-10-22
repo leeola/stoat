@@ -18,7 +18,7 @@
 //!
 //! ```ignore
 //! use std::path::Path;
-//! use stoat::git_repository::Repository;
+//! use crate::git_repository::Repository;
 //!
 //! // Find repository for a file
 //! if let Ok(repo) = Repository::discover(Path::new("src/main.rs")) {

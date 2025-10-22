@@ -1,14 +1,22 @@
 use crate::{
     about_modal::AboutModal,
+    actions::{
+        AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
+        HelpModalDismiss, OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview,
+        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll,
+        SplitDown, SplitLeft, SplitRight, SplitUp, ToggleMinimap,
+    },
     command_overlay::CommandOverlay,
     command_palette::CommandPalette,
     editor_view::EditorView,
     file_finder::Finder,
     git_status::GitStatus,
     help_modal::HelpModal,
+    pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     pane_group::element::pane_axis,
     render_stats::{FrameTimer, RenderStatsOverlayElement},
     status_bar::StatusBar,
+    stoat::{KeyContext, Stoat},
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
@@ -18,19 +26,9 @@ use gpui::{
 use std::{
     cell::RefCell,
     collections::HashMap,
+    path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
-};
-use stoat::{
-    actions::{
-        AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-        HelpModalDismiss, OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview,
-        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll,
-        SplitDown, SplitLeft, SplitRight, SplitUp, ToggleMinimap,
-    },
-    pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
-    stoat::KeyContext,
-    Stoat,
 };
 use tracing::debug;
 
@@ -135,6 +133,8 @@ impl Default for MinimapVisibility {
 /// The minimap is owned at this level (window-level) rather than per-pane,
 /// ensuring only one minimap appears regardless of split configuration.
 pub struct PaneGroupView {
+    /// Workspace-level state shared across all panes
+    workspace: crate::workspace_state::WorkspaceState,
     pane_group: PaneGroup,
     pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
     active_pane: PaneId,
@@ -219,7 +219,11 @@ impl PaneGroupView {
             minimap_view
         };
 
+        // Initialize workspace state
+        let workspace = crate::workspace_state::WorkspaceState::new(cx);
+
         Self {
+            workspace,
             pane_group,
             pane_contents,
             active_pane: initial_pane_id,
@@ -307,13 +311,176 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Open file finder in the active editor's Stoat instance
-        if let Some(editor) = self.active_editor() {
+        // Get current mode and key_context from active editor
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Extract current mode and key_context
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            // Initialize file finder in workspace
+            self.workspace
+                .open_file_finder(current_mode, current_key_context, cx);
+
+            // Update editor's key_context and mode
             editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_file_finder(cx);
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_key_context(KeyContext::FileFinder);
+                    stoat.set_mode("file_finder");
                 });
             });
+
+            // Load preview for first file
+            self.load_file_finder_preview(cx);
+
+            cx.notify();
+        }
+    }
+
+    /// Load preview for the currently selected file in file finder.
+    ///
+    /// Spawns an async task to load file preview. Updates workspace.file_finder.preview
+    /// when complete. This method follows the same pattern as Stoat's load_preview_for_selected
+    /// but operates on workspace state instead.
+    fn load_file_finder_preview(&mut self, cx: &mut Context<'_, Self>) {
+        // Cancel existing preview task
+        self.workspace.file_finder.preview_task = None;
+
+        // Get selected file path from workspace
+        let relative_path = match self
+            .workspace
+            .file_finder
+            .filtered
+            .get(self.workspace.file_finder.selected)
+        {
+            Some(path) => path.clone(),
+            None => {
+                self.workspace.file_finder.preview = None;
+                return;
+            },
+        };
+
+        // Build absolute path
+        let root = self
+            .workspace
+            .worktree
+            .lock()
+            .snapshot()
+            .root()
+            .to_path_buf();
+        let abs_path = root.join(&relative_path);
+        let abs_path_for_highlight = abs_path.clone();
+
+        // Spawn async task to load preview
+        self.workspace.file_finder.preview_task = Some(cx.spawn(async move |this, cx| {
+            // Phase 1: Load plain text immediately
+            if let Some(text) = crate::file_finder::load_text_only(&abs_path).await {
+                let _ = this.update(cx, |pane_group, cx| {
+                    pane_group.workspace.file_finder.preview =
+                        Some(crate::file_finder::PreviewData::Plain(text));
+                    cx.notify();
+                });
+            }
+
+            // Phase 2: Load syntax-highlighted version
+            if let Some(highlighted) =
+                crate::file_finder::load_file_preview(&abs_path_for_highlight).await
+            {
+                let _ = this.update(cx, |pane_group, cx| {
+                    pane_group.workspace.file_finder.preview = Some(highlighted);
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// Handle file finder next action
+    fn handle_file_finder_next(
+        &mut self,
+        _: &crate::actions::FileFinderNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.file_finder.selected + 1 < self.workspace.file_finder.filtered.len() {
+            self.workspace.file_finder.selected += 1;
+            self.load_file_finder_preview(cx);
+            cx.notify();
+        }
+    }
+
+    /// Handle file finder prev action
+    fn handle_file_finder_prev(
+        &mut self,
+        _: &crate::actions::FileFinderPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.file_finder.selected > 0 {
+            self.workspace.file_finder.selected -= 1;
+            self.load_file_finder_preview(cx);
+            cx.notify();
+        }
+    }
+
+    /// Handle file finder select action
+    fn handle_file_finder_select(
+        &mut self,
+        _: &crate::actions::FileFinderSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            if self.workspace.file_finder.selected < self.workspace.file_finder.filtered.len() {
+                let relative_path =
+                    &self.workspace.file_finder.filtered[self.workspace.file_finder.selected];
+                let root = self
+                    .workspace
+                    .worktree
+                    .lock()
+                    .snapshot()
+                    .root()
+                    .to_path_buf();
+                let abs_path = root.join(relative_path);
+
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        if let Err(e) = stoat.load_file(&abs_path, cx) {
+                            tracing::error!("Failed to load file {:?}: {}", abs_path, e);
+                        }
+                    });
+                });
+            }
+            self.handle_file_finder_dismiss(&crate::actions::FileFinderDismiss, _window, cx);
+        }
+    }
+
+    /// Handle file finder dismiss action
+    fn handle_file_finder_dismiss(
+        &mut self,
+        _: &crate::actions::FileFinderDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            self.workspace.file_finder.input = None;
+            self.workspace.file_finder.files.clear();
+            self.workspace.file_finder.filtered.clear();
+            self.workspace.file_finder.selected = 0;
+            self.workspace.file_finder.preview = None;
+            self.workspace.file_finder.preview_task = None;
+
+            if let Some(previous_context) = self.workspace.file_finder.previous_key_context.take() {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_set_key_context(previous_context, cx);
+                    });
+                });
+            }
+
             cx.notify();
         }
     }
@@ -537,7 +704,7 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
+            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -586,7 +753,7 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
+            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -635,7 +802,7 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
+            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -684,7 +851,7 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
+            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -1234,7 +1401,7 @@ impl Render for PaneGroupView {
             key_context,
             active_mode,
             mode_display,
-            file_finder_data,
+            _file_finder_data,
             command_palette_data,
             buffer_finder_data,
             git_status_data,
@@ -1255,24 +1422,13 @@ impl Render for PaneGroupView {
                     .map(|m| m.display_name.clone())
                     .unwrap_or_else(|| mode_name.to_uppercase());
 
-                // Extract file finder data if in FileFinder context
-                let ff_data = if key_context == KeyContext::FileFinder {
-                    let query = stoat
-                        .file_finder_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-                    Some((
-                        query,
-                        stoat.file_finder_filtered().to_vec(),
-                        stoat.file_finder_selected(),
-                        stoat.file_finder_preview().cloned(),
-                    ))
-                } else {
-                    None
-                };
+                // File finder data is now extracted from workspace state below
+                let ff_data = None::<(
+                    String,
+                    Vec<PathBuf>,
+                    usize,
+                    Option<crate::file_finder::PreviewData>,
+                )>;
 
                 // Extract command palette data if in CommandPalette context
                 let cp_data = if key_context == KeyContext::CommandPalette {
@@ -1403,6 +1559,28 @@ impl Render for PaneGroupView {
                 None,
             ));
 
+        // Extract file finder data from workspace if in FileFinder context
+        let file_finder_data = if key_context == KeyContext::FileFinder {
+            let query = self
+                .workspace
+                .file_finder
+                .input
+                .as_ref()
+                .map(|buffer| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    buffer_snapshot.text()
+                })
+                .unwrap_or_default();
+            Some((
+                query,
+                self.workspace.file_finder.filtered.clone(),
+                self.workspace.file_finder.selected,
+                self.workspace.file_finder.preview.clone(),
+            ))
+        } else {
+            None
+        };
+
         // Update minimap scroll position to match calculated value
         // This must happen after data extraction (to avoid borrow conflicts) but before thumb
         // calculation
@@ -1467,6 +1645,10 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_focus_pane_left))
                     .on_action(cx.listener(Self::handle_focus_pane_right))
                     .on_action(cx.listener(Self::handle_open_file_finder))
+                    .on_action(cx.listener(Self::handle_file_finder_next))
+                    .on_action(cx.listener(Self::handle_file_finder_prev))
+                    .on_action(cx.listener(Self::handle_file_finder_select))
+                    .on_action(cx.listener(Self::handle_file_finder_dismiss))
                     .on_action(cx.listener(Self::handle_open_command_palette))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_open_git_status))

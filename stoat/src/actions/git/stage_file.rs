@@ -5,7 +5,7 @@
 //! staging workflow alongside [`git_stage_all`](crate::Stoat::git_stage_all) for staging all
 //! changes and [`git_stage_hunk`](crate::Stoat::git_stage_hunk) for staging individual hunks.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {

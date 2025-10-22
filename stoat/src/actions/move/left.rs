@@ -1,6 +1,6 @@
 //! Move left action implementation and tests.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 use text::{Bias, Point};
 

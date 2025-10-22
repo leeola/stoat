@@ -6,7 +6,7 @@
 //! staging entire files and [`git_stage_all`](crate::Stoat::git_stage_all) for staging all
 //! changes.
 
-use crate::Stoat;
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {
