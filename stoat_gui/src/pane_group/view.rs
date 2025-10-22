@@ -128,14 +128,15 @@ impl Default for MinimapVisibility {
 /// Main view that manages multiple editor panes in a tree layout.
 ///
 /// PaneGroupView wraps a [`PaneGroup`] (from stoat core) and maintains
-/// the mapping from [`PaneId`] to [`EditorView`] entities. It handles
-/// split operations, pane focus, and recursive rendering of the pane tree.
+/// the mapping from [`PaneId`] to [`PaneContent`] (which can hold different
+/// view types). It handles split operations, pane focus, and recursive
+/// rendering of the pane tree.
 ///
 /// The minimap is owned at this level (window-level) rather than per-pane,
 /// ensuring only one minimap appears regardless of split configuration.
 pub struct PaneGroupView {
     pane_group: PaneGroup,
-    pane_editors: HashMap<PaneId, Entity<EditorView>>,
+    pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
     active_pane: PaneId,
     focus_handle: FocusHandle,
     keymap: Rc<gpui::Keymap>,
@@ -168,8 +169,11 @@ impl PaneGroupView {
         let pane_group = PaneGroup::new();
         let initial_pane_id = pane_group.panes()[0];
 
-        let mut pane_editors = HashMap::new();
-        pane_editors.insert(initial_pane_id, initial_editor.clone());
+        let mut pane_contents = HashMap::new();
+        pane_contents.insert(
+            initial_pane_id,
+            crate::content_view::PaneContent::Editor(initial_editor.clone()),
+        );
 
         // Create single minimap for the entire window
         // The minimap shares the initial editor's Stoat and will be updated when active pane
@@ -217,7 +221,7 @@ impl PaneGroupView {
 
         Self {
             pane_group,
-            pane_editors,
+            pane_contents,
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
             keymap,
@@ -236,7 +240,9 @@ impl PaneGroupView {
 
     /// Get the active editor view
     pub fn active_editor(&self) -> Option<&Entity<EditorView>> {
-        self.pane_editors.get(&self.active_pane)
+        self.pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
     }
 
     /// Focus the currently active editor.
@@ -254,7 +260,11 @@ impl PaneGroupView {
     ///
     /// This is called after pane commands execute to make Pane mode a one-shot mode.
     fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(editor) = self.pane_editors.get_mut(&self.active_pane) {
+        if let Some(editor) = self
+            .pane_contents
+            .get_mut(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             editor.update(cx, |editor, cx| {
                 let mode = editor.stoat.read(cx).mode().to_string();
                 if mode == "pane" {
@@ -272,7 +282,11 @@ impl PaneGroupView {
     /// This should be called whenever the active pane changes (focus, split, close).
     /// The minimap's Stoat will be updated to point to the same buffer as the active editor.
     fn update_minimap_to_active_pane(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+        if let Some(active_editor) = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             let active_stoat = active_editor.read(cx).stoat.clone();
 
             // Update minimap's Stoat to point to the active editor's buffer
@@ -332,8 +346,9 @@ impl PaneGroupView {
     ) {
         // Collect buffer IDs visible in all panes
         let visible_buffer_ids: Vec<text::BufferId> = self
-            .pane_editors
+            .pane_contents
             .values()
+            .filter_map(|content| content.as_editor())
             .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx))
             .collect();
 
@@ -499,7 +514,10 @@ impl PaneGroupView {
         _cx: &mut Context<'_, Self>,
     ) {
         let new_pane_id = self.pane_group.split(self.active_pane, direction);
-        self.pane_editors.insert(new_pane_id, new_editor);
+        self.pane_contents.insert(
+            new_pane_id,
+            crate::content_view::PaneContent::Editor(new_editor),
+        );
         self.active_pane = new_pane_id;
     }
 
@@ -512,7 +530,11 @@ impl PaneGroupView {
         );
 
         // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+        let new_stoat = if let Some(active_editor) = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
@@ -557,7 +579,11 @@ impl PaneGroupView {
         );
 
         // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+        let new_stoat = if let Some(active_editor) = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
@@ -602,7 +628,11 @@ impl PaneGroupView {
         );
 
         // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+        let new_stoat = if let Some(active_editor) = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
@@ -647,7 +677,11 @@ impl PaneGroupView {
         );
 
         // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self.pane_editors.get(&self.active_pane) {
+        let new_stoat = if let Some(active_editor) = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+        {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
             cx.new(|cx| Stoat::new(stoat::Config::default(), cx))
@@ -722,7 +756,11 @@ impl PaneGroupView {
                 "Focusing pane"
             );
             self.active_pane = new_pane;
-            if let Some(editor) = self.pane_editors.get(&new_pane) {
+            if let Some(editor) = self
+                .pane_contents
+                .get(&new_pane)
+                .and_then(|content| content.as_editor())
+            {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
@@ -757,7 +795,11 @@ impl PaneGroupView {
                 "Focusing pane"
             );
             self.active_pane = new_pane;
-            if let Some(editor) = self.pane_editors.get(&new_pane) {
+            if let Some(editor) = self
+                .pane_contents
+                .get(&new_pane)
+                .and_then(|content| content.as_editor())
+            {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
@@ -792,7 +834,11 @@ impl PaneGroupView {
                 "Focusing pane"
             );
             self.active_pane = new_pane;
-            if let Some(editor) = self.pane_editors.get(&new_pane) {
+            if let Some(editor) = self
+                .pane_contents
+                .get(&new_pane)
+                .and_then(|content| content.as_editor())
+            {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
@@ -827,7 +873,11 @@ impl PaneGroupView {
                 "Focusing pane"
             );
             self.active_pane = new_pane;
-            if let Some(editor) = self.pane_editors.get(&new_pane) {
+            if let Some(editor) = self
+                .pane_contents
+                .get(&new_pane)
+                .and_then(|content| content.as_editor())
+            {
                 window.focus(&editor.read(cx).focus_handle(cx));
             }
 
@@ -857,7 +907,7 @@ impl PaneGroupView {
         match self.pane_group.remove(pane_to_close) {
             Ok(()) => {
                 // Successfully removed - clean up editor and switch focus
-                self.pane_editors.remove(&pane_to_close);
+                self.pane_contents.remove(&pane_to_close);
 
                 // Get remaining panes and focus the first one
                 let remaining_panes = self.pane_group.panes();
@@ -870,7 +920,11 @@ impl PaneGroupView {
                     );
 
                     self.active_pane = new_active_pane;
-                    if let Some(editor) = self.pane_editors.get(&new_active_pane) {
+                    if let Some(editor) = self
+                        .pane_contents
+                        .get(&new_active_pane)
+                        .and_then(|content| content.as_editor())
+                    {
                         window.focus(&editor.read(cx).focus_handle(cx));
                     }
 
@@ -990,12 +1044,19 @@ impl PaneGroupView {
     fn render_member(&self, member: &Member, basis: usize) -> AnyElement {
         match member {
             Member::Pane(pane_id) => {
-                if let Some(editor) = self.pane_editors.get(pane_id) {
-                    div()
-                        .flex_1()
-                        .size_full()
-                        .child(editor.clone())
-                        .into_any_element()
+                if let Some(content) = self.pane_contents.get(pane_id) {
+                    match content {
+                        crate::content_view::PaneContent::Editor(editor) => div()
+                            .flex_1()
+                            .size_full()
+                            .child(editor.clone())
+                            .into_any_element(),
+                        crate::content_view::PaneContent::Static(static_view) => div()
+                            .flex_1()
+                            .size_full()
+                            .child(static_view.clone())
+                            .into_any_element(),
+                    }
                 } else {
                     div()
                         .flex_1()
@@ -1035,10 +1096,14 @@ impl Render for PaneGroupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // Track scroll position for ScrollHint mode
         // Extract early to avoid borrow conflicts with later code
-        let current_scroll_y = self.pane_editors.get(&self.active_pane).map(|editor| {
-            let stoat = editor.read(cx).stoat.read(cx);
-            stoat.scroll_position().y
-        });
+        let current_scroll_y = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+            .map(|editor| {
+                let stoat = editor.read(cx).stoat.read(cx);
+                stoat.scroll_position().y
+            });
 
         // Update scroll hint state if in ScrollHint mode
         if let MinimapVisibility::ScrollHint { threshold_lines } = self.minimap_visibility {
@@ -1177,8 +1242,9 @@ impl Render for PaneGroupView {
             minimap_scroll_to_set,
             thumb_calculation_data,
         ) = self
-            .pane_editors
+            .pane_contents
             .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
             .map(|editor| {
                 let stoat_entity = editor.read(cx).stoat.clone();
                 let stoat = stoat_entity.read(cx);

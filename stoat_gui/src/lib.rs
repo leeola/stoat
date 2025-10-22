@@ -2,6 +2,7 @@ pub mod about_modal;
 pub mod app;
 pub mod command_overlay;
 pub mod command_palette;
+pub mod content_view;
 pub mod dispatch;
 pub mod editor_element;
 pub mod editor_style;
@@ -15,6 +16,7 @@ pub mod keymap_query;
 pub mod minimap;
 pub mod pane_group;
 pub mod render_stats;
+pub mod static_view;
 pub mod status_bar;
 pub mod syntax;
 

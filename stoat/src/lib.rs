@@ -3,6 +3,7 @@
 //! Key architectural change: Stoat methods take `&mut Context<Self>` instead of `&mut App`,
 //! enabling self-updating async tasks.
 
+pub mod action_metadata;
 pub mod actions;
 pub mod buffer_item;
 pub mod buffer_store;

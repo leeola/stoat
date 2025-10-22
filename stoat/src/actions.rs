@@ -1,6 +1,32 @@
 //! Action definitions for stoat.
 //!
 //! Actions are dispatched through GPUI's action system and handled by [`crate::Stoat`].
+//!
+//! # Metadata Architecture
+//!
+//! This module provides action metadata through two complementary systems:
+//!
+//! 1. **GPUI's idiomatic approach** (preferred for new code):
+//!    - Doc comments on actions (e.g., `/// Move cursor up`)
+//!    - [`Action::documentation()`] auto-extracts these comments
+//!    - [`crate::action_metadata::ActionMetadataRegistry`] provides TypeId-based lookup
+//!
+//! 2. **ActionMetadata trait** (retained for backward compatibility):
+//!    - [`ActionMetadata`] trait defines `action_name()`, `description()`, `help_text()`,
+//!      `aliases()`
+//!    - Implemented via `action_metadata!` macro for all 99 actions
+//!    - Static HashMaps ([`ACTION_NAMES`], [`DESCRIPTIONS`], [`HELP_TEXT`], [`ALIASES`]) provide
+//!      TypeId lookups
+//!    - Used by command palette and help modal that need additional metadata beyond doc comments
+//!
+//! Both systems are kept in sync: doc comments are the single source of truth, and
+//! [`ActionMetadata::description()`] implementations typically match the doc comment text.
+//!
+//! # Migration Complete
+//!
+//! All 99 actions have been migrated to use GPUI's idiomatic [`Action::documentation()`].
+//! The old `generate_metadata_maps!` macro that generated HashMaps has been removed.
+//! Manual HashMap entries are retained for command palette/help modal TypeId lookups.
 
 use crate::stoat::KeyContext;
 use gpui::{actions, Action};
@@ -988,10 +1014,12 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     let mut names = HashMap::new();
 
     // Movement actions
-    names.insert(TypeId::of::<MoveLeft>(), MoveLeft::action_name());
-    names.insert(TypeId::of::<MoveRight>(), MoveRight::action_name());
     names.insert(TypeId::of::<MoveUp>(), MoveUp::action_name());
     names.insert(TypeId::of::<MoveDown>(), MoveDown::action_name());
+    names.insert(TypeId::of::<MoveLeft>(), MoveLeft::action_name());
+    names.insert(TypeId::of::<MoveRight>(), MoveRight::action_name());
+    names.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::action_name());
+    names.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::action_name());
     names.insert(
         TypeId::of::<MoveToLineStart>(),
         MoveToLineStart::action_name(),
@@ -1002,8 +1030,6 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         MoveToFileStart::action_name(),
     );
     names.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::action_name());
-    names.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::action_name());
-    names.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::action_name());
     names.insert(TypeId::of::<PageUp>(), PageUp::action_name());
     names.insert(TypeId::of::<PageDown>(), PageDown::action_name());
 
@@ -1302,10 +1328,12 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     let mut descriptions = HashMap::new();
 
     // Movement actions
-    descriptions.insert(TypeId::of::<MoveLeft>(), MoveLeft::description());
-    descriptions.insert(TypeId::of::<MoveRight>(), MoveRight::description());
     descriptions.insert(TypeId::of::<MoveUp>(), MoveUp::description());
     descriptions.insert(TypeId::of::<MoveDown>(), MoveDown::description());
+    descriptions.insert(TypeId::of::<MoveLeft>(), MoveLeft::description());
+    descriptions.insert(TypeId::of::<MoveRight>(), MoveRight::description());
+    descriptions.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::description());
+    descriptions.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::description());
     descriptions.insert(
         TypeId::of::<MoveToLineStart>(),
         MoveToLineStart::description(),
@@ -1316,8 +1344,6 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         MoveToFileStart::description(),
     );
     descriptions.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::description());
-    descriptions.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::description());
-    descriptions.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::description());
     descriptions.insert(TypeId::of::<PageUp>(), PageUp::description());
     descriptions.insert(TypeId::of::<PageDown>(), PageDown::description());
 
@@ -1626,10 +1652,12 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     let mut help = HashMap::new();
 
     // Movement actions
-    help.insert(TypeId::of::<MoveLeft>(), MoveLeft::help_text());
-    help.insert(TypeId::of::<MoveRight>(), MoveRight::help_text());
     help.insert(TypeId::of::<MoveUp>(), MoveUp::help_text());
     help.insert(TypeId::of::<MoveDown>(), MoveDown::help_text());
+    help.insert(TypeId::of::<MoveLeft>(), MoveLeft::help_text());
+    help.insert(TypeId::of::<MoveRight>(), MoveRight::help_text());
+    help.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::help_text());
+    help.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::help_text());
     help.insert(
         TypeId::of::<MoveToLineStart>(),
         MoveToLineStart::help_text(),
@@ -1640,8 +1668,6 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         MoveToFileStart::help_text(),
     );
     help.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::help_text());
-    help.insert(TypeId::of::<MoveWordLeft>(), MoveWordLeft::help_text());
-    help.insert(TypeId::of::<MoveWordRight>(), MoveWordRight::help_text());
     help.insert(TypeId::of::<PageUp>(), PageUp::help_text());
     help.insert(TypeId::of::<PageDown>(), PageDown::help_text());
 

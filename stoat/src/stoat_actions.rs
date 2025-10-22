@@ -670,8 +670,12 @@ pub fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
 
     // Iterate through all actions with metadata
     for (type_id, name) in crate::actions::ACTION_NAMES.iter() {
-        // Get description - skip if not available
-        let Some(description) = crate::actions::DESCRIPTIONS.get(type_id) else {
+        // Get description from new idiomatic registry
+        // All actions have been migrated to use Action::documentation()
+        let description = if let Some(doc) = crate::action_metadata::get_documentation(type_id) {
+            doc
+        } else {
+            // No documentation available - skip this action
             continue;
         };
 
@@ -705,4 +709,425 @@ pub fn build_command_list() -> Vec<crate::stoat::CommandInfo> {
     commands.sort_by(|a, b| a.name.cmp(&b.name));
 
     commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::TypeId;
+
+    #[test]
+    fn build_command_list_includes_movement_actions_from_new_registry() {
+        let commands = build_command_list();
+
+        let move_up_type_id = TypeId::of::<crate::actions::MoveUp>();
+        let move_up_cmd = commands.iter().find(|cmd| cmd.type_id == move_up_type_id);
+
+        assert!(move_up_cmd.is_some(), "MoveUp should be in command list");
+
+        let cmd = move_up_cmd.unwrap();
+        assert!(
+            cmd.description.contains("Move cursor up"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_all_movement_actions() {
+        let commands = build_command_list();
+
+        let movement_action_names = [
+            "MoveUp",
+            "MoveDown",
+            "MoveLeft",
+            "MoveRight",
+            "MoveWordLeft",
+            "MoveWordRight",
+            "MoveToLineStart",
+            "MoveToLineEnd",
+            "MoveToFileStart",
+            "MoveToFileEnd",
+            "PageUp",
+            "PageDown",
+        ];
+
+        for name in &movement_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(
+                found,
+                "Movement action '{}' should be in command list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_all_selection_actions() {
+        let commands = build_command_list();
+
+        let selection_action_names = [
+            "SelectNextSymbol",
+            "SelectPrevSymbol",
+            "SelectNextToken",
+            "SelectPrevToken",
+            "SelectLeft",
+            "SelectRight",
+            "SelectUp",
+            "SelectDown",
+            "SelectToLineStart",
+            "SelectToLineEnd",
+        ];
+
+        for name in &selection_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(
+                found,
+                "Selection action '{}' should be in command list",
+                name
+            );
+        }
+
+        let select_left_type_id = TypeId::of::<crate::actions::SelectLeft>();
+        let select_left_cmd = commands
+            .iter()
+            .find(|cmd| cmd.type_id == select_left_type_id);
+
+        assert!(
+            select_left_cmd.is_some(),
+            "SelectLeft should be in command list"
+        );
+
+        let cmd = select_left_cmd.unwrap();
+        assert!(
+            cmd.description.contains("Extend selection"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_all_editing_actions() {
+        let commands = build_command_list();
+
+        let editing_action_names = [
+            "DeleteLeft",
+            "DeleteRight",
+            "DeleteWordLeft",
+            "DeleteWordRight",
+            "NewLine",
+            "DeleteLine",
+            "DeleteToEndOfLine",
+        ];
+
+        for name in &editing_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(found, "Editing action '{}' should be in command list", name);
+        }
+
+        let delete_left_type_id = TypeId::of::<crate::actions::DeleteLeft>();
+        let delete_left_cmd = commands
+            .iter()
+            .find(|cmd| cmd.type_id == delete_left_type_id);
+
+        assert!(
+            delete_left_cmd.is_some(),
+            "DeleteLeft should be in command list"
+        );
+
+        let cmd = delete_left_cmd.unwrap();
+        assert!(
+            cmd.description.contains("Delete") && cmd.description.contains("character"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_all_mode_actions() {
+        let commands = build_command_list();
+
+        let mode_action_names = [
+            "EnterInsertMode",
+            "EnterNormalMode",
+            "EnterVisualMode",
+            "EnterSpaceMode",
+            "EnterPaneMode",
+            "EnterGitFilterMode",
+        ];
+
+        for name in &mode_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(found, "Mode action '{}' should be in command list", name);
+        }
+
+        let insert_mode_type_id = TypeId::of::<crate::actions::EnterInsertMode>();
+        let insert_mode_cmd = commands
+            .iter()
+            .find(|cmd| cmd.type_id == insert_mode_type_id);
+
+        assert!(
+            insert_mode_cmd.is_some(),
+            "EnterInsertMode should be in command list"
+        );
+
+        let cmd = insert_mode_cmd.unwrap();
+        assert!(
+            cmd.description.contains("Enter insert mode"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_all_file_finder_actions() {
+        let commands = build_command_list();
+
+        let file_finder_action_names = [
+            "OpenFileFinder",
+            "FileFinderNext",
+            "FileFinderPrev",
+            "FileFinderSelect",
+            "FileFinderDismiss",
+        ];
+
+        for name in &file_finder_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(
+                found,
+                "File finder action '{}' should be in command list",
+                name
+            );
+        }
+
+        let open_type_id = TypeId::of::<crate::actions::OpenFileFinder>();
+        let open_cmd = commands.iter().find(|cmd| cmd.type_id == open_type_id);
+
+        assert!(
+            open_cmd.is_some(),
+            "OpenFileFinder should be in command list"
+        );
+
+        let cmd = open_cmd.unwrap();
+        assert!(
+            cmd.description.contains("file finder"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_all_buffer_finder_actions() {
+        let commands = build_command_list();
+
+        let buffer_finder_action_names = [
+            "OpenBufferFinder",
+            "BufferFinderNext",
+            "BufferFinderPrev",
+            "BufferFinderSelect",
+            "BufferFinderDismiss",
+        ];
+
+        for name in &buffer_finder_action_names {
+            let found = commands.iter().any(|cmd| cmd.name == *name);
+            assert!(
+                found,
+                "Buffer finder action '{}' should be in command list",
+                name
+            );
+        }
+
+        let open_type_id = TypeId::of::<crate::actions::OpenBufferFinder>();
+        let open_cmd = commands.iter().find(|cmd| cmd.type_id == open_type_id);
+
+        assert!(
+            open_cmd.is_some(),
+            "OpenBufferFinder should be in command list"
+        );
+
+        let cmd = open_cmd.unwrap();
+        assert!(
+            cmd.description.contains("buffer finder"),
+            "Description should come from Action::documentation(). Got: {:?}",
+            cmd.description
+        );
+    }
+
+    #[test]
+    fn build_command_list_includes_command_palette_actions() {
+        let commands = build_command_list();
+        let names = [
+            "OpenCommandPalette",
+            "CommandPaletteNext",
+            "CommandPalettePrev",
+            "CommandPaletteExecute",
+            "CommandPaletteDismiss",
+            "ToggleCommandPaletteHidden",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Command palette action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_pane_actions() {
+        let commands = build_command_list();
+        let names = [
+            "SplitUp",
+            "SplitDown",
+            "SplitLeft",
+            "SplitRight",
+            "Quit",
+            "FocusPaneUp",
+            "FocusPaneDown",
+            "FocusPaneLeft",
+            "FocusPaneRight",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Pane action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_application_actions() {
+        let commands = build_command_list();
+        let names = ["QuitAll", "WriteFile", "WriteAll"];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Application action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_view_actions() {
+        let commands = build_command_list();
+        let names = ["ToggleMinimap", "ShowMinimapOnScroll"];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "View action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_help_actions() {
+        let commands = build_command_list();
+        let names = [
+            "OpenHelpOverlay",
+            "OpenHelpModal",
+            "HelpModalDismiss",
+            "OpenAboutModal",
+            "AboutModalDismiss",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Help action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_git_status_actions() {
+        let commands = build_command_list();
+        let names = [
+            "OpenGitStatus",
+            "GitStatusNext",
+            "GitStatusPrev",
+            "GitStatusSelect",
+            "GitStatusDismiss",
+            "GitStatusCycleFilter",
+            "GitStatusSetFilterAll",
+            "GitStatusSetFilterStaged",
+            "GitStatusSetFilterUnstaged",
+            "GitStatusSetFilterUnstagedWithUntracked",
+            "GitStatusSetFilterUntracked",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Git status action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_git_diff_hunk_actions() {
+        let commands = build_command_list();
+        let names = ["ToggleDiffHunk", "GotoNextHunk", "GotoPrevHunk"];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Git diff hunk action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_diff_review_actions() {
+        let commands = build_command_list();
+        let names = [
+            "OpenDiffReview",
+            "DiffReviewNextHunk",
+            "DiffReviewPrevHunk",
+            "DiffReviewApproveHunk",
+            "DiffReviewToggleApproval",
+            "DiffReviewNextUnreviewedHunk",
+            "DiffReviewResetProgress",
+            "DiffReviewDismiss",
+            "DiffReviewCycleComparisonMode",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Diff review action '{}' should be in list",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn build_command_list_includes_git_repository_actions() {
+        let commands = build_command_list();
+        let names = [
+            "GitStageFile",
+            "GitStageAll",
+            "GitUnstageFile",
+            "GitUnstageAll",
+            "GitStageHunk",
+            "GitUnstageHunk",
+        ];
+
+        for name in &names {
+            assert!(
+                commands.iter().any(|cmd| cmd.name == *name),
+                "Git repository action '{}' should be in list",
+                name
+            );
+        }
+    }
 }

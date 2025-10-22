@@ -1087,3 +1087,13 @@ impl Render for EditorView {
         // FIXME: Minimap rendering will be integrated into EditorElement following Zed's approach
     }
 }
+
+impl crate::content_view::ContentView for EditorView {
+    fn view_type(&self) -> crate::content_view::ViewType {
+        crate::content_view::ViewType::Editor
+    }
+
+    fn stoat(&self) -> Option<&Entity<Stoat>> {
+        Some(&self.stoat)
+    }
+}
