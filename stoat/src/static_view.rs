@@ -1,7 +1,7 @@
 //! Static read-only text view.
 //!
 //! Demonstrates the multi-view architecture by providing a view type that
-//! handles actions differently from [`EditorView`](crate::editor_view::EditorView).
+//! handles actions differently from [`EditorView`](crate::editor::view::EditorView).
 //! This view displays fixed content without text editing capabilities, proving
 //! that GPUI's focus-based action routing correctly dispatches to different
 //! view implementations.
@@ -10,7 +10,7 @@
 //!
 //! The same action can have different behaviors in different views:
 //!
-//! - `DeleteLeft` in [`EditorView`](crate::editor_view::EditorView): Deletes a character
+//! - `DeleteLeft` in [`EditorView`](crate::editor::view::EditorView): Deletes a character
 //! - `DeleteLeft` in [`StaticView`]: No-op (not registered)
 //! - `Quit` in both views: Closes the pane
 //!
@@ -33,7 +33,7 @@ use gpui::{
 ///
 /// This view demonstrates the multi-view architecture by showing that different
 /// view types can exist in the same pane system. Unlike
-/// [`EditorView`](crate::editor_view::EditorView), this view:
+/// [`EditorView`](crate::editor::view::EditorView), this view:
 ///
 /// - Does not register text editing action handlers (no `DeleteLeft`, `InsertText`, etc.)
 /// - Has its own rendering style

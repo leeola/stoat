@@ -101,7 +101,7 @@ mod tests {
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsHead
+                crate::git::diff_review::DiffComparisonMode::WorkingVsHead
             );
 
             // In WorkingVsHead: 2 hunks total (line 2: "line 2" -> "STAGED", line 5: "line 5" ->
@@ -116,7 +116,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+                crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
             let position_unstaged = s.diff_review_hunk_position(cx);
@@ -129,7 +129,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             let position_staged = s.diff_review_hunk_position(cx);
@@ -277,7 +277,7 @@ mod tests {
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsHead
+                crate::git::diff_review::DiffComparisonMode::WorkingVsHead
             );
 
             let position_all = s.diff_review_hunk_position(cx);
@@ -289,7 +289,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             let position_staged = s.diff_review_hunk_position(cx);

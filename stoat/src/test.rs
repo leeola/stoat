@@ -80,7 +80,7 @@ impl<'a> TestStoat<'a> {
             let worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
                 std::path::PathBuf::from("."),
             )));
-            let buffer_store = cx.new(|_| crate::buffer_store::BufferStore::new());
+            let buffer_store = cx.new(|_| crate::buffer::store::BufferStore::new());
 
             let stoat = Stoat::new(crate::config::Config::default(), worktree, buffer_store, cx);
 

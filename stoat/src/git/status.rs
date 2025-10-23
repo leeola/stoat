@@ -34,8 +34,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! use crate::git_status::{GitStatusEntry, gather_git_status};
-//! use crate::git_repository::Repository;
+//! use crate::git::status::{GitStatusEntry, gather_git_status};
+//! use crate::git::repository::Repository;
 //!
 //! let repo = Repository::discover(Path::new("."))?;
 //! let entries = gather_git_status(repo.inner())?;
@@ -47,7 +47,7 @@
 //!
 //! # Related
 //!
-//! - [`git_repository::Repository`](crate::git_repository::Repository) - Git repository wrapper
+//! - [`git_repository::Repository`](crate::git::repository::Repository) - Git repository wrapper
 //! - [`Stoat`](crate::Stoat) - Uses this for git status modal state
 
 use gpui::{

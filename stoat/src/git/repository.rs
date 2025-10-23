@@ -18,7 +18,7 @@
 //!
 //! ```ignore
 //! use std::path::Path;
-//! use crate::git_repository::Repository;
+//! use crate::git::repository::Repository;
 //!
 //! // Find repository for a file
 //! if let Ok(repo) = Repository::discover(Path::new("src/main.rs")) {
@@ -31,7 +31,7 @@
 //!
 //! # Related
 //!
-//! - [`git_diff`](crate::git_diff) - Uses this to get base content for diff computation
+//! - [`git_diff`](crate::git::diff) - Uses this to get base content for diff computation
 //! - [`BufferItem`](crate::BufferItem) - Stores computed diffs
 
 use std::{
@@ -284,9 +284,9 @@ impl Repository {
     /// ```
     pub fn count_hunks_by_file(
         &self,
-        comparison_mode: crate::diff_review::DiffComparisonMode,
+        comparison_mode: crate::git::diff_review::DiffComparisonMode,
     ) -> Result<HashMap<PathBuf, usize>, GitError> {
-        use crate::diff_review::DiffComparisonMode;
+        use crate::git::diff_review::DiffComparisonMode;
 
         // Create diff based on comparison mode
         // Configure diff options to include untracked files with full content

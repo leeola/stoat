@@ -4,9 +4,8 @@
 //! No gutter, no mouse handling, no complex layout - just get text visible.
 
 use crate::{
-    editor_style::EditorStyle,
-    editor_view::EditorView,
-    git_diff::DiffHunkStatus,
+    editor::{style::EditorStyle, view::EditorView},
+    git::diff::DiffHunkStatus,
     gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
     DisplayRow,

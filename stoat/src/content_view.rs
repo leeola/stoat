@@ -13,7 +13,7 @@
 //! - **GPUI routes actions**: Focus-based routing automatically dispatches actions to the
 //!   appropriate view without central dispatchers
 //! - **Different behaviors**: The same action (e.g., `DeleteLeft`) can have different
-//!   implementations in [`EditorView`](crate::editor_view::EditorView) vs future `ImageView` or
+//!   implementations in [`EditorView`](crate::editor::view::EditorView) vs future `ImageView` or
 //!   `TableView`
 //!
 //! # Usage in PaneGroupView
@@ -71,7 +71,7 @@ pub trait ContentView: Render + Focusable {
 
     /// Returns the underlying [`Stoat`] entity if this view is backed by one.
     ///
-    /// Text-based views like [`EditorView`](crate::editor_view::EditorView) are
+    /// Text-based views like [`EditorView`](crate::editor::view::EditorView) are
     /// backed by a [`Stoat`] entity which manages the text buffer, cursor, and
     /// editing state. Other view types (images, tables, etc.) may not need a
     /// Stoat and return `None`.
@@ -170,9 +170,9 @@ pub enum ViewType {
 pub enum PaneContent {
     /// Text editor view.
     ///
-    /// Contains an [`EditorView`](crate::editor_view::EditorView) entity which
+    /// Contains an [`EditorView`](crate::editor::view::EditorView) entity which
     /// wraps a [`Stoat`] entity for text editing functionality.
-    Editor(Entity<crate::editor_view::EditorView>),
+    Editor(Entity<crate::editor::view::EditorView>),
     /// Static read-only text view.
     ///
     /// Contains a [`StaticView`](crate::static_view::StaticView) entity for
@@ -194,7 +194,7 @@ impl PaneContent {
         }
     }
 
-    /// Returns a reference to the contained [`EditorView`](crate::editor_view::EditorView)
+    /// Returns a reference to the contained [`EditorView`](crate::editor::view::EditorView)
     /// entity if this is an editor pane.
     ///
     /// # Usage
@@ -214,7 +214,7 @@ impl PaneContent {
     ///     });
     /// }
     /// ```
-    pub fn as_editor(&self) -> Option<&Entity<crate::editor_view::EditorView>> {
+    pub fn as_editor(&self) -> Option<&Entity<crate::editor::view::EditorView>> {
         match self {
             Self::Editor(entity) => Some(entity),
             _ => None,

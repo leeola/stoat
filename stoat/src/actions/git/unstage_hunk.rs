@@ -14,7 +14,7 @@ impl Stoat {
     ///
     /// Finds the git diff hunk at the cursor position and unstages only that hunk using
     /// `git apply --cached --reverse --unidiff-zero`. The file must have diff information
-    /// available via [`BufferDiff`](crate::git_diff::BufferDiff). The patch is generated
+    /// available via [`BufferDiff`](crate::git::diff::BufferDiff). The patch is generated
     /// by [`generate_hunk_patch`](super::hunk_patch::generate_hunk_patch) and applied in
     /// reverse to the staging area.
     ///
@@ -29,7 +29,7 @@ impl Stoat {
     ///
     /// # Implementation
     ///
-    /// Uses [`BufferDiff::hunk_for_row`](crate::git_diff::BufferDiff::hunk_for_row) to find
+    /// Uses [`BufferDiff::hunk_for_row`](crate::git::diff::BufferDiff::hunk_for_row) to find
     /// the hunk at the cursor, then generates a minimal unified diff patch and applies it
     /// in reverse to remove it from the staging area.
     ///
@@ -153,10 +153,10 @@ mod tests {
                 });
 
                 // Compute diff
-                let repo = crate::git_repository::Repository::discover(&file_path).unwrap();
+                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
                 let head_content = repo.head_content(&file_path).unwrap();
                 let buffer_snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git_diff::BufferDiff::new(
+                let diff = crate::git::diff::BufferDiff::new(
                     item.buffer().read(cx).remote_id(),
                     head_content,
                     &buffer_snapshot,
@@ -237,10 +237,10 @@ mod tests {
                 });
 
                 // Compute diff (will be empty)
-                let repo = crate::git_repository::Repository::discover(&file_path).unwrap();
+                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
                 let head_content = repo.head_content(&file_path).unwrap();
                 let buffer_snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git_diff::BufferDiff::new(
+                let diff = crate::git::diff::BufferDiff::new(
                     item.buffer().read(cx).remote_id(),
                     head_content,
                     &buffer_snapshot,

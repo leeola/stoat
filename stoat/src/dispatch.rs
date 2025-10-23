@@ -3,7 +3,7 @@
 //! Provides type-safe dispatch of actions from TypeId, enabling the command palette
 //! to execute arbitrary commands selected by the user.
 
-use crate::{actions::*, editor_view::EditorView};
+use crate::{actions::*, editor::view::EditorView};
 use gpui::{Context, Window};
 use std::any::TypeId;
 

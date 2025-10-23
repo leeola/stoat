@@ -44,7 +44,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git_repository::Repository::discover(&root_path) {
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };

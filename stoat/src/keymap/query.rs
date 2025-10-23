@@ -7,7 +7,7 @@ use std::collections::HashSet;
 /// the given mode's context. Prioritizes mode-specific bindings over global ones
 /// and limits the total number shown to keep the overlay manageable.
 ///
-/// Used by [`crate::command_overlay::CommandOverlay`] to display relevant keybindings
+/// Used by [`crate::command::overlay::CommandOverlay`] to display relevant keybindings
 /// for the current editor mode.
 ///
 /// # Arguments

@@ -15,7 +15,7 @@
 //!
 //! During editor paint:
 //! 1. Reserve space on left side for gutter
-//! 2. Query [`BufferDiff`](crate::git_diff::BufferDiff) for hunks
+//! 2. Query [`BufferDiff`](crate::git::diff::BufferDiff) for hunks
 //! 3. Convert hunk anchors to visible row numbers
 //! 4. Create [`DiffIndicator`] for each changed line
 //! 5. Paint gutter background
@@ -29,11 +29,11 @@
 //!
 //! # Related
 //!
-//! - [`EditorElement`](super::editor_element::EditorElement) - Renders the gutter
-//! - [`EditorStyle`](super::editor_style::EditorStyle) - Configures gutter appearance
-//! - [`BufferDiff`](crate::git_diff::BufferDiff) - Source of diff data
+//! - [`EditorElement`](super::editor::element::EditorElement) - Renders the gutter
+//! - [`EditorStyle`](super::editor::style::EditorStyle) - Configures gutter appearance
+//! - [`BufferDiff`](crate::git::diff::BufferDiff) - Source of diff data
 
-use crate::git_diff::{BufferDiff, DiffHunkStatus};
+use crate::git::diff::{BufferDiff, DiffHunkStatus};
 use gpui::{point, px, size, Bounds, Corners, Pixels, Point};
 use std::ops::Range;
 use text::{BufferSnapshot, ToPoint};

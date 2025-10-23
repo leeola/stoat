@@ -3,7 +3,7 @@
 //! This module implements the [`delete_word_right`](crate::Stoat::delete_word_right) action,
 //! which deletes from the cursor position to the end of the next symbol/word. Like
 //! [`delete_word_left`](crate::Stoat::delete_word_left), this action uses the
-//! [`TokenSnapshot`](crate::buffer_item::TokenSnapshot) to identify word boundaries.
+//! [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) to identify word boundaries.
 //!
 //! The cursor stays at its current position after deletion, making this action useful for
 //! removing forward text without changing cursor placement.
@@ -20,7 +20,7 @@ impl Stoat {
     ///
     /// # Behavior
     ///
-    /// - Finds next symbol boundary using [`TokenSnapshot`](crate::buffer_item::TokenSnapshot)
+    /// - Finds next symbol boundary using [`TokenSnapshot`](crate::buffer::item::TokenSnapshot)
     /// - Deletes from cursor to symbol end
     /// - Cursor stays at current position
     /// - If no next symbol, does nothing

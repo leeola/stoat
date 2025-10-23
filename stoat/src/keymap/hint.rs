@@ -3,7 +3,7 @@ use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
 /// A single keybinding hint showing a key combination and its description.
 ///
 /// Displays keyboard shortcuts in a styled format with the key in a bordered box
-/// followed by a description label. Used within [`crate::command_overlay::CommandOverlay`]
+/// followed by a description label. Used within [`crate::command::overlay::CommandOverlay`]
 /// to show available commands for the current editor mode.
 ///
 /// # Layout

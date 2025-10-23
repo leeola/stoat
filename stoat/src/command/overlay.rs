@@ -1,4 +1,4 @@
-use crate::keybinding_hint::KeybindingHint;
+use crate::keymap::hint::KeybindingHint;
 use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Window};
 
 /// Overlay displaying available commands for the current editor mode.
@@ -10,9 +10,9 @@ use gpui::{div, App, Hsla, IntoElement, ParentElement, RenderOnce, Styled, Windo
 ///
 /// # Usage
 ///
-/// This component is always rendered in [`crate::editor_view::EditorView`] and
+/// This component is always rendered in [`crate::editor::view::EditorView`] and
 /// updates automatically when the mode changes. Bindings are queried via
-/// [`crate::keymap_query::bindings_for_mode`].
+/// [`crate::keymap::query::bindings_for_mode`].
 ///
 /// # Layout
 ///
@@ -34,7 +34,7 @@ impl CommandOverlay {
     /// # Arguments
     /// * `mode_display` - The mode display name (e.g., "NORMAL")
     /// * `bindings` - Pre-queried keybindings for this mode from
-    ///   [`crate::keymap_query::bindings_for_mode`]
+    ///   [`crate::keymap::query::bindings_for_mode`]
     pub fn new(mode_display: String, bindings: Vec<(String, String)>) -> Self {
         Self {
             mode_display,

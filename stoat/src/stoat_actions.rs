@@ -101,7 +101,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git_repository::Repository::discover(&root_path) {
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -122,7 +122,9 @@ impl Stoat {
             }
 
             // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode() == crate::diff_review::DiffComparisonMode::IndexVsHead {
+            if self.diff_comparison_mode()
+                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
+            {
                 if let Ok(index_content) = repo.index_content(&abs_path) {
                     let buffer_item = self.active_buffer(cx);
                     buffer_item.update(cx, |item, cx| {
@@ -179,7 +181,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git_repository::Repository::discover(&root_path) {
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -205,7 +207,9 @@ impl Stoat {
             }
 
             // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode() == crate::diff_review::DiffComparisonMode::IndexVsHead {
+            if self.diff_comparison_mode()
+                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
+            {
                 if let Ok(index_content) = repo.index_content(&abs_path) {
                     let buffer_item = self.active_buffer(cx);
                     buffer_item.update(cx, |item, cx| {

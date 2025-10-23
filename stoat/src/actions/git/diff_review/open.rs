@@ -9,7 +9,7 @@ impl Stoat {
     ///
     /// Scans the repository for all modified files and enters diff_review mode for hunk-by-hunk
     /// review. Supports resuming previous review sessions if state exists. Computes diffs
-    /// on-demand for each file using the current [`crate::git_diff::DiffComparisonMode`].
+    /// on-demand for each file using the current [`crate::git::diff::DiffComparisonMode`].
     /// Following Zed's ProjectDiff pattern but simplified for stoat's modal architecture.
     ///
     /// # Workflow
@@ -34,7 +34,7 @@ impl Stoat {
     /// - Returns early if no git repository found
     /// - Returns early if no modified files
     /// - Returns early if no files have hunks in current comparison mode
-    /// - Respects current [`crate::git_diff::DiffComparisonMode`]
+    /// - Respects current [`crate::git::diff::DiffComparisonMode`]
     /// - Preserves review progress across sessions
     ///
     /// # Related
@@ -54,7 +54,7 @@ impl Stoat {
 
         // Use worktree root to discover repository
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git_repository::Repository::discover(&root_path).ok() {
+        let repo = match crate::git::repository::Repository::discover(&root_path).ok() {
             Some(repo) => repo,
             None => {
                 debug!("No git repository found");
@@ -85,7 +85,7 @@ impl Stoat {
                 // For IndexVsHead mode, update buffer with index content so anchors resolve
                 // correctly
                 if self.diff_comparison_mode()
-                    == crate::diff_review::DiffComparisonMode::IndexVsHead
+                    == crate::git::diff_review::DiffComparisonMode::IndexVsHead
                 {
                     if let Ok(index_content) = repo.index_content(&abs_path) {
                         let buffer_item = self.active_buffer(cx);
@@ -124,7 +124,7 @@ impl Stoat {
 
         // No existing state - start fresh review session
         // Scan git status to get list of modified files
-        let entries = match crate::git_status::gather_git_status(repo.inner()) {
+        let entries = match crate::git::status::gather_git_status(repo.inner()) {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::error!("Failed to gather git status: {}", e);
@@ -165,7 +165,9 @@ impl Stoat {
             }
 
             // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode() == crate::diff_review::DiffComparisonMode::IndexVsHead {
+            if self.diff_comparison_mode()
+                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
+            {
                 if let Ok(index_content) = repo.index_content(&abs_path) {
                     let buffer_item = self.active_buffer(cx);
                     buffer_item.update(cx, |item, cx| {
@@ -401,14 +403,14 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+                crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
             // Cycle again to IndexVsHead
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             // Verify diff is still present after switching to IndexVsHead
@@ -498,7 +500,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             // Verify cursor is at hunk before pressing next
@@ -567,7 +569,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             // BUG CHECK: In IndexVsHead mode, buffer should contain "STAGED", not "WORKING"
@@ -637,7 +639,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             // Verify initial state is correct
@@ -738,7 +740,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+                crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
             // BUG A: Diff should be cleared (no unstaged changes)
@@ -810,7 +812,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::WorkingVsIndex
+                crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
             // At this point: Bug A and Bug C from previous test
@@ -914,7 +916,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.diff_comparison_mode(),
-                crate::diff_review::DiffComparisonMode::IndexVsHead
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
             // ROOT CAUSE BUG: After switching to IndexVsHead, we replaced buffer content

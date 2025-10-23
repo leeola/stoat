@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! About modal is a mode-based component like [`crate::help_modal::HelpModal`].
+//! About modal is a mode-based component like [`crate::modal::help::HelpModal`].
 //! It's rendered when [`crate::Stoat::mode`] returns `"about_modal"`.
 
 use gpui::{

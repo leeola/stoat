@@ -4,9 +4,12 @@
 //! self-updating async tasks.
 
 use crate::{
-    buffer_item::BufferItem, buffer_store::BufferStore, cursor::CursorManager,
-    git_diff::BufferDiff, git_repository::Repository, scroll::ScrollPosition,
-    selections::SelectionsCollection, worktree::Worktree,
+    buffer::{item::BufferItem, store::BufferStore},
+    cursor::CursorManager,
+    git::{diff::BufferDiff, repository::Repository},
+    scroll::ScrollPosition,
+    selections::SelectionsCollection,
+    worktree::Worktree,
 };
 use gpui::{App, AppContext, Context, Entity, EventEmitter, WeakEntity};
 use parking_lot::Mutex;
@@ -275,8 +278,8 @@ pub struct Stoat {
     /// Comparison mode for diff review (working vs HEAD, working vs index, or index vs HEAD).
     ///
     /// Determines which git refs are compared when computing diffs in review mode.
-    /// Default is [`WorkingVsHead`](crate::diff_review::DiffComparisonMode::WorkingVsHead).
-    pub(crate) diff_review_comparison_mode: crate::diff_review::DiffComparisonMode,
+    /// Default is [`WorkingVsHead`](crate::git::diff_review::DiffComparisonMode::WorkingVsHead).
+    pub(crate) diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode,
 
     /// Current file path (for status bar display)
     pub(crate) current_file_path: Option<PathBuf>,
@@ -366,7 +369,7 @@ impl Stoat {
             diff_review_current_hunk_idx: 0,
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
-            diff_review_comparison_mode: crate::diff_review::DiffComparisonMode::default(),
+            diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
             worktree,
             parent_stoat: None,
@@ -757,13 +760,13 @@ impl Stoat {
     /// # Performance
     ///
     /// This method computes hunk counts for all files on every call to get accurate counts.
-    /// Uses [`crate::git_diff::count_hunks`] which is fast (no buffer allocations).
+    /// Uses [`crate::git::diff::count_hunks`] which is fast (no buffer allocations).
     /// Called from GUI status bar rendering, so should be fast enough for typical usage.
     /// Consider caching if performance becomes an issue.
     ///
     /// # Related
     ///
-    /// - [`crate::git_diff::count_hunks`] - fast hunk counting from text
+    /// - [`crate::git::diff::count_hunks`] - fast hunk counting from text
     /// - [`diff_comparison_mode`](Self::diff_comparison_mode) - determines which refs to compare
     pub fn diff_review_hunk_position(&self, _cx: &App) -> Option<(usize, usize)> {
         if !self.is_in_diff_review() {
@@ -843,8 +846,8 @@ impl Stoat {
     ///
     /// # Returns
     ///
-    /// The current [`DiffComparisonMode`](crate::diff_review::DiffComparisonMode)
-    pub fn diff_comparison_mode(&self) -> crate::diff_review::DiffComparisonMode {
+    /// The current [`DiffComparisonMode`](crate::git::diff_review::DiffComparisonMode)
+    pub fn diff_comparison_mode(&self) -> crate::git::diff_review::DiffComparisonMode {
         self.diff_review_comparison_mode
     }
 
@@ -869,7 +872,7 @@ impl Stoat {
     /// // Switch to viewing only unstaged changes
     /// stoat.set_diff_comparison_mode(DiffComparisonMode::WorkingVsIndex);
     /// ```
-    pub fn set_diff_comparison_mode(&mut self, mode: crate::diff_review::DiffComparisonMode) {
+    pub fn set_diff_comparison_mode(&mut self, mode: crate::git::diff_review::DiffComparisonMode) {
         self.diff_review_comparison_mode = mode;
     }
 
@@ -1173,7 +1176,7 @@ impl Stoat {
         path: &std::path::Path,
         cx: &App,
     ) -> Option<BufferDiff> {
-        use crate::diff_review::DiffComparisonMode;
+        use crate::git::diff_review::DiffComparisonMode;
 
         let repo = Repository::discover(path).ok()?;
         let buffer_item = self.active_buffer(cx);
@@ -1273,7 +1276,7 @@ impl Stoat {
             diff_review_current_hunk_idx: 0,
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
-            diff_review_comparison_mode: crate::diff_review::DiffComparisonMode::default(),
+            diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),

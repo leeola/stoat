@@ -23,8 +23,8 @@
 //! These actions are dispatched through the [`Stoat`](crate::Stoat) action system and
 //! integrate with:
 //! - [`Cursor`](crate::cursor::Cursor) for position tracking and goal column
-//! - [`BufferItem`](crate::buffer_item::BufferItem) for buffer snapshots and bounds checking
-//! - [`TokenSnapshot`](crate::buffer_item::TokenSnapshot) for word-based movement
+//! - [`BufferItem`](crate::buffer::item::BufferItem) for buffer snapshots and bounds checking
+//! - [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) for word-based movement
 //! - Scroll animation system for smooth viewport transitions
 
 mod down;

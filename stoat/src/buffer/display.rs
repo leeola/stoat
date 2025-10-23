@@ -49,9 +49,9 @@
 //! # Related
 //!
 //! - [`BufferItem`](crate::BufferItem) - Stores the diff and provides access to display buffer
-//! - [`BufferDiff`](crate::git_diff::BufferDiff) - Contains the hunks used to build phantom rows
+//! - [`BufferDiff`](crate::git::diff::BufferDiff) - Contains the hunks used to build phantom rows
 
-use crate::git_diff::{BufferDiff, DiffHunkStatus};
+use crate::git::diff::{BufferDiff, DiffHunkStatus};
 use std::ops::Range;
 use text::{BufferSnapshot, ToPoint};
 
@@ -514,7 +514,7 @@ fn compute_word_diff(base_line: &str, new_line: &str) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git_diff::BufferDiff;
+    use crate::git::diff::BufferDiff;
     use std::num::NonZeroU64;
     use text::{Buffer, BufferId};
 

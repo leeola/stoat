@@ -3,7 +3,7 @@
 //! Wraps [`text::Buffer`] with syntax highlighting tokens from tree-sitter and optional git diff
 //! state.
 
-use crate::git_diff::BufferDiff;
+use crate::git::diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
 use std::{sync::Arc, time::SystemTime};

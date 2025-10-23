@@ -4,7 +4,7 @@
 //! Zed's BufferStore pattern for performance. Manages the lifecycle of buffers,
 //! path-to-buffer mapping, and buffer activation history.
 
-use crate::buffer_item::BufferItem;
+use crate::buffer::item::BufferItem;
 use gpui::{App, AppContext, Entity, WeakEntity};
 use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 use stoat_text::Language;

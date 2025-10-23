@@ -1,10 +1,17 @@
 //! Minimal keymap configuration for Stoat v4.
 //!
 //! Provides default key bindings for the implemented v4 actions, using GPUI's
-//! [`KeyBinding`] and context predicate system.
+//! [`KeyBinding`] and context predicate system. Also includes keymap querying
+//! and keybinding hint UI components.
 
+pub mod hint;
+pub mod query;
+
+// Re-export commonly used items
 use crate::{actions::*, stoat::Mode};
 use gpui::{KeyBinding, Keymap};
+pub use hint::KeybindingHint;
+pub use query::bindings_for_mode;
 use serde::Deserialize;
 use std::collections::HashMap;
 

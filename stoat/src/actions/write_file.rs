@@ -5,7 +5,7 @@
 //! associated file path, and [`write_all`](crate::Stoat::write_all) saves all
 //! modified buffers with file paths.
 
-use crate::{buffer_item::BufferItem, Stoat};
+use crate::{buffer::item::BufferItem, Stoat};
 use gpui::{Context, Entity};
 use std::{io::Write, path::PathBuf};
 use text::LineEnding;
@@ -183,7 +183,7 @@ impl Stoat {
     ///
     /// # Workflow
     ///
-    /// 1. Gets all buffer IDs from [`crate::buffer_store::BufferStore`]
+    /// 1. Gets all buffer IDs from [`crate::buffer::store::BufferStore`]
     /// 2. For each buffer:
     ///    - Skips buffers without file paths (unnamed/scratch buffers)
     ///    - Skips buffers that are not modified (already saved)

@@ -14,7 +14,7 @@
 //!
 //! # Usage
 //!
-//! The registry is used by [`crate::help_modal`] and [`crate::command_palette`]
+//! The registry is used by [`crate::modal::help`] and [`crate::command::palette`]
 //! to display action information:
 //!
 //! ```rust,ignore
@@ -64,8 +64,8 @@ use std::{any::TypeId, collections::HashMap, sync::LazyLock};
 ///
 /// # Usage by Other Components
 ///
-/// - [`crate::help_modal`]: Displays action help text
-/// - [`crate::command_palette`]: Shows action descriptions
+/// - [`crate::modal::help`]: Displays action help text
+/// - [`crate::command::palette`]: Shows action descriptions
 /// - Future components: Any code that needs to look up action metadata by [`TypeId`]
 pub struct ActionMetadataRegistry {
     /// Maps action [`TypeId`] to documentation string.
@@ -301,7 +301,7 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
 /// Gets the documentation for an action by its [`TypeId`].
 ///
 /// This is the primary public API for looking up action documentation.
-/// Used by [`crate::help_modal`] and [`crate::command_palette`] to display
+/// Used by [`crate::modal::help`] and [`crate::command::palette`] to display
 /// action information to users.
 ///
 /// # Arguments

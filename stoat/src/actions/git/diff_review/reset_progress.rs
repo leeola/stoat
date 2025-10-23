@@ -41,7 +41,7 @@ impl Stoat {
         // If in review mode, load first file and jump to first hunk
         if self.mode == "diff_review" && !self.diff_review_files.is_empty() {
             let root_path = self.worktree.lock().root().to_path_buf();
-            if let Ok(repo) = crate::git_repository::Repository::discover(&root_path) {
+            if let Ok(repo) = crate::git::repository::Repository::discover(&root_path) {
                 // Clone file list to avoid borrow conflicts
                 let files = self.diff_review_files.clone();
                 // Find first file with hunks by loading files on-demand

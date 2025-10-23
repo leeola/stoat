@@ -22,7 +22,7 @@
 //! integrate with:
 //! - [`Cursor`](crate::cursor::Cursor) for selection state management
 //! - [`Selection`](crate::cursor::Selection) for anchor/cursor tracking
-//! - [`TokenSnapshot`](crate::buffer_item::TokenSnapshot) for token-based selection
+//! - [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) for token-based selection
 //! - Visual mode for interactive selection extension
 
 mod down;

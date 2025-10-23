@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! Help modal is a mode-based component like [`crate::command_palette::CommandPalette`]
+//! Help modal is a mode-based component like [`crate::command::palette::CommandPalette`]
 //! and [`crate::file_finder::Finder`]. It's rendered when [`crate::Stoat::mode`]
 //! returns `"help_modal"`.
 

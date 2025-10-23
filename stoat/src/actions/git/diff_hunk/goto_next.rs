@@ -8,7 +8,7 @@ impl Stoat {
     /// Jump to the next diff hunk.
     ///
     /// Moves the cursor to the start of the next git diff hunk after the current cursor position.
-    /// Uses the buffer item's diff (computed via [`crate::buffer_item::BufferItem::diff`]) to find
+    /// Uses the buffer item's diff (computed via [`crate::buffer::item::BufferItem::diff`]) to find
     /// hunks. Wraps around to the first hunk if at the end of the file.
     ///
     /// # Workflow
@@ -31,7 +31,7 @@ impl Stoat {
     ///
     /// - [`Stoat::goto_prev_hunk`] - navigate to previous hunk
     /// - [`Stoat::ensure_cursor_visible`] - scroll to make cursor visible
-    /// - [`crate::buffer_item::BufferItem::diff`] - source of hunk data
+    /// - [`crate::buffer::item::BufferItem::diff`] - source of hunk data
     pub fn goto_next_hunk(&mut self, cx: &mut Context<Self>) {
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);

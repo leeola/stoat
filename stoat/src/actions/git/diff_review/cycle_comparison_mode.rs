@@ -7,7 +7,7 @@ use tracing::debug;
 impl Stoat {
     /// Cycle through diff comparison modes in diff review.
     ///
-    /// Rotates through [`crate::git_diff::DiffComparisonMode`] variants (WorkingVsHead to
+    /// Rotates through [`crate::git::diff::DiffComparisonMode`] variants (WorkingVsHead to
     /// WorkingVsIndex to IndexVsHead to WorkingVsHead) via
     /// [`Stoat::cycle_diff_comparison_mode`]. Recomputes the diff for the current file using
     /// [`Stoat::compute_diff_for_review_mode`] to reflect the new comparison. If the current
@@ -37,7 +37,7 @@ impl Stoat {
     /// - [`Stoat::cycle_diff_comparison_mode`] - cycles the mode setting
     /// - [`Stoat::compute_diff_for_review_mode`] - centralized diff computation
     /// - [`Stoat::jump_to_current_hunk`] - cursor positioning and scrolling
-    /// - [`crate::git_diff::DiffComparisonMode`] - comparison mode enum
+    /// - [`crate::git::diff::DiffComparisonMode`] - comparison mode enum
     pub fn diff_review_cycle_comparison_mode(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -61,14 +61,14 @@ impl Stoat {
 
         // Get absolute path
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git_repository::Repository::discover(&root_path) {
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
         let abs_path = repo.workdir().join(&current_file_path);
 
         // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-        if new_mode == crate::diff_review::DiffComparisonMode::IndexVsHead {
+        if new_mode == crate::git::diff_review::DiffComparisonMode::IndexVsHead {
             if let Ok(index_content) = repo.index_content(&abs_path) {
                 let buffer_item = self.active_buffer(cx);
                 buffer_item.update(cx, |item, cx| {

@@ -1,11 +1,11 @@
 //! Utilities for generating git patch files from diff hunks.
 //!
-//! This module provides functionality to convert [`DiffHunk`](crate::git_diff::DiffHunk)
+//! This module provides functionality to convert [`DiffHunk`](crate::git::diff::DiffHunk)
 //! instances into unified diff format patches that can be applied with `git apply`.
 //! Used by [`git_stage_hunk`](crate::Stoat::git_stage_hunk) and
 //! [`git_unstage_hunk`](crate::Stoat::git_unstage_hunk) actions.
 
-use crate::git_diff::{BufferDiff, DiffHunk, DiffHunkStatus};
+use crate::git::diff::{BufferDiff, DiffHunk, DiffHunkStatus};
 use text::{BufferSnapshot, ToPoint};
 
 /// Generates a unified diff format patch for a single hunk.

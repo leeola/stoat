@@ -1,5 +1,4 @@
 use crate::{
-    about_modal::AboutModal,
     actions::{
         AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
         GitStatusCycleFilter, GitStatusDismiss, GitStatusNext, GitStatusPrev, GitStatusSelect,
@@ -9,12 +8,11 @@ use crate::{
         OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll, SplitDown,
         SplitLeft, SplitRight, SplitUp, ToggleMinimap,
     },
-    command_overlay::CommandOverlay,
-    command_palette::CommandPalette,
-    editor_view::EditorView,
+    command::{overlay::CommandOverlay, palette::CommandPalette},
+    editor::view::EditorView,
     file_finder::Finder,
-    git_status::GitStatus,
-    help_modal::HelpModal,
+    git::status::GitStatus,
+    modal::{about::AboutModal, help::HelpModal},
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     pane_group::element::pane_axis,
     render_stats::{FrameTimer, RenderStatsOverlayElement},
@@ -236,7 +234,7 @@ impl PaneGroupView {
             // Get config from the stoat to create base style, then override minimap-specific
             // settings
             let config = initial_stoat.read(cx).config().clone();
-            let mut minimap_style = crate::editor_style::EditorStyle::new(&config);
+            let mut minimap_style = crate::editor::style::EditorStyle::new(&config);
             minimap_style.font_size = gpui::px(crate::minimap::MINIMAP_FONT_SIZE); // 2.0px
             minimap_style.line_height = gpui::px(crate::minimap::MINIMAP_LINE_HEIGHT); // 2.5px
             minimap_style.font = minimap_font;
@@ -981,7 +979,7 @@ impl PaneGroupView {
         // Spawn async task to load diff
         self.workspace.git_status.preview_task = Some(cx.spawn(async move |this, cx| {
             // Load git diff
-            if let Some(diff) = crate::git_status::load_git_diff(&root_path, &file_path).await {
+            if let Some(diff) = crate::git::status::load_git_diff(&root_path, &file_path).await {
                 // Update workspace through entity handle
                 let _ = this.update(cx, |pane_group, cx| {
                     pane_group.workspace.git_status.preview = Some(diff);
@@ -1141,7 +1139,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to All
-            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::All;
+            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::All;
 
             // Re-filter files
             self.workspace.git_status.filtered = self
@@ -1180,7 +1178,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Staged
-            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Staged;
+            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Staged;
 
             // Re-filter files
             self.workspace.git_status.filtered = self
@@ -1219,7 +1217,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Unstaged
-            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Unstaged;
+            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Unstaged;
 
             // Re-filter files
             self.workspace.git_status.filtered = self
@@ -1259,7 +1257,7 @@ impl PaneGroupView {
         if let Some(editor) = editor_opt {
             // Set filter to UnstagedWithUntracked
             self.workspace.git_status.filter =
-                crate::git_status::GitStatusFilter::UnstagedWithUntracked;
+                crate::git::status::GitStatusFilter::UnstagedWithUntracked;
 
             // Re-filter files
             self.workspace.git_status.filtered = self
@@ -1298,7 +1296,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Untracked
-            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Untracked;
+            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Untracked;
 
             // Re-filter files
             self.workspace.git_status.filtered = self
@@ -2241,25 +2239,25 @@ impl Render for PaneGroupView {
                 let cp_data = None::<(String, Vec<crate::CommandInfo>, usize)>;
 
                 // Buffer finder data is now extracted from workspace state below
-                let bf_data = None::<(String, Vec<crate::buffer_store::BufferListEntry>, usize)>;
+                let bf_data = None::<(String, Vec<crate::buffer::store::BufferListEntry>, usize)>;
 
                 // Extract git status data from workspace (not from Stoat)
                 let gs_data = None::<(
-                    Vec<crate::git_status::GitStatusEntry>,
-                    Vec<crate::git_status::GitStatusEntry>,
-                    crate::git_status::GitStatusFilter,
+                    Vec<crate::git::status::GitStatusEntry>,
+                    Vec<crate::git::status::GitStatusEntry>,
+                    crate::git::status::GitStatusFilter,
                     usize,
                     usize,
-                    Option<crate::git_status::DiffPreviewData>,
-                    Option<crate::git_status::GitBranchInfo>,
+                    Option<crate::git::status::DiffPreviewData>,
+                    Option<crate::git::status::GitBranchInfo>,
                 )>;
 
                 // Extract status bar data
                 let sb_data = (
                     display.clone(),
-                    None::<crate::git_status::GitBranchInfo>, // Will be set from workspace below
-                    Vec::<crate::git_status::GitStatusEntry>::new(), /* Will be set from
-                                                               * workspace below */
+                    None::<crate::git::status::GitBranchInfo>, // Will be set from workspace below
+                    Vec::<crate::git::status::GitStatusEntry>::new(), /* Will be set from
+                                                                * workspace below */
                     stoat.current_file_path().map(|p| p.display().to_string()),
                     stoat.diff_review_progress(),
                     stoat.diff_review_file_progress(),
@@ -2435,7 +2433,7 @@ impl Render for PaneGroupView {
         }
 
         // Query keymap for bindings in the current mode
-        let bindings = crate::keymap_query::bindings_for_mode(&self.keymap, &active_mode);
+        let bindings = crate::keymap::query::bindings_for_mode(&self.keymap, &active_mode);
 
         // Calculate minimap thumb bounds using pre-extracted data
         // Following Zed's architecture: thumb is sized and positioned using minimap line heights

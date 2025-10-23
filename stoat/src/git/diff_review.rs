@@ -29,11 +29,11 @@
 //!
 //! # Related
 //!
-//! - [`git_diff`](crate::git_diff) - Core diff computation
-//! - [`git_status`](crate::git_status) - File status tracking
+//! - [`git_diff`](crate::git::diff) - Core diff computation
+//! - [`git_status`](crate::git::status) - File status tracking
 //! - Zed's `ProjectDiff` - Inspiration for multi-file diff navigation
 
-use crate::git_diff::BufferDiff;
+use crate::git::diff::BufferDiff;
 use std::path::PathBuf;
 
 /// Mode for comparing different git states during diff review.

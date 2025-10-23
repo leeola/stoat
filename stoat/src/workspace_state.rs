@@ -23,7 +23,7 @@
 //!
 //! See [`MULTI_VIEW_ARCHITECTURE.md`](../../MULTI_VIEW_ARCHITECTURE.md) for details.
 
-use crate::{buffer_store::BufferStore, stoat::KeyContext, worktree::Worktree};
+use crate::{buffer::store::BufferStore, stoat::KeyContext, worktree::Worktree};
 use gpui::{AppContext, Entity, Task};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -75,9 +75,9 @@ pub struct BufferFinder {
     /// Input buffer for search query
     pub input: Option<Entity<Buffer>>,
     /// All open buffers
-    pub buffers: Vec<crate::buffer_store::BufferListEntry>,
+    pub buffers: Vec<crate::buffer::store::BufferListEntry>,
     /// Filtered buffer list (fuzzy matched against input)
-    pub filtered: Vec<crate::buffer_store::BufferListEntry>,
+    pub filtered: Vec<crate::buffer::store::BufferListEntry>,
     /// Selected index in filtered list
     pub selected: usize,
     /// Previous mode to restore when closing finder
@@ -140,11 +140,11 @@ impl Default for CommandPalette {
 /// files with their status (modified, added, deleted, etc.).
 pub struct GitStatus {
     /// All files with git changes
-    pub files: Vec<crate::git_status::GitStatusEntry>,
+    pub files: Vec<crate::git::status::GitStatusEntry>,
     /// Filtered file list based on status filter
-    pub filtered: Vec<crate::git_status::GitStatusEntry>,
+    pub filtered: Vec<crate::git::status::GitStatusEntry>,
     /// Current status filter (all, modified, staged, etc.)
-    pub filter: crate::git_status::GitStatusFilter,
+    pub filter: crate::git::status::GitStatusFilter,
     /// Selected index in filtered list
     pub selected: usize,
     /// Previous mode to restore when closing modal
@@ -152,11 +152,11 @@ pub struct GitStatus {
     /// Previous key context to restore when closing modal
     pub previous_key_context: Option<KeyContext>,
     /// Diff preview data for selected file
-    pub preview: Option<crate::git_status::DiffPreviewData>,
+    pub preview: Option<crate::git::status::DiffPreviewData>,
     /// Task loading preview in background
     pub preview_task: Option<Task<()>>,
     /// Git branch information (name, ahead/behind counts)
-    pub branch_info: Option<crate::git_status::GitBranchInfo>,
+    pub branch_info: Option<crate::git::status::GitBranchInfo>,
     /// Number of dirty files in working tree
     pub dirty_count: usize,
 }
@@ -166,7 +166,7 @@ impl Default for GitStatus {
         Self {
             files: Vec::new(),
             filtered: Vec::new(),
-            filter: crate::git_status::GitStatusFilter::default(),
+            filter: crate::git::status::GitStatusFilter::default(),
             selected: 0,
             previous_mode: None,
             previous_key_context: None,
@@ -181,7 +181,7 @@ impl Default for GitStatus {
 impl GitStatus {
     /// Filter files based on the current filter setting.
     ///
-    /// Applies the current [`GitStatusFilter`](crate::git_status::GitStatusFilter) to
+    /// Applies the current [`GitStatusFilter`](crate::git::status::GitStatusFilter) to
     /// the given file list and returns filtered results.
     ///
     /// # Arguments
@@ -193,8 +193,8 @@ impl GitStatus {
     /// Vector of filtered files that match the current filter
     fn filter_files(
         &self,
-        files: &[crate::git_status::GitStatusEntry],
-    ) -> Vec<crate::git_status::GitStatusEntry> {
+        files: &[crate::git::status::GitStatusEntry],
+    ) -> Vec<crate::git::status::GitStatusEntry> {
         files
             .iter()
             .filter(|entry| self.filter.matches(entry))
@@ -219,7 +219,7 @@ pub struct DiffReview {
     /// Previous mode to restore when exiting review
     pub previous_mode: Option<String>,
     /// Comparison mode (working vs HEAD, working vs index, index vs HEAD)
-    pub comparison_mode: crate::diff_review::DiffComparisonMode,
+    pub comparison_mode: crate::git::diff_review::DiffComparisonMode,
 }
 
 impl Default for DiffReview {
@@ -230,7 +230,7 @@ impl Default for DiffReview {
             current_hunk_idx: 0,
             approved_hunks: HashMap::new(),
             previous_mode: None,
-            comparison_mode: crate::diff_review::DiffComparisonMode::default(),
+            comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
         }
     }
 }
@@ -260,7 +260,7 @@ impl Default for DiffReview {
 /// Individual views maintain their own state (cursor, scroll, zoom, etc.)
 /// but do NOT duplicate workspace state. For example:
 ///
-/// - [`EditorView`](crate::editor_view::EditorView) has cursor position and selections
+/// - [`EditorView`](crate::editor::view::EditorView) has cursor position and selections
 /// - `ImageView` has zoom level and pan offset
 /// - But both access the same worktree and buffer_store through workspace
 ///
@@ -311,9 +311,9 @@ impl WorkspaceState {
 
         // Initialize git status for status bar
         let (branch_info, git_status_files, dirty_count) =
-            if let Ok(repo) = crate::git_repository::Repository::open(std::path::Path::new(".")) {
-                let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
-                let status_files = crate::git_status::gather_git_status(repo.inner())
+            if let Ok(repo) = crate::git::repository::Repository::open(std::path::Path::new(".")) {
+                let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
+                let status_files = crate::git::status::gather_git_status(repo.inner())
                     .unwrap_or_else(|_| Vec::new());
                 let dirty_count = status_files.len();
                 (branch_info, status_files, dirty_count)
@@ -609,10 +609,10 @@ impl WorkspaceState {
         self.git_status.previous_key_context = Some(current_key_context);
 
         // Refresh git status from repository
-        if let Ok(repo) = crate::git_repository::Repository::open(std::path::Path::new(".")) {
-            let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
+        if let Ok(repo) = crate::git::repository::Repository::open(std::path::Path::new(".")) {
+            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
             let status_files =
-                crate::git_status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
+                crate::git::status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
             let dirty_count = status_files.len();
 
             self.git_status.files = status_files.clone();

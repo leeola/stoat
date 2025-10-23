@@ -2,7 +2,7 @@
 //!
 //! This module implements the [`delete_word_left`](crate::Stoat::delete_word_left) action, which
 //! deletes from the start of the previous symbol/word to the cursor position. This action uses
-//! the [`TokenSnapshot`](crate::buffer_item::TokenSnapshot) from the active buffer to identify
+//! the [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) from the active buffer to identify
 //! word boundaries based on syntax tokens.
 //!
 //! The implementation differentiates between deleting within a symbol (cursor inside a word) and
@@ -20,7 +20,7 @@ impl Stoat {
     ///
     /// # Behavior
     ///
-    /// - Finds previous symbol boundary using [`TokenSnapshot`](crate::buffer_item::TokenSnapshot)
+    /// - Finds previous symbol boundary using [`TokenSnapshot`](crate::buffer::item::TokenSnapshot)
     /// - Deletes from symbol start to cursor
     /// - Moves cursor to deletion start
     /// - If no previous symbol, does nothing

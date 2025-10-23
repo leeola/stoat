@@ -1,7 +1,6 @@
 use crate::{
     actions::*,
-    editor_element::EditorElement,
-    editor_style::EditorStyle,
+    editor::{element::EditorElement, style::EditorStyle},
     scroll,
     stoat::{KeyContext, Stoat},
 };

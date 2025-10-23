@@ -36,8 +36,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! use crate::git_diff::BufferDiff;
-//! use crate::git_repository::Repository;
+//! use crate::git::diff::BufferDiff;
+//! use crate::git::repository::Repository;
 //!
 //! let repo = Repository::discover(Path::new("src/main.rs"))?;
 //! let head_content = repo.head_content(Path::new("src/main.rs"))?;
@@ -52,7 +52,7 @@
 //!
 //! # Related
 //!
-//! - [`git_repository`](crate::git_repository) - Provides access to git HEAD content
+//! - [`git_repository`](crate::git::repository) - Provides access to git HEAD content
 //! - [`BufferItem`](crate::BufferItem) - Stores computed diffs for display
 
 use std::ops::Range;

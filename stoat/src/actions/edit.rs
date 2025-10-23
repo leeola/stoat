@@ -17,7 +17,7 @@
 //! These actions are dispatched through the [`Stoat`](crate::Stoat) action system and
 //! integrate with:
 //! - [`Cursor`](crate::cursor::Cursor) for position tracking
-//! - [`BufferItem`](crate::buffer_item::BufferItem) for text storage
+//! - [`BufferItem`](crate::buffer::item::BufferItem) for text storage
 //! - Modal system for routing input to different buffers (file finder, command palette, etc.)
 
 mod delete_left;
