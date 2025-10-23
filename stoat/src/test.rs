@@ -76,7 +76,13 @@ impl<'a> TestStoat<'a> {
     /// Called by [`Stoat::test`] and [`Stoat::test_with_text`].
     pub fn new(text: &str, cx: &'a mut TestAppContext) -> Self {
         let entity = cx.new(|cx| {
-            let stoat = Stoat::new(crate::config::Config::default(), cx);
+            // Create test-specific worktree and buffer_store
+            let worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
+                std::path::PathBuf::from("."),
+            )));
+            let buffer_store = cx.new(|_| crate::buffer_store::BufferStore::new());
+
+            let stoat = Stoat::new(crate::config::Config::default(), worktree, buffer_store, cx);
 
             // Always update the buffer to replace welcome text (even with empty string)
             // Use Rust language for better tokenization in tests

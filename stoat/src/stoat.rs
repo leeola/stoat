@@ -8,7 +8,7 @@ use crate::{
     git_diff::BufferDiff, git_repository::Repository, scroll::ScrollPosition,
     selections::SelectionsCollection, worktree::Worktree,
 };
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, WeakEntity};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
@@ -236,32 +236,21 @@ pub struct Stoat {
     /// while maintaining the architectural separation where file_finder state lives in workspace.
     pub(crate) file_finder_input_ref: Option<Entity<Buffer>>,
 
-    // Command palette state
-    pub(crate) command_palette_input: Option<Entity<Buffer>>,
-    pub(crate) command_palette_commands: Vec<CommandInfo>,
-    pub(crate) command_palette_filtered: Vec<CommandInfo>,
-    pub(crate) command_palette_selected: usize,
-    pub(crate) command_palette_previous_mode: Option<String>,
-    pub(crate) command_palette_previous_key_context: Option<KeyContext>,
-    pub(crate) command_palette_show_hidden: bool,
+    /// Temporary reference to command_palette input buffer (set when entering CommandPalette
+    /// context)
+    ///
+    /// This is a reference (not the owner) to the command_palette input buffer from
+    /// WorkspaceState. It allows edit actions (insert_text, delete_left) to route to the
+    /// command palette input while maintaining the architectural separation where
+    /// command_palette state lives in workspace.
+    pub(crate) command_palette_input_ref: Option<Entity<Buffer>>,
 
-    // Buffer finder state
-    pub(crate) buffer_finder_input: Option<Entity<Buffer>>,
-    pub(crate) buffer_finder_buffers: Vec<crate::buffer_store::BufferListEntry>,
-    pub(crate) buffer_finder_filtered: Vec<crate::buffer_store::BufferListEntry>,
-    pub(crate) buffer_finder_selected: usize,
-    pub(crate) buffer_finder_previous_mode: Option<String>,
-    pub(crate) buffer_finder_previous_key_context: Option<KeyContext>,
-
-    // Git status state
-    pub(crate) git_status_files: Vec<crate::git_status::GitStatusEntry>,
-    pub(crate) git_status_filtered: Vec<crate::git_status::GitStatusEntry>,
-    pub(crate) git_status_filter: crate::git_status::GitStatusFilter,
-    pub(crate) git_status_selected: usize,
-    pub(crate) git_status_previous_mode: Option<String>,
-    pub(crate) git_status_previous_key_context: Option<KeyContext>,
-    pub(crate) git_status_preview: Option<crate::git_status::DiffPreviewData>,
-    pub(crate) git_status_preview_task: Option<Task<()>>,
+    /// Temporary reference to buffer_finder input buffer (set when entering BufferFinder context)
+    ///
+    /// Similar to [`command_palette_input_ref`], this is a reference (not the owner) to
+    /// the buffer_finder input buffer from WorkspaceState. It allows edit actions to route
+    /// to the buffer finder input while maintaining architectural separation.
+    pub(crate) buffer_finder_input_ref: Option<Entity<Buffer>>,
 
     // Help modal state
     pub(crate) help_modal_previous_mode: Option<String>,
@@ -270,9 +259,6 @@ pub struct Stoat {
     // About modal state
     pub(crate) about_modal_previous_mode: Option<String>,
     pub(crate) about_modal_previous_key_context: Option<KeyContext>,
-
-    pub(crate) git_status_branch_info: Option<crate::git_status::GitBranchInfo>,
-    pub(crate) git_dirty_count: usize,
 
     // Diff review state
     /// List of modified files for diff review.
@@ -316,10 +302,16 @@ impl Stoat {
     /// # Arguments
     ///
     /// * `config` - Global configuration loaded from config.toml
+    /// * `worktree` - Shared worktree from workspace
+    /// * `buffer_store` - Shared buffer store from workspace
     /// * `cx` - GPUI context for entity creation
-    pub fn new(config: crate::config::Config, cx: &mut Context<Self>) -> Self {
-        // Create buffer store
-        let buffer_store = cx.new(|_| BufferStore::new());
+    pub fn new(
+        config: crate::config::Config,
+        worktree: Arc<Mutex<Worktree>>,
+        buffer_store: Entity<BufferStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Use workspace's buffer store (shared across all editors)
 
         // Allocate buffer ID from BufferStore to prevent collisions
         let buffer_id = buffer_store.update(cx, |store, _cx| store.allocate_buffer_id());
@@ -341,26 +333,12 @@ impl Stoat {
         let buffer_snapshot = buffer.read(cx).snapshot();
         let selections = SelectionsCollection::new(&buffer_snapshot);
 
-        let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
-
         // Initialize mode registry from keymap.toml
         let modes = crate::keymap::parse_modes_from_config();
 
         // Initialize KeyContext registry from keymap.toml
         let contexts = crate::keymap::parse_contexts_from_config();
         let key_context = KeyContext::TextEditor; // Default context
-
-        // Initialize git status for status bar
-        let (git_branch_info, git_status_files, git_dirty_count) =
-            if let Ok(repo) = Repository::open(std::path::Path::new(".")) {
-                let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
-                let status_files = crate::git_status::gather_git_status(repo.inner())
-                    .unwrap_or_else(|_| Vec::new());
-                let dirty_count = status_files.len();
-                (branch_info, status_files, dirty_count)
-            } else {
-                (None, Vec::new(), 0)
-            };
 
         Self {
             config,
@@ -377,33 +355,12 @@ impl Stoat {
             key_context,
             contexts,
             file_finder_input_ref: None,
-            command_palette_input: None,
-            command_palette_commands: Vec::new(),
-            command_palette_filtered: Vec::new(),
-            command_palette_selected: 0,
-            command_palette_previous_mode: None,
-            command_palette_previous_key_context: None,
-            command_palette_show_hidden: false,
-            buffer_finder_input: None,
-            buffer_finder_buffers: Vec::new(),
-            buffer_finder_filtered: Vec::new(),
-            buffer_finder_selected: 0,
-            buffer_finder_previous_mode: None,
-            buffer_finder_previous_key_context: None,
-            git_status_files: git_status_files.clone(),
-            git_status_filtered: git_status_files,
-            git_status_filter: crate::git_status::GitStatusFilter::default(),
-            git_status_selected: 0,
-            git_status_previous_mode: None,
-            git_status_previous_key_context: None,
-            git_status_preview: None,
-            git_status_preview_task: None,
+            command_palette_input_ref: None,
+            buffer_finder_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            git_status_branch_info: git_branch_info,
-            git_dirty_count,
             diff_review_files: Vec::new(),
             diff_review_current_file_idx: 0,
             diff_review_current_hunk_idx: 0,
@@ -451,33 +408,12 @@ impl Stoat {
             key_context: self.key_context,
             contexts: self.contexts.clone(),
             file_finder_input_ref: None,
-            command_palette_input: None,
-            command_palette_commands: Vec::new(),
-            command_palette_filtered: Vec::new(),
-            command_palette_selected: 0,
-            command_palette_previous_mode: None,
-            command_palette_previous_key_context: None,
-            command_palette_show_hidden: false,
-            buffer_finder_input: None,
-            buffer_finder_buffers: Vec::new(),
-            buffer_finder_filtered: Vec::new(),
-            buffer_finder_selected: 0,
-            buffer_finder_previous_mode: None,
-            buffer_finder_previous_key_context: None,
-            git_status_files: self.git_status_files.clone(),
-            git_status_filtered: self.git_status_filtered.clone(),
-            git_status_filter: self.git_status_filter,
-            git_status_selected: 0,
-            git_status_previous_mode: None,
-            git_status_previous_key_context: None,
-            git_status_preview: None,
-            git_status_preview_task: None,
+            command_palette_input_ref: None,
+            buffer_finder_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            git_status_branch_info: self.git_status_branch_info.clone(),
-            git_dirty_count: self.git_dirty_count,
             diff_review_files: Vec::new(),
             diff_review_current_file_idx: 0,
             diff_review_current_hunk_idx: 0,
@@ -565,6 +501,69 @@ impl Stoat {
         }
 
         self.active_buffer_id
+    }
+
+    /// Switch to a different buffer by ID.
+    ///
+    /// Updates the active buffer ID, current file path, activation history, and resets
+    /// cursor/selections to the beginning of the buffer. Used by buffer finder to switch
+    /// between open buffers.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_id` - The buffer ID to switch to
+    /// * `cx` - GPUI context
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the switch succeeded, `Err` if the buffer was not found in BufferStore.
+    pub fn switch_to_buffer(
+        &mut self,
+        buffer_id: BufferId,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        // Get buffer from BufferStore
+        let buffer_item = self
+            .buffer_store
+            .read(cx)
+            .get_buffer(buffer_id)
+            .ok_or_else(|| format!("Buffer not found: {:?}", buffer_id))?;
+
+        // Update active_buffer_id
+        self.active_buffer_id = Some(buffer_id);
+
+        // Update current_file_path for status bar
+        self.current_file_path = self
+            .buffer_store
+            .read(cx)
+            .get_path(buffer_id)
+            .map(|p| self.normalize_file_path(p));
+
+        // Update activation history
+        self.buffer_store.update(cx, |store, _cx| {
+            store.activate_buffer(buffer_id);
+        });
+
+        // Reset cursor to beginning
+        let target_pos = text::Point::new(0, 0);
+        self.cursor.move_to(target_pos);
+
+        // Sync selections to cursor position
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let id = self.selections.next_id();
+        self.selections.select(
+            vec![text::Selection {
+                id,
+                start: target_pos,
+                end: target_pos,
+                reversed: false,
+                goal: text::SelectionGoal::None,
+            }],
+            &buffer_snapshot,
+        );
+
+        cx.notify();
+        Ok(())
     }
 
     /// Get all active selections resolved to Point positions.
@@ -1263,33 +1262,12 @@ impl Stoat {
             key_context: KeyContext::TextEditor, // Minimap always in editor context
             contexts: self.contexts.clone(),
             file_finder_input_ref: None,
-            command_palette_input: None,
-            command_palette_commands: Vec::new(),
-            command_palette_filtered: Vec::new(),
-            command_palette_selected: 0,
-            command_palette_previous_mode: None,
-            command_palette_previous_key_context: None,
-            command_palette_show_hidden: false,
-            buffer_finder_input: None,
-            buffer_finder_buffers: Vec::new(),
-            buffer_finder_filtered: Vec::new(),
-            buffer_finder_selected: 0,
-            buffer_finder_previous_mode: None,
-            buffer_finder_previous_key_context: None,
-            git_status_files: Vec::new(),
-            git_status_filtered: Vec::new(),
-            git_status_filter: crate::git_status::GitStatusFilter::default(),
-            git_status_selected: 0,
-            git_status_previous_mode: None,
-            git_status_previous_key_context: None,
-            git_status_preview: None,
-            git_status_preview_task: None,
+            command_palette_input_ref: None,
+            buffer_finder_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            git_status_branch_info: None,
-            git_dirty_count: 0,
             diff_review_files: Vec::new(),
             diff_review_current_file_idx: 0,
             diff_review_current_hunk_idx: 0,

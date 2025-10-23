@@ -476,173 +476,8 @@ impl EditorView {
         cx.notify();
     }
 
-    fn handle_buffer_finder_next(
-        &mut self,
-        _: &BufferFinderNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.buffer_finder_next(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_buffer_finder_prev(
-        &mut self,
-        _: &BufferFinderPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.buffer_finder_prev(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_buffer_finder_select(
-        &mut self,
-        _: &BufferFinderSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.buffer_finder_select(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_buffer_finder_dismiss(
-        &mut self,
-        _: &BufferFinderDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.buffer_finder_dismiss(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_next(
-        &mut self,
-        _: &GitStatusNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_next(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_prev(
-        &mut self,
-        _: &GitStatusPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_prev(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_select(
-        &mut self,
-        _: &GitStatusSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_select(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_dismiss(
-        &mut self,
-        _: &GitStatusDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_dismiss(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_cycle_filter(
-        &mut self,
-        _: &GitStatusCycleFilter,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_cycle_filter(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_set_filter_all(
-        &mut self,
-        _: &GitStatusSetFilterAll,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_set_filter_all(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_set_filter_staged(
-        &mut self,
-        _: &GitStatusSetFilterStaged,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_set_filter_staged(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_set_filter_unstaged(
-        &mut self,
-        _: &GitStatusSetFilterUnstaged,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_set_filter_unstaged(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_set_filter_unstaged_with_untracked(
-        &mut self,
-        _: &GitStatusSetFilterUnstagedWithUntracked,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_set_filter_unstaged_with_untracked(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_git_status_set_filter_untracked(
-        &mut self,
-        _: &GitStatusSetFilterUntracked,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.git_status_set_filter_untracked(cx);
-        });
-        cx.notify();
-    }
+    // FIXME: BufferFinder handlers moved to PaneGroupView
+    // FIXME: GitStatus handlers moved to PaneGroupView
 
     fn handle_toggle_diff_hunk(
         &mut self,
@@ -777,70 +612,6 @@ impl EditorView {
         cx.notify();
     }
 
-    fn handle_command_palette_next(
-        &mut self,
-        _: &CommandPaletteNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.command_palette_next(cx);
-        });
-
-        let _selected = self.stoat.read(cx).command_palette_selected();
-
-        cx.notify();
-    }
-
-    fn handle_command_palette_prev(
-        &mut self,
-        _: &CommandPalettePrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.command_palette_prev(cx);
-        });
-
-        let _selected = self.stoat.read(cx).command_palette_selected();
-
-        cx.notify();
-    }
-
-    fn handle_command_palette_execute(
-        &mut self,
-        _: &CommandPaletteExecute,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Get the selected command's TypeId
-        let type_id = self.stoat.read(cx).command_palette_selected_type_id();
-
-        // Dismiss the command palette first
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.command_palette_dismiss(cx);
-        });
-
-        // Dispatch the selected command
-        if let Some(type_id) = type_id {
-            crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
-        }
-
-        cx.notify();
-    }
-
-    fn handle_command_palette_dismiss(
-        &mut self,
-        _: &CommandPaletteDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.command_palette_dismiss(cx);
-        });
-        cx.notify();
-    }
-
     fn handle_write_file(
         &mut self,
         _: &WriteFile,
@@ -956,20 +727,8 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_enter_git_filter_mode))
             .on_action(cx.listener(Self::handle_set_key_context))
             .on_action(cx.listener(Self::handle_set_mode))
-            .on_action(cx.listener(Self::handle_buffer_finder_next))
-            .on_action(cx.listener(Self::handle_buffer_finder_prev))
-            .on_action(cx.listener(Self::handle_buffer_finder_select))
-            .on_action(cx.listener(Self::handle_buffer_finder_dismiss))
-            .on_action(cx.listener(Self::handle_git_status_next))
-            .on_action(cx.listener(Self::handle_git_status_prev))
-            .on_action(cx.listener(Self::handle_git_status_select))
-            .on_action(cx.listener(Self::handle_git_status_dismiss))
-            .on_action(cx.listener(Self::handle_git_status_cycle_filter))
-            .on_action(cx.listener(Self::handle_git_status_set_filter_all))
-            .on_action(cx.listener(Self::handle_git_status_set_filter_staged))
-            .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged))
-            .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged_with_untracked))
-            .on_action(cx.listener(Self::handle_git_status_set_filter_untracked))
+            // FIXME: BufferFinder actions now handled by PaneGroupView
+            // FIXME: GitStatus actions now handled by PaneGroupView
             .on_action(cx.listener(Self::handle_toggle_diff_hunk))
             .on_action(cx.listener(Self::handle_goto_next_hunk))
             .on_action(cx.listener(Self::handle_goto_prev_hunk))
@@ -981,10 +740,6 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_diff_review_reset_progress))
             .on_action(cx.listener(Self::handle_diff_review_dismiss))
             .on_action(cx.listener(Self::handle_diff_review_cycle_comparison_mode))
-            .on_action(cx.listener(Self::handle_command_palette_next))
-            .on_action(cx.listener(Self::handle_command_palette_prev))
-            .on_action(cx.listener(Self::handle_command_palette_execute))
-            .on_action(cx.listener(Self::handle_command_palette_dismiss))
             .on_action(cx.listener(Self::handle_write_file))
             .on_action(cx.listener(Self::handle_write_all))
             .on_key_down(cx.listener(Self::handle_key_down))

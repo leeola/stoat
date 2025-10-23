@@ -65,7 +65,7 @@ impl Stoat {
 
         // Route to command palette input buffer if in command_palette mode
         if self.mode == "command_palette" {
-            if let Some(input_buffer) = &self.command_palette_input {
+            if let Some(input_buffer) = &self.command_palette_input_ref {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let len = snapshot.len();
 
@@ -82,9 +82,9 @@ impl Stoat {
                         buffer.edit([(char_boundary..len, "")]);
                     });
 
-                    // Re-filter commands based on new query
-                    let query = input_buffer.read(cx).snapshot().text();
-                    self.filter_commands(&query);
+                    // FIXME: Filtering moved to PaneGroupView
+                    // (will be triggered by PaneGroupView observing buffer changes or through
+                    // event)
                 }
             }
             return;
@@ -92,7 +92,7 @@ impl Stoat {
 
         // Route to buffer finder input buffer if in buffer_finder mode
         if self.mode == "buffer_finder" {
-            if let Some(input_buffer) = &self.buffer_finder_input {
+            if let Some(input_buffer) = &self.buffer_finder_input_ref {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let len = snapshot.len();
 
@@ -109,9 +109,9 @@ impl Stoat {
                         buffer.edit([(char_boundary..len, "")]);
                     });
 
-                    // Re-filter buffers based on new query
-                    let query = input_buffer.read(cx).snapshot().text();
-                    self.filter_buffers(&query, cx);
+                    // FIXME: Filtering moved to PaneGroupView
+                    // (will be triggered by PaneGroupView observing buffer changes or through
+                    // event)
                 }
             }
             return;

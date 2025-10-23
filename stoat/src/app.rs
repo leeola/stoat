@@ -1,4 +1,4 @@
-use crate::{editor_view::EditorView, pane_group::PaneGroupView, Stoat};
+use crate::pane_group::PaneGroupView;
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
 use std::rc::Rc;
 
@@ -36,31 +36,10 @@ pub fn run_with_paths(
                 ..Default::default()
             },
             move |window, cx| {
-                // Create Stoat entity
-                let stoat = cx.new(|cx| {
-                    let mut stoat = Stoat::new(config.clone(), cx);
-
-                    // Load first file if provided
-                    if !paths.is_empty() {
-                        if let Err(e) = stoat.load_file(&paths[0], cx) {
-                            tracing::error!("Failed to load file: {}", e);
-                        }
-                    }
-
-                    stoat
+                // Create PaneGroupView (handles workspace, stoat, and editor initialization)
+                let pane_group_view = cx.new(|cx| {
+                    PaneGroupView::new(config.clone(), paths.clone(), keymap.clone(), cx)
                 });
-
-                // Create EditorView that renders the Stoat entity
-                let editor_view = cx.new(|cx| EditorView::new(stoat, cx));
-
-                // Set the entity reference so EditorView can pass it to EditorElement
-                editor_view.update(cx, |view, _| {
-                    view.set_entity(editor_view.clone());
-                });
-
-                // Create PaneGroupView wrapping the editor
-                let pane_group_view =
-                    cx.new(|cx| PaneGroupView::new(editor_view.clone(), keymap.clone(), cx));
 
                 // Focus the initial editor so input works immediately
                 // This must happen after PaneGroupView is created so the focus chain is established

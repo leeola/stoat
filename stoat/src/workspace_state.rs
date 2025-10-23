@@ -178,6 +178,31 @@ impl Default for GitStatus {
     }
 }
 
+impl GitStatus {
+    /// Filter files based on the current filter setting.
+    ///
+    /// Applies the current [`GitStatusFilter`](crate::git_status::GitStatusFilter) to
+    /// the given file list and returns filtered results.
+    ///
+    /// # Arguments
+    ///
+    /// * `files` - List of all files to filter
+    ///
+    /// # Returns
+    ///
+    /// Vector of filtered files that match the current filter
+    fn filter_files(
+        &self,
+        files: &[crate::git_status::GitStatusEntry],
+    ) -> Vec<crate::git_status::GitStatusEntry> {
+        files
+            .iter()
+            .filter(|entry| self.filter.matches(entry))
+            .cloned()
+            .collect()
+    }
+}
+
 /// Diff review state.
 ///
 /// Contains all state for diff review mode which allows reviewing and
@@ -379,5 +404,258 @@ impl WorkspaceState {
             self.file_finder.previous_mode.clone(),
             self.file_finder.previous_key_context,
         )
+    }
+
+    /// Open command palette modal.
+    ///
+    /// Builds a list of all available commands from action metadata and creates
+    /// an input buffer for fuzzy search. The command palette provides a searchable
+    /// interface to all registered actions in the editor.
+    ///
+    /// The caller (typically [`PaneGroupView`](crate::pane_group::PaneGroupView))
+    /// is responsible for:
+    /// - Setting the active view's key_context to [`KeyContext::CommandPalette`]
+    /// - Setting the active view's mode to "command_palette"
+    ///
+    /// # Arguments
+    ///
+    /// * `current_mode` - Current mode to save for restoration
+    /// * `current_key_context` - Current key context to save for restoration
+    /// * `cx` - GPUI context for entity creation
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` tuple for restoration
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let (prev_mode, prev_ctx) = self.workspace.open_command_palette(mode, key_context, cx);
+    /// editor.stoat.update(cx, |stoat, cx| {
+    ///     stoat.set_key_context(KeyContext::CommandPalette);
+    ///     stoat.set_mode("command_palette");
+    /// });
+    /// ```
+    pub fn open_command_palette(
+        &mut self,
+        current_mode: String,
+        current_key_context: KeyContext,
+        cx: &mut gpui::App,
+    ) -> (Option<String>, Option<KeyContext>) {
+        use std::num::NonZeroU64;
+        use text::BufferId;
+
+        // Save current state for restoration
+        self.command_palette.previous_mode = Some(current_mode);
+        self.command_palette.previous_key_context = Some(current_key_context);
+
+        // Build command list from action metadata
+        let commands = crate::stoat_actions::build_command_list();
+
+        // Create input buffer with BufferId 3 (following existing convention)
+        let buffer_id = BufferId::from(NonZeroU64::new(3).unwrap());
+        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        self.command_palette.input = Some(input_buffer);
+
+        // Initialize command palette state
+        self.command_palette.commands = commands.clone();
+        self.command_palette.filtered = commands;
+        self.command_palette.selected = 0;
+
+        (
+            self.command_palette.previous_mode.clone(),
+            self.command_palette.previous_key_context,
+        )
+    }
+
+    /// Dismiss command palette and restore previous mode/context.
+    ///
+    /// Returns the mode and key_context to restore, or None if command palette
+    /// wasn't open.
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` to restore, or `(None, None)` if not open
+    pub fn dismiss_command_palette(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.command_palette.previous_mode.take();
+        let prev_ctx = self.command_palette.previous_key_context.take();
+
+        // Clear command palette state
+        self.command_palette.input = None;
+        self.command_palette.commands.clear();
+        self.command_palette.filtered.clear();
+        self.command_palette.selected = 0;
+        self.command_palette.show_hidden = false;
+
+        (prev_mode, prev_ctx)
+    }
+
+    /// Open buffer finder modal.
+    ///
+    /// Retrieves all open buffers from [`BufferStore`] and creates an input buffer
+    /// for fuzzy search. The buffer finder provides quick navigation between all
+    /// currently open buffers.
+    ///
+    /// The caller (typically [`PaneGroupView`](crate::pane_group::PaneGroupView))
+    /// is responsible for:
+    /// - Setting the active view's key_context to [`KeyContext::BufferFinder`]
+    /// - Setting the active view's mode to "buffer_finder"
+    ///
+    /// # Arguments
+    ///
+    /// * `current_mode` - Current mode to save for restoration
+    /// * `current_key_context` - Current key context to save for restoration
+    /// * `cx` - GPUI context for entity creation
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` tuple for restoration
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let (prev_mode, prev_ctx) = self.workspace.open_buffer_finder(mode, key_context, cx);
+    /// editor.stoat.update(cx, |stoat, cx| {
+    ///     stoat.set_key_context(KeyContext::BufferFinder);
+    ///     stoat.set_mode("buffer_finder");
+    /// });
+    /// ```
+    pub fn open_buffer_finder(
+        &mut self,
+        current_mode: String,
+        current_key_context: KeyContext,
+        cx: &mut gpui::App,
+    ) -> (Option<String>, Option<KeyContext>) {
+        use std::num::NonZeroU64;
+        use text::BufferId;
+
+        // Save current state for restoration
+        self.buffer_finder.previous_mode = Some(current_mode);
+        self.buffer_finder.previous_key_context = Some(current_key_context);
+
+        // Create input buffer with BufferId 4 (following existing convention)
+        let buffer_id = BufferId::from(NonZeroU64::new(4).unwrap());
+        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        self.buffer_finder.input = Some(input_buffer);
+
+        // Get all open buffers from buffer_store (caller will update active/visible status)
+        let buffers = self.buffer_store.read(cx).buffer_list(None, &[], cx);
+        self.buffer_finder.buffers = buffers.clone();
+        self.buffer_finder.filtered = buffers;
+        self.buffer_finder.selected = 0;
+
+        (
+            self.buffer_finder.previous_mode.clone(),
+            self.buffer_finder.previous_key_context,
+        )
+    }
+
+    /// Dismiss buffer finder and restore previous mode/context.
+    ///
+    /// Returns the mode and key_context to restore, or None if buffer finder
+    /// wasn't open.
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` to restore, or `(None, None)` if not open
+    pub fn dismiss_buffer_finder(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.buffer_finder.previous_mode.take();
+        let prev_ctx = self.buffer_finder.previous_key_context.take();
+
+        // Clear buffer finder state
+        self.buffer_finder.input = None;
+        self.buffer_finder.buffers.clear();
+        self.buffer_finder.filtered.clear();
+        self.buffer_finder.selected = 0;
+
+        (prev_mode, prev_ctx)
+    }
+
+    /// Open git status modal.
+    ///
+    /// Refreshes git status from the repository and applies the current filter.
+    /// Creates the git status modal showing all files with changes and their status.
+    ///
+    /// The caller (typically [`PaneGroupView`](crate::pane_group::PaneGroupView))
+    /// is responsible for:
+    /// - Setting the active view's key_context to [`KeyContext::Git`]
+    /// - Setting the active view's mode to "git_status"
+    ///
+    /// # Arguments
+    ///
+    /// * `current_mode` - Current mode to save for restoration
+    /// * `current_key_context` - Current key context to save for restoration
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` tuple for restoration
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let (prev_mode, prev_ctx) = self.workspace.open_git_status(mode, key_context);
+    /// editor.stoat.update(cx, |stoat, cx| {
+    ///     stoat.set_key_context(KeyContext::Git);
+    ///     stoat.set_mode("git_status");
+    /// });
+    /// ```
+    pub fn open_git_status(
+        &mut self,
+        current_mode: String,
+        current_key_context: KeyContext,
+    ) -> (Option<String>, Option<KeyContext>) {
+        // Save current state for restoration
+        self.git_status.previous_mode = Some(current_mode);
+        self.git_status.previous_key_context = Some(current_key_context);
+
+        // Refresh git status from repository
+        if let Ok(repo) = crate::git_repository::Repository::open(std::path::Path::new(".")) {
+            let branch_info = crate::git_status::gather_git_branch_info(repo.inner());
+            let status_files =
+                crate::git_status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
+            let dirty_count = status_files.len();
+
+            self.git_status.files = status_files.clone();
+            self.git_status.branch_info = branch_info;
+            self.git_status.dirty_count = dirty_count;
+        } else {
+            self.git_status.files.clear();
+            self.git_status.branch_info = None;
+            self.git_status.dirty_count = 0;
+        }
+
+        // Apply current filter
+        self.git_status.filtered = self.git_status.filter_files(&self.git_status.files);
+        self.git_status.selected = 0;
+
+        // Clear any existing preview (caller will load new preview)
+        self.git_status.preview = None;
+        self.git_status.preview_task = None;
+
+        (
+            self.git_status.previous_mode.clone(),
+            self.git_status.previous_key_context,
+        )
+    }
+
+    /// Dismiss git status modal and restore previous mode/context.
+    ///
+    /// Returns the mode and key_context to restore, or None if git status
+    /// wasn't open.
+    ///
+    /// # Returns
+    ///
+    /// `(previous_mode, previous_key_context)` to restore, or `(None, None)` if not open
+    pub fn dismiss_git_status(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.git_status.previous_mode.take();
+        let prev_ctx = self.git_status.previous_key_context.take();
+
+        // Clear git status modal state (but keep files and branch_info for status bar)
+        self.git_status.filtered.clear();
+        self.git_status.selected = 0;
+        self.git_status.preview = None;
+        self.git_status.preview_task = None;
+
+        (prev_mode, prev_ctx)
     }
 }

@@ -67,7 +67,7 @@ impl Stoat {
 
         // Route to command palette input buffer if in CommandPalette context
         if self.key_context == KeyContext::CommandPalette {
-            if let Some(input_buffer) = &self.command_palette_input {
+            if let Some(input_buffer) = &self.command_palette_input_ref {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let end_offset = snapshot.len();
 
@@ -75,16 +75,15 @@ impl Stoat {
                     buffer.edit([(end_offset..end_offset, text)]);
                 });
 
-                // Re-filter commands based on new query
-                let query = input_buffer.read(cx).snapshot().text();
-                self.filter_commands(&query);
+                // FIXME: Filtering moved to PaneGroupView
+                // (will be triggered by PaneGroupView observing buffer changes or through event)
             }
             return;
         }
 
         // Route to buffer finder input buffer if in BufferFinder context
         if self.key_context == KeyContext::BufferFinder {
-            if let Some(input_buffer) = &self.buffer_finder_input {
+            if let Some(input_buffer) = &self.buffer_finder_input_ref {
                 let snapshot = input_buffer.read(cx).snapshot();
                 let end_offset = snapshot.len();
 
@@ -92,9 +91,8 @@ impl Stoat {
                     buffer.edit([(end_offset..end_offset, text)]);
                 });
 
-                // Re-filter buffers based on new query
-                let query = input_buffer.read(cx).snapshot().text();
-                self.filter_buffers(&query, cx);
+                // FIXME: Filtering moved to PaneGroupView
+                // (will be triggered by PaneGroupView observing buffer changes or through event)
             }
             return;
         }

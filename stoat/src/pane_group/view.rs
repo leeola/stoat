@@ -2,9 +2,12 @@ use crate::{
     about_modal::AboutModal,
     actions::{
         AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-        HelpModalDismiss, OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview,
-        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll,
-        SplitDown, SplitLeft, SplitRight, SplitUp, ToggleMinimap,
+        GitStatusCycleFilter, GitStatusDismiss, GitStatusNext, GitStatusPrev, GitStatusSelect,
+        GitStatusSetFilterAll, GitStatusSetFilterStaged, GitStatusSetFilterUnstaged,
+        GitStatusSetFilterUnstagedWithUntracked, GitStatusSetFilterUntracked, HelpModalDismiss,
+        OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder,
+        OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll, SplitDown,
+        SplitLeft, SplitRight, SplitUp, ToggleMinimap,
     },
     command_overlay::CommandOverlay,
     command_palette::CommandPalette,
@@ -158,14 +161,53 @@ pub struct PaneGroupView {
 }
 
 impl PaneGroupView {
-    /// Create a new pane group view with an initial editor entity.
+    /// Create a new pane group view with config and optional initial files.
     ///
-    /// The caller must create the initial EditorView entity using App context.
+    /// Creates workspace state first, then uses it to create the initial editor.
+    /// This ensures all editors share the workspace's worktree and buffer_store.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Global configuration
+    /// * `initial_paths` - Optional files to load on startup
+    /// * `keymap` - Keymap for keybinding resolution
+    /// * `cx` - GPUI context
     pub fn new(
-        initial_editor: Entity<EditorView>,
+        config: crate::Config,
+        initial_paths: Vec<std::path::PathBuf>,
         keymap: Rc<gpui::Keymap>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        // Create workspace state first (this creates worktree and buffer_store)
+        let workspace = crate::workspace_state::WorkspaceState::new(cx);
+
+        // Create initial Stoat using workspace's shared resources
+        let initial_stoat = cx.new(|cx| {
+            let mut stoat = Stoat::new(
+                config.clone(),
+                workspace.worktree.clone(),
+                workspace.buffer_store.clone(),
+                cx,
+            );
+
+            // Load first file if provided
+            if !initial_paths.is_empty() {
+                if let Err(e) = stoat.load_file(&initial_paths[0], cx) {
+                    tracing::error!("Failed to load file: {}", e);
+                }
+            }
+
+            stoat
+        });
+
+        // Create initial EditorView
+        let initial_editor = cx.new(|cx| EditorView::new(initial_stoat, cx));
+
+        // Set entity reference so EditorView can pass it to EditorElement
+        initial_editor.update(cx, |view, _| {
+            view.set_entity(initial_editor.clone());
+        });
+
         let pane_group = PaneGroup::new();
         let initial_pane_id = pane_group.panes()[0];
 
@@ -218,9 +260,6 @@ impl PaneGroupView {
 
             minimap_view
         };
-
-        // Initialize workspace state
-        let workspace = crate::workspace_state::WorkspaceState::new(cx);
 
         Self {
             workspace,
@@ -492,15 +531,220 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Open command palette in the active editor's Stoat instance
-        if let Some(editor) = self.active_editor() {
-            let keymap = self.keymap.clone();
+        // Get current mode and key_context from active editor
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Extract current mode and key_context
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            // Initialize command palette in workspace
+            self.workspace
+                .open_command_palette(current_mode, current_key_context, cx);
+
+            // Update editor's key_context and mode, and set input reference
             editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_command_palette(&keymap, cx);
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_key_context(KeyContext::CommandPalette);
+                    stoat.set_mode("command_palette");
+                    // Set input reference for edit actions
+                    stoat.command_palette_input_ref = self.workspace.command_palette.input.clone();
                 });
             });
+
             cx.notify();
+        }
+    }
+
+    /// Handle command palette next action
+    fn handle_command_palette_next(
+        &mut self,
+        _: &crate::actions::CommandPaletteNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.command_palette.selected + 1
+            < self.workspace.command_palette.filtered.len()
+        {
+            self.workspace.command_palette.selected += 1;
+            debug!(
+                selected = self.workspace.command_palette.selected,
+                "Command palette: next"
+            );
+            cx.notify();
+        }
+    }
+
+    /// Handle command palette prev action
+    fn handle_command_palette_prev(
+        &mut self,
+        _: &crate::actions::CommandPalettePrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.command_palette.selected > 0 {
+            self.workspace.command_palette.selected -= 1;
+            debug!(
+                selected = self.workspace.command_palette.selected,
+                "Command palette: prev"
+            );
+            cx.notify();
+        }
+    }
+
+    /// Handle command palette dismiss action
+    fn handle_command_palette_dismiss(
+        &mut self,
+        _: &crate::actions::CommandPaletteDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Dismiss command palette and get previous state to restore
+            let (_prev_mode, prev_ctx) = self.workspace.dismiss_command_palette();
+
+            // Clear input reference from Stoat
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.command_palette_input_ref = None;
+                });
+            });
+
+            // Restore previous KeyContext (this auto-applies the default mode for that context)
+            if let Some(previous_context) = prev_ctx {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_set_key_context(previous_context, cx);
+                    });
+                });
+            }
+
+            cx.notify();
+        }
+    }
+
+    /// Handle command palette toggle hidden action
+    fn handle_command_palette_toggle_hidden(
+        &mut self,
+        _: &crate::actions::ToggleCommandPaletteHidden,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        debug!(
+            "Toggling command palette hidden commands: {} -> {}",
+            self.workspace.command_palette.show_hidden, !self.workspace.command_palette.show_hidden
+        );
+
+        // Toggle the flag
+        self.workspace.command_palette.show_hidden = !self.workspace.command_palette.show_hidden;
+
+        // Get current query from input buffer
+        let query = self
+            .workspace
+            .command_palette
+            .input
+            .as_ref()
+            .map(|buffer| buffer.read(cx).text())
+            .unwrap_or_default();
+
+        // Re-filter commands with new hidden state
+        self.filter_command_palette_commands(&query);
+
+        // Reset selection to avoid out-of-bounds issues
+        self.workspace.command_palette.selected = 0;
+
+        cx.notify();
+    }
+
+    /// Handle command palette execute action
+    fn handle_command_palette_execute(
+        &mut self,
+        _: &crate::actions::CommandPaletteExecute,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Get the selected command's TypeId
+        let type_id = if self.workspace.command_palette.selected
+            < self.workspace.command_palette.filtered.len()
+        {
+            Some(
+                self.workspace.command_palette.filtered[self.workspace.command_palette.selected]
+                    .type_id,
+            )
+        } else {
+            None
+        };
+
+        // Dismiss the command palette first
+        self.handle_command_palette_dismiss(&crate::actions::CommandPaletteDismiss, window, cx);
+
+        // Dispatch the selected command via the active editor
+        if let (Some(type_id), Some(editor)) = (type_id, self.active_editor().cloned()) {
+            editor.update(cx, |_editor, cx| {
+                crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
+            });
+        }
+
+        cx.notify();
+    }
+
+    /// Filter command palette commands based on query and show_hidden flag.
+    ///
+    /// Updates [`WorkspaceState::command_palette::filtered`] with commands that match
+    /// the fuzzy search query and respect the show_hidden setting. Uses nucleo_matcher
+    /// for fuzzy matching.
+    fn filter_command_palette_commands(&mut self, query: &str) {
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Matcher,
+        };
+
+        let show_hidden = self.workspace.command_palette.show_hidden;
+        let all_commands = &self.workspace.command_palette.commands;
+
+        if query.is_empty() {
+            // No query - show all commands (filtered by hidden state)
+            self.workspace.command_palette.filtered = all_commands
+                .iter()
+                .filter(|cmd| show_hidden || !cmd.hidden)
+                .cloned()
+                .collect();
+        } else {
+            // Fuzzy match query against command name/description using nucleo_matcher
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+
+            // Build haystack strings and keep parallel vector of commands for lookup
+            let visible_commands: Vec<crate::CommandInfo> = all_commands
+                .iter()
+                .filter(|cmd| show_hidden || !cmd.hidden)
+                .cloned()
+                .collect();
+
+            let candidates: Vec<String> = visible_commands
+                .iter()
+                .map(|cmd| format!("{} {} {}", cmd.name, cmd.description, cmd.aliases.join(" ")))
+                .collect();
+
+            // Match and collect results
+            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+            let mut matches = pattern.match_list(candidate_refs, &mut matcher);
+            matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
+
+            // Map matched strings back to commands using the parallel vector
+            self.workspace.command_palette.filtered = matches
+                .into_iter()
+                .filter_map(|(matched_str, _score)| {
+                    // Find the command that produced this matched string
+                    candidates
+                        .iter()
+                        .position(|s| s.as_str() == matched_str)
+                        .and_then(|idx| visible_commands.get(idx).cloned())
+                })
+                .collect();
         }
     }
 
@@ -511,23 +755,240 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        // Get current mode and key_context from active editor
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Extract current mode and key_context
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            // Initialize buffer finder in workspace
+            self.workspace
+                .open_buffer_finder(current_mode, current_key_context, cx);
+
+            // Update editor's key_context and mode, and set input reference
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_key_context(KeyContext::BufferFinder);
+                    stoat.set_mode("buffer_finder");
+                    // Set input reference for edit actions
+                    stoat.buffer_finder_input_ref = self.workspace.buffer_finder.input.clone();
+                });
+            });
+
+            // Update buffer list with active/visible status
+            self.update_buffer_finder_list(cx);
+
+            cx.notify();
+        }
+    }
+
+    /// Update buffer finder list with current active/visible status.
+    ///
+    /// Refreshes the buffer list from BufferStore with current active/visible flags.
+    fn update_buffer_finder_list(&mut self, cx: &mut Context<'_, Self>) {
+        // Get active buffer ID
+        let active_id = self
+            .active_editor()
+            .and_then(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx));
+
         // Collect buffer IDs visible in all panes
-        let visible_buffer_ids: Vec<text::BufferId> = self
+        let visible_ids: Vec<text::BufferId> = self
             .pane_contents
             .values()
             .filter_map(|content| content.as_editor())
             .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx))
             .collect();
 
-        // Open buffer finder in the active editor's Stoat instance
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_buffer_finder(&visible_buffer_ids, cx);
-                });
-            });
+        // Update buffer list with active/visible status
+        let buffers = self
+            .workspace
+            .buffer_store
+            .read(cx)
+            .buffer_list(active_id, &visible_ids, cx);
+        self.workspace.buffer_finder.buffers = buffers.clone();
+
+        // Get current query from input buffer
+        let query = self
+            .workspace
+            .buffer_finder
+            .input
+            .as_ref()
+            .map(|buffer| buffer.read(cx).text())
+            .unwrap_or_default();
+
+        // Re-filter with updated list
+        self.filter_buffer_finder_buffers(&query);
+    }
+
+    /// Filter buffer finder buffers based on query.
+    ///
+    /// Updates [`WorkspaceState::buffer_finder::filtered`] with buffers that match
+    /// the fuzzy search query. Uses nucleo_matcher for fuzzy matching.
+    fn filter_buffer_finder_buffers(&mut self, query: &str) {
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Matcher,
+        };
+
+        let all_buffers = &self.workspace.buffer_finder.buffers;
+
+        if query.is_empty() {
+            // No query - show all buffers
+            self.workspace.buffer_finder.filtered = all_buffers.clone();
+        } else {
+            // Fuzzy match query against buffer display names using nucleo_matcher
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+
+            // Build haystack strings
+            let candidates: Vec<String> = all_buffers
+                .iter()
+                .map(|buf| buf.display_name.clone())
+                .collect();
+
+            // Match and collect results
+            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+            let mut matches = pattern.match_list(candidate_refs, &mut matcher);
+            matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
+
+            // Map matched strings back to buffers using parallel vectors
+            self.workspace.buffer_finder.filtered = matches
+                .into_iter()
+                .filter_map(|(matched_str, _score)| {
+                    candidates
+                        .iter()
+                        .position(|s| s.as_str() == matched_str)
+                        .and_then(|idx| all_buffers.get(idx).cloned())
+                })
+                .collect();
+        }
+    }
+
+    /// Handle buffer finder next action
+    fn handle_buffer_finder_next(
+        &mut self,
+        _: &crate::actions::BufferFinderNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.buffer_finder.selected + 1 < self.workspace.buffer_finder.filtered.len() {
+            self.workspace.buffer_finder.selected += 1;
             cx.notify();
         }
+    }
+
+    /// Handle buffer finder prev action
+    fn handle_buffer_finder_prev(
+        &mut self,
+        _: &crate::actions::BufferFinderPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.buffer_finder.selected > 0 {
+            self.workspace.buffer_finder.selected -= 1;
+            cx.notify();
+        }
+    }
+
+    /// Handle buffer finder select action
+    fn handle_buffer_finder_select(
+        &mut self,
+        _: &crate::actions::BufferFinderSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            if self.workspace.buffer_finder.selected < self.workspace.buffer_finder.filtered.len() {
+                let buffer_entry =
+                    &self.workspace.buffer_finder.filtered[self.workspace.buffer_finder.selected];
+                let buffer_id = buffer_entry.buffer_id;
+
+                // Switch to the selected buffer
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        if let Err(e) = stoat.switch_to_buffer(buffer_id, cx) {
+                            tracing::error!("Failed to switch to buffer {:?}: {}", buffer_id, e);
+                        }
+                    });
+                });
+            }
+            self.handle_buffer_finder_dismiss(&crate::actions::BufferFinderDismiss, _window, cx);
+        }
+    }
+
+    /// Handle buffer finder dismiss action
+    fn handle_buffer_finder_dismiss(
+        &mut self,
+        _: &crate::actions::BufferFinderDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Dismiss buffer finder and get previous state to restore
+            let (_prev_mode, prev_ctx) = self.workspace.dismiss_buffer_finder();
+
+            // Clear input reference from Stoat
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.buffer_finder_input_ref = None;
+                });
+            });
+
+            // Restore previous KeyContext (this auto-applies the default mode for that context)
+            if let Some(previous_context) = prev_ctx {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_set_key_context(previous_context, cx);
+                    });
+                });
+            }
+
+            cx.notify();
+        }
+    }
+
+    /// Load preview for the currently selected file in git status.
+    ///
+    /// Spawns an async task to load git diff preview. Updates workspace.git_status.preview
+    /// when complete.
+    fn load_git_status_preview(&mut self, cx: &mut Context<'_, Self>) {
+        // Cancel existing preview task
+        self.workspace.git_status.preview_task = None;
+
+        // Get selected file entry from filtered list
+        let entry = match self
+            .workspace
+            .git_status
+            .filtered
+            .get(self.workspace.git_status.selected)
+        {
+            Some(entry) => entry.clone(),
+            None => {
+                self.workspace.git_status.preview = None;
+                return;
+            },
+        };
+
+        // Get repository root path
+        let root_path = self.workspace.worktree.lock().root().to_path_buf();
+        let file_path = entry.path.clone();
+
+        // Spawn async task to load diff
+        self.workspace.git_status.preview_task = Some(cx.spawn(async move |this, cx| {
+            // Load git diff
+            if let Some(diff) = crate::git_status::load_git_diff(&root_path, &file_path).await {
+                // Update workspace through entity handle
+                let _ = this.update(cx, |pane_group, cx| {
+                    pane_group.workspace.git_status.preview = Some(diff);
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     /// Handle opening the git status modal
@@ -537,13 +998,331 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Open git status in the active editor's Stoat instance
-        if let Some(editor) = self.active_editor() {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Extract current mode and key_context
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            // Initialize git status in workspace
+            self.workspace
+                .open_git_status(current_mode, current_key_context);
+
+            // Update editor's key_context and mode
             editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_git_status(cx);
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_key_context(KeyContext::Git);
+                    stoat.set_mode("git_status");
                 });
             });
+
+            // Load preview for first file
+            self.load_git_status_preview(cx);
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status next action
+    fn handle_git_status_next(
+        &mut self,
+        _: &GitStatusNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.git_status.selected + 1 < self.workspace.git_status.filtered.len() {
+            self.workspace.git_status.selected += 1;
+            self.load_git_status_preview(cx);
+            cx.notify();
+        }
+    }
+
+    /// Handle git status prev action
+    fn handle_git_status_prev(
+        &mut self,
+        _: &GitStatusPrev,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.workspace.git_status.selected > 0 {
+            self.workspace.git_status.selected -= 1;
+            self.load_git_status_preview(cx);
+            cx.notify();
+        }
+    }
+
+    /// Handle git status select action
+    fn handle_git_status_select(
+        &mut self,
+        _: &GitStatusSelect,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            if self.workspace.git_status.selected < self.workspace.git_status.filtered.len() {
+                let entry = &self.workspace.git_status.filtered[self.workspace.git_status.selected];
+                let root = self.workspace.worktree.lock().root().to_path_buf();
+                let abs_path = root.join(&entry.path);
+
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        if let Err(e) = stoat.load_file(&abs_path, cx) {
+                            tracing::error!("Failed to load file {:?}: {}", abs_path, e);
+                        }
+                    });
+                });
+            }
+            self.handle_git_status_dismiss(&GitStatusDismiss, _window, cx);
+        }
+    }
+
+    /// Handle git status dismiss action
+    fn handle_git_status_dismiss(
+        &mut self,
+        _: &GitStatusDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            let (_prev_mode, prev_ctx) = self.workspace.dismiss_git_status();
+
+            if let Some(previous_context) = prev_ctx {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_set_key_context(previous_context, cx);
+                    });
+                });
+            }
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status cycle filter action
+    fn handle_git_status_cycle_filter(
+        &mut self,
+        _: &GitStatusCycleFilter,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Cycle to next filter
+        self.workspace.git_status.filter = self.workspace.git_status.filter.next();
+
+        // Re-filter files with new filter
+        self.workspace.git_status.filtered = self
+            .workspace
+            .git_status
+            .files
+            .iter()
+            .filter(|entry| self.workspace.git_status.filter.matches(entry))
+            .cloned()
+            .collect();
+
+        // Reset selection to 0
+        self.workspace.git_status.selected = 0;
+
+        // Load preview for first filtered file
+        self.load_git_status_preview(cx);
+
+        cx.notify();
+    }
+
+    /// Handle git status set filter to All action
+    fn handle_git_status_set_filter_all(
+        &mut self,
+        _: &GitStatusSetFilterAll,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Set filter to All
+            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::All;
+
+            // Re-filter files
+            self.workspace.git_status.filtered = self
+                .workspace
+                .git_status
+                .files
+                .iter()
+                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .cloned()
+                .collect();
+
+            // Reset selection to 0
+            self.workspace.git_status.selected = 0;
+
+            // Load preview for first filtered file
+            self.load_git_status_preview(cx);
+
+            // Transition from git_filter mode to git_status mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_mode("git_status");
+                });
+            });
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status set filter to Staged action
+    fn handle_git_status_set_filter_staged(
+        &mut self,
+        _: &GitStatusSetFilterStaged,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Set filter to Staged
+            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Staged;
+
+            // Re-filter files
+            self.workspace.git_status.filtered = self
+                .workspace
+                .git_status
+                .files
+                .iter()
+                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .cloned()
+                .collect();
+
+            // Reset selection to 0
+            self.workspace.git_status.selected = 0;
+
+            // Load preview for first filtered file
+            self.load_git_status_preview(cx);
+
+            // Transition from git_filter mode to git_status mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_mode("git_status");
+                });
+            });
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status set filter to Unstaged action
+    fn handle_git_status_set_filter_unstaged(
+        &mut self,
+        _: &GitStatusSetFilterUnstaged,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Set filter to Unstaged
+            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Unstaged;
+
+            // Re-filter files
+            self.workspace.git_status.filtered = self
+                .workspace
+                .git_status
+                .files
+                .iter()
+                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .cloned()
+                .collect();
+
+            // Reset selection to 0
+            self.workspace.git_status.selected = 0;
+
+            // Load preview for first filtered file
+            self.load_git_status_preview(cx);
+
+            // Transition from git_filter mode to git_status mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_mode("git_status");
+                });
+            });
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status set filter to UnstagedWithUntracked action
+    fn handle_git_status_set_filter_unstaged_with_untracked(
+        &mut self,
+        _: &GitStatusSetFilterUnstagedWithUntracked,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Set filter to UnstagedWithUntracked
+            self.workspace.git_status.filter =
+                crate::git_status::GitStatusFilter::UnstagedWithUntracked;
+
+            // Re-filter files
+            self.workspace.git_status.filtered = self
+                .workspace
+                .git_status
+                .files
+                .iter()
+                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .cloned()
+                .collect();
+
+            // Reset selection to 0
+            self.workspace.git_status.selected = 0;
+
+            // Load preview for first filtered file
+            self.load_git_status_preview(cx);
+
+            // Transition from git_filter mode to git_status mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_mode("git_status");
+                });
+            });
+
+            cx.notify();
+        }
+    }
+
+    /// Handle git status set filter to Untracked action
+    fn handle_git_status_set_filter_untracked(
+        &mut self,
+        _: &GitStatusSetFilterUntracked,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Set filter to Untracked
+            self.workspace.git_status.filter = crate::git_status::GitStatusFilter::Untracked;
+
+            // Re-filter files
+            self.workspace.git_status.filtered = self
+                .workspace
+                .git_status
+                .files
+                .iter()
+                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .cloned()
+                .collect();
+
+            // Reset selection to 0
+            self.workspace.git_status.selected = 0;
+
+            // Load preview for first filtered file
+            self.load_git_status_preview(cx);
+
+            // Transition from git_filter mode to git_status mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_mode("git_status");
+                });
+            });
+
             cx.notify();
         }
     }
@@ -704,7 +1483,14 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
+            cx.new(|cx| {
+                Stoat::new(
+                    crate::Config::default(),
+                    self.workspace.worktree.clone(),
+                    self.workspace.buffer_store.clone(),
+                    cx,
+                )
+            })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -753,7 +1539,14 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
+            cx.new(|cx| {
+                Stoat::new(
+                    crate::Config::default(),
+                    self.workspace.worktree.clone(),
+                    self.workspace.buffer_store.clone(),
+                    cx,
+                )
+            })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -802,7 +1595,14 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
+            cx.new(|cx| {
+                Stoat::new(
+                    crate::Config::default(),
+                    self.workspace.worktree.clone(),
+                    self.workspace.buffer_store.clone(),
+                    cx,
+                )
+            })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -851,7 +1651,14 @@ impl PaneGroupView {
         {
             cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
         } else {
-            cx.new(|cx| Stoat::new(crate::Config::default(), cx))
+            cx.new(|cx| {
+                Stoat::new(
+                    crate::Config::default(),
+                    self.workspace.worktree.clone(),
+                    self.workspace.buffer_store.clone(),
+                    cx,
+                )
+            })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
 
@@ -1402,9 +2209,9 @@ impl Render for PaneGroupView {
             active_mode,
             mode_display,
             _file_finder_data,
-            command_palette_data,
+            _command_palette_data,
             buffer_finder_data,
-            git_status_data,
+            _git_status_data,
             status_bar_data,
             minimap_scroll_to_set,
             thumb_calculation_data,
@@ -1430,62 +2237,29 @@ impl Render for PaneGroupView {
                     Option<crate::file_finder::PreviewData>,
                 )>;
 
-                // Extract command palette data if in CommandPalette context
-                let cp_data = if key_context == KeyContext::CommandPalette {
-                    let query = stoat
-                        .command_palette_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-                    Some((
-                        query,
-                        stoat.command_palette_filtered().to_vec(),
-                        stoat.command_palette_selected(),
-                    ))
-                } else {
-                    None
-                };
+                // Command palette data is now extracted from workspace state below
+                let cp_data = None::<(String, Vec<crate::CommandInfo>, usize)>;
 
-                // Extract buffer finder data if in BufferFinder context
-                let bf_data = if key_context == KeyContext::BufferFinder {
-                    let query = stoat
-                        .buffer_finder_input()
-                        .map(|buffer| {
-                            let buffer_snapshot = buffer.read(cx).snapshot();
-                            buffer_snapshot.text()
-                        })
-                        .unwrap_or_default();
-                    Some((
-                        query,
-                        stoat.buffer_finder_filtered().to_vec(),
-                        stoat.buffer_finder_selected(),
-                    ))
-                } else {
-                    None
-                };
+                // Buffer finder data is now extracted from workspace state below
+                let bf_data = None::<(String, Vec<crate::buffer_store::BufferListEntry>, usize)>;
 
-                // Extract git status data if in Git context
-                let gs_data = if key_context == KeyContext::Git {
-                    Some((
-                        stoat.git_status_files().to_vec(),
-                        stoat.git_status_filtered().to_vec(),
-                        stoat.git_status_filter(),
-                        stoat.git_status_files().len(),
-                        stoat.git_status_selected(),
-                        stoat.git_status_preview().cloned(),
-                        stoat.git_status_branch_info().cloned(),
-                    ))
-                } else {
-                    None
-                };
+                // Extract git status data from workspace (not from Stoat)
+                let gs_data = None::<(
+                    Vec<crate::git_status::GitStatusEntry>,
+                    Vec<crate::git_status::GitStatusEntry>,
+                    crate::git_status::GitStatusFilter,
+                    usize,
+                    usize,
+                    Option<crate::git_status::DiffPreviewData>,
+                    Option<crate::git_status::GitBranchInfo>,
+                )>;
 
                 // Extract status bar data
                 let sb_data = (
                     display.clone(),
-                    stoat.git_status_branch_info().cloned(),
-                    stoat.git_status_files().to_vec(),
+                    None::<crate::git_status::GitBranchInfo>, // Will be set from workspace below
+                    Vec::<crate::git_status::GitStatusEntry>::new(), /* Will be set from
+                                                               * workspace below */
                     stoat.current_file_path().map(|p| p.display().to_string()),
                     stoat.diff_review_progress(),
                     stoat.diff_review_file_progress(),
@@ -1581,6 +2355,71 @@ impl Render for PaneGroupView {
             None
         };
 
+        // Extract command palette data from workspace if in CommandPalette context
+        let command_palette_data = if key_context == KeyContext::CommandPalette {
+            let query = self
+                .workspace
+                .command_palette
+                .input
+                .as_ref()
+                .map(|buffer| {
+                    let buffer_snapshot = buffer.read(cx).snapshot();
+                    buffer_snapshot.text()
+                })
+                .unwrap_or_default();
+
+            // Re-filter commands based on current query
+            self.filter_command_palette_commands(&query);
+
+            Some((
+                query,
+                self.workspace.command_palette.filtered.clone(),
+                self.workspace.command_palette.selected,
+            ))
+        } else {
+            None
+        };
+
+        // Extract git status data from workspace if in Git context
+        let git_status_data = if key_context == KeyContext::Git {
+            Some((
+                self.workspace.git_status.files.clone(),
+                self.workspace.git_status.filtered.clone(),
+                self.workspace.git_status.filter,
+                self.workspace.git_status.dirty_count,
+                self.workspace.git_status.selected,
+                self.workspace.git_status.preview.clone(),
+                self.workspace.git_status.branch_info.clone(),
+            ))
+        } else {
+            None
+        };
+
+        // Update status_bar_data with workspace git_status data
+        let status_bar_data = status_bar_data.map(
+            |(
+                mode,
+                _branch,
+                _files,
+                path,
+                review_progress,
+                review_file_progress,
+                hunk_position,
+                comparison_mode,
+            )| {
+                (
+                    mode,
+                    self.workspace.git_status.branch_info.clone(),
+                    self.workspace.git_status.files.clone(),
+                    path,
+                    review_progress,
+                    review_file_progress,
+                    hunk_position,
+                    comparison_mode,
+                )
+            },
+        );
+
         // Update minimap scroll position to match calculated value
         // This must happen after data extraction (to avoid borrow conflicts) but before thumb
         // calculation
@@ -1650,8 +2489,29 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_file_finder_select))
                     .on_action(cx.listener(Self::handle_file_finder_dismiss))
                     .on_action(cx.listener(Self::handle_open_command_palette))
+                    .on_action(cx.listener(Self::handle_command_palette_next))
+                    .on_action(cx.listener(Self::handle_command_palette_prev))
+                    .on_action(cx.listener(Self::handle_command_palette_dismiss))
+                    .on_action(cx.listener(Self::handle_command_palette_toggle_hidden))
+                    .on_action(cx.listener(Self::handle_command_palette_execute))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
+                    .on_action(cx.listener(Self::handle_buffer_finder_next))
+                    .on_action(cx.listener(Self::handle_buffer_finder_prev))
+                    .on_action(cx.listener(Self::handle_buffer_finder_select))
+                    .on_action(cx.listener(Self::handle_buffer_finder_dismiss))
                     .on_action(cx.listener(Self::handle_open_git_status))
+                    .on_action(cx.listener(Self::handle_git_status_next))
+                    .on_action(cx.listener(Self::handle_git_status_prev))
+                    .on_action(cx.listener(Self::handle_git_status_select))
+                    .on_action(cx.listener(Self::handle_git_status_dismiss))
+                    .on_action(cx.listener(Self::handle_git_status_cycle_filter))
+                    .on_action(cx.listener(Self::handle_git_status_set_filter_all))
+                    .on_action(cx.listener(Self::handle_git_status_set_filter_staged))
+                    .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged))
+                    .on_action(
+                        cx.listener(Self::handle_git_status_set_filter_unstaged_with_untracked),
+                    )
+                    .on_action(cx.listener(Self::handle_git_status_set_filter_untracked))
                     .on_action(cx.listener(Self::handle_open_diff_review))
                     .on_action(cx.listener(Self::handle_open_help_overlay))
                     .on_action(cx.listener(Self::handle_open_help_modal))
