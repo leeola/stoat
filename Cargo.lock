@@ -6543,6 +6543,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_display_map"
+version = "0.1.0"
+dependencies = [
+ "sum_tree",
+]
+
+[[package]]
 name = "stoat_rope"
 version = "0.1.0"
 dependencies = [
