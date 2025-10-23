@@ -487,6 +487,66 @@ action = "SelectToLineEnd"
 context = "TextEditor && mode == visual"
 
 [[bindings]]
+key = "cmd-shift-l"
+action = "SplitSelectionIntoLines"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-shift-l"
+action = "SplitSelectionIntoLines"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
+key = "cmd-d"
+action = "SelectNext"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-d"
+action = "SelectNext"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
+key = "cmd-shift-d"
+action = "SelectPrevious"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-shift-d"
+action = "SelectPrevious"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
+key = "cmd-ctrl-g"
+action = "SelectAllMatches"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-ctrl-g"
+action = "SelectAllMatches"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
+key = "cmd-alt-up"
+action = "AddSelectionAbove"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-alt-up"
+action = "AddSelectionAbove"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
+key = "cmd-alt-down"
+action = "AddSelectionBelow"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "cmd-alt-down"
+action = "AddSelectionBelow"
+context = "TextEditor && mode == visual"
+
+[[bindings]]
 key = "y"
 action = "Copy"
 context = "TextEditor && mode == visual"

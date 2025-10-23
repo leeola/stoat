@@ -266,6 +266,18 @@ actions!(
         SelectToLineStart,
         /// Extend selection to end of line
         SelectToLineEnd,
+        /// Split multi-line selection into one cursor per line
+        SplitSelectionIntoLines,
+        /// Select next occurrence of current selection
+        SelectNext,
+        /// Select previous occurrence of current selection
+        SelectPrevious,
+        /// Select all occurrences of current selection
+        SelectAllMatches,
+        /// Add cursor on line above with same column
+        AddSelectionAbove,
+        /// Add cursor on line below with same column
+        AddSelectionBelow,
     ]
 );
 
@@ -635,6 +647,36 @@ action_metadata!(
     SelectToLineEnd,
     "select to line end",
     "Extend selection to the end of the line"
+);
+action_metadata!(
+    SplitSelectionIntoLines,
+    "split selection into lines",
+    "Split multi-line selection into one cursor per line"
+);
+action_metadata!(
+    SelectNext,
+    "select next occurrence",
+    "Add selection at next occurrence of current selection"
+);
+action_metadata!(
+    SelectPrevious,
+    "select previous occurrence",
+    "Add selection at previous occurrence of current selection"
+);
+action_metadata!(
+    SelectAllMatches,
+    "select all occurrences",
+    "Select all occurrences of current selection"
+);
+action_metadata!(
+    AddSelectionAbove,
+    "add selection above",
+    "Add cursor on line above at same column position"
+);
+action_metadata!(
+    AddSelectionBelow,
+    "add selection below",
+    "Add cursor on line below at same column position"
 );
 
 // File finder actions
@@ -1103,6 +1145,27 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<SelectToLineEnd>(),
         SelectToLineEnd::action_name(),
     );
+    names.insert(
+        TypeId::of::<SplitSelectionIntoLines>(),
+        SplitSelectionIntoLines::action_name(),
+    );
+    names.insert(TypeId::of::<SelectNext>(), SelectNext::action_name());
+    names.insert(
+        TypeId::of::<SelectPrevious>(),
+        SelectPrevious::action_name(),
+    );
+    names.insert(
+        TypeId::of::<SelectAllMatches>(),
+        SelectAllMatches::action_name(),
+    );
+    names.insert(
+        TypeId::of::<AddSelectionAbove>(),
+        AddSelectionAbove::action_name(),
+    );
+    names.insert(
+        TypeId::of::<AddSelectionBelow>(),
+        AddSelectionBelow::action_name(),
+    );
 
     // File finder actions
     names.insert(
@@ -1416,6 +1479,27 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(
         TypeId::of::<SelectToLineEnd>(),
         SelectToLineEnd::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<SplitSelectionIntoLines>(),
+        SplitSelectionIntoLines::description(),
+    );
+    descriptions.insert(TypeId::of::<SelectNext>(), SelectNext::description());
+    descriptions.insert(
+        TypeId::of::<SelectPrevious>(),
+        SelectPrevious::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<SelectAllMatches>(),
+        SelectAllMatches::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<AddSelectionAbove>(),
+        AddSelectionAbove::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<AddSelectionBelow>(),
+        AddSelectionBelow::description(),
     );
 
     // File finder actions
@@ -1734,6 +1818,24 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<SelectToLineEnd>(),
         SelectToLineEnd::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SplitSelectionIntoLines>(),
+        SplitSelectionIntoLines::help_text(),
+    );
+    help.insert(TypeId::of::<SelectNext>(), SelectNext::help_text());
+    help.insert(TypeId::of::<SelectPrevious>(), SelectPrevious::help_text());
+    help.insert(
+        TypeId::of::<SelectAllMatches>(),
+        SelectAllMatches::help_text(),
+    );
+    help.insert(
+        TypeId::of::<AddSelectionAbove>(),
+        AddSelectionAbove::help_text(),
+    );
+    help.insert(
+        TypeId::of::<AddSelectionBelow>(),
+        AddSelectionBelow::help_text(),
     );
 
     // File finder actions

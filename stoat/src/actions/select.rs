@@ -8,6 +8,7 @@
 //! - Token-based selection: [`next_symbol`], [`prev_symbol`], [`next_token`], [`prev_token`]
 //! - Directional selection: [`left`], [`right`], [`up`], [`down`]
 //! - Line-boundary selection: [`to_line_start`], [`to_line_end`]
+//! - Multi-cursor operations: [`split_into_lines`]
 //!
 //! # Selection Model
 //!
@@ -25,13 +26,19 @@
 //! - [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) for token-based selection
 //! - Visual mode for interactive selection extension
 
+mod above;
+mod all_matches;
+mod below;
 mod down;
 mod left;
+mod next;
 mod next_symbol;
 mod next_token;
 mod prev_symbol;
 mod prev_token;
+mod previous;
 mod right;
+mod split_into_lines;
 mod to_line_end;
 mod to_line_start;
 mod up;

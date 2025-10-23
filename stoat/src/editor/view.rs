@@ -1,6 +1,10 @@
 use crate::{
     actions::*,
-    editor::{element::EditorElement, style::EditorStyle},
+    editor::{
+        element::EditorElement,
+        state::{AddSelectionsState, SelectNextState},
+        style::EditorStyle,
+    },
     scroll,
     stoat::{KeyContext, Stoat},
 };
@@ -17,6 +21,15 @@ pub struct EditorView {
     this: Option<Entity<Self>>,
     /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
     pub(crate) editor_style: Arc<EditorStyle>,
+
+    /// State for AddSelectionAbove/Below columnar selection tracking
+    add_selections_state: Option<AddSelectionsState>,
+
+    /// State for SelectNext/SelectAllMatches occurrence selection
+    select_next_state: Option<SelectNextState>,
+
+    /// State for SelectPrevious occurrence selection
+    select_prev_state: Option<SelectNextState>,
 }
 
 impl EditorView {
@@ -32,6 +45,9 @@ impl EditorView {
             focus_handle,
             this: None,
             editor_style,
+            add_selections_state: None,
+            select_next_state: None,
+            select_prev_state: None,
         }
     }
 
@@ -225,6 +241,78 @@ impl EditorView {
     ) {
         self.stoat.update(cx, |stoat, cx| {
             stoat.select_to_line_end(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_split_selection_into_lines(
+        &mut self,
+        _: &SplitSelectionIntoLines,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.split_selection_into_lines(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_next(
+        &mut self,
+        _: &SelectNext,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_next(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_previous(
+        &mut self,
+        _: &SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_previous(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_select_all_matches(
+        &mut self,
+        _: &SelectAllMatches,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.select_all_matches(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_add_selection_above(
+        &mut self,
+        _: &AddSelectionAbove,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.add_selection_above(cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_add_selection_below(
+        &mut self,
+        _: &AddSelectionBelow,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.stoat.update(cx, |stoat, cx| {
+            stoat.add_selection_below(cx);
         });
         cx.notify();
     }
@@ -703,6 +791,12 @@ impl Render for EditorView {
             .on_action(cx.listener(Self::handle_select_down))
             .on_action(cx.listener(Self::handle_select_to_line_start))
             .on_action(cx.listener(Self::handle_select_to_line_end))
+            .on_action(cx.listener(Self::handle_split_selection_into_lines))
+            .on_action(cx.listener(Self::handle_select_next))
+            .on_action(cx.listener(Self::handle_select_previous))
+            .on_action(cx.listener(Self::handle_select_all_matches))
+            .on_action(cx.listener(Self::handle_add_selection_above))
+            .on_action(cx.listener(Self::handle_add_selection_below))
             .on_action(cx.listener(Self::handle_new_line))
             .on_action(cx.listener(Self::handle_delete_line))
             .on_action(cx.listener(Self::handle_delete_to_end_of_line))

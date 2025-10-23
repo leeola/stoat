@@ -293,6 +293,21 @@ pub struct Stoat {
     /// Following Zed's pattern, the minimap is just another Stoat instance with
     /// tiny font and this parent reference to synchronize scroll and handle interactions.
     pub(crate) parent_stoat: Option<WeakEntity<Stoat>>,
+
+    /// State for SelectNext/SelectAllMatches occurrence selection.
+    ///
+    /// Tracks the search query and iteration state for occurrence-based multi-cursor
+    /// selection. Created on first invocation of [`select_next`](Self::select_next) and
+    /// reused for subsequent invocations with the same query.
+    pub(crate) select_next_state: Option<crate::editor::state::SelectNextState>,
+
+    /// State for SelectPrevious occurrence selection.
+    ///
+    /// Tracks the search query and iteration state for backward occurrence-based
+    /// multi-cursor selection. Created on first invocation of
+    /// [`select_previous`](Self::select_previous) and reused for subsequent
+    /// invocations with the same query.
+    pub(crate) select_prev_state: Option<crate::editor::state::SelectNextState>,
 }
 
 impl EventEmitter<StoatEvent> for Stoat {}
@@ -373,6 +388,8 @@ impl Stoat {
             current_file_path: None,
             worktree,
             parent_stoat: None,
+            select_next_state: None,
+            select_prev_state: None,
         }
     }
 
@@ -426,6 +443,8 @@ impl Stoat {
             current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: None,
+            select_next_state: None,
+            select_prev_state: None,
         }
     }
 
@@ -1280,6 +1299,8 @@ impl Stoat {
             current_file_path: None,
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),
+            select_next_state: None,
+            select_prev_state: None,
         })
     }
 
