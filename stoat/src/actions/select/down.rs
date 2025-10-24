@@ -7,16 +7,21 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Extend all selections down by one line.
+    /// Extend all selections down by one display line.
     ///
-    /// Each selection extends independently by moving its head down while preserving goal column
-    /// and keeping the tail (anchor) fixed.
+    /// Each selection extends independently by moving its head down one display line while
+    /// preserving goal column and keeping the tail (anchor) fixed. With DisplayMap, this
+    /// correctly handles soft-wrapped lines and folded regions.
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_down(&mut self, cx: &mut Context<Self>) {
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
+
+        // Get DisplaySnapshot for display-space operations
+        let display_snapshot = self.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx));
+        let max_display_point = display_snapshot.max_point();
 
         // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
@@ -41,22 +46,29 @@ impl Stoat {
 
         // Operate on all selections
         let mut selections = self.selections.all::<Point>(&snapshot);
-        let max_row = snapshot.max_point().row;
 
         for selection in &mut selections {
             let head = selection.head();
-            if head.row < max_row {
-                let target_row = head.row + 1;
-                let line_len = snapshot.line_len(target_row);
 
+            // Convert to display coordinates
+            let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
+
+            // Move down in display space
+            if display_point.row < max_display_point.row {
                 // Determine goal column from selection's goal or current column
                 let goal_column = match selection.goal {
                     text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
-                    _ => head.column,
+                    _ => display_point.column,
                 };
 
-                let target_column = goal_column.min(line_len);
-                let new_head = Point::new(target_row, target_column);
+                let target_display_point = stoat_display_map::DisplayPoint {
+                    row: display_point.row + 1,
+                    column: goal_column,
+                };
+
+                // Convert back to buffer coordinates
+                let new_head = display_snapshot
+                    .display_point_to_point(target_display_point, sum_tree::Bias::Left);
 
                 // Extend selection by moving head, keeping tail fixed
                 selection.set_head(

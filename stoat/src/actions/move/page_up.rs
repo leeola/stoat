@@ -9,8 +9,9 @@ use text::Point;
 impl Stoat {
     /// Move all cursors up by one page.
     ///
-    /// Each cursor moves independently up by approximately one viewport height,
-    /// while preserving its goal column.
+    /// Each cursor moves independently up by approximately one viewport height in display space,
+    /// while preserving its goal column. With DisplayMap, this correctly handles soft-wrapped
+    /// lines and folded regions.
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn page_up(&mut self, cx: &mut Context<Self>) {
@@ -20,10 +21,12 @@ impl Stoat {
             return;
         }
 
-        let buffer_snapshot = {
-            let buffer_item = self.active_buffer(cx).read(cx);
-            buffer_item.buffer().read(cx).snapshot()
-        };
+        let buffer_item = self.active_buffer(cx);
+        let buffer = buffer_item.read(cx).buffer();
+        let buffer_snapshot = buffer.read(cx).snapshot();
+
+        // Get DisplaySnapshot for display-space operations
+        let display_snapshot = self.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx));
 
         // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
@@ -55,17 +58,27 @@ impl Stoat {
             }
 
             let head = selection.head();
-            let new_row = head.row.saturating_sub(lines_per_page);
-            let line_len = buffer_snapshot.line_len(new_row);
+
+            // Convert to display coordinates
+            let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
+
+            // Move up in display space
+            let new_display_row = display_point.row.saturating_sub(lines_per_page);
 
             // Determine goal column from selection's goal or current column
             let goal_column = match selection.goal {
                 text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
-                _ => head.column,
+                _ => display_point.column,
             };
 
-            let new_column = goal_column.min(line_len);
-            let new_pos = Point::new(new_row, new_column);
+            let target_display_point = stoat_display_map::DisplayPoint {
+                row: new_display_row,
+                column: goal_column,
+            };
+
+            // Convert back to buffer coordinates
+            let new_pos =
+                display_snapshot.display_point_to_point(target_display_point, sum_tree::Bias::Left);
 
             // Collapse selection to new cursor position, preserving goal
             selection.start = new_pos;

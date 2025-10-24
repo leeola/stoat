@@ -1,40 +1,40 @@
 //! AddSelectionBelow action implementation.
 //!
-//! Adds a cursor on the line below at the same column position, enabling
-//! columnar multi-cursor editing. Simplified version that works with Point
-//! coordinates instead of Zed's DisplayMap approach.
+//! Adds a cursor on the display line below at the same column position, enabling
+//! columnar multi-cursor editing. Uses DisplayMap for correct handling of
+//! soft-wrapped lines, folded regions, and inlay hints.
 
 use crate::stoat::Stoat;
 use gpui::Context;
 use text::{Point, Selection, SelectionGoal};
 
 impl Stoat {
-    /// Add a cursor on the line below at the same column position.
+    /// Add a cursor on the display line below at the same column position.
     ///
-    /// Creates a new cursor one line below the newest selection, preserving
-    /// the column position. Enables columnar editing by repeatedly invoking
-    /// this action to build up vertical cursor stacks.
+    /// Creates a new cursor one display line below the newest selection, preserving
+    /// the column position in display space. Enables columnar editing by repeatedly
+    /// invoking this action to build up vertical cursor stacks.
     ///
     /// # Algorithm
     ///
     /// 1. Get the newest selection (most recently added)
-    /// 2. If already at last line, no-op
-    /// 3. Create cursor at same column on next line
-    /// 4. Clamp column to line length if necessary
-    /// 5. Add new selection to collection
+    /// 2. Convert to display coordinates
+    /// 3. If already at last display line, no-op
+    /// 4. Create cursor at same display column on next display line
+    /// 5. Convert back to buffer coordinates
+    /// 6. Add new selection to collection
     ///
-    /// # Simplified Architecture
+    /// # DisplayMap Integration
     ///
-    /// Unlike Zed's DisplayMap-based implementation, this uses simple Point
-    /// coordinates and works for unwrapped text. Does not handle:
-    /// - Display wrapping (soft wraps)
-    /// - Folded regions
-    /// - Inlay hints
+    /// Unlike the previous simplified implementation, this correctly handles:
+    /// - Display wrapping (soft wraps) - moves within wrapped lines
+    /// - Folded regions - skips over folded code blocks
+    /// - Inlay hints - maintains visual column position
     ///
     /// # Edge Cases
     ///
-    /// - Last line: No-op (can't go below)
-    /// - Column beyond line length: Clamped to line end
+    /// - Last display line: No-op (can't go below)
+    /// - Column beyond line length: Clamped by DisplayMap conversion
     /// - Empty buffer: No-op
     ///
     /// # Related
@@ -46,24 +46,31 @@ impl Stoat {
         let buffer = buffer_item.read(cx).buffer().read(cx).snapshot();
         let snapshot = buffer;
 
+        // Get DisplaySnapshot for display-space operations
+        let display_snapshot = self.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx));
+        let max_display_point = display_snapshot.max_point();
+
         // Get newest selection as Point
         let newest: Selection<Point> = self.selections.newest(&snapshot);
 
-        // Check if on last line
-        let max_row = snapshot.max_point().row;
-        if newest.end.row >= max_row {
+        // Convert to display coordinates
+        let display_point =
+            display_snapshot.point_to_display_point(newest.end, sum_tree::Bias::Left);
+
+        // Check if on last display line
+        if display_point.row >= max_display_point.row {
             return;
         }
 
-        // Calculate position one line below
-        let target_row = newest.end.row + 1;
-        let target_column = newest.end.column;
+        // Move down one display row, preserving column
+        let target_display_point = stoat_display_map::DisplayPoint {
+            row: display_point.row + 1,
+            column: display_point.column,
+        };
 
-        // Clamp to line length
-        let line_len = snapshot.line_len(target_row);
-        let clamped_column = target_column.min(line_len);
-
-        let new_point = Point::new(target_row, clamped_column);
+        // Convert back to buffer coordinates
+        let new_point =
+            display_snapshot.display_point_to_point(target_display_point, sum_tree::Bias::Left);
 
         // Create new cursor
         let new_selection = Selection {
