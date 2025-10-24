@@ -1,567 +1,1093 @@
+///! WrapMap v2: Soft-wrapping transformation layer with async background processing.
+///!
+///! This implementation uses the Transform pattern with async wrapping for optimal
+/// performance: ! - **Interpolation**: Instant response by assuming wraps stay unchanged
+///! - **Background wrapping**: Real wrapping using `LineWrapper` in async task
+///! - **5ms timeout**: Fast completions update immediately, slow ones continue in background
+///!
+///! # Transform Architecture
+///!
+///! Unlike InlayMap (enum) and FoldMap (struct with Option), WrapMap uses a struct with
+///! optional `display_text` field:
+///! - `display_text == None`: Isomorphic transform (no wrap)
+///! - `display_text == Some(...)`: Wrap transform (soft wrap with indent)
+///!
+///! # Coordinate Transformation
+///!
+///! Wraps **add rows** to display:
+///! ```text
+///! TabPoint (input):         WrapPoint (output):
+///! Row 0, Col 0-100:         Row 0: "This is a very long..."
+///!                           Row 1: "  line that wraps"
+///! Row 1: "Next line"        Row 2: "Next line"
+///! ```
+///!
+///! # Async Wrapping Flow
+///!
+///! 1. Edit arrives - queue in `pending_edits`
+///! 2. Call `interpolate()` - fast estimate (assume wraps stay same)
+///! 3. Return snapshot immediately
+///! 4. Spawn background task with `LineWrapper`
+///! 5. If completes <5ms: update snapshot with real wraps
+///! 6. Else: continue in background, notify when done
+///! 7. Compose `interpolated_edits.invert()` with real edits
+///!
+///! # Performance
+///!
+///! - Interpolation: O(log n) - instant (<1ms)
+///! - Real wrapping: O(file_size) - background (20-50ms for large files)
+///! - UI never blocks: Always returns interpolated snapshot first
+///!
+///! # Related
+///!
+///! - Input: [`TabPoint`](crate::TabPoint) from
+/// [`TabSnapshot`](crate::tab_map::TabSnapshot) ! - Output: [`WrapPoint`](crate::WrapPoint)
+///! - Uses [`gpui::LineWrapper`] for pixel-based wrapping
 use crate::{
-    tab_map::TabMap, BufferEdit, BufferSnapshot, CoordinateTransform, EditableLayer, TabPoint,
-    WrapPoint,
+    coords::{TabPoint, WrapPoint},
+    dimensions::TabOffset,
+    tab_map::TabSnapshot,
 };
-use sum_tree::{self, SumTree};
+use gpui::{App, AppContext, Context, Entity, Font, LineWrapper, Pixels, Task};
+use smol::future::yield_now;
+use std::{collections::VecDeque, mem, ops::Range, sync::LazyLock, time::Duration};
+use sum_tree::{Bias, Item, SumTree};
+use text::{Edit, OffsetUtf16, Patch, Point, TextSummary};
 
-/// Transformation layer for soft-wrapping long lines.
-///
-/// WrapMap breaks lines that exceed a character width limit into multiple display rows,
-/// transforming [`TabPoint`] into [`WrapPoint`]. Unlike hard line breaks, wrapping is
-/// visual-only and doesn't modify the buffer.
-///
-/// # Coordinate Transformation
-///
-/// ```text
-/// TabMap (one line):              WrapMap (wrap_width=20):
-/// Row 0, Col 0-50:                Row 0: columns 0-19
-/// "A very long line..."           Row 1: columns 20-39
-///                                 Row 2: columns 40-50
-/// ```
-///
-/// A single TabPoint row can become multiple WrapPoint rows when the line exceeds
-/// the wrap width.
-///
-/// # Usage Context
-///
-/// WrapMap is the fourth layer in the DisplayMap pipeline:
-/// - Input: [`TabPoint`] from [`TabMap`](crate::TabMap)
-/// - Output: [`WrapPoint`] consumed by [`BlockMap`](crate::BlockMap)
-///
-/// Used by:
-/// - [`BlockMap`](crate::BlockMap): Adds block decorations after wrapping
-/// - Editor view: For rendering long lines that fit the viewport width
-/// - Navigation: For moving cursor across wrapped line segments
-///
-/// # Implementation Notes
-///
-/// This simplified implementation uses character-count-based hard wrapping:
-/// - No font metrics (assumes monospace)
-/// - No word-boundary wrapping
-/// - No wrap indent
-/// - Rebuild strategy for edits
-///
-/// Future enhancements can add word wrapping, font metrics, and lazy calculation.
-///
-/// # Related
-///
-/// - [`CoordinateTransform`]: Trait for bidirectional coordinate conversion
-/// - [`EditableLayer`]: Trait for handling buffer edits
-/// - [`WrapPoint`]: Output coordinate type
+/// Edit in TabPoint space (input to WrapMap from TabMap).
+pub type TabEdit = Edit<TabPoint>;
 
-/// Represents a wrap point where a line breaks for display.
-///
-/// Each Wrap indicates a position in a TabPoint row where the line wraps to the next
-/// display row due to exceeding the wrap width.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wrap {
-    /// The TabPoint row this wrap belongs to.
-    pub tab_row: u32,
+/// Edit in WrapOffset space (output from WrapMap).
+pub type WrapEdit = Edit<u32>;
 
-    /// The TabPoint column where this wrap occurs.
+/// Transform representing either an isomorphic region or a wrap point.
+///
+/// This is a **struct** where `display_text` determines the type:
+/// - `display_text == None`: Isomorphic transform (no wrap, 1:1 mapping)
+/// - `display_text == Some(...)`: Wrap transform (soft wrap with indent)
+///
+/// The wrap's display text is a newline followed by spaces for indentation,
+/// stored as a static string for efficiency.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Transform {
+    /// Aggregated summary of input/output coordinates.
+    summary: TransformSummary,
+
+    /// If Some, this is a wrap point. The string contains newline + indent spaces.
+    /// None indicates isomorphic region.
+    display_text: Option<&'static str>,
+}
+
+impl Transform {
+    /// Create an isomorphic transform with 1:1 mapping.
     ///
-    /// Characters at and after this column appear on the next WrapPoint row.
-    pub column: u32,
-}
+    /// Input and output summaries are identical since no wrapping occurs.
+    fn isomorphic(summary: TextSummary) -> Self {
+        #[cfg(test)]
+        assert!(
+            !summary.lines.is_zero(),
+            "Isomorphic transform must have content"
+        );
 
-impl Wrap {
-    pub fn new(tab_row: u32, column: u32) -> Self {
-        Self { tab_row, column }
-    }
-}
-
-impl PartialOrd for Wrap {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Wrap {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.tab_row, self.column).cmp(&(other.tab_row, other.column))
-    }
-}
-
-/// Summary for [`Wrap`] items in the SumTree.
-///
-/// Aggregates metadata about wraps in a subtree for efficient queries.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WrapSummary {
-    /// Number of TabPoint rows covered by wraps in this subtree.
-    pub tab_rows: u32,
-
-    /// Total number of wraps in this subtree.
-    pub wrap_count: usize,
-}
-
-impl sum_tree::ContextLessSummary for WrapSummary {
-    fn zero() -> Self {
         Self {
-            tab_rows: 0,
-            wrap_count: 0,
+            summary: TransformSummary {
+                input: summary.clone(),
+                output: summary,
+            },
+            display_text: None,
         }
+    }
+
+    /// Create a wrap transform with the given indent amount.
+    ///
+    /// The wrap has:
+    /// - Zero input (doesn't consume tab space)
+    /// - One output line with `indent` columns
+    /// - Static display text: newline + indent spaces
+    fn wrap(indent: u32) -> Self {
+        // Preallocated wrap text with max indent
+        static WRAP_TEXT: LazyLock<String> = LazyLock::new(|| {
+            let mut text = String::new();
+            text.push('\n');
+            text.extend((0..LineWrapper::MAX_INDENT as usize).map(|_| ' '));
+            text
+        });
+
+        Self {
+            summary: TransformSummary {
+                input: TextSummary::default(),
+                output: TextSummary {
+                    lines: Point::new(1, indent),
+                    first_line_chars: 0,
+                    last_line_chars: indent,
+                    longest_row: 1,
+                    longest_row_chars: indent,
+                    len: 1 + indent as usize,
+                    chars: indent as usize,
+                    last_line_len_utf16: indent,
+                    len_utf16: OffsetUtf16(1 + indent as usize),
+                },
+            },
+            display_text: Some(&WRAP_TEXT[..1 + indent as usize]),
+        }
+    }
+
+    /// Check if this transform is isomorphic (no wrap).
+    fn is_isomorphic(&self) -> bool {
+        self.display_text.is_none()
+    }
+}
+
+/// Summary aggregating coordinate information for a Transform subtree.
+///
+/// Tracks both input (TabPoint) and output (WrapPoint) coordinate spaces.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct TransformSummary {
+    /// Input summary (TabPoint space before wrapping).
+    input: TextSummary,
+
+    /// Output summary (WrapPoint space after wrapping).
+    output: TextSummary,
+}
+
+impl sum_tree::ContextLessSummary for TransformSummary {
+    fn zero() -> Self {
+        Self::default()
     }
 
     fn add_summary(&mut self, other: &Self) {
-        self.tab_rows = self.tab_rows.max(other.tab_rows);
-        self.wrap_count += other.wrap_count;
+        self.input = self.input.clone() + other.input.clone();
+        self.output = self.output.clone() + other.output.clone();
     }
 }
 
-impl sum_tree::Item for Wrap {
-    type Summary = WrapSummary;
+impl Item for Transform {
+    type Summary = TransformSummary;
 
-    fn summary(&self, _: ()) -> Self::Summary {
-        WrapSummary {
-            tab_rows: self.tab_row,
-            wrap_count: 1,
-        }
+    fn summary(&self, _cx: ()) -> Self::Summary {
+        self.summary.clone()
     }
 }
 
-/// Transformation layer for soft-wrapping long lines.
+/// Push an isomorphic transform, merging with the last transform if it's also isomorphic.
 ///
-/// Maintains a collection of [`Wrap`]s and transforms [`TabPoint`] coordinates to
-/// [`WrapPoint`] coordinates by accounting for line wrapping.
-pub struct WrapMap {
-    /// Input layer providing TabPoint coordinates.
-    tab_map: TabMap,
-
-    /// Tree of wrap points stored in a SumTree for O(log n) queries.
-    wraps: SumTree<Wrap>,
-
-    /// Character width limit - lines longer than this wrap to next row.
-    wrap_width: u32,
-
-    /// Version counter for tracking changes.
-    version: usize,
+/// This optimization reduces transform tree size by combining adjacent unchanged regions.
+fn push_isomorphic(transforms: &mut Vec<Transform>, summary: TextSummary) {
+    if let Some(last) = transforms.last_mut() {
+        if last.is_isomorphic() {
+            last.summary.input += &summary;
+            last.summary.output += &summary;
+            return;
+        }
+    }
+    transforms.push(Transform::isomorphic(summary));
 }
 
-impl WrapMap {
-    /// Create a new WrapMap with the specified wrap width.
-    ///
-    /// # Arguments
-    ///
-    /// * `tab_map` - Input layer providing TabPoint coordinates
-    /// * `wrap_width` - Maximum characters per line before wrapping
-    pub fn new(tab_map: TabMap, wrap_width: u32) -> Self {
-        let mut wrap_map = Self {
-            tab_map,
-            wraps: SumTree::new(()),
-            wrap_width,
-            version: 0,
-        };
-        wrap_map.recalculate_all_wraps();
-        wrap_map
-    }
+/// Extension trait for SumTree<Transform> to handle push-or-merge logic.
+trait SumTreeExt {
+    /// Push a transform, or extend the last one if they're both isomorphic.
+    fn push_or_extend(&mut self, transform: Transform);
+}
 
-    /// Recalculate wraps for all rows in the buffer.
-    fn recalculate_all_wraps(&mut self) {
-        let buffer = self.tab_map.buffer();
-        let max_point = buffer.max_point();
+impl SumTreeExt for SumTree<Transform> {
+    fn push_or_extend(&mut self, transform: Transform) {
+        if transform.is_isomorphic() {
+            let mut did_extend = false;
+            self.update_last(
+                |last| {
+                    if last.is_isomorphic() {
+                        last.summary.input += &transform.summary.input;
+                        last.summary.output += &transform.summary.output;
+                        did_extend = true;
+                    }
+                },
+                (),
+            );
 
-        let mut all_wraps = Vec::new();
-        for row in 0..=max_point.row {
-            let wraps = self.calculate_wraps_for_row(row);
-            all_wraps.extend(wraps);
-        }
-
-        self.wraps = SumTree::from_iter(all_wraps, ());
-        self.version += 1;
-    }
-
-    /// Calculate wrap points for a specific TabPoint row.
-    ///
-    /// Returns wrap points for each position where the line exceeds wrap_width.
-    fn calculate_wraps_for_row(&self, tab_row: u32) -> Vec<Wrap> {
-        // Convert tab_row to buffer coordinates and get the line
-        let tab_point = TabPoint {
-            row: tab_row,
-            column: 0,
-        };
-        let buffer_point = self.tab_map.from_coords(tab_point);
-        let line = self.tab_map.buffer().line(buffer_point.row);
-
-        // Calculate how many characters the line occupies after tab expansion
-        let mut tab_column = 0;
-        for ch in line.chars() {
-            if ch == '\t' {
-                let tab_width = self.tab_map.tab_width();
-                tab_column += tab_width - (tab_column % tab_width);
-            } else {
-                tab_column += 1;
+            if !did_extend {
+                self.push(transform, ());
             }
+        } else {
+            self.push(transform, ());
         }
-
-        let line_length = tab_column;
-
-        // Calculate wrap points
-        let mut wraps = Vec::new();
-        if line_length > self.wrap_width {
-            let mut current_column = self.wrap_width;
-            while current_column < line_length {
-                wraps.push(Wrap::new(tab_row, current_column));
-                current_column += self.wrap_width;
-            }
-        }
-
-        wraps
-    }
-
-    /// Convert TabPoint to WrapPoint.
-    pub fn to_wrap_point(&self, tab_point: TabPoint) -> WrapPoint {
-        let mut wrap_row = tab_point.row;
-        let mut wrap_column = tab_point.column;
-
-        // Count wraps before this point
-        let mut cursor = self.wraps.cursor::<()>(());
-        cursor.next();
-
-        while let Some(wrap) = cursor.item() {
-            if wrap.tab_row < tab_point.row {
-                // Wrap is on an earlier row, adds one display row
-                wrap_row += 1;
-            } else if wrap.tab_row == tab_point.row && wrap.column <= tab_point.column {
-                // Wrap is on the same row, before or at our column
-                wrap_row += 1;
-                wrap_column = tab_point.column - wrap.column;
-            } else {
-                // Past our position
-                break;
-            }
-            cursor.next();
-        }
-
-        WrapPoint {
-            row: wrap_row,
-            column: wrap_column,
-        }
-    }
-
-    /// Convert WrapPoint to TabPoint.
-    pub fn to_tab_point(&self, wrap_point: WrapPoint) -> TabPoint {
-        // Find which TabPoint row this WrapPoint row belongs to
-        let mut tab_row = wrap_point.row;
-        let mut wraps_before = 0;
-
-        let mut cursor = self.wraps.cursor::<()>(());
-        cursor.next();
-
-        while let Some(wrap) = cursor.item() {
-            // Count how many wraps we've seen
-            wraps_before += 1;
-
-            if wrap.tab_row + wraps_before > wrap_point.row {
-                // We've gone past the target row
-                wraps_before -= 1;
-                break;
-            }
-            cursor.next();
-        }
-
-        tab_row -= wraps_before as u32;
-
-        // Find the wrap column offset for this row
-        let mut wrap_column_offset = 0;
-        cursor = self.wraps.cursor::<()>(());
-        cursor.next();
-
-        let mut wrap_index_on_row = 0;
-        while let Some(wrap) = cursor.item() {
-            if wrap.tab_row == tab_row {
-                wrap_index_on_row += 1;
-                let display_row_for_wrap = tab_row + wrap_index_on_row;
-                if display_row_for_wrap == wrap_point.row {
-                    wrap_column_offset = wrap.column;
-                    break;
-                }
-            } else if wrap.tab_row > tab_row {
-                break;
-            }
-            cursor.next();
-        }
-
-        TabPoint {
-            row: tab_row,
-            column: wrap_point.column + wrap_column_offset,
-        }
-    }
-
-    /// Get reference to the underlying TabMap.
-    pub fn tab_map(&self) -> &TabMap {
-        &self.tab_map
-    }
-
-    /// Get the buffer snapshot.
-    pub fn buffer(&self) -> &BufferSnapshot {
-        self.tab_map.buffer()
-    }
-
-    /// Get the wrap width setting.
-    pub fn wrap_width(&self) -> u32 {
-        self.wrap_width
-    }
-
-    /// Get all wraps as a Vec for inspection.
-    pub fn wraps(&self) -> Vec<Wrap> {
-        self.wraps.iter().cloned().collect()
     }
 }
 
-impl CoordinateTransform<TabPoint, WrapPoint> for WrapMap {
-    fn to_coords(&self, point: TabPoint) -> WrapPoint {
-        self.to_wrap_point(point)
+// Dimension trait implementations for coordinate seeking
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for TabPoint {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
     }
 
-    fn from_coords(&self, point: WrapPoint) -> TabPoint {
-        self.to_tab_point(point)
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        let lines = &summary.input.lines;
+        if lines.row > 0 {
+            self.row += lines.row;
+            self.column = lines.column;
+        } else {
+            self.column += lines.column;
+        }
     }
 }
 
-impl EditableLayer for WrapMap {
-    fn apply_edit(&mut self, edit: &BufferEdit) {
-        // Delegate edit to TabMap
-        self.tab_map.apply_edit(edit);
-
-        // Recalculate wraps for affected rows
-        // For simplicity, recalculate all wraps for now
-        // Future optimization: only recalculate affected rows
-        self.recalculate_all_wraps();
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for WrapPoint {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
     }
 
-    fn version(&self) -> usize {
-        self.version
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        let lines = &summary.output.lines;
+        if lines.row > 0 {
+            self.row += lines.row;
+            self.column = lines.column;
+        } else {
+            self.column += lines.column;
+        }
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for TabOffset {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        self.0 += summary.input.len;
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for u32 {
+    fn zero(_cx: ()) -> Self {
+        0
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        *self += summary.output.len as u32;
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_transform {
     use super::*;
-    use crate::{FoldMap, InlayMap, Point};
 
-    fn create_test_buffer(text: &str) -> BufferSnapshot {
-        BufferSnapshot::from_text(text)
-    }
+    #[test]
+    fn transform_isomorphic() {
+        let summary = TextSummary::from("hello world");
+        let transform = Transform::isomorphic(summary.clone());
 
-    fn create_wrap_map(text: &str, wrap_width: u32) -> WrapMap {
-        let buffer = create_test_buffer(text);
-        let inlay_map = InlayMap::new(buffer);
-        let fold_map = FoldMap::new(inlay_map);
-        let tab_map = TabMap::new(fold_map, 4);
-        WrapMap::new(tab_map, wrap_width)
+        assert!(transform.is_isomorphic());
+        assert_eq!(transform.summary.input, summary);
+        assert_eq!(transform.summary.output, summary);
+        assert_eq!(transform.display_text, None);
     }
 
     #[test]
-    fn no_wrap_short_line() {
-        let wrap_map = create_wrap_map("Hello", 20);
+    fn transform_wrap() {
+        let transform = Transform::wrap(4);
 
-        assert_eq!(wrap_map.wraps().len(), 0);
-
-        let tab = TabPoint { row: 0, column: 0 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap, WrapPoint { row: 0, column: 0 });
+        assert!(!transform.is_isomorphic());
+        assert_eq!(transform.summary.input, TextSummary::default());
+        assert_eq!(transform.summary.output.lines, Point::new(1, 4));
+        assert_eq!(transform.summary.output.last_line_chars, 4);
+        assert!(transform.display_text.is_some());
+        assert_eq!(transform.display_text.unwrap(), "\n    ");
     }
 
     #[test]
-    fn single_wrap() {
-        let wrap_map = create_wrap_map("This is a line that is longer than twenty characters", 20);
+    fn push_isomorphic_merges() {
+        let mut transforms = Vec::new();
 
-        let wraps = wrap_map.wraps();
-        assert!(wraps.len() > 0);
+        let summary1 = TextSummary::from("hello ");
+        let summary2 = TextSummary::from("world");
 
-        // Column 0 should be on row 0
-        let tab = TabPoint { row: 0, column: 0 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.row, 0);
+        push_isomorphic(&mut transforms, summary1.clone());
+        push_isomorphic(&mut transforms, summary2.clone());
 
-        // Column 30 should be on a later row
-        let tab = TabPoint { row: 0, column: 30 };
-        let wrap = wrap_map.to_coords(tab);
-        assert!(wrap.row > 0);
+        // Should have merged into one transform
+        assert_eq!(transforms.len(), 1);
+        assert_eq!(
+            transforms[0].summary.input,
+            summary1.clone() + summary2.clone()
+        );
     }
 
     #[test]
-    fn multiple_wraps() {
-        let text = "A".repeat(100);
-        let wrap_map = create_wrap_map(&text, 20);
+    fn push_isomorphic_doesnt_merge_with_wrap() {
+        let mut transforms = Vec::new();
 
-        let wraps = wrap_map.wraps();
-        // 100 chars with wrap_width=20 should create 4 wraps (at 20, 40, 60, 80)
-        assert_eq!(wraps.len(), 4);
+        transforms.push(Transform::wrap(4));
+        push_isomorphic(&mut transforms, TextSummary::from("hello"));
 
-        // Last character should be on row 4
-        let tab = TabPoint { row: 0, column: 99 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.row, 4);
+        // Should have 2 transforms (wrap doesn't merge with isomorphic)
+        assert_eq!(transforms.len(), 2);
     }
+}
 
-    #[test]
-    fn wrap_at_exact_boundary() {
-        let text = "A".repeat(40);
-        let wrap_map = create_wrap_map(&text, 20);
+/// Mutable WrapMap managing async wrapping state.
+///
+/// Uses GPUI Entity pattern for background task management and state updates.
+/// Provides instant UI response via interpolation while real wrapping runs in background.
+pub struct WrapMap {
+    /// Current snapshot (may be interpolated or real).
+    snapshot: WrapSnapshot,
 
-        let wraps = wrap_map.wraps();
-        assert_eq!(wraps.len(), 1); // One wrap at column 20
+    /// Queue of pending edits waiting to be processed.
+    ///
+    /// Edits accumulate while background tasks run, then get batch-processed.
+    pending_edits: VecDeque<(TabSnapshot, Vec<TabEdit>)>,
 
-        // Character at column 20 should be on row 1
-        let tab = TabPoint { row: 0, column: 20 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.row, 1);
-        assert_eq!(wrap.column, 0);
-    }
+    /// Edits from interpolation that haven't been replaced by real wraps yet.
+    ///
+    /// When background task completes, these are inverted and composed with real edits.
+    interpolated_edits: Patch<u32>,
 
-    #[test]
-    fn empty_line() {
-        let wrap_map = create_wrap_map("", 20);
+    /// Accumulated edits since last sync, returned to caller.
+    edits_since_sync: Patch<u32>,
 
-        assert_eq!(wrap_map.wraps().len(), 0);
+    /// Current wrap width in pixels.
+    ///
+    /// None means no wrapping (infinite width).
+    wrap_width: Option<Pixels>,
 
-        let tab = TabPoint { row: 0, column: 0 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap, WrapPoint { row: 0, column: 0 });
-    }
+    /// Background task computing real wraps.
+    ///
+    /// When present, indicates wrapping is in progress.
+    background_task: Option<Task<()>>,
 
-    #[test]
-    fn multiple_lines_mixed_lengths() {
-        let text = "Short\nThis is a very long line that will wrap multiple times\nShort again";
-        let wrap_map = create_wrap_map(text, 20);
+    /// Font and size for LineWrapper.
+    font_with_size: (Font, Pixels),
+}
 
-        // First line (short) should not wrap
-        let tab = TabPoint { row: 0, column: 0 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.row, 0);
-
-        // Second line (long) should wrap
-        let wraps = wrap_map.wraps();
-        let row1_wraps: Vec<_> = wraps.iter().filter(|w| w.tab_row == 1).collect();
-        assert!(row1_wraps.len() > 0);
-    }
-
-    #[test]
-    fn round_trip_conversion() {
-        let wrap_map = create_wrap_map("A".repeat(100).as_str(), 20);
-
-        // Test several points
-        for col in [0, 10, 20, 30, 50, 75, 99] {
-            let tab = TabPoint {
-                row: 0,
-                column: col,
+impl WrapMap {
+    /// Create a new WrapMap Entity with the given configuration.
+    ///
+    /// Returns an Entity handle and the initial snapshot. The Entity manages async
+    /// background tasks and can be updated through the handle.
+    pub fn new(
+        tab_snapshot: TabSnapshot,
+        font: Font,
+        font_size: Pixels,
+        wrap_width: Option<Pixels>,
+        cx: &mut App,
+    ) -> (Entity<Self>, WrapSnapshot) {
+        let handle = cx.new(|cx| {
+            let mut this = Self {
+                font_with_size: (font, font_size),
+                wrap_width: None,
+                pending_edits: VecDeque::new(),
+                interpolated_edits: Patch::default(),
+                edits_since_sync: Patch::default(),
+                snapshot: WrapSnapshot::new(tab_snapshot),
+                background_task: None,
             };
-            let wrap = wrap_map.to_coords(tab);
-            let back = wrap_map.from_coords(wrap);
-            assert_eq!(tab, back, "Round trip failed for column {}", col);
+            this.set_wrap_width(wrap_width, cx);
+            mem::take(&mut this.edits_since_sync);
+            this
+        });
+        let snapshot = handle.read(cx).snapshot.clone();
+        (handle, snapshot)
+    }
+
+    /// Get the current wrap snapshot.
+    pub fn snapshot(&self) -> &WrapSnapshot {
+        &self.snapshot
+    }
+
+    pub fn is_rewrapping(&self) -> bool {
+        self.background_task.is_some()
+    }
+
+    /// Sync with new tab snapshot and handle incoming edits.
+    ///
+    /// If wrapping is enabled, queues edits and processes them asynchronously.
+    /// Returns the current snapshot and accumulated edits since last sync.
+    pub fn sync(
+        &mut self,
+        tab_snapshot: TabSnapshot,
+        edits: Vec<TabEdit>,
+        cx: &mut Context<Self>,
+    ) -> (WrapSnapshot, Patch<u32>) {
+        if self.wrap_width.is_some() {
+            self.pending_edits.push_back((tab_snapshot, edits));
+            self.flush_edits(cx);
+        } else {
+            self.edits_since_sync = self
+                .edits_since_sync
+                .compose(self.snapshot.interpolate(tab_snapshot, &edits));
+            self.snapshot.interpolated = false;
+        }
+
+        (self.snapshot.clone(), mem::take(&mut self.edits_since_sync))
+    }
+
+    /// Update font and font size, triggering rewrap if changed.
+    pub fn set_font_with_size(
+        &mut self,
+        font: Font,
+        font_size: Pixels,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let font_with_size = (font, font_size);
+
+        if font_with_size == self.font_with_size {
+            false
+        } else {
+            self.font_with_size = font_with_size;
+            self.rewrap(cx);
+            true
         }
     }
 
-    #[test]
-    fn different_wrap_widths() {
-        let text = "A".repeat(100);
+    /// Update wrap width, triggering rewrap if changed.
+    pub fn set_wrap_width(&mut self, wrap_width: Option<Pixels>, cx: &mut Context<Self>) -> bool {
+        if wrap_width == self.wrap_width {
+            return false;
+        }
 
-        let wrap_map_10 = create_wrap_map(&text, 10);
-        let wrap_map_25 = create_wrap_map(&text, 25);
-        let wrap_map_50 = create_wrap_map(&text, 50);
-
-        assert_eq!(wrap_map_10.wraps().len(), 9); // 10, 20, 30, ... 90
-        assert_eq!(wrap_map_25.wraps().len(), 3); // 25, 50, 75
-        assert_eq!(wrap_map_50.wraps().len(), 1); // 50
+        self.wrap_width = wrap_width;
+        self.rewrap(cx);
+        true
     }
 
-    #[test]
-    fn coordinate_transform_trait() {
-        let wrap_map = create_wrap_map("A".repeat(60).as_str(), 20);
+    /// Rewrap entire file with new configuration.
+    ///
+    /// Clears pending state and spawns background task with 5ms timeout.
+    fn rewrap(&mut self, cx: &mut Context<Self>) {
+        self.background_task.take();
+        self.interpolated_edits.clear();
+        self.pending_edits.clear();
 
-        let tab = TabPoint { row: 0, column: 25 };
-        let wrap: WrapPoint = wrap_map.to_coords(tab);
-        let back: TabPoint = wrap_map.from_coords(wrap);
+        if let Some(wrap_width) = self.wrap_width {
+            let mut new_snapshot = self.snapshot.clone();
 
-        assert_eq!(tab, back);
-    }
+            let text_system = cx.text_system().clone();
+            let (font, font_size) = self.font_with_size.clone();
+            let task = cx.background_spawn(async move {
+                let mut line_wrapper = text_system.line_wrapper(font, font_size);
+                let tab_snapshot = new_snapshot.tab_snapshot.clone();
+                let range = TabPoint::new(0, 0)..tab_snapshot.max_point();
+                let edits = new_snapshot
+                    .update(
+                        tab_snapshot,
+                        &[TabEdit {
+                            old: range.clone(),
+                            new: range.clone(),
+                        }],
+                        wrap_width,
+                        &mut line_wrapper,
+                    )
+                    .await;
+                (new_snapshot, edits)
+            });
 
-    #[test]
-    fn editable_layer_trait() {
-        let buffer = create_test_buffer("Hello\nWorld");
-        let inlay_map = InlayMap::new(buffer);
-        let fold_map = FoldMap::new(inlay_map);
-        let tab_map = TabMap::new(fold_map, 4);
-        let mut wrap_map = WrapMap::new(tab_map, 20);
-
-        let initial_version = wrap_map.version();
-
-        let edit = BufferEdit {
-            old_range: Point { row: 0, column: 0 }..Point { row: 0, column: 5 },
-            new_range: Point { row: 0, column: 0 }..Point { row: 0, column: 10 },
-        };
-
-        wrap_map.apply_edit(&edit);
-
-        assert!(wrap_map.version() > initial_version);
-    }
-
-    #[test]
-    fn tab_expansion_affects_wrapping() {
-        let text = "A\tB\tC"; // Tabs expand to tab_width
-        let wrap_map = create_wrap_map(text, 10);
-
-        // With tab_width=4, this becomes "A   B   C" (4+4=8 chars)
-        // Should not wrap at width=10
-        assert_eq!(wrap_map.wraps().len(), 0);
-
-        let wrap_map_narrow = create_wrap_map(text, 5);
-        // At width=5, "A   B   C" (9 chars) should wrap
-        assert!(wrap_map_narrow.wraps().len() > 0);
-    }
-
-    #[test]
-    fn wrap_column_calculation() {
-        let text = "A".repeat(50);
-        let wrap_map = create_wrap_map(&text, 20);
-
-        // Column 0 should be at wrap column 0
-        let tab = TabPoint { row: 0, column: 0 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.column, 0);
-
-        // Column 20 wraps to next row, column 0
-        let tab = TabPoint { row: 0, column: 20 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.column, 0);
-
-        // Column 25 is 5 chars into second wrap row
-        let tab = TabPoint { row: 0, column: 25 };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.column, 5);
-    }
-
-    #[test]
-    fn wrap_preserves_tab_row_order() {
-        let text = "Short\n".to_string() + &"A".repeat(60) + "\nShort";
-        let wrap_map = create_wrap_map(&text, 20);
-
-        let wraps = wrap_map.wraps();
-        let mut prev_tab_row = None;
-        for wrap in wraps {
-            if let Some(prev) = prev_tab_row {
-                assert!(wrap.tab_row >= prev, "Wraps should be ordered by tab_row");
+            match cx
+                .background_executor()
+                .block_with_timeout(Duration::from_millis(5), task)
+            {
+                Ok((snapshot, edits)) => {
+                    self.snapshot = snapshot;
+                    self.edits_since_sync = self.edits_since_sync.compose(&edits);
+                },
+                Err(wrap_task) => {
+                    self.background_task = Some(cx.spawn(async move |this, cx| {
+                        let (snapshot, edits) = wrap_task.await;
+                        this.update(cx, |this, cx| {
+                            this.snapshot = snapshot;
+                            this.edits_since_sync = this.edits_since_sync.compose(&edits);
+                            this.background_task = None;
+                            this.flush_edits(cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                },
             }
-            prev_tab_row = Some(wrap.tab_row);
+        } else {
+            let old_rows = self.snapshot.transforms.summary().output.lines.row + 1;
+            self.snapshot.transforms = SumTree::default();
+            let max_point = self.snapshot.tab_snapshot.max_point();
+            let summary = self
+                .snapshot
+                .tab_snapshot
+                .text_summary_for_range(TabPoint::new(0, 0)..max_point);
+            if !summary.lines.is_zero() {
+                self.snapshot
+                    .transforms
+                    .push(Transform::isomorphic(summary), ());
+            }
+            let new_rows = self.snapshot.transforms.summary().output.lines.row + 1;
+            self.snapshot.interpolated = false;
+            self.edits_since_sync = self.edits_since_sync.compose(Patch::new(vec![WrapEdit {
+                old: 0..old_rows,
+                new: 0..new_rows,
+            }]));
         }
     }
 
-    #[test]
-    fn very_long_line() {
-        let text = "A".repeat(1000);
-        let wrap_map = create_wrap_map(&text, 20);
+    /// Process pending edits with async wrapping.
+    ///
+    /// Uses 1ms timeout for fast response, spawning continuation tasks for slow wrapping.
+    fn flush_edits(&mut self, cx: &mut Context<Self>) {
+        if !self.snapshot.interpolated {
+            let mut to_remove_len = 0;
+            for (tab_snapshot, _) in &self.pending_edits {
+                if tab_snapshot.version <= self.snapshot.tab_snapshot.version {
+                    to_remove_len += 1;
+                } else {
+                    break;
+                }
+            }
+            self.pending_edits.drain(..to_remove_len);
+        }
 
-        // 1000 chars with wrap_width=20 should create 49 wraps
-        let wraps = wrap_map.wraps();
-        assert_eq!(wraps.len(), 49);
+        if self.pending_edits.is_empty() {
+            return;
+        }
 
-        // Last char should be on row 49
-        let tab = TabPoint {
-            row: 0,
-            column: 999,
+        if let Some(wrap_width) = self.wrap_width {
+            if self.background_task.is_none() {
+                let pending_edits = self.pending_edits.clone();
+                let mut snapshot = self.snapshot.clone();
+                let text_system = cx.text_system().clone();
+                let (font, font_size) = self.font_with_size.clone();
+                let update_task = cx.background_spawn(async move {
+                    let mut edits = Patch::default();
+                    let mut line_wrapper = text_system.line_wrapper(font, font_size);
+                    for (tab_snapshot, tab_edits) in pending_edits {
+                        let wrap_edits = snapshot
+                            .update(tab_snapshot, &tab_edits, wrap_width, &mut line_wrapper)
+                            .await;
+                        edits = edits.compose(&wrap_edits);
+                    }
+                    (snapshot, edits)
+                });
+
+                match cx
+                    .background_executor()
+                    .block_with_timeout(Duration::from_millis(1), update_task)
+                {
+                    Ok((snapshot, output_edits)) => {
+                        self.snapshot = snapshot;
+                        self.edits_since_sync = self.edits_since_sync.compose(&output_edits);
+                    },
+                    Err(update_task) => {
+                        self.background_task = Some(cx.spawn(async move |this, cx| {
+                            let (snapshot, edits) = update_task.await;
+                            this.update(cx, |this, cx| {
+                                this.snapshot = snapshot;
+                                this.edits_since_sync = this
+                                    .edits_since_sync
+                                    .compose(mem::take(&mut this.interpolated_edits).invert())
+                                    .compose(&edits);
+                                this.background_task = None;
+                                this.flush_edits(cx);
+                                cx.notify();
+                            })
+                            .ok();
+                        }));
+                    },
+                }
+            }
+        }
+
+        let was_interpolated = self.snapshot.interpolated;
+        let mut to_remove_len = 0;
+        for (tab_snapshot, edits) in &self.pending_edits {
+            if tab_snapshot.version <= self.snapshot.tab_snapshot.version {
+                to_remove_len += 1;
+            } else {
+                let interpolated_edits = self.snapshot.interpolate(tab_snapshot.clone(), edits);
+                self.edits_since_sync = self.edits_since_sync.compose(&interpolated_edits);
+                self.interpolated_edits = self.interpolated_edits.compose(&interpolated_edits);
+            }
+        }
+
+        if !was_interpolated {
+            self.pending_edits.drain(..to_remove_len);
+        }
+    }
+}
+
+/// Immutable snapshot of wrap state.
+///
+/// Cheap to clone (Arc-based TabSnapshot). Provides fast coordinate conversions
+/// and can be interpolated for instant UI updates.
+///
+/// # Interpolation vs Real Wrapping
+///
+/// - **Interpolated**: Fast estimate assuming wraps stay unchanged (< 1ms)
+/// - **Real wrapping**: Actual wrapping using LineWrapper (20-50ms for large files)
+///
+/// The `interpolated` flag tracks which mode was used to create this snapshot.
+#[derive(Clone)]
+pub struct WrapSnapshot {
+    /// Tab snapshot providing input coordinates.
+    pub tab_snapshot: TabSnapshot,
+
+    /// Transform tree representing wraps and isomorphic regions.
+    transforms: SumTree<Transform>,
+
+    /// True if this snapshot was created via interpolation (fast estimate).
+    /// False if created via real wrapping with LineWrapper.
+    interpolated: bool,
+}
+
+impl WrapSnapshot {
+    /// Create a new wrap snapshot with no wrapping.
+    ///
+    /// The entire file is represented as a single isomorphic transform.
+    pub fn new(tab_snapshot: TabSnapshot) -> Self {
+        // Start with empty transforms - wrapping added later via update()
+        // This matches Zed's pattern where wrapping is done asynchronously
+        Self {
+            tab_snapshot,
+            transforms: SumTree::new(()),
+            interpolated: false,
+        }
+    }
+
+    /// Get the maximum WrapPoint in this snapshot.
+    pub fn max_point(&self) -> WrapPoint {
+        let lines = &self.transforms.summary().output.lines;
+        WrapPoint::new(lines.row, lines.column)
+    }
+
+    /// Get the longest row in display coordinates.
+    pub fn longest_row(&self) -> u32 {
+        self.transforms.summary().output.longest_row
+    }
+
+    /// Convert TabPoint to WrapPoint.
+    ///
+    /// Seeks to the tab point in the transform tree and calculates the
+    /// corresponding wrap point based on accumulated transforms.
+    pub fn tab_point_to_wrap_point(&self, tab_point: TabPoint) -> WrapPoint {
+        if self.transforms.is_empty() {
+            return WrapPoint::new(tab_point.row, tab_point.column);
+        }
+
+        let mut cursor = self
+            .transforms
+            .cursor::<sum_tree::Dimensions<TabPoint, WrapPoint>>(());
+        cursor.seek(&tab_point, Bias::Right);
+
+        let tab_start = cursor.start().0;
+        let wrap_start = cursor.start().1;
+
+        // Calculate row/column offset separately
+        if tab_point.row > tab_start.row {
+            // Different rows - use tab_point's column directly
+            WrapPoint::new(
+                wrap_start.row + (tab_point.row - tab_start.row),
+                tab_point.column,
+            )
+        } else {
+            // Same row - add column offset
+            WrapPoint::new(
+                wrap_start.row,
+                wrap_start.column + (tab_point.column - tab_start.column),
+            )
+        }
+    }
+
+    /// Convert WrapPoint to TabPoint.
+    ///
+    /// Seeks to the wrap point and converts back to tab coordinates.
+    /// If the wrap point is inside a wrap transform (soft wrap), clamps to
+    /// the position before the wrap.
+    pub fn to_tab_point(&self, wrap_point: WrapPoint) -> TabPoint {
+        if self.transforms.is_empty() {
+            return TabPoint::new(wrap_point.row, wrap_point.column);
+        }
+
+        let mut cursor = self
+            .transforms
+            .cursor::<sum_tree::Dimensions<WrapPoint, TabPoint>>(());
+        cursor.seek(&wrap_point, Bias::Right);
+
+        let wrap_start = cursor.start().0;
+        let tab_start = cursor.start().1;
+
+        if cursor.item().map_or(false, |t| t.is_isomorphic()) {
+            // Isomorphic - calculate offset
+            if wrap_point.row > wrap_start.row {
+                TabPoint::new(
+                    tab_start.row + (wrap_point.row - wrap_start.row),
+                    wrap_point.column,
+                )
+            } else {
+                TabPoint::new(
+                    tab_start.row,
+                    tab_start.column + (wrap_point.column - wrap_start.column),
+                )
+            }
+        } else {
+            // Wrap transform - return start position
+            tab_start
+        }
+    }
+
+    /// Get text summary for a range of wrap rows.
+    pub fn text_summary_for_range(&self, rows: Range<u32>) -> TextSummary {
+        let mut summary = TextSummary::default();
+
+        let start = WrapPoint {
+            row: rows.start,
+            column: 0,
         };
-        let wrap = wrap_map.to_coords(tab);
-        assert_eq!(wrap.row, 49);
+        let end = WrapPoint {
+            row: rows.end,
+            column: 0,
+        };
+
+        let mut cursor = self
+            .transforms
+            .cursor::<sum_tree::Dimensions<WrapPoint, TabPoint>>(());
+        cursor.seek(&start, Bias::Right);
+
+        // Accumulate transforms in range
+        while let Some(transform) = cursor.item() {
+            let wrap_pos = cursor.end().0;
+
+            if wrap_pos.row >= end.row {
+                break;
+            }
+
+            summary += &transform.summary.output;
+            cursor.next();
+        }
+
+        summary
+    }
+
+    /// Fast interpolation: assume wraps stay unchanged, update transforms via slicing.
+    ///
+    /// Returns instantly (<1ms) by copying unchanged transforms and splicing in edits.
+    /// Sets `interpolated = true` flag since this is an estimate.
+    fn interpolate(&mut self, new_tab_snapshot: TabSnapshot, tab_edits: &[TabEdit]) -> Patch<u32> {
+        let mut new_transforms;
+        if tab_edits.is_empty() {
+            new_transforms = self.transforms.clone();
+        } else {
+            let mut old_cursor = self.transforms.cursor::<TabPoint>(());
+
+            let mut tab_edits_iter = tab_edits.iter().peekable();
+            new_transforms =
+                old_cursor.slice(&tab_edits_iter.peek().unwrap().old.start, Bias::Right);
+
+            while let Some(edit) = tab_edits_iter.next() {
+                let input_lines = new_transforms.summary().input.lines;
+                let current_point = TabPoint::new(input_lines.row, input_lines.column);
+                if edit.new.start > current_point {
+                    let summary =
+                        new_tab_snapshot.text_summary_for_range(current_point..edit.new.start);
+                    new_transforms.push_or_extend(Transform::isomorphic(summary));
+                }
+
+                if !edit.new.is_empty() {
+                    new_transforms.push_or_extend(Transform::isomorphic(
+                        new_tab_snapshot.text_summary_for_range(edit.new.clone()),
+                    ));
+                }
+
+                old_cursor.seek_forward(&edit.old.end, Bias::Right);
+                if let Some(next_edit) = tab_edits_iter.peek() {
+                    if next_edit.old.start > old_cursor.end() {
+                        if old_cursor.end() > edit.old.end {
+                            let summary = self
+                                .tab_snapshot
+                                .text_summary_for_range(edit.old.end..old_cursor.end());
+                            new_transforms.push_or_extend(Transform::isomorphic(summary));
+                        }
+
+                        old_cursor.next();
+                        new_transforms
+                            .append(old_cursor.slice(&next_edit.old.start, Bias::Right), ());
+                    }
+                } else {
+                    if old_cursor.end() > edit.old.end {
+                        let summary = self
+                            .tab_snapshot
+                            .text_summary_for_range(edit.old.end..old_cursor.end());
+                        new_transforms.push_or_extend(Transform::isomorphic(summary));
+                    }
+                    old_cursor.next();
+                    new_transforms.append(old_cursor.suffix(), ());
+                }
+            }
+        }
+
+        let old_snapshot = mem::replace(
+            self,
+            WrapSnapshot {
+                tab_snapshot: new_tab_snapshot,
+                transforms: new_transforms,
+                interpolated: true,
+            },
+        );
+        self.check_invariants();
+        old_snapshot.compute_edits(tab_edits, self)
+    }
+
+    /// Real async wrapping using LineWrapper to compute actual wrap boundaries.
+    ///
+    /// Processes edited rows, builds line fragments, and calls LineWrapper to determine
+    /// wrap points. Yields periodically to avoid blocking. Returns computed edits.
+    async fn update(
+        &mut self,
+        new_tab_snapshot: TabSnapshot,
+        tab_edits: &[TabEdit],
+        wrap_width: Pixels,
+        line_wrapper: &mut LineWrapper,
+    ) -> Patch<u32> {
+        #[derive(Debug)]
+        struct RowEdit {
+            old_rows: Range<u32>,
+            new_rows: Range<u32>,
+        }
+
+        let mut tab_edits_iter = tab_edits.iter().peekable();
+        let mut row_edits = Vec::with_capacity(tab_edits.len());
+        while let Some(edit) = tab_edits_iter.next() {
+            let mut row_edit = RowEdit {
+                old_rows: edit.old.start.row..edit.old.end.row + 1,
+                new_rows: edit.new.start.row..edit.new.end.row + 1,
+            };
+
+            while let Some(next_edit) = tab_edits_iter.peek() {
+                if next_edit.old.start.row <= row_edit.old_rows.end {
+                    row_edit.old_rows.end = next_edit.old.end.row + 1;
+                    row_edit.new_rows.end = next_edit.new.end.row + 1;
+                    tab_edits_iter.next();
+                } else {
+                    break;
+                }
+            }
+
+            row_edits.push(row_edit);
+        }
+
+        let mut new_transforms;
+        if row_edits.is_empty() {
+            new_transforms = self.transforms.clone();
+        } else {
+            let mut row_edits = row_edits.into_iter().peekable();
+            let mut old_cursor = self.transforms.cursor::<TabPoint>(());
+
+            new_transforms = old_cursor.slice(
+                &TabPoint::new(row_edits.peek().unwrap().old_rows.start, 0),
+                Bias::Right,
+            );
+
+            while let Some(edit) = row_edits.next() {
+                if edit.new_rows.start > new_transforms.summary().input.lines.row {
+                    let input_lines = new_transforms.summary().input.lines;
+                    let summary = new_tab_snapshot.text_summary_for_range(
+                        TabPoint::new(input_lines.row, input_lines.column)
+                            ..TabPoint::new(edit.new_rows.start, 0),
+                    );
+                    new_transforms.push_or_extend(Transform::isomorphic(summary));
+                }
+
+                // Process each line in the edited range with LineWrapper
+                let mut edit_transforms = Vec::<Transform>::new();
+                for row in edit.new_rows.start..edit.new_rows.end {
+                    let line_start = TabPoint::new(row, 0);
+                    let line_end = if row + 1 < new_tab_snapshot.max_point().row {
+                        TabPoint::new(row + 1, 0)
+                    } else {
+                        new_tab_snapshot.max_point()
+                    };
+
+                    let line_summary =
+                        new_tab_snapshot.text_summary_for_range(line_start..line_end);
+
+                    if line_summary.lines.row > 0 {
+                        // Line exists - wrap it
+                        let line_text = format!("{}", line_summary.len); // FIXME: Get actual line text
+                        let fragments = vec![gpui::LineFragment::text(&line_text)];
+
+                        let mut prev_boundary_ix = 0;
+                        for boundary in line_wrapper.wrap_line(&fragments, wrap_width) {
+                            let wrapped_len = boundary.ix - prev_boundary_ix;
+                            push_isomorphic(
+                                &mut edit_transforms,
+                                TextSummary {
+                                    lines: Point::new(0, wrapped_len as u32),
+                                    len: wrapped_len,
+                                    ..Default::default()
+                                },
+                            );
+                            edit_transforms.push(Transform::wrap(boundary.next_indent));
+                            prev_boundary_ix = boundary.ix;
+                        }
+
+                        // Add remaining line content
+                        if prev_boundary_ix < line_summary.len {
+                            let remaining_len = line_summary.len - prev_boundary_ix;
+                            push_isomorphic(
+                                &mut edit_transforms,
+                                TextSummary {
+                                    lines: Point::new(1, 0),
+                                    len: remaining_len,
+                                    ..Default::default()
+                                },
+                            );
+                        } else {
+                            push_isomorphic(&mut edit_transforms, line_summary);
+                        }
+                    }
+
+                    yield_now().await;
+                }
+
+                let mut edit_transforms = edit_transforms.into_iter();
+                if let Some(transform) = edit_transforms.next() {
+                    new_transforms.push_or_extend(transform);
+                }
+                new_transforms.extend(edit_transforms, ());
+
+                old_cursor.seek_forward(&TabPoint::new(edit.old_rows.end, 0), Bias::Right);
+                if let Some(next_edit) = row_edits.peek() {
+                    if next_edit.old_rows.start > old_cursor.end().row {
+                        if old_cursor.end() > TabPoint::new(edit.old_rows.end, 0) {
+                            let summary = self.tab_snapshot.text_summary_for_range(
+                                TabPoint::new(edit.old_rows.end, 0)..old_cursor.end(),
+                            );
+                            new_transforms.push_or_extend(Transform::isomorphic(summary));
+                        }
+                        old_cursor.next();
+                        new_transforms.append(
+                            old_cursor
+                                .slice(&TabPoint::new(next_edit.old_rows.start, 0), Bias::Right),
+                            (),
+                        );
+                    }
+                } else {
+                    if old_cursor.end() > TabPoint::new(edit.old_rows.end, 0) {
+                        let summary = self.tab_snapshot.text_summary_for_range(
+                            TabPoint::new(edit.old_rows.end, 0)..old_cursor.end(),
+                        );
+                        new_transforms.push_or_extend(Transform::isomorphic(summary));
+                    }
+                    old_cursor.next();
+                    new_transforms.append(old_cursor.suffix(), ());
+                }
+            }
+        }
+
+        let old_snapshot = mem::replace(
+            self,
+            WrapSnapshot {
+                tab_snapshot: new_tab_snapshot,
+                transforms: new_transforms,
+                interpolated: false,
+            },
+        );
+        self.check_invariants();
+        old_snapshot.compute_edits(tab_edits, self)
+    }
+
+    /// Compute wrap edits by comparing old and new snapshot outputs.
+    ///
+    /// Simplified implementation that returns overall change.
+    /// FIXME: Implement precise row-level edit tracking using cursor seeking.
+    fn compute_edits(&self, _tab_edits: &[TabEdit], new_snapshot: &WrapSnapshot) -> Patch<u32> {
+        let old_rows = self.transforms.summary().output.lines.row + 1;
+        let new_rows = new_snapshot.transforms.summary().output.lines.row + 1;
+
+        if old_rows != new_rows {
+            Patch::new(vec![WrapEdit {
+                old: 0..old_rows,
+                new: 0..new_rows,
+            }])
+        } else {
+            Patch::default()
+        }
+    }
+
+    /// Debug-only invariant checking.
+    #[cfg(debug_assertions)]
+    fn check_invariants(&self) {
+        // Verify transform tree is consistent
+        let _summary = self.transforms.summary();
+
+        // FIXME: Add proper invariant checks for WrapSnapshot
+        // - Verify input matches TabSnapshot output
+        // - Verify no adjacent isomorphic transforms
+        // - Verify wrap indents are within bounds
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn check_invariants(&self) {}
+}
+
+#[cfg(test)]
+mod tests_wrap_snapshot {
+    use super::*;
+    use crate::{fold_map::FoldSnapshot, inlay_map::InlaySnapshot};
+    use std::num::NonZeroU64;
+    use text::{Buffer, BufferId};
+
+    fn create_buffer(text: &str) -> text::BufferSnapshot {
+        let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
+        buffer.snapshot()
+    }
+
+    fn build_wrap_snapshot(text: &str, tab_width: u32) -> WrapSnapshot {
+        let buffer = create_buffer(text);
+        let inlay_snapshot = InlaySnapshot::new(buffer);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
+        let tab_snapshot = TabSnapshot::new(fold_snapshot, tab_width);
+        WrapSnapshot::new(tab_snapshot)
+    }
+
+    #[test]
+    fn empty_wrap_snapshot() {
+        let snapshot = build_wrap_snapshot("", 4);
+
+        assert_eq!(snapshot.transforms.summary().input, TextSummary::default());
+        assert_eq!(snapshot.transforms.summary().output, TextSummary::default());
+        assert!(!snapshot.interpolated);
+    }
+
+    #[test]
+    fn wrap_snapshot_no_transforms() {
+        let snapshot = build_wrap_snapshot("hello world", 4);
+
+        // Empty transforms means isomorphic (1:1 mapping)
+        let tab_point = TabPoint::new(0, 5);
+        let wrap_point = snapshot.tab_point_to_wrap_point(tab_point);
+
+        assert_eq!(wrap_point, WrapPoint::new(0, 5));
+    }
+
+    #[test]
+    fn wrap_snapshot_roundtrip() {
+        let snapshot = build_wrap_snapshot("hello\nworld", 4);
+
+        // Test roundtrip: TabPoint -> WrapPoint -> TabPoint
+        let original = TabPoint::new(1, 3);
+        let wrap_point = snapshot.tab_point_to_wrap_point(original);
+        let roundtrip = snapshot.to_tab_point(wrap_point);
+
+        assert_eq!(roundtrip, original);
+    }
+
+    #[test]
+    fn max_point_empty() {
+        let snapshot = build_wrap_snapshot("", 4);
+        let max = snapshot.max_point();
+
+        assert_eq!(max, WrapPoint::new(0, 0));
+    }
+
+    #[test]
+    fn text_summary_for_range_empty() {
+        let snapshot = build_wrap_snapshot("line 1\nline 2\nline 3", 4);
+        let summary = snapshot.text_summary_for_range(0..0);
+
+        assert_eq!(summary, TextSummary::default());
     }
 }

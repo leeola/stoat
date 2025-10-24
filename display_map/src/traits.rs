@@ -2,8 +2,10 @@
 ///!
 ///! These traits define the interfaces that all transformation layers must implement,
 ///! enabling composition of the six-layer pipeline.
-// FIXME: Replace with actual text crate types once upstream issue is resolved
-pub use crate::buffer_stubs::BufferEdit;
+use text::Point;
+
+/// Edit operations on the buffer using Point coordinates
+pub type BufferEdit = text::Edit<Point>;
 
 /// Trait for coordinate transformation between adjacent layers.
 ///
@@ -117,7 +119,7 @@ pub trait CoordinateTransform<From, To> {
 /// impl EditableLayer for TabMap {
 ///     fn apply_edit(&mut self, edit: &BufferEdit) {
 ///         // Invalidate cached tab expansions for edited rows
-///         for row in edit.old_range.start.row..=edit.old_range.end.row {
+///         for row in edit.old.start.row..=edit.old.end.row {
 ///             self.tab_cache.remove(&row);
 ///         }
 ///

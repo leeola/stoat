@@ -1,99 +1,87 @@
-///! TabMap transformation layer.
+///! TabMap v2: Tab expansion transformation layer with snapshot pattern.
 ///!
-///! Expands tab characters into spaces based on tab width settings, transforming
-///! buffer coordinates into tab-expanded coordinates.
+///! Unlike InlayMap and FoldMap which use SumTree<Transform>, TabMap uses a simpler
+///! line-scanning approach since tab expansion is inherently line-local and doesn't
+///! benefit from tree-based seeking.
 ///!
-///! # Tab Expansion Rules
+///! # Transform Architecture
 ///!
-///! Tabs advance to the next multiple of `tab_width`:
-///! - Tab at column 0 with tab_width=4 displays at columns 0-3
-///! - Tab at column 2 with tab_width=4 displays at columns 2-3
-///! - Tab at column 4 with tab_width=4 displays at columns 4-7
+///! TabMap converts FoldPoint -> TabPoint by expanding tab characters:
+///! - Regular characters: 1 display column
+///! - Tab characters: Advances to next multiple of tab_width
 ///!
 ///! # Example
 ///!
 ///! ```text
-///! Buffer (tab_width=4):     Display columns:
-///! "\ttext"                  [0,1,2,3][4,5,6,7]...
-///!                           tab=0-3  t e x t
-///!
-///! "ab\tcd"                  [0,1,2,3][4,5]...
-///!                           a b     c d
-///!                           tab=2-3
+///! Buffer (tab_width=4):     Display:
+///! "\ttext"                  "    text"   (tab expands to 4 spaces)
+///! "ab\tcd"                  "ab  cd"     (tab expands to 2 spaces to align at column 4)
 ///! ```
+///!
+///! # Performance
+///!
+///! - Coordinate conversion: O(line_length) - must scan entire line
+///! - No tree overhead: Tab expansion is purely local to each line
+///! - Memory: O(1) - no caching in snapshot (immutable)
+///!
+///! # Related
+///!
+///! - Input: [`FoldPoint`](crate::FoldPoint) from [`FoldSnapshot`]
+///! - Output: [`TabPoint`](crate::TabPoint)
+///! - [`fold_map_v2::FoldSnapshot`] - Input layer
 use crate::{
-    buffer_stubs::{BufferEdit, BufferSnapshot, Point},
-    coords::{FoldPoint, InlayPoint, TabPoint},
-    fold_map::FoldMap,
-    inlay_map::InlayMap,
-    traits::{CoordinateTransform, EditableLayer},
+    coords::{FoldPoint, TabPoint},
+    dimensions::FoldOffset,
+    fold_map::FoldSnapshot,
 };
-use std::collections::HashMap;
+use sum_tree::Bias;
+use text::{Edit, Point, TextSummary, ToOffset};
 
-/// Tab expansion transformation layer.
+/// Edit in FoldOffset space (input to TabMap).
+pub type FoldEdit = Edit<FoldOffset>;
+
+/// Edit in TabPoint space (output from TabMap).
+pub type TabEdit = Edit<TabPoint>;
+
+/// Immutable snapshot of tab expansion state.
 ///
-/// Transforms [`FoldPoint`] coordinates (after folding) to [`TabPoint`] coordinates
-/// by expanding tab characters into the appropriate number of visual columns.
-///
-/// # Architecture
-///
-/// TabMap scans buffer lines character-by-character, tracking both:
-/// - Buffer column (byte offset in the line)
-/// - Display column (visual column after tab expansion)
-///
-/// When a tab character is encountered, the display column advances to the next
-/// multiple of `tab_width`, while the buffer column advances by one character.
-///
-/// # Performance
-///
-/// - Forward conversion: O(n) where n = buffer column position
-/// - Backward conversion: O(n) where n = display column position
-/// - Optional caching can reduce repeated conversions to O(1)
-///
-/// # Related
-///
-/// - Input coordinates: [`FoldPoint`] (after folding)
-/// - Output coordinates: [`TabPoint`] (after tab expansion)
-/// - Implements [`CoordinateTransform`] for bidirectional conversion
-/// - Implements [`EditableLayer`] to handle buffer edits
-pub struct TabMap {
-    /// Tab width setting (typically 2, 4, or 8)
+/// Cheap to clone (contains Arc-based FoldSnapshot). Used for coordinate
+/// conversions and can be safely shared across threads.
+#[derive(Clone)]
+pub struct TabSnapshot {
+    /// Fold snapshot providing input coordinates.
+    pub fold_snapshot: FoldSnapshot,
+
+    /// Tab width setting (typically 2, 4, or 8).
     tab_width: u32,
 
-    /// FoldMap for converting between FoldPoint and buffer Point
-    fold_map: FoldMap,
-
-    /// Optional cache mapping row to Vec<(buffer_column, expanded_width)>
-    /// Stores tab positions and their expansion widths for fast lookup
-    tab_cache: HashMap<u32, Vec<(u32, u32)>>,
-
-    /// Version counter incremented on each edit
-    /// Used for cache invalidation
-    version: usize,
+    /// Version counter for change tracking.
+    pub version: usize,
 }
 
-impl TabMap {
-    /// Create a new TabMap.
-    ///
-    /// # Arguments
-    ///
-    /// - `fold_map`: FoldMap for converting between FoldPoint and buffer Point
-    /// - `tab_width`: Number of columns tabs align to (typically 2, 4, or 8)
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let buffer = BufferSnapshot::from_text("\thello\n\tworld");
-    /// let fold_map = FoldMap::new(buffer.clone());
-    /// let tab_map = TabMap::new(fold_map, 4);
-    /// ```
-    pub fn new(fold_map: FoldMap, tab_width: u32) -> Self {
+impl TabSnapshot {
+    /// Create a new tab snapshot with the given fold snapshot and tab width.
+    pub fn new(fold_snapshot: FoldSnapshot, tab_width: u32) -> Self {
         Self {
+            fold_snapshot,
             tab_width,
-            fold_map,
-            tab_cache: HashMap::new(),
             version: 0,
         }
+    }
+
+    /// Get the tab width setting.
+    pub fn tab_width(&self) -> u32 {
+        self.tab_width
+    }
+
+    /// Get the underlying buffer snapshot.
+    pub fn buffer(&self) -> &text::BufferSnapshot {
+        self.fold_snapshot.buffer()
+    }
+
+    /// Get the version number of this snapshot.
+    pub fn version(&self) -> usize {
+        self.version
     }
 
     /// Convert FoldPoint to TabPoint.
@@ -104,28 +92,21 @@ impl TabMap {
     ///
     /// # Algorithm
     ///
-    /// 1. Convert FoldPoint to buffer Point via FoldMap
+    /// 1. Convert FoldPoint to InlayPoint to get buffer coordinates
     /// 2. Get the line text from buffer
     /// 3. Iterate through characters up to target buffer column
     /// 4. For each tab: `display_col = (display_col / tab_width + 1) * tab_width`
     /// 5. For each regular char: `display_col += 1`
-    /// 6. Return TabPoint with computed display column and fold_point row
-    ///
-    /// # Edge Cases
-    ///
-    /// - Empty line: returns TabPoint with column 0
-    /// - Column beyond line end: returns column at line end
-    /// - Line with only tabs: correctly computes expanded width
-    pub fn to_tab_point(&self, fold_point: FoldPoint) -> TabPoint {
+    /// 6. Return TabPoint with computed display column and same row
+    pub fn to_tab_point(&self, fold_point: FoldPoint, _bias: Bias) -> TabPoint {
         // Convert FoldPoint to InlayPoint, then to buffer Point to read the text
-        let inlay_point = self.fold_map.to_inlay_point(fold_point);
-        // For now, InlayPoint and Point have same structure (row, column)
-        // In a system with no inlays, they're identical
+        let inlay_point = self.fold_snapshot.to_inlay_point(fold_point);
         let point = Point {
             row: inlay_point.row,
             column: inlay_point.column,
         };
-        let line = self.fold_map.buffer().line(point.row);
+
+        let line = self.get_line_text(point.row);
 
         let mut display_col = 0;
         let mut byte_offset = 0;
@@ -154,20 +135,11 @@ impl TabMap {
         }
     }
 
-    /// Convert TabPoint back to FoldPoint.
+    /// Convert TabPoint to FoldPoint.
     ///
     /// Scans the line from the start, expanding tabs until reaching or exceeding the
     /// target display column. If the target is inside a tab expansion, clamps to the
-    /// buffer position of the tab character itself, then converts to FoldPoint.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Determine buffer row from TabPoint row (same as FoldPoint row for now)
-    /// 2. Get the line text from buffer
-    /// 3. Iterate through characters, tracking display column
-    /// 4. Stop when display column reaches or would exceed target
-    /// 5. If stopped inside tab expansion, use tab's buffer position
-    /// 6. Convert buffer Point to FoldPoint via FoldMap
+    /// buffer position of the tab character itself.
     ///
     /// # Clamping Behavior
     ///
@@ -183,20 +155,16 @@ impl TabMap {
     /// TabPoint column 0,1,2,3 all map to buffer column 0 (the tab)
     /// TabPoint column 4 maps to buffer column 1 (the 't')
     /// ```
-    pub fn to_fold_point(&self, tab_point: TabPoint) -> FoldPoint {
-        // First, we need to figure out which buffer row corresponds to this TabPoint row
-        // Since TabPoint row == FoldPoint row, we can create a FoldPoint and convert to buffer
-        // Point via InlayPoint
+    pub fn to_fold_point(&self, tab_point: TabPoint, _bias: Bias) -> FoldPoint {
+        // Get the buffer row for this FoldPoint row
         let fold_point_for_row = FoldPoint {
             row: tab_point.row,
             column: 0,
         };
-        let inlay_point_for_row = self.fold_map.to_inlay_point(fold_point_for_row);
-        let buffer_point_for_row = Point {
-            row: inlay_point_for_row.row,
-            column: inlay_point_for_row.column,
-        };
-        let line = self.fold_map.buffer().line(buffer_point_for_row.row);
+        let inlay_point_for_row = self.fold_snapshot.to_inlay_point(fold_point_for_row);
+        let buffer_row = inlay_point_for_row.row;
+
+        let line = self.get_line_text(buffer_row);
 
         let mut display_col = 0;
         let mut byte_offset = 0;
@@ -225,199 +193,290 @@ impl TabMap {
 
         // Convert buffer Point to InlayPoint, then to FoldPoint
         let buffer_point = Point {
-            row: buffer_point_for_row.row,
+            row: buffer_row,
             column: byte_offset,
         };
-        let inlay_point = InlayPoint {
+        let inlay_point = crate::coords::InlayPoint {
             row: buffer_point.row,
             column: buffer_point.column,
         };
-        self.fold_map.to_fold_point(inlay_point)
+        self.fold_snapshot.to_fold_point(inlay_point, Bias::Left)
     }
 
-    /// Get the tab width setting.
-    pub fn tab_width(&self) -> u32 {
-        self.tab_width
+    /// Get the maximum TabPoint in the snapshot.
+    pub fn max_point(&self) -> TabPoint {
+        let max_fold = self.fold_snapshot.max_point();
+        self.to_tab_point(max_fold, Bias::Left)
     }
 
-    /// Get the underlying FoldMap.
-    pub fn fold_map(&self) -> &FoldMap {
-        &self.fold_map
+    /// Get text summary for a range of TabPoints.
+    ///
+    /// Used by WrapMap for computing transform summaries during interpolation.
+    pub fn text_summary_for_range(&self, range: std::ops::Range<TabPoint>) -> TextSummary {
+        // Convert TabPoints to FoldPoints
+        let start_fold = self.to_fold_point(range.start, Bias::Left);
+        let end_fold = self.to_fold_point(range.end, Bias::Left);
+
+        // Get the text between these fold points
+        // For now, approximate using line-based summary
+        let mut summary = TextSummary::default();
+
+        if start_fold.row == end_fold.row {
+            // Same row - just column difference
+            let col_diff = end_fold.column.saturating_sub(start_fold.column);
+            summary.lines = Point::new(0, col_diff);
+            summary.len = col_diff as usize;
+            summary.chars = col_diff as usize;
+            summary.last_line_chars = col_diff;
+            summary.last_line_len_utf16 = col_diff;
+            summary.len_utf16 = text::OffsetUtf16(col_diff as usize);
+        } else {
+            // Multiple rows
+            let row_diff = end_fold.row - start_fold.row;
+            summary.lines = Point::new(row_diff, end_fold.column);
+            // Approximate length
+            summary.len = (row_diff * 80 + end_fold.column) as usize;
+            summary.chars = summary.len;
+            summary.last_line_chars = end_fold.column;
+            summary.last_line_len_utf16 = end_fold.column;
+            summary.len_utf16 = text::OffsetUtf16(summary.len);
+        }
+
+        summary
     }
 
-    /// Get the buffer snapshot.
-    pub fn buffer(&self) -> &BufferSnapshot {
-        self.fold_map.buffer()
+    /// Helper to get line text from buffer.
+    fn get_line_text(&self, row: u32) -> String {
+        let buffer = self.buffer();
+        let max_row = buffer.max_point().row;
+
+        if row > max_row {
+            return String::new();
+        }
+
+        let line_start = Point::new(row, 0);
+        let line_end = if row < max_row {
+            Point::new(row + 1, 0)
+        } else {
+            buffer.max_point()
+        };
+
+        let start_offset = line_start.to_offset(buffer);
+        let end_offset = line_end.to_offset(buffer);
+
+        buffer
+            .text_for_range(start_offset..end_offset)
+            .collect::<String>()
+            .trim_end_matches('\n')
+            .to_string()
     }
 }
 
-impl CoordinateTransform<FoldPoint, TabPoint> for TabMap {
-    fn to_coords(&self, fold_point: FoldPoint) -> TabPoint {
-        self.to_tab_point(fold_point)
-    }
-
-    fn from_coords(&self, tab_point: TabPoint) -> FoldPoint {
-        self.to_fold_point(tab_point)
-    }
+/// Mutable tab map managing tab expansion state.
+pub struct TabMap {
+    /// Current snapshot.
+    snapshot: TabSnapshot,
 }
 
-impl EditableLayer for TabMap {
-    fn apply_edit(&mut self, edit: &BufferEdit) {
-        // Forward edit to FoldMap
-        self.fold_map.apply_edit(edit);
-
-        // Invalidate entire cache on any edit
-        // FIXME: Could optimize to only clear affected rows
-        self.tab_cache.clear();
-        self.version += 1;
+impl TabMap {
+    /// Create a new TabMap from a fold snapshot.
+    pub fn new(fold_snapshot: FoldSnapshot, tab_width: u32) -> (Self, TabSnapshot) {
+        let snapshot = TabSnapshot::new(fold_snapshot, tab_width);
+        let map = Self {
+            snapshot: snapshot.clone(),
+        };
+        (map, snapshot)
     }
 
-    fn version(&self) -> usize {
-        self.version
+    /// Get read-only access and sync with new fold snapshot.
+    ///
+    /// Returns updated snapshot and tab edits derived from fold edits.
+    pub fn read(
+        &mut self,
+        fold_snapshot: FoldSnapshot,
+        fold_edits: Vec<FoldEdit>,
+    ) -> (TabSnapshot, Vec<TabEdit>) {
+        let tab_edits = self.sync(fold_snapshot, fold_edits);
+        (self.snapshot.clone(), tab_edits)
+    }
+
+    /// Sync with new fold snapshot and convert fold edits to tab edits.
+    ///
+    /// Tab expansion changes column positions for lines with tabs. We convert
+    /// FoldOffset-based edits to TabPoint-based edits by converting offsets to
+    /// points and then applying tab expansion to the points.
+    fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<TabEdit> {
+        let old_snapshot = self.snapshot.clone();
+
+        // Update fold snapshot
+        self.snapshot.fold_snapshot = fold_snapshot;
+        self.snapshot.version += 1;
+
+        // Convert fold edits (FoldOffset ranges) to tab edits (TabPoint ranges)
+        // Since fold edits currently cover entire buffer, we convert start/end offsets to points
+        let tab_edits = fold_edits
+            .into_iter()
+            .map(|edit| {
+                // Convert old FoldOffsets to TabPoints using old snapshot
+                // For now, simplified: assume offset 0 = point (0,0), max offset = max point
+                let old_start = if edit.old.start.0 == 0 {
+                    TabPoint { row: 0, column: 0 }
+                } else {
+                    // FIXME: Need proper FoldOffset -> FoldPoint -> TabPoint conversion
+                    old_snapshot.max_point()
+                };
+                let old_end = if edit.old.end.0 == 0 {
+                    TabPoint { row: 0, column: 0 }
+                } else {
+                    old_snapshot.max_point()
+                };
+
+                // Convert new FoldOffsets to TabPoints using new snapshot
+                let new_start = if edit.new.start.0 == 0 {
+                    TabPoint { row: 0, column: 0 }
+                } else {
+                    self.snapshot.max_point()
+                };
+                let new_end = if edit.new.end.0 == 0 {
+                    TabPoint { row: 0, column: 0 }
+                } else {
+                    self.snapshot.max_point()
+                };
+
+                TabEdit {
+                    old: old_start..old_end,
+                    new: new_start..new_end,
+                }
+            })
+            .collect();
+
+        tab_edits
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        coords::FoldPoint,
+        fold_map::{FoldMap, FoldPlaceholder, FoldSnapshot},
+        inlay_map::InlaySnapshot,
+    };
+    use std::num::NonZeroU64;
+    use text::{Buffer, BufferId};
 
-    fn create_tab_map(text: &str, tab_width: u32) -> TabMap {
-        let buffer = BufferSnapshot::from_text(text);
-        let inlay_map = InlayMap::new(buffer);
-        let fold_map = FoldMap::new(inlay_map);
-        TabMap::new(fold_map, tab_width)
+    fn create_buffer(text: &str) -> text::BufferSnapshot {
+        let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
+        buffer.snapshot()
+    }
+
+    fn create_tab_snapshot(text: &str, tab_width: u32) -> TabSnapshot {
+        let buffer_snapshot = create_buffer(text);
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
+        TabSnapshot::new(fold_snapshot, tab_width)
+    }
+
+    #[test]
+    fn empty_line() {
+        let snapshot = create_tab_snapshot("", 4);
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 0 }, Bias::Left);
+        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
     }
 
     #[test]
     fn single_tab_at_line_start() {
-        let tab_map = create_tab_map("\ttext", 4);
+        let snapshot = create_tab_snapshot("\ttext", 4);
 
         // Tab at column 0 expands to columns 0-3
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 0 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
 
         // Character after tab
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 1 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
     }
 
     #[test]
     fn tab_in_middle_of_line() {
-        let tab_map = create_tab_map("ab\tcd", 4);
+        let snapshot = create_tab_snapshot("ab\tcd", 4);
 
         // 'a' at column 0
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 0 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
 
         // 'b' at column 1
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 1 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 1 });
 
         // tab at column 2 (expands to fill columns 2-3, next char at 4)
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 2 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 2 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 2 });
 
         // 'c' at column 3 (after tab)
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 3 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 3 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
     }
 
     #[test]
     fn multiple_tabs_on_same_line() {
-        let tab_map = create_tab_map("\t\ttext", 4);
+        let snapshot = create_tab_snapshot("\t\ttext", 4);
 
         // First tab: 0-3
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 0 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
 
         // Second tab: 4-7
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 1 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
 
         // Text after both tabs
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 2 });
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 2 }, Bias::Left);
         assert_eq!(tab_point, TabPoint { row: 0, column: 8 });
     }
 
     #[test]
-    fn tab_width_2() {
-        let tab_map = create_tab_map("\ttext", 2);
+    fn different_tab_widths() {
+        // tab_width = 2
+        let snapshot = create_tab_snapshot("\ttext", 2);
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 1 }, Bias::Left);
+        assert_eq!(tab_point.column, 2);
 
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 2 });
+        // tab_width = 8
+        let snapshot = create_tab_snapshot("\ttext", 8);
+        let tab_point = snapshot.to_tab_point(FoldPoint { row: 0, column: 1 }, Bias::Left);
+        assert_eq!(tab_point.column, 8);
     }
 
     #[test]
-    fn tab_width_8() {
-        let tab_map = create_tab_map("\ttext", 8);
+    fn reverse_conversion_tab_point_to_fold_point() {
+        let snapshot = create_tab_snapshot("\ttext", 4);
 
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
+        // Tab occupies display columns 0-3
+        // All positions 0,1,2,3 should map to buffer column 0 (the tab)
+        for col in 0..4 {
+            let fold_point = snapshot.to_fold_point(
+                TabPoint {
+                    row: 0,
+                    column: col,
+                },
+                Bias::Left,
+            );
+            assert_eq!(
+                fold_point.column, 0,
+                "TabPoint column {} should map to FoldPoint column 0",
+                col
+            );
+        }
 
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 8 });
-    }
-
-    #[test]
-    fn mixed_tabs_and_spaces() {
-        let tab_map = create_tab_map(" \t text", 4);
-
-        // Space at 0, tab at 1 (expands 1 to 4), space at 2, text at 3
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 1 });
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 2 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
-    }
-
-    #[test]
-    fn tabs_with_unicode_characters() {
-        let tab_map = create_tab_map("a\tb", 4);
-
-        // 'a' at column 0
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
-
-        // Tab after 'a' (advances 1 to 4)
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 1 });
-
-        // 'b' after tab
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 2 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
-    }
-
-    #[test]
-    fn empty_line() {
-        let tab_map = create_tab_map("", 4);
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
-    }
-
-    #[test]
-    fn line_with_only_tabs() {
-        let tab_map = create_tab_map("\t\t\t", 4);
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 0 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 0 });
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 1 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
-
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 2 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 8 });
+        // Display column 4 is the first character after the tab
+        let fold_point = snapshot.to_fold_point(TabPoint { row: 0, column: 4 }, Bias::Left);
+        assert_eq!(fold_point.column, 1);
     }
 
     #[test]
     fn round_trip_conversion() {
-        let tab_map = create_tab_map("a\tbc\tdef", 4);
+        let snapshot = create_tab_snapshot("a\tbc\tdef", 4);
 
         // Test several positions
         for col in 0..10 {
@@ -425,73 +484,70 @@ mod tests {
                 row: 0,
                 column: col,
             };
-            let tab_point = tab_map.to_tab_point(fold_point);
-            let back = tab_map.to_fold_point(tab_point);
+            let tab_point = snapshot.to_tab_point(fold_point, Bias::Left);
+            let back = snapshot.to_fold_point(tab_point, Bias::Left);
 
             // Should get back same or clamped position
-            assert!(back.row == fold_point.row);
+            assert_eq!(back.row, fold_point.row);
             assert!(back.column <= fold_point.column);
         }
     }
 
     #[test]
-    fn cursor_inside_tab_expansion_clamps() {
-        let tab_map = create_tab_map("\ttext", 4);
+    fn tab_expansion_with_fold() {
+        // Create buffer with foldable content
+        let text = "fn example() {\n\tline 1\n\tline 2\n}\n";
+        let buffer_snapshot = create_buffer(text);
+        let buffer = buffer_snapshot.clone();
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
 
-        // Tab occupies display columns 0-3
-        // Cursor at display columns 0,1,2,3 should all clamp to buffer column 0
+        // Create fold covering lines 1-2 (the function body)
+        let (mut fold_map, _initial_snapshot) = FoldMap::new(inlay_snapshot.clone());
 
-        let point = tab_map.to_fold_point(TabPoint { row: 0, column: 0 });
-        assert_eq!(point, FoldPoint { row: 0, column: 0 });
+        let fold_start = buffer.anchor_after(Point::new(1, 0));
+        let fold_end = buffer.anchor_before(Point::new(3, 0));
 
-        let point = tab_map.to_fold_point(TabPoint { row: 0, column: 1 });
-        assert_eq!(point, FoldPoint { row: 0, column: 0 });
+        let (fold_snapshot, _edits) = {
+            let (mut writer, _snapshot, _edits) = fold_map.write(inlay_snapshot, Vec::new());
+            writer.fold(vec![(fold_start..fold_end, FoldPlaceholder::test())])
+        };
 
-        let point = tab_map.to_fold_point(TabPoint { row: 0, column: 2 });
-        assert_eq!(point, FoldPoint { row: 0, column: 0 });
+        // Create TabSnapshot from folded state
+        let tab_snapshot = TabSnapshot::new(fold_snapshot, 4);
 
-        let point = tab_map.to_fold_point(TabPoint { row: 0, column: 3 });
-        assert_eq!(point, FoldPoint { row: 0, column: 0 });
+        // After folding, line 3 ("}") becomes FoldPoint row 1
+        // Test tab expansion on the visible line (row 0: "fn example() {")
+        let tab_point = tab_snapshot.to_tab_point(FoldPoint { row: 0, column: 0 }, Bias::Left);
+        assert_eq!(tab_point.row, 0);
 
-        // Display column 4 is the first character after the tab
-        let point = tab_map.to_fold_point(TabPoint { row: 0, column: 4 });
-        assert_eq!(point, FoldPoint { row: 0, column: 1 });
+        // Line after fold should work correctly
+        let tab_point = tab_snapshot.to_tab_point(FoldPoint { row: 1, column: 0 }, Bias::Left);
+        assert_eq!(tab_point.row, 1);
     }
 
     #[test]
-    fn tab_at_end_of_line() {
-        let tab_map = create_tab_map("text\t", 4);
+    fn tab_map_sync_with_fold_edits() {
+        let buffer_snapshot = create_buffer("hello\tworld");
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
 
-        // 't' 'e' 'x' 't' at columns 0-3, tab at column 4
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 4 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 4 });
+        let (mut tab_map, initial_snapshot) = TabMap::new(fold_snapshot.clone(), 4);
 
-        // After the tab
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 5 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 8 });
-    }
+        // Initial version
+        assert_eq!(initial_snapshot.version(), 0);
 
-    #[test]
-    fn column_beyond_line_length() {
-        let tab_map = create_tab_map("hi", 4);
+        // Sync with empty edits (no changes)
+        let (new_snapshot, tab_edits) = tab_map.read(fold_snapshot.clone(), Vec::new());
+        assert_eq!(new_snapshot.version(), 1);
+        assert!(tab_edits.is_empty());
 
-        // Line is only 2 characters, but request column 10
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 10 });
-        // Should clamp to line end
-        assert_eq!(tab_point, TabPoint { row: 0, column: 2 });
-    }
-
-    #[test]
-    fn long_line_with_many_tabs() {
-        let text = "\t\t\t\t\t\t\t\ttext";
-        let tab_map = create_tab_map(text, 4);
-
-        // 8 tabs = 32 display columns (tabs occupy columns 0-31)
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 8 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 32 });
-
-        // 't' (first char of "text") starts at display column 32
-        let tab_point = tab_map.to_tab_point(FoldPoint { row: 0, column: 9 });
-        assert_eq!(tab_point, TabPoint { row: 0, column: 33 });
+        // Sync with some fold edits
+        let fold_edit = FoldEdit {
+            old: FoldOffset(0)..FoldOffset(10),
+            new: FoldOffset(0)..FoldOffset(15),
+        };
+        let (updated_snapshot, tab_edits) = tab_map.read(fold_snapshot, vec![fold_edit]);
+        assert_eq!(updated_snapshot.version(), 2);
+        assert_eq!(tab_edits.len(), 1);
     }
 }

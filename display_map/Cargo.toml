@@ -9,9 +9,11 @@ path = "src/stoat_display_map.rs"
 doctest = false
 
 [dependencies]
-# FIXME: text.workspace = true (temporarily disabled due to upstream smallvec issue)
-# Using local stubs until https://github.com/zed-industries/zed text crate is fixed
 sum_tree.workspace = true
+text.workspace = true
+gpui.workspace = true
+collections.workspace = true
+smol.workspace = true
 
 [dev-dependencies]
-# FIXME: gpui = { workspace = true, features = ["test-support"] } (depends on text)
+gpui = { workspace = true, features = ["test-support"] }

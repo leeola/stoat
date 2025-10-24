@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = [
 serde = { version = "1.0", features = ["derive"] }
 compact_str = "0.9"
 smol_str = "0.3"
-smallvec = { version = "1.13", features = [
+smallvec = { version = "1.15", features = [
   "union",
   "const_generics",
   "const_new",
@@ -56,6 +56,8 @@ sum_tree = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf
 fuzzy = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
 clock = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
 rope = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+collections = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+smol = "2.0"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

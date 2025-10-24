@@ -6546,7 +6546,11 @@ dependencies = [
 name = "stoat_display_map"
 version = "0.1.0"
 dependencies = [
+ "collections",
+ "gpui",
+ "smol",
  "sum_tree",
+ "text",
 ]
 
 [[package]]

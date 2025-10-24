@@ -61,18 +61,35 @@
 ///! - See `.claude/DISPLAY_MAP.md` for full implementation plan
 ///! - Based on Zed's editor DisplayMap architecture
 ///! - Uses [`sum_tree::SumTree`] for efficient coordinate queries
-mod buffer_stubs;
+mod block_map;
+mod buffer_utils;
 mod coords;
+mod crease_map;
+mod dimensions;
+mod display_map;
 mod fold_map;
 mod inlay_map;
 mod tab_map;
 mod traits;
+mod transform;
 mod wrap_map;
 
-pub use buffer_stubs::{BufferEdit, BufferSnapshot, Point};
+// Re-export text crate types for convenience
+pub use block_map::{
+    BlockMap, BlockPlacement, BlockProperties, BlockSnapshot, BlockStyle, CustomBlock,
+    CustomBlockId,
+};
 pub use coords::{BlockPoint, DisplayPoint, FoldPoint, InlayPoint, TabPoint, WrapPoint};
-pub use fold_map::{Fold, FoldMap};
-pub use inlay_map::{Inlay, InlayMap};
-pub use tab_map::TabMap;
+pub use crease_map::{Crease, CreaseId, CreaseMap, CreaseSnapshot};
+pub use dimensions::{BlockOffset, BufferOffset, FoldOffset, InlayOffset, TabOffset, WrapOffset};
+pub use display_map::{DisplayMap, DisplaySnapshot};
+pub use fold_map::{Fold, FoldMap, FoldSnapshot};
+pub use inlay_map::{InlayId, InlayMap, InlaySnapshot};
+pub use tab_map::{TabMap, TabSnapshot};
+pub use text::{BufferSnapshot, Point};
 pub use traits::{CoordinateTransform, EditableLayer};
-pub use wrap_map::{Wrap, WrapMap};
+pub use transform::{Isomorphic, TransformSummary};
+pub use wrap_map::{WrapMap, WrapSnapshot};
+
+/// Edit operations on the buffer using Point coordinates
+pub type BufferEdit = text::Edit<Point>;

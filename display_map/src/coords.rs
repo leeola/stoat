@@ -84,6 +84,12 @@ pub struct TabPoint {
     pub column: u32,
 }
 
+impl TabPoint {
+    pub fn new(row: u32, column: u32) -> Self {
+        Self { row, column }
+    }
+}
+
 /// Coordinate after soft-wrapping long lines.
 ///
 /// [`WrapMap`](crate::WrapMap) transforms [`TabPoint`] to [`WrapPoint`] by breaking
@@ -111,6 +117,12 @@ pub struct TabPoint {
 pub struct WrapPoint {
     pub row: u32,
     pub column: u32,
+}
+
+impl WrapPoint {
+    pub fn new(row: u32, column: u32) -> Self {
+        Self { row, column }
+    }
 }
 
 /// Coordinate after inserting block decorations.

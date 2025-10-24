@@ -1,701 +1,1036 @@
-use crate::{
-    inlay_map::InlayMap, BufferEdit, BufferSnapshot, CoordinateTransform, EditableLayer, FoldPoint,
-    InlayPoint, Point,
-};
-use std::ops::Range;
-use sum_tree::{self, SumTree};
-///! FoldMap: Coordinate transformation layer for code folding.
+///! FoldMap v2: Transform-based coordinate transformation for code folding.
 ///!
-///! This layer hides folded regions from display, transforming [`InlayPoint`] (coordinates
-///! after inlays) into [`FoldPoint`] (coordinates after applying folds). When a region is
-///! folded, the hidden rows are collapsed into a single line with a placeholder.
+///! This implementation uses the Transform pattern with dual `SumTree` architecture:
+///! - `transforms: SumTree<Transform>` - For coordinate conversion (InlayPoint -> FoldPoint)
+///! - `folds: SumTree<Fold>` - For fold metadata and rendering
+///!
+///! # Transform Architecture
+///!
+///! Unlike InlayMap which uses an enum, FoldMap uses a struct with optional placeholder:
+///! ```rust
+///! struct Transform {
+///!     summary: TransformSummary,
+///!     placeholder: Option<TransformPlaceholder>,  // None = isomorphic, Some = fold
+///! }
+///! ```
+///!
+///! This design allows efficient merging of adjacent isomorphic regions while
+///! maintaining fold-specific data separately.
 ///!
 ///! # Coordinate Transformation
 ///!
+///! Folds **hide rows** from display:
 ///! ```text
-///! Buffer:                     Display (FoldPoint):
-///! Row 0: fn example() {       Row 0: fn example() { <fold> }
-///! Row 1:     line 1           Row 1: fn another() {
-///! Row 2:     line 2
-///! Row 3:     line 3
-///! Row 4: }
-///! Row 5: fn another() {
+///! InlayPoint (input):    FoldPoint (output):
+///! Row 0: fn example() {  Row 0: fn example() { ... }
+///! Row 1:     line 1      (hidden)
+///! Row 2:     line 2      (hidden)
+///! Row 3: }               (hidden)
+///! Row 4: fn another()    Row 1: fn another()
 ///! ```
 ///!
-///! In this example, rows 1-4 are folded, so:
-///! - Buffer row 0 -> FoldPoint row 0
-///! - Buffer rows 1-4 -> Hidden (folded)
-///! - Buffer row 5 -> FoldPoint row 1
+///! # Dual SumTree Pattern
 ///!
-///! # Usage Context
-///!
-///! FoldMap is the second layer in the DisplayMap pipeline:
-///! - Input: [`InlayPoint`] from [`InlayMap`](crate::InlayMap)
-///! - Output: [`FoldPoint`] consumed by [`TabMap`](crate::TabMap)
-///!
-///! Used by:
-///! - [`TabMap`](crate::TabMap): Applies tab expansion after folding
-///! - Editor view: For rendering folded code regions
-///! - Navigation: For skipping over folded regions when moving cursor
-///!
-///! # Implementation Notes
-///!
-///! This simplified implementation uses a Vec instead of SumTree for fold storage.
-///! A production implementation would use SumTree for O(log n) queries.
+///! - **transforms**: Efficient coordinate conversion via cursor seeking
+///! - **folds**: Query folds by Anchor range, ID lookup via TreeMap
 ///!
 ///! # Related
 ///!
-///! - [`CoordinateTransform`]: Trait for bidirectional coordinate conversion
-///! - [`EditableLayer`]: Trait for handling buffer edits
-///! - [`FoldPoint`]: Output coordinate type
+///! - [`crate::transform`]: Base Transform pattern infrastructure
+///! - [`FoldPoint`](crate::FoldPoint): Output coordinate type
+///! - [`text::Anchor`]: Stable positioning through edits
+use crate::{
+    coords::{FoldPoint, InlayPoint},
+    dimensions::{FoldOffset, InlayOffset},
+    inlay_map::InlaySnapshot,
+};
+use std::{
+    any::TypeId,
+    cmp,
+    ops::{Deref, DerefMut, Range},
+    sync::Arc,
+};
+use sum_tree::{Bias, Dimensions, Item, SumTree, TreeMap};
+use text::{Anchor, Edit, Point, TextSummary, ToOffset};
 
-/// Represents a single folded region in the buffer.
+/// Unique identifier for a fold.
 ///
-/// A fold hides a contiguous range of rows, replacing them with a placeholder
-/// displayed at the fold's start position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fold {
-    /// The buffer range being folded (inclusive).
-    ///
-    /// For example, folding rows 10-20 would have:
-    /// - `range.start = Point { row: 10, column: 0 }`
-    /// - `range.end = Point { row: 20, column: <end of line 20> }`
-    pub range: Range<Point>,
+/// FoldIds are monotonically increasing and assigned when folds are created.
+/// Used for O(1) lookup in the metadata TreeMap.
+#[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq, Hash)]
+pub struct FoldId(pub usize);
 
-    /// Text displayed as placeholder (e.g., three dots, curly braces, etc.).
-    pub placeholder: String,
+/// Anchor-based range for a fold.
+///
+/// Using Anchors instead of Points ensures folds remain stable through buffer edits.
+/// When text is inserted before/inside a fold, the Anchors automatically adjust.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoldRange(pub Range<Anchor>);
+
+impl Deref for FoldRange {
+    type Target = Range<Anchor>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for FoldRange {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Default for FoldRange {
+    fn default() -> Self {
+        // FIXME: Default range uses MIN/MAX anchors but can't construct without buffer
+        // This will be unused in practice as Folds are created from actual ranges
+        Self(Anchor::MIN..Anchor::MAX)
+    }
+}
+
+/// Placeholder configuration for rendering a fold.
+///
+/// FoldPlaceholder defines how a folded region appears in the editor,
+/// including custom rendering callbacks and merge behavior.
+#[derive(Clone)]
+pub struct FoldPlaceholder {
+    /// Rendering callback producing the visual element for this fold.
+    ///
+    /// Takes the fold ID, Anchor range, and app context to generate the displayed element.
+    /// For example, this might render "..." for code folds or "[+]" for collapsed sections.
+    ///
+    /// NOTE: Using a simple function signature for now. Full GPUI integration requires
+    /// `AnyElement` and `App` types which we'll integrate later.
+    pub render: Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>) -> String>,
+
+    /// If true, constrain the rendered element to a fixed width (typically ellipsis width).
+    pub constrain_width: bool,
+
+    /// If true, adjacent folds of the same type are merged into a single fold.
+    ///
+    /// Useful for combining multiple consecutive folded imports or similar constructs.
+    pub merge_adjacent: bool,
+
+    /// Optional type tag for categorizing folds.
+    ///
+    /// Allows selective removal of folds by category (e.g., remove all "imports" folds
+    /// but keep "function body" folds).
+    pub type_tag: Option<TypeId>,
+}
+
+impl Default for FoldPlaceholder {
+    fn default() -> Self {
+        Self {
+            render: Arc::new(|_, _| "...".to_string()),
+            constrain_width: true,
+            merge_adjacent: true,
+            type_tag: None,
+        }
+    }
+}
+
+impl FoldPlaceholder {
+    /// Create a test placeholder with default empty rendering.
+    #[cfg(test)]
+    pub fn test() -> Self {
+        Self {
+            render: Arc::new(|_, _| "...".to_string()),
+            constrain_width: true,
+            merge_adjacent: true,
+            type_tag: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for FoldPlaceholder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FoldPlaceholder")
+            .field("constrain_width", &self.constrain_width)
+            .field("merge_adjacent", &self.merge_adjacent)
+            .field("type_tag", &self.type_tag)
+            .finish()
+    }
+}
+
+impl Eq for FoldPlaceholder {}
+
+impl PartialEq for FoldPlaceholder {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.render, &other.render)
+            && self.constrain_width == other.constrain_width
+            && self.merge_adjacent == other.merge_adjacent
+            && self.type_tag == other.type_tag
+    }
+}
+
+/// A fold region in the buffer.
+///
+/// Folds hide a contiguous range of text, replacing it with a placeholder element.
+/// The range is specified using stable Anchors that track through buffer edits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Fold {
+    /// Unique identifier for this fold.
+    pub id: FoldId,
+
+    /// Anchor-based range being folded.
+    ///
+    /// The range is inclusive of start and exclusive of end, following Rust conventions.
+    pub range: FoldRange,
+
+    /// Placeholder configuration for rendering this fold.
+    pub placeholder: FoldPlaceholder,
 }
 
 impl Fold {
-    /// Create a new fold with default placeholder (three dots).
-    pub fn new(range: Range<Point>) -> Self {
+    /// Create a new fold with the given ID, range, and placeholder.
+    pub fn new(id: FoldId, range: Range<Anchor>, placeholder: FoldPlaceholder) -> Self {
         Self {
-            range,
-            placeholder: "...".to_string(),
+            id,
+            range: FoldRange(range),
+            placeholder,
         }
-    }
-
-    /// Create a fold with custom placeholder text.
-    pub fn with_placeholder(range: Range<Point>, placeholder: String) -> Self {
-        Self { range, placeholder }
-    }
-
-    /// Number of buffer rows hidden by this fold.
-    ///
-    /// A fold from row 10 to row 20 hides 10 rows (rows 11-20).
-    /// The start row (10) remains visible with the placeholder.
-    pub fn hidden_row_count(&self) -> u32 {
-        if self.range.end.row > self.range.start.row {
-            self.range.end.row - self.range.start.row
-        } else {
-            0
-        }
-    }
-
-    /// Check if a buffer point is inside this fold.
-    ///
-    /// Note: The fold start point is NOT considered inside (it shows the placeholder).
-    /// Only points strictly after the start and before the end are inside.
-    pub fn contains(&self, point: Point) -> bool {
-        point > self.range.start && point < self.range.end
     }
 }
 
-/// Summary for [`Fold`] items in the SumTree.
+/// Summary for a fold subtree.
 ///
-/// Aggregates metadata about folds in a subtree for efficient queries.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Tracks the range spanned by folds in a SumTree node for efficient querying.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FoldSummary {
-    /// Total buffer rows hidden by all folds in this subtree.
-    pub hidden_rows: u32,
-    /// Total buffer rows spanned by folds in this subtree (including fold starts).
-    pub buffer_rows: u32,
+    /// Start anchor of the first fold in this subtree.
+    pub start: Anchor,
+
+    /// End anchor of the last fold in this subtree.
+    pub end: Anchor,
+
+    /// Minimum start anchor across all folds in subtree (for range queries).
+    pub min_start: Anchor,
+
+    /// Maximum end anchor across all folds in subtree (for range queries).
+    pub max_end: Anchor,
+
     /// Number of folds in this subtree.
     pub count: usize,
 }
 
-impl sum_tree::ContextLessSummary for FoldSummary {
-    fn zero() -> Self {
-        Self {
-            hidden_rows: 0,
-            buffer_rows: 0,
-            count: 0,
-        }
+impl sum_tree::Summary for FoldSummary {
+    type Context<'a> = &'a text::BufferSnapshot;
+
+    fn zero(_cx: &text::BufferSnapshot) -> Self {
+        Self::default()
     }
 
-    fn add_summary(&mut self, other: &Self) {
-        self.hidden_rows += other.hidden_rows;
-        self.buffer_rows += other.buffer_rows;
-        self.count += other.count;
+    fn add_summary(&mut self, other: &Self, buffer: &text::BufferSnapshot) {
+        if other.count > 0 {
+            if self.count == 0 {
+                *self = other.clone();
+            } else {
+                self.end = other.end;
+                self.min_start = self.min_start.min(&other.min_start, buffer);
+                self.max_end = self.max_end.max(&other.max_end, buffer);
+                self.count += other.count;
+            }
+        }
     }
 }
 
-impl sum_tree::Item for Fold {
+impl Item for Fold {
     type Summary = FoldSummary;
 
-    fn summary(&self, _: ()) -> Self::Summary {
+    fn summary(&self, _cx: &text::BufferSnapshot) -> Self::Summary {
         FoldSummary {
-            hidden_rows: self.hidden_row_count(),
-            buffer_rows: self.range.end.row - self.range.start.row + 1,
+            start: self.range.start,
+            end: self.range.end,
+            min_start: self.range.start,
+            max_end: self.range.end,
             count: 1,
         }
     }
 }
 
-/// Transformation layer for code folding.
-///
-/// Maintains a collection of [`Fold`]s and transforms buffer coordinates to
-/// fold coordinates by accounting for hidden rows.
-///
-/// # Example
-///
-/// ```ignore
-/// use stoat_display_map::{FoldMap, Point, FoldPoint, BufferSnapshot};
-///
-/// let buffer = BufferSnapshot::from_text("line 0\nline 1\nline 2\nline 3\n");
-/// let mut fold_map = FoldMap::new(buffer);
-///
-/// // Fold rows 1-2
-/// fold_map.fold(Point { row: 1, column: 0 }..Point { row: 2, column: 6 });
-///
-/// // Row 3 in buffer appears at row 2 in fold space (1 row hidden)
-/// let fold_point = fold_map.to_fold_point(Point { row: 3, column: 0 });
-/// assert_eq!(fold_point.row, 2);
-/// ```
-pub struct FoldMap {
-    /// InlayMap for converting between InlayPoint and buffer Point.
-    inlay_map: InlayMap,
+impl<'a> sum_tree::Dimension<'a, FoldSummary> for FoldRange {
+    fn zero(_cx: &text::BufferSnapshot) -> Self {
+        Default::default()
+    }
 
-    /// Ordered collection of folds.
-    ///
-    /// Uses SumTree for O(log n) coordinate queries.
-    folds: SumTree<Fold>,
-
-    /// Version counter for change tracking.
-    version: usize,
+    fn add_summary(&mut self, summary: &'a FoldSummary, _: &text::BufferSnapshot) {
+        self.0.start = summary.start;
+        self.0.end = summary.end;
+    }
 }
 
-impl FoldMap {
-    /// Create a new FoldMap with no folds.
-    pub fn new(inlay_map: InlayMap) -> Self {
+/// Transform representing either an isomorphic region or a fold.
+///
+/// This is a **struct** (not enum) where the presence of `placeholder` determines type:
+/// - `placeholder == None`: Isomorphic transform (1:1 mapping)
+/// - `placeholder == Some(...)`: Fold transform (hides rows)
+#[derive(Clone, Debug)]
+struct Transform {
+    /// Aggregated summary of input/output coordinates for this transform.
+    summary: TransformSummary,
+
+    /// If present, this transform represents a fold with the given placeholder.
+    /// If None, this is an isomorphic transform.
+    placeholder: Option<TransformPlaceholder>,
+}
+
+impl Transform {
+    /// Check if this transform represents a fold.
+    fn is_fold(&self) -> bool {
+        self.placeholder.is_some()
+    }
+
+    /// Create an isomorphic transform with 1:1 mapping.
+    fn isomorphic(summary: TextSummary) -> Self {
         Self {
-            inlay_map,
-            folds: SumTree::new(()),
+            summary: TransformSummary {
+                input: summary.clone(),
+                output: summary,
+            },
+            placeholder: None,
+        }
+    }
+}
+
+/// Placeholder data for a fold transform.
+///
+/// Stores the text and character boundaries for the fold's display representation.
+#[derive(Clone, Debug)]
+struct TransformPlaceholder {
+    /// Static text displayed for this fold (e.g., "...", "{...}", etc.).
+    text: &'static str,
+
+    /// Bitmap representing valid character boundaries within the placeholder text.
+    ///
+    /// Used for cursor positioning within the fold placeholder. A bit is set if
+    /// that byte offset is a valid char boundary.
+    chars: u128,
+}
+
+/// Summary aggregating coordinate information for a Transform subtree.
+///
+/// Tracks both input (InlayPoint) and output (FoldPoint) coordinate spaces.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct TransformSummary {
+    /// Input summary (InlayPoint space before folding).
+    input: TextSummary,
+
+    /// Output summary (FoldPoint space after folding).
+    output: TextSummary,
+}
+
+impl sum_tree::ContextLessSummary for TransformSummary {
+    fn zero() -> Self {
+        Self::default()
+    }
+
+    fn add_summary(&mut self, other: &Self) {
+        self.input = self.input.clone() + other.input.clone();
+        self.output = self.output.clone() + other.output.clone();
+    }
+}
+
+impl Item for Transform {
+    type Summary = TransformSummary;
+
+    fn summary(&self, _cx: ()) -> Self::Summary {
+        self.summary.clone()
+    }
+}
+
+/// Metadata for a fold stored separately from the transform tree.
+///
+/// Enables O(1) lookup of fold information by FoldId.
+#[derive(Clone, Debug)]
+struct FoldMetadata {
+    /// Anchor range of the fold.
+    range: FoldRange,
+}
+
+/// Immutable snapshot of the fold state.
+///
+/// Uses dual SumTree pattern:
+/// - `transforms` for efficient coordinate conversion
+/// - `folds` for querying by Anchor range
+#[derive(Clone)]
+pub struct FoldSnapshot {
+    /// Transform tree for coordinate conversion (InlayPoint -> FoldPoint).
+    transforms: SumTree<Transform>,
+
+    /// Fold tree for querying folds by range.
+    ///
+    /// NOTE: Item impl requires buffer context - will implement once we have
+    /// BufferSnapshot integration.
+    folds: SumTree<Fold>,
+
+    /// O(1) lookup of fold metadata by ID.
+    fold_metadata_by_id: TreeMap<FoldId, FoldMetadata>,
+
+    /// Underlying inlay snapshot providing input coordinates.
+    pub inlay_snapshot: InlaySnapshot,
+
+    /// Version counter for change tracking.
+    pub version: usize,
+}
+
+impl FoldSnapshot {
+    /// Create a new empty fold snapshot with no folds.
+    pub fn new(inlay_snapshot: InlaySnapshot) -> Self {
+        // Create initial isomorphic transform spanning entire inlay space
+        let summary = inlay_snapshot.buffer().text_summary();
+        let transforms = SumTree::from_iter([Transform::isomorphic(summary)], ());
+
+        // Create empty folds tree with buffer context
+        let buffer = inlay_snapshot.buffer();
+        let folds = SumTree::new(buffer);
+
+        Self {
+            transforms,
+            folds,
+            fold_metadata_by_id: TreeMap::default(),
+            inlay_snapshot,
             version: 0,
         }
     }
 
+    /// Get the underlying buffer snapshot.
+    pub fn buffer(&self) -> &text::BufferSnapshot {
+        self.inlay_snapshot.buffer()
+    }
+
+    /// Get the version number of this snapshot.
+    pub fn version(&self) -> usize {
+        self.version
+    }
+
     /// Convert InlayPoint to FoldPoint.
     ///
-    /// Accounts for all folds before the given point by subtracting their hidden rows.
+    /// When the point lands inside a fold, Bias determines the result:
+    /// - `Bias::Left`: Returns the start of the fold (before the fold)
+    /// - `Bias::Right`: Returns the end of the fold (after the fold)
     ///
-    /// # Clamping
-    ///
-    /// If the point is inside a folded region, it clamps to the fold's start position.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // With fold on rows 10-20 (10 hidden rows):
-    /// InlayPoint { row: 25, column: 5 } -> FoldPoint { row: 15, column: 5 }
-    /// //                                              (25 - 10 hidden = 15)
-    /// ```
-    pub fn to_fold_point(&self, inlay_point: InlayPoint) -> FoldPoint {
-        // Convert InlayPoint to buffer Point to check fold positions
-        let point = self.inlay_map.to_point(inlay_point);
+    /// For points not inside folds, coordinates map 1:1 (identity transform).
+    pub fn to_fold_point(&self, point: InlayPoint, bias: Bias) -> FoldPoint {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InlayPoint, FoldPoint>>(());
+        cursor.seek(&point, Bias::Right);
 
-        let mut fold_row = point.row;
-        let mut fold_column = point.column;
-
-        // Iterate through folds using cursor
-        let mut cursor = self.folds.cursor::<()>(());
-        cursor.next();
-
-        // Check if point is inside a fold - if so, clamp to fold start
-        while let Some(fold) = cursor.item() {
-            if fold.contains(point) {
-                // Point is inside this fold - clamp to fold start
-                fold_row = fold.range.start.row;
-                fold_column = fold.range.start.column;
-                break;
-            }
-            cursor.next();
-        }
-
-        // Subtract hidden rows from all folds before this point
-        let mut hidden_rows = 0;
-        let mut cursor = self.folds.cursor::<()>(());
-        cursor.next();
-
-        while let Some(fold) = cursor.item() {
-            if fold.range.start.row < fold_row {
-                hidden_rows += fold.hidden_row_count();
+        if cursor.item().is_some_and(|t| t.is_fold()) {
+            // Point landed inside a fold
+            if bias == Bias::Left || point == cursor.start().0 {
+                cursor.start().1
             } else {
-                break;
+                cursor.end().1
             }
-            cursor.next();
-        }
+        } else {
+            // Point is in isomorphic region - compute overshoot from cursor start
+            // Use Point arithmetic to handle row/column correctly
+            let start_inlay = Point::new(cursor.start().0.row, cursor.start().0.column);
+            let target = Point::new(point.row, point.column);
+            let overshoot = target - start_inlay;
 
+            let start_fold = Point::new(cursor.start().1.row, cursor.start().1.column);
+            let end_fold = Point::new(cursor.end().1.row, cursor.end().1.column);
+            let result = start_fold + overshoot;
+
+            // Clamp to transform end
+            let clamped = if result > end_fold { end_fold } else { result };
+
+            FoldPoint {
+                row: clamped.row,
+                column: clamped.column,
+            }
+        }
+    }
+
+    /// Convert FoldPoint to InlayPoint.
+    ///
+    /// This is the inverse of `to_fold_point`. Since folds hide regions,
+    /// a FoldPoint maps to the start of the folded range in InlayPoint space.
+    pub fn to_inlay_point(&self, point: FoldPoint) -> InlayPoint {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<FoldPoint, InlayPoint>>(());
+        cursor.seek(&point, Bias::Right);
+
+        // Use Point arithmetic to handle row/column correctly
+        let start_fold = Point::new(cursor.start().0.row, cursor.start().0.column);
+        let target = Point::new(point.row, point.column);
+        let overshoot = target - start_fold;
+
+        let start_inlay = Point::new(cursor.start().1.row, cursor.start().1.column);
+        let result = start_inlay + overshoot;
+
+        InlayPoint {
+            row: result.row,
+            column: result.column,
+        }
+    }
+
+    /// Get the total length in FoldOffset (byte offset after folding).
+    pub fn len(&self) -> FoldOffset {
+        FoldOffset(self.transforms.summary().output.len)
+    }
+
+    /// Get the maximum FoldPoint in the snapshot.
+    pub fn max_point(&self) -> FoldPoint {
+        let lines = self.transforms.summary().output.lines;
         FoldPoint {
-            row: fold_row.saturating_sub(hidden_rows),
-            column: fold_column,
+            row: lines.row,
+            column: lines.column,
         }
     }
+}
 
-    /// Convert FoldPoint back to InlayPoint.
-    ///
-    /// Adds back the hidden rows from folds to map to the correct inlay position.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // With fold on rows 10-20 (10 hidden rows):
-    /// FoldPoint { row: 15, column: 5 } -> InlayPoint { row: 25, column: 5 }
-    /// //                                              (15 + 10 hidden = 25)
-    /// ```
-    pub fn to_inlay_point(&self, fold_point: FoldPoint) -> InlayPoint {
-        let mut inlay_row = fold_point.row;
+/// Edit in InlayOffset space (input to FoldMap).
+pub type InlayEdit = Edit<InlayOffset>;
 
-        // Add back hidden rows from folds that are entirely before this fold point
-        let mut added_rows = 0;
-        let mut cursor = self.folds.cursor::<()>(());
-        cursor.next();
+/// Edit in FoldOffset space (output from FoldMap).
+pub type FoldEdit = Edit<FoldOffset>;
 
-        while let Some(fold) = cursor.item() {
-            // Adjust fold start by previously added rows
-            let adjusted_fold_start = fold.range.start.row - added_rows;
+/// Mutable fold map managing fold state.
+pub struct FoldMap {
+    /// Current snapshot.
+    snapshot: FoldSnapshot,
 
-            if adjusted_fold_start < inlay_row {
-                let hidden = fold.hidden_row_count();
-                inlay_row += hidden;
-                added_rows += hidden;
-            } else {
-                break;
-            }
-            cursor.next();
-        }
+    /// Next fold ID to assign.
+    next_fold_id: FoldId,
+}
 
-        // Convert buffer Point to InlayPoint
-        let buffer_point = Point {
-            row: inlay_row,
-            column: fold_point.column,
+impl FoldMap {
+    /// Create a new FoldMap from an inlay snapshot.
+    pub fn new(inlay_snapshot: InlaySnapshot) -> (Self, FoldSnapshot) {
+        let snapshot = FoldSnapshot::new(inlay_snapshot);
+        let map = Self {
+            snapshot: snapshot.clone(),
+            next_fold_id: FoldId(0),
         };
-        self.inlay_map.to_inlay_point(buffer_point)
+        (map, snapshot)
     }
 
-    /// Create a new fold for the given buffer range.
-    ///
-    /// # Arguments
-    ///
-    /// - `range`: Buffer range to fold (must be valid and non-empty)
-    ///
-    /// # Returns
-    ///
-    /// The index of the newly created fold, or `None` if the fold is invalid.
-    ///
-    /// # Invariants
-    ///
-    /// - Folds are kept sorted by start position
-    /// - Overlapping folds are not allowed (later fold operations may auto-unfold)
-    pub fn fold(&mut self, range: Range<Point>) -> Option<usize> {
-        if range.start >= range.end {
-            return None; // Invalid range
-        }
-
-        let fold = Fold::new(range);
-
-        // Extract to Vec, insert, rebuild
-        let mut items: Vec<Fold> = self.folds.iter().cloned().collect();
-
-        // Find insertion position to keep folds sorted
-        let insert_pos = items
-            .binary_search_by(|f| f.range.start.cmp(&fold.range.start))
-            .unwrap_or_else(|pos| pos);
-
-        items.insert(insert_pos, fold);
-
-        // Rebuild SumTree
-        self.folds = SumTree::from_iter(items, ());
-        self.version += 1;
-
-        Some(insert_pos)
+    /// Get read-only access and sync with new inlay snapshot.
+    pub fn read(
+        &mut self,
+        inlay_snapshot: InlaySnapshot,
+        edits: Vec<InlayEdit>,
+    ) -> (FoldSnapshot, Vec<FoldEdit>) {
+        let edits = self.sync(inlay_snapshot, edits);
+        (self.snapshot.clone(), edits)
     }
 
-    /// Remove a fold at the given index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the index is out of bounds.
-    pub fn unfold(&mut self, index: usize) {
-        // Extract to Vec, remove, rebuild
-        let mut items: Vec<Fold> = self.folds.iter().cloned().collect();
-        items.remove(index);
-
-        self.folds = SumTree::from_iter(items, ());
-        self.version += 1;
+    /// Get mutable access via FoldMapWriter.
+    pub fn write(
+        &mut self,
+        inlay_snapshot: InlaySnapshot,
+        edits: Vec<InlayEdit>,
+    ) -> (FoldMapWriter<'_>, FoldSnapshot, Vec<FoldEdit>) {
+        let (snapshot, edits) = self.read(inlay_snapshot, edits);
+        (FoldMapWriter(self), snapshot, edits)
     }
 
-    /// Remove all folds overlapping with the given range.
+    /// Rebuild transform tree after inlay edits.
     ///
-    /// This is typically called when an edit spans a fold boundary.
-    pub fn unfold_range(&mut self, range: &Range<Point>) {
-        // Extract to Vec, filter, rebuild
-        let items: Vec<Fold> = self
-            .folds
-            .iter()
-            .filter(|fold| {
-                // Keep folds that don't overlap with the range
-                !(fold.range.start < range.end && fold.range.end > range.start)
-            })
-            .cloned()
-            .collect();
+    /// This rebuilds the entire transform tree from scratch based on current folds.
+    /// Simplified implementation that assumes InlayOffset == BufferOffset (no inlays).
+    fn sync(
+        &mut self,
+        inlay_snapshot: InlaySnapshot,
+        inlay_edits: Vec<InlayEdit>,
+    ) -> Vec<FoldEdit> {
+        // Update inlay snapshot first
+        self.snapshot.inlay_snapshot = inlay_snapshot;
 
-        self.folds = SumTree::from_iter(items, ());
-        self.version += 1;
-    }
-
-    /// Check if a point is inside any fold.
-    pub fn is_folded(&self, point: Point) -> bool {
-        let mut cursor = self.folds.cursor::<()>(());
-        cursor.next();
+        // Rebuild entire transform tree from current folds
+        let buffer = self.snapshot.buffer();
+        let mut new_transforms = SumTree::default();
+        let mut cursor = self.snapshot.folds.cursor::<()>(buffer);
+        cursor.next(); // Position cursor at first item
+        let mut position = InlayOffset(0);
 
         while let Some(fold) = cursor.item() {
-            if fold.contains(point) {
-                return true;
+            // Get fold range as offsets (simplified: assuming InlayOffset == BufferOffset)
+            let fold_start = InlayOffset(fold.range.start.to_offset(buffer));
+            let fold_end = InlayOffset(fold.range.end.to_offset(buffer));
+
+            // Add isomorphic region before this fold
+            if fold_start > position {
+                let summary =
+                    buffer.text_summary_for_range::<TextSummary, usize>(position.0..fold_start.0);
+                push_isomorphic(&mut new_transforms, summary);
             }
+
+            // Add fold transform (hides the folded text)
+            if fold_end > fold_start {
+                let input_summary =
+                    buffer.text_summary_for_range::<TextSummary, usize>(fold_start.0..fold_end.0);
+                new_transforms.push(
+                    Transform {
+                        summary: TransformSummary {
+                            input: input_summary,
+                            output: TextSummary::default(), // Folds have zero output
+                        },
+                        placeholder: Some(TransformPlaceholder {
+                            text: "...",
+                            chars: 1,
+                        }),
+                    },
+                    (),
+                );
+            }
+
+            position = fold_end;
             cursor.next();
         }
-        false
-    }
 
-    /// Get all current folds (for testing/debugging).
-    pub fn folds(&self) -> Vec<Fold> {
-        self.folds.iter().cloned().collect()
-    }
+        // Add final isomorphic region
+        let total_len = buffer.len();
+        if position.0 < total_len {
+            let summary =
+                buffer.text_summary_for_range::<TextSummary, usize>(position.0..total_len);
+            push_isomorphic(&mut new_transforms, summary);
+        }
 
-    /// Get the buffer snapshot.
-    pub fn buffer(&self) -> &BufferSnapshot {
-        self.inlay_map.buffer()
+        // Ensure at least one transform
+        if new_transforms.is_empty() {
+            push_isomorphic(&mut new_transforms, buffer.text_summary());
+        }
+
+        // Generate fold edits (simplified: just mark entire buffer as changed if we had edits)
+        let fold_edits = if !inlay_edits.is_empty() {
+            vec![FoldEdit {
+                old: FoldOffset(0)..FoldOffset(self.snapshot.transforms.summary().output.len),
+                new: FoldOffset(0)..FoldOffset(new_transforms.summary().output.len),
+            }]
+        } else {
+            Vec::new()
+        };
+
+        // Update snapshot
+        self.snapshot.transforms = new_transforms;
+        self.snapshot.version += 1;
+
+        fold_edits
     }
 }
 
-impl CoordinateTransform<InlayPoint, FoldPoint> for FoldMap {
-    fn to_coords(&self, inlay_point: InlayPoint) -> FoldPoint {
-        self.to_fold_point(inlay_point)
+/// Mutable wrapper for adding/removing folds.
+pub struct FoldMapWriter<'a>(&'a mut FoldMap);
+
+impl FoldMapWriter<'_> {
+    /// Add folds for the given ranges with placeholders.
+    ///
+    /// Returns the updated snapshot and fold edits describing the changes.
+    pub fn fold(
+        &mut self,
+        ranges: impl IntoIterator<Item = (Range<Anchor>, FoldPlaceholder)>,
+    ) -> (FoldSnapshot, Vec<FoldEdit>) {
+        let mut folds = Vec::new();
+
+        for (range, placeholder) in ranges {
+            // Skip empty ranges
+            {
+                let buffer = self.0.snapshot.buffer();
+                if range.start.cmp(&range.end, buffer) == cmp::Ordering::Equal {
+                    continue;
+                }
+            }
+
+            // Create fold with new ID
+            let id = FoldId(self.0.next_fold_id.0);
+            self.0.next_fold_id.0 += 1;
+
+            folds.push(Fold::new(id, range, placeholder));
+        }
+
+        // Sort folds by range
+        {
+            let buffer = self.0.snapshot.buffer();
+            folds.sort_unstable_by(|a, b| {
+                let cmp_start = a.range.start.cmp(&b.range.start, buffer);
+                if cmp_start == cmp::Ordering::Equal {
+                    a.range.end.cmp(&b.range.end, buffer)
+                } else {
+                    cmp_start
+                }
+            });
+        }
+
+        // Insert metadata first
+        for fold in &folds {
+            self.0.snapshot.fold_metadata_by_id.insert(
+                fold.id,
+                FoldMetadata {
+                    range: fold.range.clone(),
+                },
+            );
+        }
+
+        // Insert folds into tree by merging with existing folds
+        self.0.snapshot.folds = {
+            let buffer = self.0.snapshot.buffer();
+            let mut new_tree = SumTree::new(buffer);
+            let mut old_cursor = self.0.snapshot.folds.cursor::<()>(buffer);
+            old_cursor.next(); // Position cursor at first item
+            let mut folds_iter = folds.into_iter().peekable();
+
+            while let Some(fold) = folds_iter.peek() {
+                // Append any old folds that come before this new fold
+                while let Some(old_fold) = old_cursor.item() {
+                    if old_fold.range.start.cmp(&fold.range.start, buffer).is_lt() {
+                        new_tree.push(old_fold.clone(), buffer);
+                        old_cursor.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Insert the new fold
+                new_tree.push(folds_iter.next().unwrap(), buffer);
+            }
+
+            // Append remaining old folds
+            while let Some(old_fold) = old_cursor.item() {
+                new_tree.push(old_fold.clone(), buffer);
+                old_cursor.next();
+            }
+
+            new_tree
+        };
+
+        // Rebuild transforms via sync()
+        let edits = self
+            .0
+            .sync(self.0.snapshot.inlay_snapshot.clone(), Vec::new());
+        (self.0.snapshot.clone(), edits)
     }
 
-    fn from_coords(&self, fold_point: FoldPoint) -> InlayPoint {
-        self.to_inlay_point(fold_point)
+    /// Remove folds that intersect the given ranges.
+    pub fn unfold_intersecting(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<Anchor>>,
+    ) -> (FoldSnapshot, Vec<FoldEdit>) {
+        let mut fold_ids_to_remove = Vec::new();
+
+        // Find folds to remove by iterating through all folds
+        {
+            let buffer = self.0.snapshot.buffer();
+            let ranges_vec: Vec<_> = ranges.into_iter().collect();
+
+            let mut cursor = self.0.snapshot.folds.cursor::<()>(buffer);
+            while let Some(fold) = cursor.item() {
+                // Check if fold intersects any of the ranges
+                for range in &ranges_vec {
+                    let fold_before_range = fold.range.end.cmp(&range.start, buffer).is_le();
+                    let fold_after_range = fold.range.start.cmp(&range.end, buffer).is_ge();
+
+                    if !fold_before_range && !fold_after_range {
+                        // Fold intersects this range
+                        fold_ids_to_remove.push(fold.id);
+                        break;
+                    }
+                }
+                cursor.next();
+            }
+        }
+
+        // Remove duplicates
+        fold_ids_to_remove.sort_unstable();
+        fold_ids_to_remove.dedup();
+
+        // Remove metadata
+        for fold_id in &fold_ids_to_remove {
+            self.0.snapshot.fold_metadata_by_id.remove(fold_id);
+        }
+
+        // Rebuild folds tree without removed folds
+        self.0.snapshot.folds = {
+            let buffer = self.0.snapshot.buffer();
+            let mut new_tree = SumTree::new(buffer);
+            let mut cursor = self.0.snapshot.folds.cursor::<()>(buffer);
+
+            while let Some(fold) = cursor.item() {
+                if !fold_ids_to_remove.contains(&fold.id) {
+                    new_tree.push(fold.clone(), buffer);
+                }
+                cursor.next();
+            }
+            new_tree
+        };
+
+        // Rebuild transforms via sync()
+        let edits = self
+            .0
+            .sync(self.0.snapshot.inlay_snapshot.clone(), Vec::new());
+        (self.0.snapshot.clone(), edits)
     }
 }
 
-impl EditableLayer for FoldMap {
-    fn apply_edit(&mut self, edit: &BufferEdit) {
-        // Forward edit to InlayMap
-        self.inlay_map.apply_edit(edit);
+// Helper functions for sync()
 
-        // Auto-unfold any folds that are affected by the edit
-        // This is a simple strategy: unfold anything overlapping the edit
-        self.unfold_range(&edit.old_range);
+/// Push an isomorphic transform, merging with the previous one if possible.
+fn push_isomorphic(transforms: &mut SumTree<Transform>, summary: TextSummary) {
+    let mut did_merge = false;
+    transforms.update_last(
+        |last| {
+            if !last.is_fold() {
+                last.summary.input = last.summary.input.clone() + summary.clone();
+                last.summary.output = last.summary.output.clone() + summary.clone();
+                did_merge = true;
+            }
+        },
+        (),
+    );
+    if !did_merge {
+        transforms.push(Transform::isomorphic(summary), ());
+    }
+}
 
-        // FIXME: In a full implementation, we would:
-        // 1. Use Anchors instead of Points for fold positions
-        // 2. Automatically adjust fold positions based on the edit
-        // 3. Only unfold if the edit truly disrupts the fold structure
-
-        self.version += 1;
+/// Consolidate overlapping inlay edits by merging adjacent/overlapping ranges.
+fn consolidate_inlay_edits(mut edits: Vec<InlayEdit>) -> Vec<InlayEdit> {
+    if edits.is_empty() {
+        return edits;
     }
 
-    fn version(&self) -> usize {
-        self.version
+    edits.sort_unstable_by(|a, b| {
+        a.old
+            .start
+            .cmp(&b.old.start)
+            .then_with(|| b.old.end.cmp(&a.old.end))
+    });
+
+    let mut consolidated = Vec::new();
+    let mut current = edits[0].clone();
+
+    for edit in edits.into_iter().skip(1) {
+        if current.old.end >= edit.old.start {
+            // Overlapping or adjacent - merge them
+            current.old.end = current.old.end.max(edit.old.end);
+            current.new.start = current.new.start.min(edit.new.start);
+            current.new.end = current.new.end.max(edit.new.end);
+        } else {
+            // Non-overlapping - push current and start new one
+            consolidated.push(current);
+            current = edit;
+        }
+    }
+    consolidated.push(current);
+    consolidated
+}
+
+/// Consolidate overlapping fold edits by merging adjacent/overlapping ranges.
+fn consolidate_fold_edits(mut edits: Vec<FoldEdit>) -> Vec<FoldEdit> {
+    if edits.is_empty() {
+        return edits;
+    }
+
+    edits.sort_unstable_by(|a, b| {
+        a.old
+            .start
+            .cmp(&b.old.start)
+            .then_with(|| b.old.end.cmp(&a.old.end))
+    });
+
+    let mut consolidated = Vec::new();
+    let mut current = edits[0].clone();
+
+    for edit in edits.into_iter().skip(1) {
+        if current.old.end >= edit.old.start {
+            // Overlapping or adjacent - merge them
+            current.old.end = current.old.end.max(edit.old.end);
+            current.new.start = current.new.start.min(edit.new.start);
+            current.new.end = current.new.end.max(edit.new.end);
+        } else {
+            // Non-overlapping - push current and start new one
+            consolidated.push(current);
+            current = edit;
+        }
+    }
+    consolidated.push(current);
+    consolidated
+}
+
+// Dimension trait implementations for coordinate seeking
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for InlayPoint {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        let lines = &summary.input.lines;
+        if lines.row > 0 {
+            self.row += lines.row;
+            self.column = lines.column;
+        } else {
+            self.column += lines.column;
+        }
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldPoint {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        let lines = &summary.output.lines;
+        if lines.row > 0 {
+            self.row += lines.row;
+            self.column = lines.column;
+        } else {
+            self.column += lines.column;
+        }
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for InlayOffset {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        self.0 += summary.input.len;
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldOffset {
+    fn zero(_cx: ()) -> Self {
+        Default::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a TransformSummary, _: ()) {
+        self.0 += summary.output.len;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
+    use text::{Buffer, BufferId};
 
-    fn create_test_buffer() -> BufferSnapshot {
-        BufferSnapshot::from_text(
-            "line 0\n\
-             line 1\n\
-             line 2\n\
-             line 3\n\
-             line 4\n\
-             line 5\n\
-             line 6\n\
-             line 7\n\
-             line 8\n\
-             line 9\n",
-        )
+    fn create_buffer(text: &str) -> text::BufferSnapshot {
+        let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
+        buffer.snapshot()
     }
 
     #[test]
-    fn no_folds_identity_mapping() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let fold_map = FoldMap::new(inlay_map);
+    fn empty_snapshot_identity_mapping() {
+        let buffer_snapshot = create_buffer("Hello, world!\nThis is a test.\n");
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
 
-        let inlay_point = InlayPoint { row: 5, column: 3 };
-        let fold_point = fold_map.to_fold_point(inlay_point);
+        // Test coordinate conversion at various points
+        let test_points = vec![
+            (0, 0),  // Start of file
+            (0, 5),  // Middle of first line
+            (0, 13), // End of first line
+            (1, 0),  // Start of second line
+            (1, 10), // Middle of second line
+            (1, 16), // End of second line
+        ];
 
-        assert_eq!(fold_point.row, 5);
-        assert_eq!(fold_point.column, 3);
+        for (row, column) in test_points {
+            let inlay_point = InlayPoint { row, column };
+            let fold_point = fold_snapshot.to_fold_point(inlay_point, Bias::Left);
+            let back = fold_snapshot.to_inlay_point(fold_point);
 
-        let back = fold_map.to_inlay_point(fold_point);
-        assert_eq!(back, inlay_point);
+            // With no folds, coordinates should map 1:1
+            assert_eq!(
+                fold_point.row, row,
+                "FoldPoint row should equal InlayPoint row"
+            );
+            assert_eq!(
+                fold_point.column, column,
+                "FoldPoint column should equal InlayPoint column"
+            );
+            assert_eq!(
+                back, inlay_point,
+                "Round-trip conversion should be identity"
+            );
+        }
     }
 
     #[test]
-    fn single_fold_hides_rows() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
+    fn empty_snapshot_max_point() {
+        let buffer_snapshot = create_buffer("Line 1\nLine 2\nLine 3\n");
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
 
-        // Fold rows 2-4 (hides 2 rows: 3 and 4)
-        fold_map.fold(Point { row: 2, column: 0 }..Point { row: 4, column: 6 });
+        let max_point = fold_snapshot.max_point();
 
-        // Row 5 in buffer appears at row 3 in fold space (2 rows hidden)
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 5, column: 0 });
-        assert_eq!(fold_point.row, 3);
-
-        // Reverse: row 3 in fold space -> row 5 in buffer (inlay)
-        let back = fold_map.to_inlay_point(FoldPoint { row: 3, column: 0 });
-        assert_eq!(back.row, 5);
+        // Max point should be at row 3, column 0 (after newline on line 3)
+        assert_eq!(max_point.row, 3);
+        assert_eq!(max_point.column, 0);
     }
 
     #[test]
-    fn multiple_folds_accumulate_hidden_rows() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
+    fn empty_snapshot_len() {
+        let text = "Hello, world!";
+        let buffer_snapshot = create_buffer(text);
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
+        let fold_snapshot = FoldSnapshot::new(inlay_snapshot);
 
-        // First fold: rows 1-2 (hides 1 row)
-        fold_map.fold(Point { row: 1, column: 0 }..Point { row: 2, column: 6 });
+        let len = fold_snapshot.len();
 
-        // Second fold: rows 4-6 (hides 2 rows)
-        fold_map.fold(Point { row: 4, column: 0 }..Point { row: 6, column: 6 });
-
-        // Row 7 in buffer: 1 row hidden from first fold + 2 rows from second = 3 hidden
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 7, column: 0 });
-        assert_eq!(fold_point.row, 4); // 7 - 3 = 4
-
-        // Row 3 in buffer: only 1 row hidden from first fold
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 3, column: 0 });
-        assert_eq!(fold_point.row, 2); // 3 - 1 = 2
+        // Length should match text length (no folds = no reduction)
+        assert_eq!(len.0, text.len());
     }
 
     #[test]
-    fn point_inside_fold_clamps_to_start() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
+    fn single_fold_hides_lines() {
+        // Create a buffer with multiple lines
+        let text = "fn example() {\n    line 1\n    line 2\n}\n";
+        let buffer_snapshot = create_buffer(text);
+        let buffer = buffer_snapshot.clone();
+        let inlay_snapshot = InlaySnapshot::new(buffer_snapshot);
 
-        // Fold rows 3-5
-        fold_map.fold(Point { row: 3, column: 0 }..Point { row: 5, column: 6 });
+        // Create FoldMap and add a fold covering lines 1-3 (the function body)
+        let (mut fold_map, _initial_snapshot) = FoldMap::new(inlay_snapshot.clone());
 
-        // Point inside fold (row 4) should clamp to fold start (row 3)
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 4, column: 2 });
-        assert_eq!(fold_point.row, 3);
-        assert_eq!(fold_point.column, 0); // Clamped to fold start column
-    }
+        // Create anchors for the fold range
+        // Fold lines 1 and 2 completely (leave line 0 and 3 visible)
+        // Line 0: "fn example() {\n"
+        // Lines 1-2: "    line 1\n    line 2\n" <- fold these
+        // Line 3: "}\n"
+        let fold_start = buffer.anchor_after(Point::new(1, 0)); // Start of line 1
+        let fold_end = buffer.anchor_before(Point::new(3, 0)); // Before line 3
 
-    #[test]
-    fn unfold_removes_fold() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        // Fold rows 2-4
-        let fold_idx = fold_map
-            .fold(Point { row: 2, column: 0 }..Point { row: 4, column: 6 })
-            .unwrap();
-
-        // Row 5 appears at row 3 (2 rows hidden)
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 5, column: 0 });
-        assert_eq!(fold_point.row, 3);
-
-        // Unfold
-        fold_map.unfold(fold_idx);
-
-        // Now row 5 appears at row 5 (no hidden rows)
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 5, column: 0 });
-        assert_eq!(fold_point.row, 5);
-    }
-
-    #[test]
-    fn is_folded_detects_points_in_fold() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        fold_map.fold(Point { row: 2, column: 0 }..Point { row: 4, column: 6 });
-
-        assert!(!fold_map.is_folded(Point { row: 1, column: 0 }));
-        assert!(!fold_map.is_folded(Point { row: 2, column: 0 })); // Start is not inside
-        assert!(fold_map.is_folded(Point { row: 3, column: 0 })); // Inside
-        assert!(fold_map.is_folded(Point { row: 4, column: 0 })); // Inside (end-exclusive but row 4 is still hidden)
-        assert!(!fold_map.is_folded(Point { row: 5, column: 0 }));
-    }
-
-    #[test]
-    fn round_trip_conversion() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        fold_map.fold(Point { row: 1, column: 0 }..Point { row: 3, column: 6 });
-
-        // Test round-trip for point before fold
-        let p1 = InlayPoint { row: 0, column: 5 };
-        assert_eq!(fold_map.to_inlay_point(fold_map.to_fold_point(p1)), p1);
-
-        // Test round-trip for point after fold
-        let p2 = InlayPoint { row: 5, column: 2 };
-        assert_eq!(fold_map.to_inlay_point(fold_map.to_fold_point(p2)), p2);
-
-        // Point inside fold clamps, so round-trip returns fold start
-        let p3 = InlayPoint { row: 2, column: 3 };
-        let fold_p3 = fold_map.to_fold_point(p3);
-        let back_p3 = fold_map.to_inlay_point(fold_p3);
-        assert_eq!(back_p3.row, 1); // Clamped to fold start
-    }
-
-    #[test]
-    fn edit_unfolds_affected_range() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        fold_map.fold(Point { row: 2, column: 0 }..Point { row: 4, column: 6 });
-
-        assert_eq!(fold_map.folds().len(), 1);
-
-        // Edit overlapping the fold
-        let edit = BufferEdit {
-            old_range: Point { row: 3, column: 0 }..Point { row: 3, column: 5 },
-            new_range: Point { row: 3, column: 0 }..Point { row: 3, column: 10 },
+        let (snapshot, _edits) = {
+            let (mut writer, _snapshot, _edits) = fold_map.write(inlay_snapshot, Vec::new());
+            writer.fold(vec![(fold_start..fold_end, FoldPlaceholder::test())])
         };
 
-        fold_map.apply_edit(&edit);
+        // Point before the fold (on line 0) should map 1:1
+        let before_fold = InlayPoint { row: 0, column: 10 };
+        let fold_point_before = snapshot.to_fold_point(before_fold, Bias::Left);
+        assert_eq!(fold_point_before.row, 0);
+        assert_eq!(fold_point_before.column, 10);
 
-        // Fold should be removed
-        assert_eq!(fold_map.folds().len(), 0);
-    }
-
-    #[test]
-    fn fold_at_end_of_buffer() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        // Fold last two rows
-        fold_map.fold(Point { row: 8, column: 0 }..Point { row: 9, column: 6 });
-
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 9, column: 0 });
-        assert_eq!(fold_point.row, 8); // Row 9 is hidden
-    }
-
-    #[test]
-    fn empty_fold_rejected() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        // Empty range (start == end)
-        let result = fold_map.fold(Point { row: 3, column: 0 }..Point { row: 3, column: 0 });
-
-        assert!(result.is_none());
-        assert_eq!(fold_map.folds().len(), 0);
-    }
-
-    #[test]
-    fn coordinate_transform_trait() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        fold_map.fold(Point { row: 1, column: 0 }..Point { row: 2, column: 6 });
-
-        // Use trait methods
-        let inlay_point = InlayPoint { row: 3, column: 0 };
-        let fold_point = fold_map.to_coords(inlay_point);
-        let back = fold_map.from_coords(fold_point);
-
-        assert_eq!(fold_point.row, 2); // 1 row hidden
-        assert_eq!(back, inlay_point);
-    }
-
-    #[test]
-    fn editable_layer_trait() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        let v1 = fold_map.version();
-
-        fold_map.fold(Point { row: 1, column: 0 }..Point { row: 2, column: 6 });
-
-        let v2 = fold_map.version();
-        assert!(v2 > v1);
-
-        let edit = BufferEdit {
-            old_range: Point { row: 1, column: 0 }..Point { row: 1, column: 5 },
-            new_range: Point { row: 1, column: 0 }..Point { row: 1, column: 10 },
-        };
-
-        fold_map.apply_edit(&edit);
-
-        let v3 = fold_map.version();
-        assert!(v3 > v2);
-    }
-
-    #[test]
-    fn large_fold_many_hidden_rows() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        // Fold rows 1-8 (hides 7 rows)
-        fold_map.fold(Point { row: 1, column: 0 }..Point { row: 8, column: 6 });
-
-        // Row 9 in buffer appears at row 2 in fold space (7 rows hidden)
-        let fold_point = fold_map.to_fold_point(InlayPoint { row: 9, column: 0 });
-        assert_eq!(fold_point.row, 2); // 9 - 7 = 2
-
-        // Reverse mapping
-        let back = fold_map.to_inlay_point(FoldPoint { row: 2, column: 0 });
-        assert_eq!(back.row, 9);
-    }
-
-    #[test]
-    fn fold_with_custom_placeholder() {
-        let buffer = create_test_buffer();
-        let inlay_map = InlayMap::new(buffer);
-        let mut fold_map = FoldMap::new(inlay_map);
-
-        let fold = Fold::with_placeholder(
-            Point { row: 2, column: 0 }..Point { row: 4, column: 6 },
-            "{fold}".to_string(),
+        // Point at start of line 1 (which is folded) should map to fold start
+        let in_fold = InlayPoint { row: 1, column: 5 };
+        let fold_point_in = snapshot.to_fold_point(in_fold, Bias::Left);
+        // Should map to end of line 0 (where fold starts)
+        assert_eq!(
+            fold_point_in.row, 1,
+            "Point in fold should map to fold position"
         );
 
-        // Rebuild SumTree with the fold
-        fold_map.folds = SumTree::from_iter(vec![fold.clone()], ());
-        fold_map.version += 1;
+        // Point after the fold (line 3) should have reduced row number
+        // Original row 3 should become row 1 after folding rows 1-2
+        // (row 0 stays, rows 1-2 folded, row 3 becomes row 1)
+        let after_fold = InlayPoint { row: 3, column: 0 };
+        let fold_point_after = snapshot.to_fold_point(after_fold, Bias::Left);
+        assert_eq!(
+            fold_point_after.row, 1,
+            "Row 3 should become row 1 after folding rows 1-2"
+        );
+        assert_eq!(fold_point_after.column, 0);
 
-        assert_eq!(fold_map.folds()[0].placeholder, "{fold}");
-    }
-
-    #[test]
-    fn fold_hidden_row_count() {
-        let fold = Fold::new(Point { row: 10, column: 0 }..Point { row: 20, column: 0 });
-
-        // Rows 11-20 are hidden (10 rows)
-        assert_eq!(fold.hidden_row_count(), 10);
-
-        let single_row_fold = Fold::new(Point { row: 5, column: 0 }..Point { row: 5, column: 10 });
-
-        // Same row fold - no rows hidden
-        assert_eq!(single_row_fold.hidden_row_count(), 0);
+        // Round-trip should work
+        let back = snapshot.to_inlay_point(fold_point_after);
+        assert_eq!(back, after_fold);
     }
 }
