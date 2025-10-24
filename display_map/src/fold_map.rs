@@ -504,6 +504,58 @@ impl FoldSnapshot {
             column: lines.column,
         }
     }
+
+    /// Convert FoldOffset (byte offset in fold coordinate space) to FoldPoint.
+    ///
+    /// Traverses the transform tree to find the position corresponding to the given byte offset,
+    /// accounting for both isomorphic regions and folds.
+    pub fn offset_to_fold_point(&self, offset: FoldOffset) -> FoldPoint {
+        let target_bytes = offset.0;
+        let mut cursor = self.transforms.cursor::<FoldPoint>(());
+        cursor.seek(&FoldPoint::default(), Bias::Left);
+
+        let mut accumulated_bytes = 0usize;
+        let mut result_point = FoldPoint::default();
+
+        // Seek through transforms until we reach or exceed target
+        while let Some(transform) = cursor.item() {
+            let summary = transform.summary(());
+            let transform_bytes = summary.output.len;
+
+            if accumulated_bytes + transform_bytes > target_bytes {
+                // Target is within this transform
+                let bytes_into_transform = target_bytes - accumulated_bytes;
+
+                if transform.is_fold() {
+                    // Within a fold - the entire fold maps to a single point
+                    result_point = *cursor.start();
+                } else {
+                    // Isomorphic region - calculate point from bytes
+                    // Use the inlay snapshot to convert bytes to points
+                    let inlay_point = self.to_inlay_point(*cursor.start());
+                    let inlay_offset = self.inlay_snapshot.to_inlay_offset(inlay_point);
+                    let target_inlay_offset = InlayOffset(inlay_offset.0 + bytes_into_transform);
+                    let target_inlay_point = self
+                        .inlay_snapshot
+                        .offset_to_inlay_point(target_inlay_offset);
+                    result_point = self.to_fold_point(target_inlay_point, Bias::Left);
+                }
+                break;
+            }
+
+            accumulated_bytes += transform_bytes;
+            result_point = *cursor.start();
+            result_point.row += summary.output.lines.row;
+            if summary.output.lines.row > 0 {
+                result_point.column = summary.output.lines.column;
+            } else {
+                result_point.column += summary.output.lines.column;
+            }
+            cursor.next();
+        }
+
+        result_point
+    }
 }
 
 /// Edit in InlayOffset space (input to FoldMap).

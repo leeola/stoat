@@ -420,7 +420,7 @@ impl DisplaySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{px, AppContext};
+    use gpui::AppContext;
     use std::num::NonZeroU64;
     use text::{Buffer, BufferId, ToOffset};
 
@@ -517,10 +517,7 @@ mod tests {
         let display_map = create_display_map("line 1\nline 2", cx);
         let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
-        let max = snapshot.max_point();
-
-        // With no transforms, should match buffer max
-        assert!(max.row >= 0);
+        let _max = snapshot.max_point();
     }
 
     #[gpui::test]

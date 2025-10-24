@@ -289,14 +289,136 @@ impl InlaySnapshot {
 
     /// Convert InlayPoint to InlayOffset (byte offset in inlay coordinate space).
     ///
-    /// FIXME: Simplified implementation - approximates by using buffer offset.
-    /// Should properly account for inlay bytes in the output space.
+    /// Properly accounts for inlay bytes in the output space by seeking through
+    /// the transform tree and accumulating output bytes.
     pub fn to_inlay_offset(&self, inlay_point: InlayPoint) -> InlayOffset {
-        // Convert to buffer point and then to offset
-        // This is an approximation - inlay bytes are not counted
-        let point_in_buffer = self.to_point(inlay_point, Bias::Left);
-        let offset = self.buffer.point_to_offset(point_in_buffer);
-        InlayOffset(offset)
+        let mut cursor = self.transforms.cursor::<InlayPoint>(());
+        cursor.seek(&inlay_point, Bias::Left);
+
+        // Accumulate output bytes from all transforms before the cursor position
+        let mut accumulated_bytes = 0usize;
+        let mut bytes_cursor = self.transforms.cursor::<InlayPoint>(());
+        bytes_cursor.seek(&InlayPoint::default(), Bias::Left);
+
+        while bytes_cursor.start() < cursor.start() {
+            if let Some(transform) = bytes_cursor.item() {
+                let summary = transform.summary(());
+                accumulated_bytes += summary.output.len;
+                bytes_cursor.next();
+            } else {
+                break;
+            }
+        }
+
+        // Calculate overshoot bytes within current item
+        let overshoot_bytes = match cursor.item() {
+            Some(Transform::Isomorphic(_)) => {
+                // Calculate how many display bytes are between cursor start and target point
+                let overshoot_row = inlay_point.row - cursor.start().row;
+                let overshoot_col = inlay_point.column - cursor.start().column;
+
+                // For isomorphic regions, convert point overshoot to bytes using buffer text
+                let buffer_point = self.to_point(*cursor.start(), Bias::Left);
+                let target_buffer_point = Point::new(
+                    buffer_point.row + overshoot_row,
+                    buffer_point.column + overshoot_col,
+                );
+
+                // Get bytes between buffer_point and target
+                let start_offset = self.buffer.point_to_offset(buffer_point);
+                let end_offset = self.buffer.point_to_offset(target_buffer_point);
+                end_offset - start_offset
+            },
+            Some(Transform::Inlay(data)) => {
+                // Within an inlay - calculate bytes to the target column
+                let overshoot_col = inlay_point.column - cursor.start().column;
+                // Get byte offset within inlay text
+                data.text
+                    .chars()
+                    .take(overshoot_col as usize)
+                    .map(|c| c.len_utf8())
+                    .sum::<usize>()
+            },
+            None => {
+                // Beyond end - no overshoot
+                0
+            },
+        };
+
+        InlayOffset(accumulated_bytes + overshoot_bytes)
+    }
+
+    /// Convert InlayOffset (byte offset in inlay coordinate space) to InlayPoint.
+    ///
+    /// Traverses the transform tree to find the position corresponding to the given byte offset,
+    /// accounting for both buffer text and inlay insertions.
+    pub fn offset_to_inlay_point(&self, offset: InlayOffset) -> InlayPoint {
+        let target_bytes = offset.0;
+        let mut cursor = self.transforms.cursor::<InlayPoint>(());
+        cursor.seek(&InlayPoint::default(), Bias::Left);
+
+        let mut accumulated_bytes = 0usize;
+        let mut result_point = InlayPoint::default();
+
+        // Seek through transforms until we reach or exceed target
+        while let Some(transform) = cursor.item() {
+            let summary = transform.summary(());
+            let transform_bytes = summary.output.len;
+
+            if accumulated_bytes + transform_bytes > target_bytes {
+                // Target is within this transform
+                let bytes_into_transform = target_bytes - accumulated_bytes;
+
+                match transform {
+                    Transform::Isomorphic(_) => {
+                        // Convert bytes to point using buffer text
+                        let buffer_point = self.to_point(*cursor.start(), Bias::Left);
+                        let buffer_offset = self.buffer.point_to_offset(buffer_point);
+                        let target_buffer_offset = buffer_offset + bytes_into_transform;
+                        let target_buffer_point = self.buffer.offset_to_point(target_buffer_offset);
+
+                        // Calculate row/column overshoot from cursor start
+                        let row_offset = target_buffer_point.row - buffer_point.row;
+                        let col_offset = if row_offset > 0 {
+                            target_buffer_point.column
+                        } else {
+                            target_buffer_point.column - buffer_point.column
+                        };
+
+                        result_point = InlayPoint {
+                            row: cursor.start().row + row_offset,
+                            column: cursor.start().column + col_offset,
+                        };
+                    },
+                    Transform::Inlay(data) => {
+                        // Convert bytes to column within inlay text
+                        let mut char_offset = 0u32;
+                        let mut bytes_counted = 0usize;
+
+                        for ch in data.text.chars() {
+                            if bytes_counted + ch.len_utf8() > bytes_into_transform {
+                                break;
+                            }
+                            bytes_counted += ch.len_utf8();
+                            char_offset += 1;
+                        }
+
+                        result_point = InlayPoint {
+                            row: cursor.start().row,
+                            column: cursor.start().column + char_offset,
+                        };
+                    },
+                }
+                break;
+            }
+
+            accumulated_bytes += transform_bytes;
+            result_point = *cursor.start();
+            result_point.column += summary.output.lines.column;
+            cursor.next();
+        }
+
+        result_point
     }
 
     /// Get the version number of this snapshot.
@@ -485,20 +607,38 @@ impl InlayMap {
             let old_start = self.snapshot.to_inlay_offset(old_start_inlay);
             let old_end = self.snapshot.to_inlay_offset(old_end_inlay);
 
-            // Calculate new range based on buffer edit delta
-            // FIXME: Simplified - doesn't account for inlays within edited range
-            let old_len = self.snapshot.buffer.point_to_offset(edit.old.end)
+            // Calculate actual lengths in both buffer and inlay space
+            let old_buffer_len = self.snapshot.buffer.point_to_offset(edit.old.end)
                 - self.snapshot.buffer.point_to_offset(edit.old.start);
-            let new_len = new_buffer.point_to_offset(edit.new.end)
-                - new_buffer.point_to_offset(edit.new.start);
-            let delta = new_len as i64 - old_len as i64;
+            let old_inlay_len = old_end.0 - old_start.0;
 
+            // Inlay bytes within the old range (difference between inlay and buffer lengths)
+            let old_inlay_bytes_in_range = old_inlay_len - old_buffer_len;
+
+            // New buffer length
+            let new_buffer_len = new_buffer.point_to_offset(edit.new.end)
+                - new_buffer.point_to_offset(edit.new.start);
+
+            // Assume inlays within deleted range are also removed, inlays after shift by buffer
+            // delta
             let new_start = old_start;
-            let new_end = InlayOffset((old_end.0 as i64 + delta).max(new_start.0 as i64) as usize);
+            let new_end = InlayOffset(new_start.0 + new_buffer_len);
+
+            // If the edit preserves text (not a full deletion), preserve proportion of inlay bytes
+            let edit_preserves_text = new_buffer_len > 0 && old_buffer_len > 0;
+            let adjusted_new_end = if edit_preserves_text && old_inlay_bytes_in_range > 0 {
+                // Preserve inlays proportionally
+                let inlay_preservation_ratio = new_buffer_len as f64 / old_buffer_len as f64;
+                let preserved_inlay_bytes =
+                    (old_inlay_bytes_in_range as f64 * inlay_preservation_ratio) as usize;
+                InlayOffset(new_end.0 + preserved_inlay_bytes)
+            } else {
+                new_end
+            };
 
             inlay_edits.push(InlayEdit {
                 old: old_start..old_end,
-                new: new_start..new_end,
+                new: new_start..adjusted_new_end,
             });
         }
 
@@ -672,5 +812,106 @@ mod tests {
         // Reverse conversions
         assert_eq!(snapshot.to_point(inlay_point1, Bias::Left), point1);
         assert_eq!(snapshot.to_point(inlay_point2, Bias::Left), point2);
+    }
+
+    #[test]
+    fn offset_roundtrip_empty() {
+        let buffer = create_buffer("hello world");
+        let snapshot = InlaySnapshot::new(buffer);
+
+        // Test several points
+        let points = vec![
+            InlayPoint { row: 0, column: 0 },
+            InlayPoint { row: 0, column: 5 },
+            InlayPoint { row: 0, column: 11 },
+        ];
+
+        for point in points {
+            let offset = snapshot.to_inlay_offset(point);
+            let back = snapshot.offset_to_inlay_point(offset);
+            assert_eq!(back, point, "Roundtrip failed for {:?}", point);
+        }
+    }
+
+    #[test]
+    fn offset_roundtrip_with_single_inlay() {
+        let buffer = create_buffer("let x = 42;");
+
+        // "let x" (5 bytes) | ": i32" (5 bytes inlay) | " = 42;" (6 bytes)
+        let transforms = vec![
+            Transform::Isomorphic(Isomorphic::new(TextSummary::from("let x"))),
+            Transform::Inlay(InlayData::new(": i32".to_string(), Bias::Right)),
+            Transform::Isomorphic(Isomorphic::new(TextSummary::from(" = 42;"))),
+        ];
+
+        let snapshot = InlaySnapshot {
+            buffer,
+            transforms: SumTree::from_iter(transforms, ()),
+            version: 0,
+        };
+
+        // Test various points: before inlay, at inlay boundary, after inlay
+        let points = vec![
+            InlayPoint { row: 0, column: 0 },  // Start
+            InlayPoint { row: 0, column: 3 },  // Middle of first segment
+            InlayPoint { row: 0, column: 5 },  // Boundary before inlay
+            InlayPoint { row: 0, column: 8 },  // Middle of inlay
+            InlayPoint { row: 0, column: 11 }, // After inlay starts
+            InlayPoint { row: 0, column: 16 }, // End
+        ];
+
+        for point in points {
+            let offset = snapshot.to_inlay_offset(point);
+            let back = snapshot.offset_to_inlay_point(offset);
+            assert_eq!(
+                back, point,
+                "Roundtrip failed for {:?} (offset: {:?})",
+                point, offset
+            );
+        }
+    }
+
+    #[test]
+    fn offset_roundtrip_with_multiple_inlays() {
+        let buffer = create_buffer("compute(42)");
+
+        // "compute(" (8 bytes) | "value: " (7 bytes) | "42" (2 bytes) | ", base: 10" (10 bytes) |
+        // ")" (1 byte)
+        let transforms = vec![
+            Transform::Isomorphic(Isomorphic::new(TextSummary::from("compute("))),
+            Transform::Inlay(InlayData::new("value: ".to_string(), Bias::Left)),
+            Transform::Isomorphic(Isomorphic::new(TextSummary::from("42"))),
+            Transform::Inlay(InlayData::new(", base: 10".to_string(), Bias::Left)),
+            Transform::Isomorphic(Isomorphic::new(TextSummary::from(")"))),
+        ];
+
+        let snapshot = InlaySnapshot {
+            buffer,
+            transforms: SumTree::from_iter(transforms, ()),
+            version: 0,
+        };
+
+        // Test points across all segments
+        let points = vec![
+            InlayPoint { row: 0, column: 0 },  // Start
+            InlayPoint { row: 0, column: 4 },  // Middle of first segment
+            InlayPoint { row: 0, column: 8 },  // Boundary before first inlay
+            InlayPoint { row: 0, column: 12 }, // Middle of first inlay
+            InlayPoint { row: 0, column: 15 }, // After first inlay
+            InlayPoint { row: 0, column: 17 }, // Middle of second segment
+            InlayPoint { row: 0, column: 20 }, // Middle of second inlay
+            InlayPoint { row: 0, column: 27 }, // After second inlay
+            InlayPoint { row: 0, column: 28 }, // End
+        ];
+
+        for point in points {
+            let offset = snapshot.to_inlay_offset(point);
+            let back = snapshot.offset_to_inlay_point(offset);
+            assert_eq!(
+                back, point,
+                "Roundtrip failed for {:?} (offset: {:?})",
+                point, offset
+            );
+        }
     }
 }

@@ -334,35 +334,30 @@ impl TabMap {
         self.snapshot.version += 1;
 
         // Convert fold edits (FoldOffset ranges) to tab edits (TabPoint ranges)
-        // Since fold edits currently cover entire buffer, we convert start/end offsets to points
         let tab_edits = fold_edits
             .into_iter()
             .map(|edit| {
-                // Convert old FoldOffsets to TabPoints using old snapshot
-                // For now, simplified: assume offset 0 = point (0,0), max offset = max point
-                let old_start = if edit.old.start.0 == 0 {
-                    TabPoint { row: 0, column: 0 }
-                } else {
-                    // FIXME: Need proper FoldOffset -> FoldPoint -> TabPoint conversion
-                    old_snapshot.max_point()
-                };
-                let old_end = if edit.old.end.0 == 0 {
-                    TabPoint { row: 0, column: 0 }
-                } else {
-                    old_snapshot.max_point()
-                };
+                // Convert old FoldOffsets to FoldPoints, then to TabPoints
+                let old_start_fold = old_snapshot
+                    .fold_snapshot
+                    .offset_to_fold_point(edit.old.start);
+                let old_end_fold = old_snapshot
+                    .fold_snapshot
+                    .offset_to_fold_point(edit.old.end);
+                let old_start = old_snapshot.to_tab_point(old_start_fold, Bias::Left);
+                let old_end = old_snapshot.to_tab_point(old_end_fold, Bias::Left);
 
-                // Convert new FoldOffsets to TabPoints using new snapshot
-                let new_start = if edit.new.start.0 == 0 {
-                    TabPoint { row: 0, column: 0 }
-                } else {
-                    self.snapshot.max_point()
-                };
-                let new_end = if edit.new.end.0 == 0 {
-                    TabPoint { row: 0, column: 0 }
-                } else {
-                    self.snapshot.max_point()
-                };
+                // Convert new FoldOffsets to FoldPoints, then to TabPoints
+                let new_start_fold = self
+                    .snapshot
+                    .fold_snapshot
+                    .offset_to_fold_point(edit.new.start);
+                let new_end_fold = self
+                    .snapshot
+                    .fold_snapshot
+                    .offset_to_fold_point(edit.new.end);
+                let new_start = self.snapshot.to_tab_point(new_start_fold, Bias::Left);
+                let new_end = self.snapshot.to_tab_point(new_end_fold, Bias::Left);
 
                 TabEdit {
                     old: old_start..old_end,
