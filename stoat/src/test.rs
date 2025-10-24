@@ -82,16 +82,18 @@ impl<'a> TestStoat<'a> {
             )));
             let buffer_store = cx.new(|_| crate::buffer::store::BufferStore::new());
 
-            let stoat = Stoat::new(crate::config::Config::default(), worktree, buffer_store, cx);
+            // Create Stoat with test text directly (avoids buffer edit after creation)
+            let mut stoat = Stoat::new_with_text(
+                crate::config::Config::default(),
+                worktree,
+                buffer_store,
+                text,
+                cx,
+            );
 
-            // Always update the buffer to replace welcome text (even with empty string)
-            // Use Rust language for better tokenization in tests
+            // Set language to Rust for better tokenization in tests
             stoat.active_buffer(cx).update(cx, |item, cx| {
                 item.set_language(stoat_text::Language::Rust);
-                item.buffer().update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, text)]);
-                });
                 let _ = item.reparse(cx);
             });
 

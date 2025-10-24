@@ -6496,6 +6496,7 @@ dependencies = [
  "smallvec",
  "smol",
  "stoat_display_map",
+ "stoat_log",
  "stoat_rope",
  "stoat_text",
  "sum_tree",
@@ -6550,8 +6551,17 @@ dependencies = [
  "collections",
  "gpui",
  "smol",
+ "stoat_log",
  "sum_tree",
  "text",
+ "tracing",
+]
+
+[[package]]
+name = "stoat_log"
+version = "0.1.0"
+dependencies = [
+ "tracing-subscriber",
 ]
 
 [[package]]

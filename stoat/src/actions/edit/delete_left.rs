@@ -142,8 +142,14 @@ impl Stoat {
         }
 
         // Collect deletion ranges for all selections
+        tracing::debug!("delete_left: About to call selections.all()");
         let selections = self.selections.all::<text::Point>(&snapshot);
+        tracing::debug!(
+            "delete_left: selections.all() succeeded, got {} selections",
+            selections.len()
+        );
         let mut edits = Vec::new();
+        let mut new_cursor_pos = None;
 
         for selection in &selections {
             let pos = selection.head();
@@ -157,23 +163,47 @@ impl Stoat {
                 let pos_offset = snapshot.point_to_offset(pos);
 
                 edits.push((clipped_offset..pos_offset, ""));
+
+                // Remember the clipped position for cursor update
+                new_cursor_pos = Some(clipped);
             }
         }
 
         // Apply all deletions at once
         if !edits.is_empty() {
+            tracing::debug!(
+                "delete_left: About to call buffer.edit() with {} edits",
+                edits.len()
+            );
             let buffer = buffer.clone();
             buffer.update(cx, |buffer, _| {
+                tracing::debug!("delete_left: Inside buffer.update, calling buffer.edit()");
                 buffer.edit(edits);
+                tracing::debug!("delete_left: buffer.edit() completed successfully");
             });
 
-            // Get updated selections (anchors have auto-adjusted)
-            let snapshot = buffer.read(cx).snapshot();
-            let updated_selections = self.selections.all::<text::Point>(&snapshot);
+            // Recreate SelectionsCollection with new snapshot to refresh locators
+            // This is necessary because buffer edits invalidate the internal locators
+            // used for efficient anchor resolution.
+            let new_snapshot = buffer.read(cx).snapshot();
+            self.selections = crate::selections::SelectionsCollection::new(&new_snapshot);
 
-            // Sync cursor to last selection
-            if let Some(last) = updated_selections.last() {
-                self.cursor.move_to(last.head());
+            // Sync cursor to the position where deletion occurred
+            if let Some(pos) = new_cursor_pos {
+                self.cursor.move_to(pos);
+
+                // Create a selection at the cursor position
+                let id = self.selections.next_id();
+                self.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: pos,
+                        end: pos,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &new_snapshot,
+                );
             }
 
             // Reparse

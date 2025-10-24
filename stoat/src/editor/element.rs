@@ -121,8 +121,18 @@ impl Element for EditorElement {
         // Calculate visible display row range using DisplaySnapshot (handles wrapping/folding)
         let scroll_offset = scroll_y.floor() as u32;
         let max_display_point = display_snapshot.max_point();
+        let max_buffer_point = buffer_snapshot.max_point();
         let start_display_row = scroll_offset.min(max_display_point.row);
         let end_display_row = (start_display_row + max_lines).min(max_display_point.row + 1);
+
+        // DEBUG: Log visible range calculation
+        tracing::trace!(
+            "EditorElement visible range: buffer_max=({}, {}), display_max=({}, {}), scroll={}, max_lines={}, range={}..{}",
+            max_buffer_point.row, max_buffer_point.column,
+            max_display_point.row, max_display_point.column,
+            scroll_offset, max_lines,
+            start_display_row, end_display_row
+        );
 
         // ===== PHASE 1: Collect syntax highlighting for all buffer rows in visible range =====
         // Build a HashMap of buffer_row -> Vec<TextRun> for efficient lookup
@@ -326,6 +336,15 @@ impl Element for EditorElement {
                 break;
             }
         }
+
+        // DEBUG: Log how many lines were actually rendered
+        tracing::trace!(
+            "EditorElement rendered {} lines (expected {}..{} = {} lines)",
+            line_layouts.len(),
+            start_display_row,
+            end_display_row,
+            end_display_row - start_display_row
+        );
 
         EditorPrepaintState {
             line_layouts,

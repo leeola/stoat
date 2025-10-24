@@ -129,49 +129,85 @@ impl DisplayMap {
     /// Automatically syncs with buffer changes via subscription before creating snapshot.
     /// The snapshot is cheap to clone and can be used across threads.
     pub fn snapshot(&mut self, cx: &mut App) -> DisplaySnapshot {
+        // Get current buffer snapshot first to check if buffer has changed
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+
         // Consume accumulated edits from subscription
         let edits = self.buffer_subscription.consume().into_inner();
 
+        tracing::trace!(
+            "DisplayMap.snapshot(): buffer_version={}, buffer_len={}, edits_count={}",
+            self.buffer_version,
+            buffer_snapshot.len(),
+            edits.len()
+        );
+
+        tracing::trace!(
+            "DisplayMap entering sync path: edits={}, buffer_version={}",
+            edits.len(),
+            self.buffer_version
+        );
+
+        // Convert Edit<usize> to Edit<Point>
+        let buffer_edits: Vec<Edit<Point>> = edits
+            .iter()
+            .map(|edit| Edit {
+                old: buffer_snapshot.offset_to_point(edit.old.start)
+                    ..buffer_snapshot.offset_to_point(edit.old.end),
+                new: buffer_snapshot.offset_to_point(edit.new.start)
+                    ..buffer_snapshot.offset_to_point(edit.new.end),
+            })
+            .collect();
+
+        // Always propagate through layers (even with no edits) to ensure
+        // transforms are built on first call
+        let (inlay_snapshot, inlay_edits) =
+            self.inlay_map.sync(buffer_snapshot.clone(), buffer_edits);
+        let (fold_snapshot, fold_edits) = self.fold_map.read(inlay_snapshot, inlay_edits);
+        let (tab_snapshot, tab_edits) = self.tab_map.read(fold_snapshot, fold_edits);
+        let (wrap_snapshot, wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
+            wrap_map.sync(tab_snapshot, tab_edits, cx)
+        });
+        let (_block_snapshot, _block_edits) =
+            self.block_map.sync(wrap_snapshot, wrap_edits.into_inner());
+
+        // Update crease map with new buffer
+        self.crease_map.set_buffer(buffer_snapshot);
+
+        // Only increment version if there were actual edits
         if !edits.is_empty() {
-            // Get current buffer snapshot
-            let buffer_snapshot = self.buffer.read(cx).snapshot();
-
-            // Convert Edit<usize> to Edit<Point>
-            let buffer_edits: Vec<Edit<Point>> = edits
-                .iter()
-                .map(|edit| Edit {
-                    old: buffer_snapshot.offset_to_point(edit.old.start)
-                        ..buffer_snapshot.offset_to_point(edit.old.end),
-                    new: buffer_snapshot.offset_to_point(edit.new.start)
-                        ..buffer_snapshot.offset_to_point(edit.new.end),
-                })
-                .collect();
-
-            // Propagate through layers
-            let (inlay_snapshot, inlay_edits) =
-                self.inlay_map.sync(buffer_snapshot.clone(), buffer_edits);
-            let (fold_snapshot, fold_edits) = self.fold_map.read(inlay_snapshot, inlay_edits);
-            let (tab_snapshot, tab_edits) = self.tab_map.read(fold_snapshot, fold_edits);
-            let (wrap_snapshot, wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
-                wrap_map.sync(tab_snapshot, tab_edits, cx)
-            });
-            let (_block_snapshot, _block_edits) =
-                self.block_map.sync(wrap_snapshot, wrap_edits.into_inner());
-
-            // Update crease map with new buffer
-            self.crease_map.set_buffer(buffer_snapshot);
-
             self.buffer_version += 1;
         }
 
         // Return current snapshot
         let block_snapshot = self.block_map.snapshot();
-        DisplaySnapshot { block_snapshot }
+        let display_snapshot = DisplaySnapshot { block_snapshot };
+        tracing::trace!(
+            "DisplayMap.snapshot() returning: max_point=({}, {})",
+            display_snapshot.max_point().row,
+            display_snapshot.max_point().column
+        );
+        display_snapshot
     }
 
     /// Get the current buffer version.
     pub fn buffer_version(&self) -> usize {
         self.buffer_version
+    }
+
+    /// Get the font.
+    pub fn font(&self) -> &Font {
+        &self.font
+    }
+
+    /// Get the font size.
+    pub fn font_size(&self) -> Pixels {
+        self.font_size
+    }
+
+    /// Get the wrap width.
+    pub fn wrap_width(&self) -> Option<Pixels> {
+        self.wrap_width
     }
 
     /// Access the inlay map for mutation.
@@ -451,6 +487,29 @@ mod tests {
                 assert_eq!(back, original, "Roundtrip failed for {:?}", original);
             }
         }
+    }
+
+    #[gpui::test]
+    fn test_multiline_buffer_max_point(cx: &mut gpui::TestAppContext) {
+        stoat_log::test();
+
+        // Create a buffer with 100 lines
+        let text = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let display_map = create_display_map(&text, cx);
+
+        // Get snapshot
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Buffer has 100 lines (rows 0-99), so max_point should be at least 99
+        let max_point = snapshot.max_point();
+        assert!(
+            max_point.row >= 99,
+            "Expected max_point.row >= 99, got {}",
+            max_point.row
+        );
     }
 
     #[gpui::test]

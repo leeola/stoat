@@ -458,6 +458,10 @@ impl InlayMap {
         if buffer_edits.is_empty() {
             // No edits - just rebuild and return empty edits
             self.rebuild_transforms();
+            tracing::trace!(
+                "InlayMap.sync with empty edits: buffer_len={}",
+                buffer.len()
+            );
             return (self.snapshot.clone(), Vec::new());
         }
 
@@ -523,6 +527,11 @@ impl InlayMap {
         if self.inlays.is_empty() {
             // No inlays - single isomorphic transform
             let summary = self.snapshot.buffer.text_summary();
+            tracing::trace!(
+                "InlayMap.rebuild_transforms: buffer.len()={}, summary.lines={:?}",
+                self.snapshot.buffer.len(),
+                summary.lines
+            );
             self.snapshot.transforms =
                 SumTree::from_iter([Transform::Isomorphic(Isomorphic::new(summary))], ());
             return;

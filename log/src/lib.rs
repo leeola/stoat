@@ -15,7 +15,7 @@
 //! STOAT_LOG=trace stoat
 //! ```
 //!
-//! ### Advanced Usage (power users)
+//! ### Advanced Usage
 //!
 //! ```bash
 //! # Module-specific levels using STOAT_LOG
@@ -43,7 +43,7 @@
 use std::env;
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize logging for production use.
+/// Initialize logging.
 ///
 /// This function respects the environment variable priority described in the module docs:
 /// [`STOAT_LOG`] > [`RUST_LOG`] > default settings.
@@ -83,7 +83,7 @@ fn create_filter() -> Result<EnvFilter, Box<dyn std::error::Error + Send + Sync>
 
     // Default: warn globally, info for stoat crates
     Ok(EnvFilter::new(
-        "warn,stoat=info,stoat_core=info,stoat_bin=info,stoat_gui=info,stoat_text=info",
+        "warn,stoat=info,stoat_core=info,stoat_bin=info,stoat_gui=info,stoat_text=info,stoat_display_map=info",
     ))
 }
 
@@ -109,6 +109,6 @@ fn expand_stoat_log(stoat_log: &str) -> EnvFilter {
 
     // Otherwise, treat it as a simple level and apply to all stoat crates
     EnvFilter::new(format!(
-        "warn,stoat={stoat_log},stoat_core={stoat_log},stoat_bin={stoat_log},stoat_gui={stoat_log},stoat_text={stoat_log}"
+        "warn,stoat={stoat_log},stoat_core={stoat_log},stoat_bin={stoat_log},stoat_gui={stoat_log},stoat_text={stoat_log},stoat_display_map={stoat_log}"
     ))
 }

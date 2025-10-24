@@ -8,6 +8,7 @@ members = [
   "rope",
   "agent/claude_code",
   "display_map",
+  "log",
 ]
 
 [workspace.package]

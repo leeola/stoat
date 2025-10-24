@@ -15,7 +15,7 @@ pub mod editor;
 pub mod file_finder;
 pub mod git;
 pub mod keymap;
-pub mod log;
+pub use stoat_log as log;
 pub mod modal;
 pub mod pane;
 pub mod rel_path;

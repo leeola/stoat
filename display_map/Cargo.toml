@@ -14,6 +14,8 @@ text.workspace = true
 gpui.workspace = true
 collections.workspace = true
 smol.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+stoat_log = { path = "../log" }

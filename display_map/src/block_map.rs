@@ -541,6 +541,11 @@ impl BlockMap {
         wrap_snapshot: WrapSnapshot,
         wrap_edits: Vec<Edit<u32>>,
     ) -> (BlockSnapshot, Vec<BlockEdit>) {
+        tracing::trace!(
+            "BlockMap.sync: wrap_max_point=({}, {})",
+            wrap_snapshot.max_point().row,
+            wrap_snapshot.max_point().column
+        );
         self.wrap_snapshot = wrap_snapshot;
         self.rebuild_transforms();
 

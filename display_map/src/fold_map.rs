@@ -528,7 +528,16 @@ impl FoldMap {
         inlay_snapshot: InlaySnapshot,
         edits: Vec<InlayEdit>,
     ) -> (FoldSnapshot, Vec<FoldEdit>) {
+        let inlay_max = inlay_snapshot.buffer().max_point();
         let edits = self.sync(inlay_snapshot, edits);
+        let fold_max = self.snapshot.max_point();
+        tracing::trace!(
+            "FoldMap.read: inlay_max=({}, {}) -> fold_max=({}, {})",
+            inlay_max.row,
+            inlay_max.column,
+            fold_max.row,
+            fold_max.column
+        );
         (self.snapshot.clone(), edits)
     }
 

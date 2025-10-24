@@ -341,13 +341,24 @@ impl Stoat {
         buffer_store: Entity<BufferStore>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_text(config, worktree, buffer_store, "", cx)
+    }
+
+    /// Create new Stoat with specific initial buffer text (primarily for tests).
+    pub fn new_with_text(
+        config: crate::config::Config,
+        worktree: Arc<Mutex<Worktree>>,
+        buffer_store: Entity<BufferStore>,
+        initial_text: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Use workspace's buffer store (shared across all editors)
 
         // Allocate buffer ID from BufferStore to prevent collisions
         let buffer_id = buffer_store.update(cx, |store, _cx| store.allocate_buffer_id());
 
-        // Create initial empty buffer
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        // Create initial buffer with specified text
+        let buffer = cx.new(|_| Buffer::new(0, buffer_id, initial_text));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer.clone(), Language::PlainText, cx));
 
         // Register buffer in BufferStore (weak ref) and store strong ref in open_buffers
@@ -1155,6 +1166,20 @@ impl Stoat {
 
         // Update current file path for status bar (normalized)
         self.current_file_path = Some(self.normalize_file_path(&path_buf));
+
+        // Recreate DisplayMap with new buffer to ensure proper subscription
+        let buffer = buffer_item_entity.read(cx).buffer().clone();
+        self.display_map = {
+            let tab_width = 4;
+            let font = self.display_map.read(cx).font().clone();
+            let font_size = self.display_map.read(cx).font_size();
+            let wrap_width = self.display_map.read(cx).wrap_width();
+            cx.new(|cx| {
+                stoat_display_map::DisplayMap::new(
+                    buffer, tab_width, font, font_size, wrap_width, cx,
+                )
+            })
+        };
 
         // Reset cursor and selections to origin
         self.cursor.move_to(text::Point::new(0, 0));

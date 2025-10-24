@@ -420,7 +420,17 @@ impl WrapMap {
         edits: Vec<TabEdit>,
         cx: &mut Context<Self>,
     ) -> (WrapSnapshot, Patch<u32>) {
+        let tab_max = tab_snapshot.max_point();
+
         if self.wrap_width.is_some() {
+            // If transforms are empty (initial sync), use interpolate to get a valid
+            // snapshot immediately. Background rewrapping will refine it later.
+            if self.snapshot.transforms.is_empty() {
+                self.edits_since_sync = self
+                    .edits_since_sync
+                    .compose(self.snapshot.interpolate(tab_snapshot.clone(), &edits));
+            }
+
             self.pending_edits.push_back((tab_snapshot, edits));
             self.flush_edits(cx);
         } else {
@@ -429,6 +439,15 @@ impl WrapMap {
                 .compose(self.snapshot.interpolate(tab_snapshot, &edits));
             self.snapshot.interpolated = false;
         }
+
+        let wrap_max = self.snapshot.max_point();
+        tracing::trace!(
+            "WrapMap.sync: tab_max=({}, {}) -> wrap_max=({}, {})",
+            tab_max.row,
+            tab_max.column,
+            wrap_max.row,
+            wrap_max.column
+        );
 
         (self.snapshot.clone(), mem::take(&mut self.edits_since_sync))
     }
@@ -780,7 +799,20 @@ impl WrapSnapshot {
     fn interpolate(&mut self, new_tab_snapshot: TabSnapshot, tab_edits: &[TabEdit]) -> Patch<u32> {
         let mut new_transforms;
         if tab_edits.is_empty() {
-            new_transforms = self.transforms.clone();
+            if self.transforms.is_empty() {
+                // Initial sync: build transforms from full tab_snapshot
+                let max_point = new_tab_snapshot.max_point();
+                if max_point.row > 0 || max_point.column > 0 {
+                    let summary =
+                        new_tab_snapshot.text_summary_for_range(TabPoint::new(0, 0)..max_point);
+                    new_transforms = SumTree::from_item(Transform::isomorphic(summary), ());
+                } else {
+                    // Empty buffer - keep transforms empty
+                    new_transforms = SumTree::new(());
+                }
+            } else {
+                new_transforms = self.transforms.clone();
+            }
         } else {
             let mut old_cursor = self.transforms.cursor::<TabPoint>(());
 

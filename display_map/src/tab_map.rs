@@ -308,7 +308,16 @@ impl TabMap {
         fold_snapshot: FoldSnapshot,
         fold_edits: Vec<FoldEdit>,
     ) -> (TabSnapshot, Vec<TabEdit>) {
+        let fold_max = fold_snapshot.max_point();
         let tab_edits = self.sync(fold_snapshot, fold_edits);
+        let tab_max = self.snapshot.max_point();
+        tracing::trace!(
+            "TabMap.read: fold_max=({}, {}) -> tab_max=({}, {})",
+            fold_max.row,
+            fold_max.column,
+            tab_max.row,
+            tab_max.column
+        );
         (self.snapshot.clone(), tab_edits)
     }
 
