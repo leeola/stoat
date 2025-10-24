@@ -8,9 +8,10 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Move all cursors up one line.
+    /// Move all cursors up one display line.
     ///
-    /// Each cursor moves independently to the previous line while preserving its goal column.
+    /// Each cursor moves independently to the previous display line while preserving its goal
+    /// column. With DisplayMap, this handles soft-wrapped lines and folded regions correctly.
     /// The goal column tracks the desired horizontal position across vertical movements,
     /// allowing navigation through lines of varying lengths.
     ///
@@ -24,6 +25,9 @@ impl Stoat {
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
+
+        // Get DisplaySnapshot
+        let display_snapshot = self.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx));
 
         // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
@@ -56,24 +60,40 @@ impl Stoat {
             }
 
             let head = selection.head();
-            if head.row > 0 {
-                let target_row = head.row - 1;
-                let line_len = snapshot.line_len(target_row);
 
+            // Convert to display coordinates
+            let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
+
+            // Move up in display space
+            let new_pos = if display_point.row > 0 {
                 // Determine goal column from selection's goal or current column
                 let goal_column = match selection.goal {
                     text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
-                    _ => head.column,
+                    _ => display_point.column,
                 };
 
-                let target_column = goal_column.min(line_len);
-                let new_pos = Point::new(target_row, target_column);
+                let target_display_point = stoat_display_map::DisplayPoint {
+                    row: display_point.row - 1,
+                    column: goal_column,
+                };
 
-                // Collapse selection to new cursor position, preserving goal
+                // Convert back to buffer coordinates
+                let new_buffer_pos = display_snapshot
+                    .display_point_to_point(target_display_point, sum_tree::Bias::Left);
+
+                // Preserve goal column
+                selection.goal = text::SelectionGoal::HorizontalPosition(goal_column as f64);
+
+                Some(new_buffer_pos)
+            } else {
+                None // Already at top
+            };
+
+            // Apply the new position if we moved
+            if let Some(new_pos) = new_pos {
                 selection.start = new_pos;
                 selection.end = new_pos;
                 selection.reversed = false;
-                selection.goal = text::SelectionGoal::HorizontalPosition(goal_column as f64);
             }
         }
 
@@ -89,7 +109,7 @@ impl Stoat {
             self.cursor.set_goal_column(goal_col);
         }
 
-        self.ensure_cursor_visible();
+        self.ensure_cursor_visible(cx);
     }
 }
 

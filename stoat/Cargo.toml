@@ -12,6 +12,7 @@ sum_tree = { workspace = true }
 clock = { workspace = true }
 stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
+stoat_display_map = { path = "../display_map" }
 smol = "2.0"
 nucleo-matcher = "0.3.1"
 tracing = "0.1"

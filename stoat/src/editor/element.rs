@@ -8,7 +8,6 @@ use crate::{
     git::diff::DiffHunkStatus,
     gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
-    DisplayRow,
 };
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
@@ -72,7 +71,7 @@ impl Element for EditorElement {
         let font_size = self.style.font_size;
         let line_height = self.style.line_height;
 
-        // Get buffer snapshot, token snapshot, and display buffer
+        // Get buffer snapshot, token snapshot, display snapshot, and display buffer
         let buffer_snapshot = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
@@ -87,6 +86,12 @@ impl Element for EditorElement {
             let stoat = self.view.read(cx).stoat.read(cx);
             stoat.is_in_diff_review()
         };
+        // DisplaySnapshot for wrapping/folding coordinate transformations
+        let display_snapshot = {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            stoat.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx))
+        };
+        // DisplayBuffer for git diff phantom rows (used for metadata only, not coordinates)
         let display_buffer = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
@@ -113,23 +118,26 @@ impl Element for EditorElement {
             self.calculate_gutter_width(max_point.row + 1, window, cx)
         };
 
-        // Calculate visible display row range (not buffer row range!)
+        // Calculate visible display row range using DisplaySnapshot (handles wrapping/folding)
         let scroll_offset = scroll_y.floor() as u32;
-        let max_display_row = display_buffer.max_display_row();
-        let start_display_row = scroll_offset.min(max_display_row.0);
-        let end_display_row = (start_display_row + max_lines).min(max_display_row.0 + 1);
+        let max_display_point = display_snapshot.max_point();
+        let start_display_row = scroll_offset.min(max_display_point.row);
+        let end_display_row = (start_display_row + max_lines).min(max_display_point.row + 1);
 
         // ===== PHASE 1: Collect syntax highlighting for all buffer rows in visible range =====
         // Build a HashMap of buffer_row -> Vec<TextRun> for efficient lookup
 
         // Determine which buffer rows are in the visible display range
+        // Convert each display row to buffer point using DisplaySnapshot
         let mut buffer_rows_in_range = Vec::new();
         for display_row in start_display_row..end_display_row {
-            if let Some(row_info) = display_buffer.row_at(DisplayRow(display_row)) {
-                if let Some(buffer_row) = row_info.buffer_row {
-                    buffer_rows_in_range.push(buffer_row);
-                }
-            }
+            let display_point = stoat_display_map::DisplayPoint {
+                row: display_row,
+                column: 0,
+            };
+            let buffer_point =
+                display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
+            buffer_rows_in_range.push(buffer_point.row);
         }
 
         // Get min/max buffer rows to create one HighlightedChunks iterator
@@ -206,12 +214,23 @@ impl Element for EditorElement {
         let mut y = bounds.origin.y + self.style.padding;
 
         for display_row in start_display_row..end_display_row {
-            let Some(row_info) = display_buffer.row_at(DisplayRow(display_row)) else {
-                continue;
+            // Convert display row to buffer point
+            let display_point = stoat_display_map::DisplayPoint {
+                row: display_row,
+                column: 0,
             };
+            let buffer_point =
+                display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
+            let buffer_row = buffer_point.row;
+
+            // Get git diff status from DisplayBuffer (if available)
+            // Note: DisplayBuffer uses different row numbering (includes phantom rows)
+            // We query by buffer row to get status for real buffer rows
+            let diff_display_row = display_buffer.buffer_row_to_display(buffer_row);
+            let diff_row_info = display_buffer.row_at(diff_display_row);
 
             // Determine text styling for diff rows (backgrounds painted separately)
-            let text_color_override = match row_info.diff_status {
+            let text_color_override = match diff_row_info.as_ref().and_then(|r| r.diff_status) {
                 Some(DiffHunkStatus::Deleted) => Some(gpui::Hsla {
                     h: 0.0,
                     s: 0.3,
@@ -224,16 +243,22 @@ impl Element for EditorElement {
             // Build text runs for this display row
             let mut runs = Vec::new();
 
-            // Get the text content (no prefix prepended)
-            // Ensure empty phantom rows have at least a space for background rendering
-            let line_text = if row_info.content.is_empty() && row_info.buffer_row.is_none() {
-                " ".to_string()
+            // Get line text from buffer snapshot
+            // TODO: Handle wrapped lines (currently shows full buffer line)
+            let line_start = text::Point::new(buffer_row, 0);
+            let line_end = if buffer_row < max_point.row {
+                text::Point::new(buffer_row + 1, 0)
             } else {
-                row_info.content.clone()
+                buffer_snapshot.max_point()
             };
+            let line_text: String = buffer_snapshot
+                .text_for_range(line_start..line_end)
+                .collect();
+            // Strip trailing newline if present
+            let line_text = line_text.trim_end_matches('\n').to_string();
 
-            // Add content text runs
-            if let Some(buffer_row) = row_info.buffer_row {
+            // Add content text runs using buffer row for syntax highlighting lookup
+            {
                 // Use highlighted runs from phase 1
                 if let Some(buffer_runs) = highlighted_lines.get(&buffer_row) {
                     let mut processed_runs = buffer_runs.clone();
@@ -241,40 +266,41 @@ impl Element for EditorElement {
                     // Apply stronger background to modified ranges for Modified rows (only in
                     // review mode)
                     if is_in_diff_review
-                        && matches!(row_info.diff_status, Some(DiffHunkStatus::Modified))
-                        && !row_info.modified_ranges.is_empty()
+                        && matches!(
+                            diff_row_info.as_ref().and_then(|r| r.diff_status),
+                            Some(DiffHunkStatus::Modified)
+                        )
                     {
-                        processed_runs = apply_modified_range_backgrounds(
-                            processed_runs,
-                            &row_info.modified_ranges,
-                            &self.style,
-                        );
+                        if let Some(row_info) = &diff_row_info {
+                            if !row_info.modified_ranges.is_empty() {
+                                processed_runs = apply_modified_range_backgrounds(
+                                    processed_runs,
+                                    &row_info.modified_ranges,
+                                    &self.style,
+                                );
+                            }
+                        }
                     }
 
                     for mut run in processed_runs {
-                        // Override text color for deleted rows
+                        // Override text color for deleted rows (shouldn't happen since we don't
+                        // show phantom rows, but keep for consistency)
                         if let Some(color) = text_color_override {
                             run.color = color;
                         }
                         runs.push(run);
                     }
+                } else {
+                    // No syntax highlighting available - use plain text
+                    runs.push(TextRun {
+                        len: line_text.len().max(1), // At least 1 for empty lines
+                        font: font.clone(),
+                        color: self.style.text_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    });
                 }
-            } else {
-                // Phantom row - use plain text styling
-                let content_len = row_info.content.len();
-                let color = text_color_override.unwrap_or(self.style.text_color);
-
-                // Ensure even empty lines get a TextRun for painting
-                let text_len = if content_len == 0 { 1 } else { content_len };
-
-                runs.push(TextRun {
-                    len: text_len,
-                    font: font.clone(),
-                    color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
             }
 
             // Shape the line
@@ -287,10 +313,10 @@ impl Element for EditorElement {
 
             line_layouts.push(ShapedLineLayout {
                 display_row,
-                buffer_row: row_info.buffer_row,
+                buffer_row: Some(buffer_row),
                 shaped,
                 y_position: y,
-                diff_status: row_info.diff_status,
+                diff_status: diff_row_info.and_then(|r| r.diff_status),
             });
 
             y += line_height;

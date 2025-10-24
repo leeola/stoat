@@ -31,7 +31,7 @@ impl Stoat {
         );
 
         self.cursor.move_to(Point::new(0, 0));
-        self.ensure_cursor_visible();
+        self.ensure_cursor_visible(cx);
         cx.notify();
     }
 }

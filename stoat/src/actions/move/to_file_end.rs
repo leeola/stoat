@@ -36,7 +36,7 @@ impl Stoat {
         );
 
         self.cursor.move_to(new_pos);
-        self.ensure_cursor_visible();
+        self.ensure_cursor_visible(cx);
         cx.notify();
     }
 }

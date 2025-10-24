@@ -6495,6 +6495,7 @@ dependencies = [
  "serde",
  "smallvec",
  "smol",
+ "stoat_display_map",
  "stoat_rope",
  "stoat_text",
  "sum_tree",

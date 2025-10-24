@@ -294,6 +294,18 @@ pub struct Stoat {
     /// tiny font and this parent reference to synchronize scroll and handle interactions.
     pub(crate) parent_stoat: Option<WeakEntity<Stoat>>,
 
+    /// DisplayMap for coordinate transformations (wrapping, folding, inlays, blocks).
+    ///
+    /// Transforms buffer coordinates to display coordinates by applying layers:
+    /// - InlayMap: Adds inline type hints and parameter names
+    /// - FoldMap: Hides folded code regions
+    /// - TabMap: Expands tabs to spaces
+    /// - WrapMap: Soft wraps long lines
+    /// - BlockMap: Inserts custom visual blocks
+    ///
+    /// Minimaps share the parent's DisplayMap via cheap Entity clones.
+    pub(crate) display_map: Entity<stoat_display_map::DisplayMap>,
+
     /// State for SelectNext/SelectAllMatches occurrence selection.
     ///
     /// Tracks the search query and iteration state for occurrence-based multi-cursor
@@ -358,6 +370,31 @@ impl Stoat {
         let contexts = crate::keymap::parse_contexts_from_config();
         let key_context = KeyContext::TextEditor; // Default context
 
+        // Initialize DisplayMap for coordinate transformations
+        let display_map = {
+            let tab_width = 4; // Default tab width
+            let font = gpui::Font {
+                family: gpui::SharedString::from(config.buffer_font_family.clone()),
+                features: Default::default(),
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+                fallbacks: None,
+            };
+            let font_size = gpui::px(config.buffer_font_size);
+            let wrap_width = None; // Will be set dynamically based on viewport
+
+            cx.new(|cx| {
+                stoat_display_map::DisplayMap::new(
+                    buffer.clone(),
+                    tab_width,
+                    font,
+                    font_size,
+                    wrap_width,
+                    cx,
+                )
+            })
+        };
+
         Self {
             config,
             buffer_store,
@@ -388,6 +425,7 @@ impl Stoat {
             current_file_path: None,
             worktree,
             parent_stoat: None,
+            display_map,
             select_next_state: None,
             select_prev_state: None,
         }
@@ -399,6 +437,21 @@ impl Stoat {
     /// Used by the GUI layer to access font settings and other user preferences.
     pub fn config(&self) -> &crate::config::Config {
         &self.config
+    }
+
+    /// Access the DisplayMap for coordinate transformations.
+    ///
+    /// Minimap instances delegate to their parent's DisplayMap.
+    /// Returns the DisplayMap entity for converting between buffer and display coordinates.
+    pub fn display_map(&self, cx: &App) -> Entity<stoat_display_map::DisplayMap> {
+        // If this is a minimap, delegate to parent
+        if let Some(parent_weak) = &self.parent_stoat {
+            if let Some(parent) = parent_weak.upgrade() {
+                return parent.read(cx).display_map(cx);
+            }
+        }
+
+        self.display_map.clone()
     }
 
     /// Clone this Stoat for a split pane.
@@ -443,6 +496,7 @@ impl Stoat {
             current_file_path: self.current_file_path.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: None,
+            display_map: self.display_map.clone(),
             select_next_state: None,
             select_prev_state: None,
         }
@@ -939,25 +993,31 @@ impl Stoat {
     /// Ensure cursor is visible
     ///
     /// Scrolls the viewport to ensure the cursor is visible with padding above and below.
-    pub fn ensure_cursor_visible(&mut self) {
+    pub fn ensure_cursor_visible(&mut self, cx: &mut App) {
         let Some(viewport_lines) = self.viewport_lines else {
             return;
         };
 
-        let cursor_row = self.cursor.position().row as f32;
+        // Convert cursor buffer position to display position (handles wrapping, folding, etc.)
+        let cursor_buffer_pos = self.cursor.position();
+        let display_snapshot = self.display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let cursor_display_point =
+            display_snapshot.point_to_display_point(cursor_buffer_pos, sum_tree::Bias::Left);
+        let cursor_display_row = cursor_display_point.row as f32;
+
         let scroll_y = self.scroll.position.y;
         let last_visible_line = scroll_y + viewport_lines;
 
         const PADDING: f32 = 3.0;
 
-        if cursor_row < scroll_y + PADDING {
+        if cursor_display_row < scroll_y + PADDING {
             // Scrolling up: position cursor PADDING lines from top
-            let target_scroll_y = (cursor_row - PADDING).max(0.0);
+            let target_scroll_y = (cursor_display_row - PADDING).max(0.0);
             self.scroll
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
-        } else if cursor_row >= last_visible_line - PADDING {
+        } else if cursor_display_row >= last_visible_line - PADDING {
             // Scrolling down: position cursor PADDING lines from bottom
-            let target_scroll_y = (cursor_row - viewport_lines + PADDING + 1.0).max(0.0);
+            let target_scroll_y = (cursor_display_row - viewport_lines + PADDING + 1.0).max(0.0);
             self.scroll
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         }
@@ -1299,6 +1359,8 @@ impl Stoat {
             current_file_path: None,
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),
+            display_map: self.display_map.clone(), /* Minimap shares parent's DisplayMap (cheap
+                                                    * Entity clone) */
             select_next_state: None,
             select_prev_state: None,
         })

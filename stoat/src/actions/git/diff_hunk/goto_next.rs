@@ -69,7 +69,7 @@ impl Stoat {
                     &buffer_snapshot,
                 );
 
-                self.ensure_cursor_visible();
+                self.ensure_cursor_visible(cx);
 
                 tracing::debug!("Jumped to next diff hunk at row {}", target_row);
                 cx.emit(crate::stoat::StoatEvent::Changed);

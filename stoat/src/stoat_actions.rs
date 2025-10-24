@@ -85,7 +85,7 @@ impl Stoat {
                 .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
         } else {
             // No viewport info - fall back to basic visibility check
-            self.ensure_cursor_visible();
+            self.ensure_cursor_visible(cx);
         }
 
         debug!(hunk = hunk_idx, line = start_row, "Jumped to hunk");
