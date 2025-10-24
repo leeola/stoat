@@ -296,15 +296,21 @@ impl Transform {
 /// Placeholder data for a fold transform.
 ///
 /// Stores the text and character boundaries for the fold's display representation.
+///
+/// FIXME: These fields are defined and populated but never used for rendering.
+/// Fold placeholder text rendering is not yet implemented. When implemented,
+/// these will be used to display "..." or other placeholder text for folded regions.
 #[derive(Clone, Debug)]
 struct TransformPlaceholder {
     /// Static text displayed for this fold (e.g., "...", "{...}", etc.).
+    #[allow(dead_code)]
     text: &'static str,
 
     /// Bitmap representing valid character boundaries within the placeholder text.
     ///
     /// Used for cursor positioning within the fold placeholder. A bit is set if
     /// that byte offset is a valid char boundary.
+    #[allow(dead_code)]
     chars: u128,
 }
 
@@ -343,8 +349,12 @@ impl Item for Transform {
 ///
 /// Enables O(1) lookup of fold information by FoldId.
 #[derive(Clone, Debug)]
+/// FIXME: FoldMetadata is stored in fold_metadata_by_id for O(1) lookup,
+/// but the range field is never queried. This suggests incomplete implementation
+/// of fold range queries. Either implement the queries or remove the metadata entirely.
 struct FoldMetadata {
     /// Anchor range of the fold.
+    #[allow(dead_code)]
     range: FoldRange,
 }
 
@@ -811,69 +821,11 @@ fn push_isomorphic(transforms: &mut SumTree<Transform>, summary: TextSummary) {
     }
 }
 
-/// Consolidate overlapping inlay edits by merging adjacent/overlapping ranges.
-fn consolidate_inlay_edits(mut edits: Vec<InlayEdit>) -> Vec<InlayEdit> {
-    if edits.is_empty() {
-        return edits;
-    }
-
-    edits.sort_unstable_by(|a, b| {
-        a.old
-            .start
-            .cmp(&b.old.start)
-            .then_with(|| b.old.end.cmp(&a.old.end))
-    });
-
-    let mut consolidated = Vec::new();
-    let mut current = edits[0].clone();
-
-    for edit in edits.into_iter().skip(1) {
-        if current.old.end >= edit.old.start {
-            // Overlapping or adjacent - merge them
-            current.old.end = current.old.end.max(edit.old.end);
-            current.new.start = current.new.start.min(edit.new.start);
-            current.new.end = current.new.end.max(edit.new.end);
-        } else {
-            // Non-overlapping - push current and start new one
-            consolidated.push(current);
-            current = edit;
-        }
-    }
-    consolidated.push(current);
-    consolidated
-}
-
-/// Consolidate overlapping fold edits by merging adjacent/overlapping ranges.
-fn consolidate_fold_edits(mut edits: Vec<FoldEdit>) -> Vec<FoldEdit> {
-    if edits.is_empty() {
-        return edits;
-    }
-
-    edits.sort_unstable_by(|a, b| {
-        a.old
-            .start
-            .cmp(&b.old.start)
-            .then_with(|| b.old.end.cmp(&a.old.end))
-    });
-
-    let mut consolidated = Vec::new();
-    let mut current = edits[0].clone();
-
-    for edit in edits.into_iter().skip(1) {
-        if current.old.end >= edit.old.start {
-            // Overlapping or adjacent - merge them
-            current.old.end = current.old.end.max(edit.old.end);
-            current.new.start = current.new.start.min(edit.new.start);
-            current.new.end = current.new.end.max(edit.new.end);
-        } else {
-            // Non-overlapping - push current and start new one
-            consolidated.push(current);
-            current = edit;
-        }
-    }
-    consolidated.push(current);
-    consolidated
-}
+// NOTE: Zed has consolidate_inlay_edits() and consolidate_fold_edits() functions
+// to merge overlapping edits. We don't need them because our simplified implementation
+// generates a single consolidated edit directly in compute_edits() (see line 633).
+// Zed's multi-layer architecture can produce overlapping edits from different sources,
+// but our architecture pre-consolidates edits at generation time.
 
 // Dimension trait implementations for coordinate seeking
 

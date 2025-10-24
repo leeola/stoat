@@ -98,16 +98,6 @@ impl InlayData {
     pub fn new(text: String, bias: Bias) -> Self {
         Self { text, bias }
     }
-
-    /// Get display width (number of columns) of this inlay.
-    pub fn len(&self) -> u32 {
-        self.text.len() as u32
-    }
-
-    /// Check if this inlay has no text.
-    pub fn is_empty(&self) -> bool {
-        self.text.is_empty()
-    }
 }
 
 /// Summary aggregating coordinate information for a Transform subtree.
@@ -273,29 +263,27 @@ impl InlaySnapshot {
         let mut cursor = self.transforms.cursor::<Dimensions<InlayPoint, Point>>(());
         cursor.seek(&inlay_point, bias);
 
-        loop {
-            match cursor.item() {
-                Some(Transform::Isomorphic(_)) => {
-                    // Calculate overshoot from start of this isomorphic region
-                    let overshoot_row = inlay_point.row - cursor.start().0.row;
-                    let overshoot_col = inlay_point.column - cursor.start().0.column;
-                    let input_start = cursor.start().1;
+        match cursor.item() {
+            Some(Transform::Isomorphic(_)) => {
+                // Calculate overshoot from start of this isomorphic region
+                let overshoot_row = inlay_point.row - cursor.start().0.row;
+                let overshoot_col = inlay_point.column - cursor.start().0.column;
+                let input_start = cursor.start().1;
 
-                    return Point::new(
-                        input_start.row + overshoot_row,
-                        input_start.column + overshoot_col,
-                    );
-                },
-                Some(Transform::Inlay(_)) => {
-                    // Position is inside inlay - return the buffer insertion point
-                    // Bias doesn't matter for reverse conversion
-                    return cursor.start().1;
-                },
-                None => {
-                    // Beyond end of buffer
-                    return cursor.start().1;
-                },
-            }
+                Point::new(
+                    input_start.row + overshoot_row,
+                    input_start.column + overshoot_col,
+                )
+            },
+            Some(Transform::Inlay(_)) => {
+                // Position is inside inlay - return the buffer insertion point
+                // Bias doesn't matter for reverse conversion
+                cursor.start().1
+            },
+            None => {
+                // Beyond end of buffer
+                cursor.start().1
+            },
         }
     }
 

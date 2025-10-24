@@ -420,9 +420,9 @@ impl DisplaySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext;
+    use gpui::{px, AppContext};
     use std::num::NonZeroU64;
-    use text::{Buffer, BufferId};
+    use text::{Buffer, BufferId, ToOffset};
 
     fn create_buffer(text: &str) -> BufferSnapshot {
         let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
@@ -786,5 +786,253 @@ mod tests {
         // Snapshot after mutations should still work
         let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let _ = snapshot.max_point();
+    }
+
+    #[gpui::test]
+    fn buffer_edit_with_inlays_updates_coordinates(cx: &mut gpui::TestAppContext) {
+        let buffer_entity = create_buffer_entity("hello world", cx);
+        let buffer = buffer_entity.read_with(cx, |b, _| b.snapshot());
+        let font = gpui::font("Helvetica");
+        let font_size = Pixels::from(14.0);
+        let display_map =
+            cx.new(|cx| DisplayMap::new(buffer_entity.clone(), 4, font, font_size, None, cx));
+
+        // Insert inlay at position 5 (after "hello")
+        let inlay_anchor = buffer.anchor_before(5);
+        display_map.update(cx, |dm, cx| {
+            dm.insert_inlays(vec![(inlay_anchor, ": str".to_string(), Bias::Right)], cx);
+        });
+
+        let snapshot_before = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let point_before = Point::new(0, 6); // 'w' in "world"
+        let display_before = snapshot_before.point_to_display_point(point_before, Bias::Left);
+
+        // Edit buffer: insert text before the inlay
+        buffer_entity.update(cx, |buffer, _cx| {
+            buffer.edit([(0..0, "fn ")]);
+        });
+
+        let snapshot_after = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let point_after = Point::new(0, 9); // 'w' in "world" (offset by 3)
+        let display_after = snapshot_after.point_to_display_point(point_after, Bias::Left);
+
+        // Display coordinates should shift by buffer edit + inlay width
+        assert!(display_after.column > display_before.column);
+    }
+
+    #[gpui::test]
+    fn inlays_persist_through_buffer_edits(cx: &mut gpui::TestAppContext) {
+        let buffer_entity = create_buffer_entity("line 1\nline 2\nline 3", cx);
+        let buffer = buffer_entity.read_with(cx, |b, _| b.snapshot());
+        let display_map = create_display_map("line 1\nline 2\nline 3", cx);
+
+        // Insert inlay on line 2
+        let inlay_anchor = buffer.anchor_after(Point::new(1, 6));
+        display_map.update(cx, |dm, cx| {
+            dm.insert_inlays(
+                vec![(inlay_anchor, " // comment".to_string(), Bias::Right)],
+                cx,
+            );
+        });
+
+        // Edit buffer on line 1 (before inlay)
+        buffer_entity.update(cx, |buffer, _cx| {
+            let offset = Point::new(0, 0).to_offset(&buffer.snapshot());
+            buffer.edit([(offset..offset, "// ")]);
+        });
+
+        let snapshot_after = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Inlay should still be present (anchors are stable)
+        let point_after = Point::new(1, 6);
+        let display_after = snapshot_after.point_to_display_point(point_after, Bias::Right);
+
+        // Display column should account for inlay
+        assert!(display_after.column >= point_after.column);
+    }
+
+    #[gpui::test]
+    fn utf8_multibyte_characters_with_display_map(cx: &mut gpui::TestAppContext) {
+        let display_map = create_display_map("Hello world ABC", cx);
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Test character at different positions
+        let points = vec![
+            Point::new(0, 0),  // 'H'
+            Point::new(0, 6),  // 'w'
+            Point::new(0, 12), // 'A'
+            Point::new(0, 14), // 'C'
+        ];
+
+        for point in points {
+            let display_point = snapshot.point_to_display_point(point, Bias::Left);
+            let back = snapshot.display_point_to_point(display_point, Bias::Left);
+            assert_eq!(back, point, "Roundtrip failed for point {:?}", point);
+        }
+    }
+
+    #[gpui::test]
+    fn very_long_line_coordinate_conversions(cx: &mut gpui::TestAppContext) {
+        let long_line = "a".repeat(1000);
+        let display_map = create_display_map(&long_line, cx);
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Test coordinate conversion at various points along long line
+        let test_points = vec![
+            Point::new(0, 0),
+            Point::new(0, 100),
+            Point::new(0, 500),
+            Point::new(0, 999),
+        ];
+
+        for point in test_points {
+            let display_point = snapshot.point_to_display_point(point, Bias::Left);
+            let back = snapshot.display_point_to_point(display_point, Bias::Left);
+            assert_eq!(back, point, "Roundtrip failed for long line at {:?}", point);
+        }
+    }
+
+    #[gpui::test]
+    fn large_file_coordinate_conversions(cx: &mut gpui::TestAppContext) {
+        let lines: Vec<String> = (0..1000).map(|i| format!("Line {}", i)).collect();
+        let content = lines.join("\n");
+        let display_map = create_display_map(&content, cx);
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Test conversion at various points throughout the file
+        let test_rows = vec![0, 100, 500, 750, 999];
+
+        for row in test_rows {
+            let point = Point::new(row, 0);
+            let display_point = snapshot.point_to_display_point(point, Bias::Left);
+            let back = snapshot.display_point_to_point(display_point, Bias::Left);
+            assert_eq!(
+                back, point,
+                "Roundtrip failed for large file at row {}",
+                row
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn rapid_editing_maintains_coordinate_correctness(cx: &mut gpui::TestAppContext) {
+        let buffer_entity = create_buffer_entity("line 1\nline 2\nline 3", cx);
+        let display_map = create_display_map("line 1\nline 2\nline 3", cx);
+
+        let test_point = Point::new(2, 0);
+
+        // Perform 10 rapid edits
+        for i in 0..10 {
+            buffer_entity.update(cx, |buffer, _cx| {
+                let offset = Point::new(0, 6).to_offset(&buffer.snapshot());
+                buffer.edit([(offset..offset, format!(" {}", i).as_str())]);
+            });
+
+            let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+            let display_point = snapshot.point_to_display_point(test_point, Bias::Left);
+            let back = snapshot.display_point_to_point(display_point, Bias::Left);
+
+            assert_eq!(back, test_point, "Roundtrip failed after {} edits", i + 1);
+        }
+    }
+
+    #[gpui::test]
+    fn multiple_inlays_interaction(cx: &mut gpui::TestAppContext) {
+        let buffer = create_buffer("fn foo() {\n    let x = 1;\n    let y = 2;\n}");
+        let display_map = create_display_map("fn foo() {\n    let x = 1;\n    let y = 2;\n}", cx);
+
+        // Add inlays for type hints
+        let x_anchor = buffer.anchor_after(Point::new(1, 13));
+        let y_anchor = buffer.anchor_after(Point::new(2, 13));
+        display_map.update(cx, |dm, cx| {
+            dm.insert_inlays(
+                vec![
+                    (x_anchor, ": i32".to_string(), Bias::Right),
+                    (y_anchor, ": i32".to_string(), Bias::Right),
+                ],
+                cx,
+            );
+        });
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Verify coordinates still work with multiple inlays
+        let point = Point::new(0, 0);
+        let display_point = snapshot.point_to_display_point(point, Bias::Left);
+        let back = snapshot.display_point_to_point(display_point, Bias::Left);
+        assert_eq!(back, point);
+
+        // Verify inlays affect display coordinates
+        let point_after_inlay = Point::new(1, 14);
+        let display_after = snapshot.point_to_display_point(point_after_inlay, Bias::Left);
+        assert!(display_after.column >= point_after_inlay.column);
+    }
+
+    #[gpui::test]
+    fn blocks_with_buffer_edits(cx: &mut gpui::TestAppContext) {
+        let buffer_entity = create_buffer_entity("line 1\nline 2\nline 3", cx);
+        let buffer = buffer_entity.read_with(cx, |b, _| b.snapshot());
+        let display_map = create_display_map("line 1\nline 2\nline 3", cx);
+
+        // Insert block above line 2
+        let anchor = buffer.anchor_before(Point::new(1, 0));
+        display_map.update(cx, |dm, _cx| {
+            dm.insert_blocks(vec![crate::block_map::BlockProperties {
+                placement: crate::block_map::BlockPlacement::Above(anchor),
+                height: Some(2),
+                style: crate::block_map::BlockStyle::Fixed,
+                priority: 0,
+            }]);
+        });
+
+        let snapshot_before = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let max_before = snapshot_before.max_point();
+
+        // Edit buffer above the block
+        buffer_entity.update(cx, |buffer, _cx| {
+            let offset = Point::new(0, 6).to_offset(&buffer.snapshot());
+            buffer.edit([(offset..offset, " extra")]);
+        });
+
+        let snapshot_after = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let max_after = snapshot_after.max_point();
+
+        // Block should still add same number of rows
+        assert_eq!(max_before.row, max_after.row);
+    }
+
+    #[gpui::test]
+    fn empty_buffer_operations_after_edits(cx: &mut gpui::TestAppContext) {
+        let buffer_entity = create_buffer_entity("", cx);
+        let font = gpui::font("Helvetica");
+        let font_size = Pixels::from(14.0);
+        let display_map =
+            cx.new(|cx| DisplayMap::new(buffer_entity.clone(), 4, font, font_size, None, cx));
+
+        // Add content to empty buffer
+        buffer_entity.update(cx, |buffer, _cx| {
+            buffer.edit([(0..0, "Hello\nWorld")]);
+        });
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let max = snapshot.max_point();
+
+        assert_eq!(max.row, 1);
+
+        // Add inlay
+        let buffer = buffer_entity.read_with(cx, |b, _| b.snapshot());
+        let anchor = buffer.anchor_before(5);
+        display_map.update(cx, |dm, cx| {
+            dm.insert_inlays(vec![(anchor, " there".to_string(), Bias::Right)], cx);
+        });
+
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let point = Point::new(0, 5);
+        let display_point = snapshot.point_to_display_point(point, Bias::Left);
+        let back = snapshot.display_point_to_point(display_point, Bias::Left);
+        assert_eq!(back, point);
     }
 }

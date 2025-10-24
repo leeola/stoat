@@ -1,10 +1,6 @@
 use crate::{
     actions::*,
-    editor::{
-        element::EditorElement,
-        state::{AddSelectionsState, SelectNextState},
-        style::EditorStyle,
-    },
+    editor::{element::EditorElement, style::EditorStyle},
     scroll,
     stoat::{KeyContext, Stoat},
 };
@@ -21,15 +17,8 @@ pub struct EditorView {
     this: Option<Entity<Self>>,
     /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
     pub(crate) editor_style: Arc<EditorStyle>,
-
-    /// State for AddSelectionAbove/Below columnar selection tracking
-    add_selections_state: Option<AddSelectionsState>,
-
-    /// State for SelectNext/SelectAllMatches occurrence selection
-    select_next_state: Option<SelectNextState>,
-
-    /// State for SelectPrevious occurrence selection
-    select_prev_state: Option<SelectNextState>,
+    // NOTE: Selection state (add_selections_state, select_next_state, select_prev_state)
+    // is tracked in Stoat struct, not here. EditorView is just a view layer.
 }
 
 impl EditorView {
@@ -45,9 +34,6 @@ impl EditorView {
             focus_handle,
             this: None,
             editor_style,
-            add_selections_state: None,
-            select_next_state: None,
-            select_prev_state: None,
         }
     }
 
