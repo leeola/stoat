@@ -532,10 +532,29 @@ impl BlockMap {
     ///
     /// Returns the new snapshot and edits in block space.
     /// For now, returns empty edits (full rebuild on every sync).
-    pub fn sync(&mut self, wrap_snapshot: WrapSnapshot) -> (BlockSnapshot, Vec<BlockEdit>) {
+    /// Sync with new wrap snapshot and transform wrap edits to block edits.
+    ///
+    /// Simplified implementation: converts wrap edits to block coordinates
+    /// by assuming wrap points map directly to block points (no additional transforms).
+    pub fn sync(
+        &mut self,
+        wrap_snapshot: WrapSnapshot,
+        wrap_edits: Vec<Edit<u32>>,
+    ) -> (BlockSnapshot, Vec<BlockEdit>) {
         self.wrap_snapshot = wrap_snapshot;
         self.rebuild_transforms();
-        (self.snapshot(), Vec::new())
+
+        // Transform wrap edits (u32 offsets) to block edits (BlockOffset)
+        // FIXME: Simplified - should properly account for block insertions
+        let block_edits = wrap_edits
+            .into_iter()
+            .map(|edit| BlockEdit {
+                old: BlockOffset(edit.old.start as usize)..BlockOffset(edit.old.end as usize),
+                new: BlockOffset(edit.new.start as usize)..BlockOffset(edit.new.end as usize),
+            })
+            .collect();
+
+        (self.snapshot(), block_edits)
     }
 
     /// Rebuild the entire transform tree from scratch.
@@ -571,7 +590,7 @@ impl BlockMap {
                     .tab_snapshot
                     .fold_snapshot
                     .inlay_snapshot
-                    .to_inlay_point(block_point);
+                    .to_inlay_point(block_point, Bias::Left);
                 let fold_point = self
                     .wrap_snapshot
                     .tab_snapshot

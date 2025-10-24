@@ -85,6 +85,7 @@ pub use dimensions::{BlockOffset, BufferOffset, FoldOffset, InlayOffset, TabOffs
 pub use display_map::{DisplayMap, DisplaySnapshot};
 pub use fold_map::{Fold, FoldMap, FoldSnapshot};
 pub use inlay_map::{InlayId, InlayMap, InlaySnapshot};
+pub use sum_tree::Bias;
 pub use tab_map::{TabMap, TabSnapshot};
 pub use text::{BufferSnapshot, Point};
 pub use traits::{CoordinateTransform, EditableLayer};

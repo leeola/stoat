@@ -38,6 +38,18 @@
 ///! - Real wrapping: O(file_size) - background (20-50ms for large files)
 ///! - UI never blocks: Always returns interpolated snapshot first
 ///!
+///! # Point vs Anchor
+///!
+///! WrapMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
+///! - **Ephemeral transformations**: Wraps are recalculated on width/font changes
+///! - **No persistence needed**: Transform tree rebuilt on each sync
+///! - **Pixel-dependent**: Wrapping depends on font metrics, not buffer positions
+///! - **Derived from stable sources**: Input comes from TabSnapshot which derives
+///!   from FoldSnapshot's `Range<Anchor>` storage
+///!
+///! Wraps don't need to "survive" buffer edits - they're recalculated from the
+///! updated tab coordinates which are themselves derived from stable fold anchors.
+///!
 ///! # Related
 ///!
 ///! - Input: [`TabPoint`](crate::TabPoint) from
@@ -773,8 +785,14 @@ impl WrapSnapshot {
             let mut old_cursor = self.transforms.cursor::<TabPoint>(());
 
             let mut tab_edits_iter = tab_edits.iter().peekable();
-            new_transforms =
-                old_cursor.slice(&tab_edits_iter.peek().unwrap().old.start, Bias::Right);
+            new_transforms = old_cursor.slice(
+                &tab_edits_iter
+                    .peek()
+                    .expect("tab_edits is not empty (checked above)")
+                    .old
+                    .start,
+                Bias::Right,
+            );
 
             while let Some(edit) = tab_edits_iter.next() {
                 let input_lines = new_transforms.summary().input.lines;
@@ -876,7 +894,14 @@ impl WrapSnapshot {
             let mut old_cursor = self.transforms.cursor::<TabPoint>(());
 
             new_transforms = old_cursor.slice(
-                &TabPoint::new(row_edits.peek().unwrap().old_rows.start, 0),
+                &TabPoint::new(
+                    row_edits
+                        .peek()
+                        .expect("row_edits is not empty (checked above)")
+                        .old_rows
+                        .start,
+                    0,
+                ),
                 Bias::Right,
             );
 
@@ -904,8 +929,9 @@ impl WrapSnapshot {
                         new_tab_snapshot.text_summary_for_range(line_start..line_end);
 
                     if line_summary.lines.row > 0 {
-                        // Line exists - wrap it
-                        let line_text = format!("{}", line_summary.len); // FIXME: Get actual line text
+                        // Line exists - wrap it using actual line text from buffer
+                        let line_text =
+                            crate::buffer_utils::get_line_text(new_tab_snapshot.buffer(), row);
                         let fragments = vec![gpui::LineFragment::text(&line_text)];
 
                         let mut prev_boundary_ix = 0;
@@ -1011,12 +1037,29 @@ impl WrapSnapshot {
     #[cfg(debug_assertions)]
     fn check_invariants(&self) {
         // Verify transform tree is consistent
-        let _summary = self.transforms.summary();
+        let summary = self.transforms.summary();
 
-        // FIXME: Add proper invariant checks for WrapSnapshot
-        // - Verify input matches TabSnapshot output
-        // - Verify no adjacent isomorphic transforms
-        // - Verify wrap indents are within bounds
+        // Basic invariant: output should have at least as many rows as input (due to wrapping)
+        debug_assert!(
+            summary.output.lines.row >= summary.input.lines.row,
+            "Wrapping should not decrease row count: input={}, output={}",
+            summary.input.lines.row,
+            summary.output.lines.row
+        );
+
+        // Verify tab snapshot matches expected input
+        let tab_max = self.tab_snapshot.max_point();
+        debug_assert!(
+            summary.input.lines.row <= tab_max.row + 1,
+            "Input row count should match tab snapshot: input={}, tab_max={}",
+            summary.input.lines.row,
+            tab_max.row
+        );
+
+        // TODO: Additional checks:
+        // - Verify no adjacent isomorphic transforms (should be merged)
+        // - Verify wrap indents are within reasonable bounds
+        // - Verify interpolated flag consistency with pending edits
     }
 
     #[cfg(not(debug_assertions))]

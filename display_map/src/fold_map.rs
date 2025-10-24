@@ -426,7 +426,13 @@ impl FoldSnapshot {
             }
         } else {
             // Point is in isomorphic region - compute overshoot from cursor start
-            // Use Point arithmetic to handle row/column correctly
+            // Use Point arithmetic to handle row/column correctly.
+            //
+            // SAFETY: Point arithmetic is safe here because:
+            // 1. This calculation is local to a single Transform within the SumTree
+            // 2. The entire tree is rebuilt from stable Anchors on each sync
+            // 3. We're computing relative position (overshoot) within one transform
+            // 4. Result is converted to FoldPoint (ephemeral coordinate type)
             let start_inlay = Point::new(cursor.start().0.row, cursor.start().0.column);
             let target = Point::new(point.row, point.column);
             let overshoot = target - start_inlay;
@@ -455,7 +461,13 @@ impl FoldSnapshot {
             .cursor::<Dimensions<FoldPoint, InlayPoint>>(());
         cursor.seek(&point, Bias::Right);
 
-        // Use Point arithmetic to handle row/column correctly
+        // Use Point arithmetic to handle row/column correctly.
+        //
+        // SAFETY: Point arithmetic is safe here because:
+        // 1. Transform tree is rebuilt from Anchors on each sync (see sync() method)
+        // 2. We're calculating relative offset within a single Transform
+        // 3. This is reverse conversion - InlayPoint is ephemeral coordinate type
+        // 4. Anchor stability maintained through fold.range: Range<Anchor>
         let start_fold = Point::new(cursor.start().0.row, cursor.start().0.column);
         let target = Point::new(point.row, point.column);
         let overshoot = target - start_fold;
@@ -686,8 +698,11 @@ impl FoldMapWriter<'_> {
                     }
                 }
 
-                // Insert the new fold
-                new_tree.push(folds_iter.next().unwrap(), buffer);
+                // Insert the new fold (safe: we just peeked successfully)
+                new_tree.push(
+                    folds_iter.next().expect("iterator has item (just peeked)"),
+                    buffer,
+                );
             }
 
             // Append remaining old folds

@@ -29,10 +29,10 @@
 ///!
 ///! // Convert buffer position to display position
 ///! let buffer_point = Point::new(10, 5);
-///! let display_point = snapshot.point_to_display_point(buffer_point);
+///! let display_point = snapshot.point_to_display_point(buffer_point, Bias::Left);
 ///!
 ///! // Convert back
-///! let back = snapshot.display_point_to_point(display_point);
+///! let back = snapshot.display_point_to_point(display_point, Bias::Left);
 ///! assert_eq!(back, buffer_point);
 ///! ```
 ///!
@@ -50,7 +50,7 @@ use crate::{
 };
 use gpui::{App, Entity, Font, Pixels};
 use sum_tree::Bias;
-use text::{BufferSnapshot, Point};
+use text::{subscription::Subscription, Buffer, BufferSnapshot, Edit, Point};
 
 /// DisplayMap coordinating all transformation layers.
 ///
@@ -60,7 +60,8 @@ use text::{BufferSnapshot, Point};
 ///
 /// Uses async WrapMap for non-blocking soft wrapping.
 pub struct DisplayMap {
-    buffer: BufferSnapshot,
+    buffer: Entity<Buffer>,
+    buffer_subscription: Subscription,
     buffer_version: usize,
 
     // Mutable layer holders
@@ -80,17 +81,23 @@ pub struct DisplayMap {
 impl DisplayMap {
     /// Create a new DisplayMap for the given buffer.
     ///
-    /// Requires GPUI context for async WrapMap Entity.
+    /// Requires GPUI context for async WrapMap Entity and buffer subscription.
     pub fn new(
-        buffer: BufferSnapshot,
+        buffer: Entity<Buffer>,
         tab_width: u32,
         font: Font,
         font_size: Pixels,
         wrap_width: Option<Pixels>,
         cx: &mut App,
     ) -> Self {
+        // Subscribe to buffer changes
+        let buffer_subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
+
+        // Get initial buffer snapshot for layer initialization
+        let buffer_snapshot = buffer.read(cx).snapshot();
+
         // Initialize all layers
-        let inlay_map = crate::inlay_map::InlayMap::new(buffer.clone());
+        let inlay_map = crate::inlay_map::InlayMap::new(buffer_snapshot.clone());
         let (fold_map, fold_snapshot) = crate::fold_map::FoldMap::new(inlay_map.snapshot());
         let (tab_map, tab_snapshot) = crate::tab_map::TabMap::new(fold_snapshot, tab_width);
 
@@ -99,10 +106,11 @@ impl DisplayMap {
             WrapMap::new(tab_snapshot, font.clone(), font_size, wrap_width, cx);
 
         let block_map = crate::block_map::BlockMap::new(wrap_snapshot);
-        let crease_map = crate::crease_map::CreaseMap::new(buffer.clone());
+        let crease_map = crate::crease_map::CreaseMap::new(buffer_snapshot);
 
         Self {
-            buffer: buffer.clone(),
+            buffer,
+            buffer_subscription,
             buffer_version: 0,
             inlay_map,
             fold_map,
@@ -116,39 +124,47 @@ impl DisplayMap {
         }
     }
 
-    /// Update buffer and propagate edits through all layers.
-    ///
-    /// This is called when the buffer changes. It syncs all layers and propagates
-    /// edits downstream using async WrapMap.
-    pub fn update_buffer(&mut self, new_buffer: BufferSnapshot, cx: &mut App) {
-        // For now, just update buffer and rebuild everything
-        // TODO: Compute actual buffer edits
-        self.buffer = new_buffer.clone();
-        self.buffer_version += 1;
-
-        // Propagate through layers
-        let (inlay_snapshot, _inlay_edits) = self.inlay_map.sync(new_buffer.clone());
-        let (fold_snapshot, _fold_edits) = self.fold_map.read(inlay_snapshot, Vec::new());
-        let (tab_snapshot, tab_edits) = self.tab_map.read(fold_snapshot, Vec::new());
-
-        // Use async WrapMap
-        let (wrap_snapshot, _wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
-            wrap_map.sync(tab_snapshot, tab_edits, cx)
-        });
-
-        let (_block_snapshot, _block_edits) = self.block_map.sync(wrap_snapshot);
-
-        self.crease_map.set_buffer(new_buffer);
-    }
-
     /// Get an immutable snapshot of the current display state.
     ///
+    /// Automatically syncs with buffer changes via subscription before creating snapshot.
     /// The snapshot is cheap to clone and can be used across threads.
-    pub fn snapshot(&self, cx: &App) -> DisplaySnapshot {
-        // Get wrap snapshot from Entity
-        let wrap_snapshot = self.wrap_map.read(cx).snapshot().clone();
+    pub fn snapshot(&mut self, cx: &mut App) -> DisplaySnapshot {
+        // Consume accumulated edits from subscription
+        let edits = self.buffer_subscription.consume().into_inner();
 
-        // Block snapshot uses the wrap snapshot
+        if !edits.is_empty() {
+            // Get current buffer snapshot
+            let buffer_snapshot = self.buffer.read(cx).snapshot();
+
+            // Convert Edit<usize> to Edit<Point>
+            let buffer_edits: Vec<Edit<Point>> = edits
+                .iter()
+                .map(|edit| Edit {
+                    old: buffer_snapshot.offset_to_point(edit.old.start)
+                        ..buffer_snapshot.offset_to_point(edit.old.end),
+                    new: buffer_snapshot.offset_to_point(edit.new.start)
+                        ..buffer_snapshot.offset_to_point(edit.new.end),
+                })
+                .collect();
+
+            // Propagate through layers
+            let (inlay_snapshot, inlay_edits) =
+                self.inlay_map.sync(buffer_snapshot.clone(), buffer_edits);
+            let (fold_snapshot, fold_edits) = self.fold_map.read(inlay_snapshot, inlay_edits);
+            let (tab_snapshot, tab_edits) = self.tab_map.read(fold_snapshot, fold_edits);
+            let (wrap_snapshot, wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
+                wrap_map.sync(tab_snapshot, tab_edits, cx)
+            });
+            let (_block_snapshot, _block_edits) =
+                self.block_map.sync(wrap_snapshot, wrap_edits.into_inner());
+
+            // Update crease map with new buffer
+            self.crease_map.set_buffer(buffer_snapshot);
+
+            self.buffer_version += 1;
+        }
+
+        // Return current snapshot
         let block_snapshot = self.block_map.snapshot();
         DisplaySnapshot { block_snapshot }
     }
@@ -223,11 +239,12 @@ impl DisplayMap {
         let (tab_snapshot, tab_edits) = self.tab_map.read(fold_snapshot, fold_edits);
 
         // Use async WrapMap
-        let (wrap_snapshot, _wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
+        let (wrap_snapshot, wrap_edits) = self.wrap_map.update(cx, |wrap_map, cx| {
             wrap_map.sync(tab_snapshot, tab_edits, cx)
         });
 
-        let (_block_snapshot, _block_edits) = self.block_map.sync(wrap_snapshot);
+        let (_block_snapshot, _block_edits) =
+            self.block_map.sync(wrap_snapshot, wrap_edits.into_inner());
     }
 
     // Wrap configuration API
@@ -290,12 +307,13 @@ pub struct DisplaySnapshot {
 impl DisplaySnapshot {
     /// Convert buffer Point to final DisplayPoint.
     ///
+    /// The bias parameter controls positioning at transformation boundaries (inlays, folds, etc).
     /// Chains through: Point to InlayPoint to FoldPoint to TabPoint to WrapPoint to BlockPoint
-    pub fn point_to_display_point(&self, point: Point) -> DisplayPoint {
-        // Chain through all layers
-        let inlay_point = self.inlay_snapshot().to_inlay_point(point);
-        let fold_point = self.fold_snapshot().to_fold_point(inlay_point, Bias::Left);
-        let tab_point = self.tab_snapshot().to_tab_point(fold_point, Bias::Left);
+    pub fn point_to_display_point(&self, point: Point, bias: Bias) -> DisplayPoint {
+        // Chain through all layers with consistent bias
+        let inlay_point = self.inlay_snapshot().to_inlay_point(point, bias);
+        let fold_point = self.fold_snapshot().to_fold_point(inlay_point, bias);
+        let tab_point = self.tab_snapshot().to_tab_point(fold_point, bias);
         let wrap_point = self.wrap_snapshot().tab_point_to_wrap_point(tab_point);
         let block_point = self.block_snapshot.wrap_point_to_block_point(wrap_point);
 
@@ -308,21 +326,22 @@ impl DisplaySnapshot {
 
     /// Convert DisplayPoint to buffer Point.
     ///
+    /// The bias parameter controls positioning at transformation boundaries.
     /// Chains back through: DisplayPoint to BlockPoint to WrapPoint to TabPoint to FoldPoint to
     /// InlayPoint to Point
-    pub fn display_point_to_point(&self, display_point: DisplayPoint) -> Point {
+    pub fn display_point_to_point(&self, display_point: DisplayPoint, bias: Bias) -> Point {
         // Convert DisplayPoint to BlockPoint
         let block_point = BlockPoint {
             row: display_point.row,
             column: display_point.column,
         };
 
-        // Chain back through all layers
+        // Chain back through all layers with consistent bias
         let wrap_point = self.block_snapshot.to_wrap_point(block_point);
         let tab_point = self.wrap_snapshot().to_tab_point(wrap_point);
-        let fold_point = self.tab_snapshot().to_fold_point(tab_point, Bias::Left);
+        let fold_point = self.tab_snapshot().to_fold_point(tab_point, bias);
         let inlay_point = self.fold_snapshot().to_inlay_point(fold_point);
-        let point = self.inlay_snapshot().to_point(inlay_point);
+        let point = self.inlay_snapshot().to_point(inlay_point, bias);
 
         point
     }
@@ -374,8 +393,13 @@ mod tests {
         buffer.snapshot()
     }
 
+    fn create_buffer_entity(text: &str, cx: &mut gpui::TestAppContext) -> Entity<Buffer> {
+        let buffer = Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text);
+        cx.new(|_| buffer)
+    }
+
     fn create_display_map(text: &str, cx: &mut gpui::TestAppContext) -> Entity<DisplayMap> {
-        let buffer = create_buffer(text);
+        let buffer = create_buffer_entity(text, cx);
         let font = gpui::font("Helvetica");
         let font_size = Pixels::from(14.0);
         let wrap_width = None;
@@ -385,16 +409,16 @@ mod tests {
     #[gpui::test]
     fn display_map_basic_creation(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("hello world", cx);
-        let _snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let _snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
     }
 
     #[gpui::test]
     fn point_to_display_point_identity(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("hello world", cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         let point = Point::new(0, 5);
-        let display_point = snapshot.point_to_display_point(point);
+        let display_point = snapshot.point_to_display_point(point, Bias::Left);
 
         assert_eq!(display_point.row, 0);
         assert_eq!(display_point.column, 5);
@@ -403,10 +427,10 @@ mod tests {
     #[gpui::test]
     fn display_point_to_point_identity(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("hello world", cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         let display_point = DisplayPoint { row: 0, column: 5 };
-        let point = snapshot.display_point_to_point(display_point);
+        let point = snapshot.display_point_to_point(display_point, Bias::Left);
 
         assert_eq!(point.row, 0);
         assert_eq!(point.column, 5);
@@ -415,14 +439,14 @@ mod tests {
     #[gpui::test]
     fn roundtrip_conversion(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("hello\nworld\ntest", cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         // Test multiple points
         for row in 0..3 {
             for col in 0..5 {
                 let original = Point::new(row, col);
-                let display = snapshot.point_to_display_point(original);
-                let back = snapshot.display_point_to_point(display);
+                let display = snapshot.point_to_display_point(original, Bias::Left);
+                let back = snapshot.display_point_to_point(display, Bias::Left);
 
                 assert_eq!(back, original, "Roundtrip failed for {:?}", original);
             }
@@ -432,7 +456,7 @@ mod tests {
     #[gpui::test]
     fn max_point(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("line 1\nline 2", cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         let max = snapshot.max_point();
 
@@ -444,30 +468,30 @@ mod tests {
     fn multiline_text(cx: &mut gpui::TestAppContext) {
         let text = "fn example() {\n    let x = 42;\n    println!(\"{}\", x);\n}\n";
         let display_map = create_display_map(text, cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         // Test first line
         let p1 = Point::new(0, 0);
-        let d1 = snapshot.point_to_display_point(p1);
+        let d1 = snapshot.point_to_display_point(p1, Bias::Left);
         assert_eq!(d1.row, 0);
 
         // Test indented line
         let p2 = Point::new(1, 4);
-        let d2 = snapshot.point_to_display_point(p2);
+        let d2 = snapshot.point_to_display_point(p2, Bias::Left);
         assert_eq!(d2.row, 1);
 
         // Verify roundtrip
-        let back = snapshot.display_point_to_point(d2);
+        let back = snapshot.display_point_to_point(d2, Bias::Left);
         assert_eq!(back, p2);
     }
 
     #[gpui::test]
     fn empty_buffer(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("", cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         let point = Point::new(0, 0);
-        let display = snapshot.point_to_display_point(point);
+        let display = snapshot.point_to_display_point(point, Bias::Left);
 
         assert_eq!(display.row, 0);
         assert_eq!(display.column, 0);
@@ -478,7 +502,7 @@ mod tests {
         let text = "hello world";
         let buffer = create_buffer(text);
         let display_map = create_display_map(text, cx);
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
 
         // Should be able to access buffer through snapshot
         let retrieved_buffer = snapshot.buffer();
@@ -488,18 +512,22 @@ mod tests {
     // Integration tests for Phase 2: Edit propagation and mutations
 
     #[gpui::test]
-    fn buffer_update_propagates_through_layers(cx: &mut gpui::TestAppContext) {
+    fn buffer_subscription_system_works(cx: &mut gpui::TestAppContext) {
         let display_map = create_display_map("hello world", cx);
 
+        // Initial version should be 0
         let initial_version = display_map.read_with(cx, |dm, _cx| dm.buffer_version());
         assert_eq!(initial_version, 0);
 
-        // Update buffer
-        let new_buffer = create_buffer("hello beautiful world");
-        display_map.update(cx, |dm, cx| dm.update_buffer(new_buffer, cx));
+        // Calling snapshot() without any edits should not increment version
+        let _snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let version = display_map.read_with(cx, |dm, _cx| dm.buffer_version());
+        assert_eq!(version, 0);
 
-        let new_version = display_map.read_with(cx, |dm, _cx| dm.buffer_version());
-        assert_eq!(new_version, 1);
+        // Multiple snapshots without edits should keep version at 0
+        let _snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let version = display_map.read_with(cx, |dm, _cx| dm.buffer_version());
+        assert_eq!(version, 0);
     }
 
     #[gpui::test]
@@ -509,8 +537,8 @@ mod tests {
 
         // Get initial coordinates
         let point = Point::new(0, 5); // After "let x"
-        let snapshot1 = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
-        let display1 = snapshot1.point_to_display_point(point);
+        let snapshot1 = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let display1 = snapshot1.point_to_display_point(point, Bias::Left);
 
         // Insert inlay at position 5
         let anchor = buffer.anchor_before(5);
@@ -521,8 +549,8 @@ mod tests {
         assert_eq!(ids.len(), 1);
 
         // Get updated coordinates
-        let snapshot2 = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
-        let display2 = snapshot2.point_to_display_point(point);
+        let snapshot2 = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let display2 = snapshot2.point_to_display_point(point, Bias::Left);
 
         // The inlay should affect display coordinates
         // (exact values depend on bias handling, just verify snapshot updated)
@@ -534,7 +562,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 2\nline 3");
         let display_map = create_display_map("line 1\nline 2\nline 3", cx);
 
-        let snapshot1 = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot1 = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let max1 = snapshot1.max_point();
 
         // Insert a 3-row block at line 1
@@ -549,7 +577,7 @@ mod tests {
         let ids = display_map.update(cx, |dm, _cx| dm.insert_blocks(vec![block]));
         assert_eq!(ids.len(), 1);
 
-        let snapshot2 = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot2 = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let max2 = snapshot2.max_point();
 
         // Block should add rows
@@ -582,9 +610,9 @@ mod tests {
         assert_eq!(block_ids.len(), 1);
 
         // Verify snapshot still works
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let point = Point::new(0, 0);
-        let _display = snapshot.point_to_display_point(point);
+        let _display = snapshot.point_to_display_point(point, Bias::Left);
     }
 
     #[gpui::test]
@@ -603,7 +631,7 @@ mod tests {
         display_map.update(cx, |dm, cx| dm.remove_inlays(&ids, cx));
 
         // Snapshot should still work
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let _ = snapshot.max_point();
     }
 
@@ -628,7 +656,76 @@ mod tests {
         display_map.update(cx, |dm, _cx| dm.remove_blocks(&ids));
 
         // Snapshot should still work
-        let snapshot = display_map.read_with(cx, |dm, cx| dm.snapshot(cx));
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+        let _ = snapshot.max_point();
+    }
+
+    #[gpui::test]
+    fn single_character_buffer(cx: &mut gpui::TestAppContext) {
+        let display_map = create_display_map("x", cx);
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // Verify single character handling
+        let start = Point::new(0, 0);
+        let end = Point::new(0, 1);
+
+        let display_start = snapshot.point_to_display_point(start, Bias::Left);
+        let display_end = snapshot.point_to_display_point(end, Bias::Left);
+
+        assert_eq!(display_start.row, 0);
+        assert_eq!(display_start.column, 0);
+        assert_eq!(display_end.row, 0);
+        assert_eq!(display_end.column, 1);
+
+        // Roundtrip
+        let back_start = snapshot.display_point_to_point(display_start, Bias::Left);
+        let back_end = snapshot.display_point_to_point(display_end, Bias::Left);
+        assert_eq!(back_start, start);
+        assert_eq!(back_end, end);
+
+        // Max point should not panic (actual value may vary by implementation)
+        let _ = snapshot.max_point();
+    }
+
+    #[gpui::test]
+    fn empty_buffer_comprehensive(cx: &mut gpui::TestAppContext) {
+        let display_map = create_display_map("", cx);
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
+
+        // All coordinates should be (0,0)
+        let origin = Point::new(0, 0);
+        let display_origin = snapshot.point_to_display_point(origin, Bias::Left);
+        assert_eq!(display_origin.row, 0);
+        assert_eq!(display_origin.column, 0);
+
+        // Roundtrip
+        let back = snapshot.display_point_to_point(display_origin, Bias::Left);
+        assert_eq!(back, origin);
+
+        // Max point should be origin
+        let max = snapshot.max_point();
+        assert_eq!(max.row, 0);
+        assert_eq!(max.column, 0);
+
+        // Try mutations on empty buffer (should not panic)
+        let buffer = create_buffer("");
+        let anchor = buffer.anchor_before(0);
+
+        display_map.update(cx, |dm, cx| {
+            // Insert inlay at origin
+            dm.insert_inlays(vec![(anchor, "hint".to_string(), Bias::Right)], cx);
+
+            // Insert block at origin
+            dm.insert_blocks(vec![crate::block_map::BlockProperties {
+                placement: crate::block_map::BlockPlacement::Above(anchor),
+                height: Some(1),
+                style: crate::block_map::BlockStyle::Fixed,
+                priority: 0,
+            }]);
+        });
+
+        // Snapshot after mutations should still work
+        let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));
         let _ = snapshot.max_point();
     }
 }

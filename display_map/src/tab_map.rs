@@ -24,6 +24,18 @@
 ///! - No tree overhead: Tab expansion is purely local to each line
 ///! - Memory: O(1) - no caching in snapshot (immutable)
 ///!
+///! # Point vs Anchor
+///!
+///! TabMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
+///! - **Ephemeral transformations**: Tab expansion is recalculated on each sync
+///! - **No persistence**: No state survives across buffer edits
+///! - **Line-local**: Operates on per-line coordinates from FoldSnapshot
+///! - **Recalculated from stable sources**: Input comes from FoldSnapshot which
+///!   already handles anchor stability through its own `Range<Anchor>` storage
+///!
+///! This differs from FoldMap/BlockMap which need Anchors because they store
+///! user-visible entities that must survive buffer edits.
+///!
 ///! # Related
 ///!
 ///! - Input: [`FoldPoint`](crate::FoldPoint) from [`FoldSnapshot`]

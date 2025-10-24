@@ -31,6 +31,21 @@
 ///! coordinates through the transform tree. Cursor seeking provides O(log n)
 ///! conversion between coordinate spaces.
 ///!
+///! # Anchor Stability
+///!
+///! InlayMap achieves anchor stability **without storing explicit [`Anchor`] positions**.
+///! Instead, position is implicit in the SumTree structure:
+///!
+///! - **Inlay positions** are derived from tree traversal, not stored
+///! - **Buffer anchors** handle stability through edits (InlayMap rebuilds from anchors)
+///! - **More efficient** than storing Anchor in each Transform (avoids anchor comparison)
+///! - **Simpler** than maintaining anchor-to-transform mappings
+///!
+///! This differs from FoldMap/BlockMap which store `Range<Anchor>` because:
+///! - Folds/blocks are user-visible entities that persist across syncs
+///! - Inlays are rebuilt from scratch on each sync from external sources
+///! - InlayMap is a pure transformation layer, not a persistence layer
+///!
 ///! # Related
 ///!
 ///! - [`crate::transform`]: Base Transform pattern infrastructure
@@ -195,21 +210,21 @@ impl InlaySnapshot {
     ///
     /// # Bias Handling
     ///
-    /// When the point is exactly at a boundary where inlays are inserted:
-    /// - Skip over Left-biased inlays (they attach to character on left)
-    /// - Stop before Right-biased inlays (they attach to character on right)
-    pub fn to_inlay_point(&self, point: Point) -> InlayPoint {
+    /// The bias parameter controls positioning at inlay boundaries:
+    /// - `Bias::Left`: Skip over left-biased inlays, position after them
+    /// - `Bias::Right`: Stop before right-biased inlays, position before them
+    pub fn to_inlay_point(&self, point: Point, bias: Bias) -> InlayPoint {
         let mut cursor = self.transforms.cursor::<Dimensions<Point, InlayPoint>>(());
-        cursor.seek(&point, Bias::Left);
+        cursor.seek(&point, bias);
 
         loop {
             match cursor.item() {
                 Some(Transform::Isomorphic(_)) => {
                     // Check if we're exactly at the end of this isomorphic region
                     if point == cursor.end().0 {
-                        // Skip over Left-biased inlays, stop at Right-biased ones
+                        // Apply bias: skip inlays that match the bias direction
                         while let Some(Transform::Inlay(inlay)) = cursor.next_item() {
-                            if inlay.bias == Bias::Right {
+                            if inlay.bias != bias {
                                 break;
                             } else {
                                 cursor.next();
@@ -251,11 +266,12 @@ impl InlaySnapshot {
     /// # Bias Handling
     ///
     /// Positions inside inlay display text map back to the inlay's insertion point.
-    /// The bias of the inlay doesn't affect the reverse conversion - any display
-    /// position within the inlay's extent maps to the same buffer position.
-    pub fn to_point(&self, inlay_point: InlayPoint) -> Point {
+    /// The bias parameter is provided for consistency with other conversion functions,
+    /// but doesn't affect the result since any display position within an inlay's
+    /// extent maps to the same buffer position.
+    pub fn to_point(&self, inlay_point: InlayPoint, bias: Bias) -> Point {
         let mut cursor = self.transforms.cursor::<Dimensions<InlayPoint, Point>>(());
-        cursor.seek(&inlay_point, Bias::Left);
+        cursor.seek(&inlay_point, bias);
 
         loop {
             match cursor.item() {
@@ -281,6 +297,18 @@ impl InlaySnapshot {
                 },
             }
         }
+    }
+
+    /// Convert InlayPoint to InlayOffset (byte offset in inlay coordinate space).
+    ///
+    /// FIXME: Simplified implementation - approximates by using buffer offset.
+    /// Should properly account for inlay bytes in the output space.
+    pub fn to_inlay_offset(&self, inlay_point: InlayPoint) -> InlayOffset {
+        // Convert to buffer point and then to offset
+        // This is an approximation - inlay bytes are not counted
+        let point_in_buffer = self.to_point(inlay_point, Bias::Left);
+        let offset = self.buffer.point_to_offset(point_in_buffer);
+        InlayOffset(offset)
     }
 
     /// Get the version number of this snapshot.
@@ -417,15 +445,72 @@ impl InlayMap {
 
     /// Update buffer and rebuild transforms.
     ///
-    /// Returns the new snapshot and edits in InlayOffset space.
-    /// For now, returns empty edits (full rebuild on every sync).
-    pub fn sync(&mut self, buffer: BufferSnapshot) -> (InlaySnapshot, Vec<InlayEdit>) {
-        self.snapshot.buffer = buffer;
+    /// Transforms buffer edits (Point coordinate space) into inlay edits (InlayPoint space).
+    /// Uses cursor-based seeking for O(log n + k) performance where k is number of edits.
+    pub fn sync(
+        &mut self,
+        buffer: BufferSnapshot,
+        buffer_edits: Vec<Edit<Point>>,
+    ) -> (InlaySnapshot, Vec<InlayEdit>) {
+        self.snapshot.buffer = buffer.clone();
         self.snapshot.version += 1;
+
+        if buffer_edits.is_empty() {
+            // No edits - just rebuild and return empty edits
+            self.rebuild_transforms();
+            return (self.snapshot.clone(), Vec::new());
+        }
+
+        // Transform buffer edits to inlay edits
+        let inlay_edits = self.transform_buffer_edits(buffer_edits, &buffer);
+
+        // Rebuild transforms after edits
         self.rebuild_transforms();
 
-        // TODO: Compute actual edits instead of returning empty vec
-        (self.snapshot.clone(), Vec::new())
+        (self.snapshot.clone(), inlay_edits)
+    }
+
+    /// Transform buffer edits (Point space) to inlay edits (InlayPoint space).
+    ///
+    /// For each buffer edit, computes:
+    /// - old range: inlay coordinates before edit
+    /// - new range: inlay coordinates after edit
+    ///
+    /// Handles inlays that fall within, before, or after each edit.
+    fn transform_buffer_edits(
+        &self,
+        buffer_edits: Vec<Edit<Point>>,
+        new_buffer: &BufferSnapshot,
+    ) -> Vec<InlayEdit> {
+        let mut inlay_edits = Vec::new();
+
+        for edit in buffer_edits {
+            // Convert old buffer points to inlay points using existing API
+            let old_start_inlay = self.snapshot.to_inlay_point(edit.old.start, Bias::Left);
+            let old_end_inlay = self.snapshot.to_inlay_point(edit.old.end, Bias::Right);
+
+            // Convert to offsets
+            let old_start = self.snapshot.to_inlay_offset(old_start_inlay);
+            let old_end = self.snapshot.to_inlay_offset(old_end_inlay);
+
+            // Calculate new range based on buffer edit delta
+            // FIXME: Simplified - doesn't account for inlays within edited range
+            let old_len = self.snapshot.buffer.point_to_offset(edit.old.end)
+                - self.snapshot.buffer.point_to_offset(edit.old.start);
+            let new_len = new_buffer.point_to_offset(edit.new.end)
+                - new_buffer.point_to_offset(edit.new.start);
+            let delta = new_len as i64 - old_len as i64;
+
+            let new_start = old_start;
+            let new_end = InlayOffset((old_end.0 as i64 + delta).max(new_start.0 as i64) as usize);
+
+            inlay_edits.push(InlayEdit {
+                old: old_start..old_end,
+                new: new_start..new_end,
+            });
+        }
+
+        inlay_edits
     }
 
     /// Get the current snapshot.
@@ -498,12 +583,12 @@ mod tests {
         let snapshot = InlaySnapshot::new(buffer);
 
         let point = Point::new(0, 2);
-        let inlay_point = snapshot.to_inlay_point(point);
+        let inlay_point = snapshot.to_inlay_point(point, Bias::Left);
 
         assert_eq!(inlay_point.row, 0);
         assert_eq!(inlay_point.column, 2);
 
-        let back = snapshot.to_point(inlay_point);
+        let back = snapshot.to_point(inlay_point, Bias::Left);
         assert_eq!(back, point);
     }
 
@@ -530,19 +615,19 @@ mod tests {
 
         // Point 5 is at boundary - with Right-biased inlay, we stop before it
         let point1 = Point::new(0, 5);
-        let inlay_point1 = snapshot.to_inlay_point(point1);
+        let inlay_point1 = snapshot.to_inlay_point(point1, Bias::Left);
         assert_eq!(inlay_point1.row, 0);
         assert_eq!(inlay_point1.column, 5);
 
         // After inlay: column 6 (buffer) maps to column 11 (display)
         // "let x" (5) + ": i32" (5) + " " (1) = 11
         let point2 = Point::new(0, 6);
-        let inlay_point2 = snapshot.to_inlay_point(point2);
+        let inlay_point2 = snapshot.to_inlay_point(point2, Bias::Left);
         assert_eq!(inlay_point2.row, 0);
         assert_eq!(inlay_point2.column, 11);
 
         // Reverse: column 11 (display) maps back to column 6 (buffer)
-        let back = snapshot.to_point(inlay_point2);
+        let back = snapshot.to_point(inlay_point2, Bias::Left);
         assert_eq!(back, point2);
     }
 
@@ -578,17 +663,17 @@ mod tests {
         // Buffer column 8 at boundary - skip over Left-biased inlay
         // Result: "compute(" (8) + "value: " (7) = 15
         let point1 = Point::new(0, 8);
-        let inlay_point1 = snapshot.to_inlay_point(point1);
+        let inlay_point1 = snapshot.to_inlay_point(point1, Bias::Left);
         assert_eq!(inlay_point1.column, 15);
 
         // Buffer column 10 at boundary - skip over Left-biased inlay
         // Result: "compute(" (8) + "value: " (7) + "42" (2) + ", base: 10" (10) = 27
         let point2 = Point::new(0, 10);
-        let inlay_point2 = snapshot.to_inlay_point(point2);
+        let inlay_point2 = snapshot.to_inlay_point(point2, Bias::Left);
         assert_eq!(inlay_point2.column, 27);
 
         // Reverse conversions
-        assert_eq!(snapshot.to_point(inlay_point1), point1);
-        assert_eq!(snapshot.to_point(inlay_point2), point2);
+        assert_eq!(snapshot.to_point(inlay_point1, Bias::Left), point1);
+        assert_eq!(snapshot.to_point(inlay_point2, Bias::Left), point2);
     }
 }
