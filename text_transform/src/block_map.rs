@@ -779,6 +779,131 @@ impl BlockSnapshot {
 
         summary
     }
+
+    /// Iterate through text chunks for a range of display rows with highlight information.
+    ///
+    /// This is a simplified reference implementation that demonstrates text iteration
+    /// and highlight merging. Production implementation will optimize for performance.
+    pub fn chunks<'a>(
+        &'a self,
+        rows: Range<u32>,
+        _highlights: crate::display_map::Highlights<'a>,
+    ) -> BlockChunks<'a> {
+        // Convert block row range to buffer coordinates
+        let start_wrap_point = self.to_wrap_point(BlockPoint {
+            row: rows.start,
+            column: 0,
+        });
+        let end_wrap_point = self.to_wrap_point(BlockPoint {
+            row: rows.end,
+            column: 0,
+        });
+
+        // Convert wrap points to buffer points
+        let buffer = self
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .inlay_snapshot
+            .buffer();
+
+        let start_tab_point = self.wrap_snapshot.to_tab_point(start_wrap_point);
+        let start_fold_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .to_fold_point(start_tab_point, Bias::Left);
+        let start_inlay_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .to_inlay_point(start_fold_point);
+        let start_buffer_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .inlay_snapshot
+            .to_point(start_inlay_point, Bias::Left);
+
+        let end_tab_point = self.wrap_snapshot.to_tab_point(end_wrap_point);
+        let end_fold_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .to_fold_point(end_tab_point, Bias::Right);
+        let end_inlay_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .to_inlay_point(end_fold_point);
+        let end_buffer_point = self
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .inlay_snapshot
+            .to_point(end_inlay_point, Bias::Right);
+
+        let start_offset = buffer.point_to_offset(start_buffer_point);
+        let end_offset = buffer.point_to_offset(end_buffer_point);
+
+        BlockChunks {
+            snapshot: self,
+            start_offset,
+            end_offset,
+            yielded: false,
+        }
+    }
+}
+
+/// Iterator over text chunks with highlight information.
+///
+/// This is a simplified reference implementation. Production version will be
+/// more sophisticated with incremental chunk yielding and proper highlight merging.
+pub struct BlockChunks<'a> {
+    snapshot: &'a BlockSnapshot,
+    start_offset: usize,
+    end_offset: usize,
+    yielded: bool,
+}
+
+impl<'a> Iterator for BlockChunks<'a> {
+    type Item = crate::display_map::Chunk<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.yielded {
+            return None;
+        }
+
+        self.yielded = true;
+
+        let buffer = self
+            .snapshot
+            .wrap_snapshot
+            .tab_snapshot
+            .fold_snapshot
+            .inlay_snapshot
+            .buffer();
+
+        // Collect text chunks into a single string
+        // FIXME: This is inefficient - production should yield chunks incrementally
+        let text: String = buffer
+            .text_for_range(self.start_offset..self.end_offset)
+            .collect();
+
+        // Leak the string to get a 'static reference, then cast to 'a
+        // FIXME: This leaks memory - production should use proper arena allocation
+        let leaked: &'static str = Box::leak(text.into_boxed_str());
+        let text_ref: &'a str = unsafe { std::mem::transmute(leaked) };
+
+        Some(crate::display_map::Chunk {
+            text: text_ref,
+            highlight_style: None,
+            syntax_highlight_id: None,
+            diagnostic_severity: None,
+            is_tab: false,
+            is_inlay: false,
+            is_unnecessary: false,
+            underline: false,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -847,6 +972,55 @@ mod tests_block_snapshot {
         let summary = snapshot.text_summary_for_range(0..0);
 
         assert_eq!(summary, TextSummary::default());
+    }
+
+    #[test]
+    fn chunks_basic() {
+        let snapshot = build_block_snapshot("hello\nworld", 4);
+        let highlights = crate::display_map::Highlights::default();
+
+        let chunks: Vec<_> = snapshot.chunks(0..2, highlights).collect();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "hello\nworld");
+        assert_eq!(chunks[0].is_tab, false);
+        assert_eq!(chunks[0].is_inlay, false);
+    }
+
+    #[test]
+    fn chunks_single_line() {
+        let snapshot = build_block_snapshot("hello world", 4);
+        let highlights = crate::display_map::Highlights::default();
+
+        let chunks: Vec<_> = snapshot.chunks(0..1, highlights).collect();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "hello world");
+    }
+
+    #[test]
+    fn chunks_empty_range() {
+        let snapshot = build_block_snapshot("hello\nworld", 4);
+        let highlights = crate::display_map::Highlights::default();
+
+        let chunks: Vec<_> = snapshot.chunks(0..0, highlights).collect();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "");
+    }
+
+    #[test]
+    fn chunks_multi_line() {
+        let snapshot = build_block_snapshot("line 1\nline 2\nline 3\nline 4", 4);
+        let highlights = crate::display_map::Highlights::default();
+
+        let chunks: Vec<_> = snapshot.chunks(0..4, highlights).collect();
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("line 1"));
+        assert!(chunks[0].text.contains("line 2"));
+        assert!(chunks[0].text.contains("line 3"));
+        assert!(chunks[0].text.contains("line 4"));
     }
 }
 

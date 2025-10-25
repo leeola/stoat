@@ -1,11 +1,11 @@
 [package]
-name = "stoat_display_map"
+name = "stoat_text_transform"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-path = "src/stoat_display_map.rs"
+path = "src/lib.rs"
 doctest = false
 
 [dependencies]

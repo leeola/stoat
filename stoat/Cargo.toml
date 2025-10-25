@@ -12,7 +12,7 @@ sum_tree = { workspace = true }
 clock = { workspace = true }
 stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
-stoat_display_map = { path = "../display_map" }
+stoat_text_transform = { path = "../text_transform" }
 stoat_log = { path = "../log" }
 smol = "2.0"
 nucleo-matcher = "0.3.1"

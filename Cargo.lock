@@ -6495,10 +6495,10 @@ dependencies = [
  "serde",
  "smallvec",
  "smol",
- "stoat_display_map",
  "stoat_log",
  "stoat_rope",
  "stoat_text",
+ "stoat_text_transform",
  "sum_tree",
  "tempfile",
  "text",
@@ -6545,19 +6545,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoat_display_map"
-version = "0.1.0"
-dependencies = [
- "collections",
- "gpui",
- "smol",
- "stoat_log",
- "sum_tree",
- "text",
- "tracing",
-]
-
-[[package]]
 name = "stoat_log"
 version = "0.1.0"
 dependencies = [
@@ -6589,6 +6576,19 @@ dependencies = [
  "tree-sitter-md",
  "tree-sitter-rust",
  "tree-sitter-toml",
+]
+
+[[package]]
+name = "stoat_text_transform"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "gpui",
+ "smol",
+ "stoat_log",
+ "sum_tree",
+ "text",
+ "tracing",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
-///! DisplayMap coordinate transformation system for Stoat.
+///! Text coordinate transformation system for Stoat.
 ///!
-///! DisplayMap is a layered pipeline that transforms raw buffer coordinates ([`text::Point`])
-///! into visual display coordinates ([`DisplayPoint`]), handling:
+///! This crate provides a layered pipeline that transforms raw buffer coordinates
+/// ([`text::Point`]) ! into visual rendering coordinates, handling:
 ///!
 ///! - **Inlay hints**: Type annotations shown inline (InlayMap)
 ///! - **Code folding**: Hidden regions like collapsed function bodies (FoldMap)
@@ -24,7 +24,7 @@
 ///!   | WrapMap
 ///! WrapPoint
 ///!   | BlockMap
-///! BlockPoint (display)
+///! BlockPoint (visual)
 ///! ```
 ///!
 ///! Each layer:
@@ -58,11 +58,11 @@
 ///!
 ///! # Related
 ///!
-///! - See `.claude/DISPLAY_MAP.md` for full implementation plan
-///! - Based on Zed's editor DisplayMap architecture
+///! - Architecture inspired by Zed's coordinate transformation system
 ///! - Uses [`sum_tree::SumTree`] for efficient coordinate queries
 mod block_map;
 mod buffer_utils;
+mod char_visibility;
 mod coords;
 mod crease_map;
 mod dimensions;
@@ -76,13 +76,18 @@ mod wrap_map;
 
 // Re-export text crate types for convenience
 pub use block_map::{
-    BlockMap, BlockPlacement, BlockProperties, BlockSnapshot, BlockStyle, CustomBlock,
+    BlockChunks, BlockMap, BlockPlacement, BlockProperties, BlockSnapshot, BlockStyle, CustomBlock,
     CustomBlockId,
 };
+pub use char_visibility::{is_invisible, replacement_glyph};
 pub use coords::{BlockPoint, DisplayPoint, FoldPoint, InlayPoint, TabPoint, WrapPoint};
 pub use crease_map::{Crease, CreaseId, CreaseMap, CreaseSnapshot};
 pub use dimensions::{BlockOffset, BufferOffset, FoldOffset, InlayOffset, TabOffset, WrapOffset};
-pub use display_map::{DisplayMap, DisplaySnapshot};
+pub use display_map::{
+    Chunk, DiagnosticSeverity, DisplayMap, DisplayRow, DisplaySnapshot, FontWeight, HighlightKey,
+    HighlightStyle, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, TextHighlights,
+    TextLayoutDetails, UnderlineStyle,
+};
 pub use fold_map::{Fold, FoldMap, FoldSnapshot};
 pub use inlay_map::{InlayId, InlayMap, InlaySnapshot};
 pub use sum_tree::Bias;

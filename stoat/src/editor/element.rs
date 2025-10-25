@@ -141,7 +141,7 @@ impl Element for EditorElement {
         // Convert each display row to buffer point using DisplaySnapshot
         let mut buffer_rows_in_range = Vec::new();
         for display_row in start_display_row..end_display_row {
-            let display_point = stoat_display_map::DisplayPoint {
+            let display_point = stoat_text_transform::DisplayPoint {
                 row: display_row,
                 column: 0,
             };
@@ -225,7 +225,7 @@ impl Element for EditorElement {
 
         for display_row in start_display_row..end_display_row {
             // Convert display row to buffer point
-            let display_point = stoat_display_map::DisplayPoint {
+            let display_point = stoat_text_transform::DisplayPoint {
                 row: display_row,
                 column: 0,
             };

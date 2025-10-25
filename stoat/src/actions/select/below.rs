@@ -63,7 +63,7 @@ impl Stoat {
         }
 
         // Move down one display row, preserving column
-        let target_display_point = stoat_display_map::DisplayPoint {
+        let target_display_point = stoat_text_transform::DisplayPoint {
             row: display_point.row + 1,
             column: display_point.column,
         };

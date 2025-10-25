@@ -7,7 +7,7 @@ members = [
   "stoat_ast",
   "rope",
   "agent/claude_code",
-  "display_map",
+  "text_transform",
   "log",
 ]
 

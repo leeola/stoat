@@ -304,7 +304,7 @@ pub struct Stoat {
     /// - BlockMap: Inserts custom visual blocks
     ///
     /// Minimaps share the parent's DisplayMap via cheap Entity clones.
-    pub(crate) display_map: Entity<stoat_display_map::DisplayMap>,
+    pub(crate) display_map: Entity<stoat_text_transform::DisplayMap>,
 
     /// State for SelectNext/SelectAllMatches occurrence selection.
     ///
@@ -395,7 +395,7 @@ impl Stoat {
             let wrap_width = None; // Will be set dynamically based on viewport
 
             cx.new(|cx| {
-                stoat_display_map::DisplayMap::new(
+                stoat_text_transform::DisplayMap::new(
                     buffer.clone(),
                     tab_width,
                     font,
@@ -454,7 +454,7 @@ impl Stoat {
     ///
     /// Minimap instances delegate to their parent's DisplayMap.
     /// Returns the DisplayMap entity for converting between buffer and display coordinates.
-    pub fn display_map(&self, cx: &App) -> Entity<stoat_display_map::DisplayMap> {
+    pub fn display_map(&self, cx: &App) -> Entity<stoat_text_transform::DisplayMap> {
         // If this is a minimap, delegate to parent
         if let Some(parent_weak) = &self.parent_stoat {
             if let Some(parent) = parent_weak.upgrade() {
@@ -1175,7 +1175,7 @@ impl Stoat {
             let font_size = self.display_map.read(cx).font_size();
             let wrap_width = self.display_map.read(cx).wrap_width();
             cx.new(|cx| {
-                stoat_display_map::DisplayMap::new(
+                stoat_text_transform::DisplayMap::new(
                     buffer, tab_width, font, font_size, wrap_width, cx,
                 )
             })

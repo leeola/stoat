@@ -71,7 +71,7 @@ impl Stoat {
                 _ => display_point.column,
             };
 
-            let target_display_point = stoat_display_map::DisplayPoint {
+            let target_display_point = stoat_text_transform::DisplayPoint {
                 row: new_display_row,
                 column: goal_column,
             };
