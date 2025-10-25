@@ -60,6 +60,7 @@ impl KeyContext {
     }
 
     /// Parse a KeyContext from string, validating it's a known context.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "TextEditor" => Ok(Self::TextEditor),
@@ -614,7 +615,7 @@ impl Stoat {
             .buffer_store
             .read(cx)
             .get_buffer(buffer_id)
-            .ok_or_else(|| format!("Buffer not found: {:?}", buffer_id))?;
+            .ok_or_else(|| format!("Buffer not found: {buffer_id:?}"))?;
 
         // Update active_buffer_id
         self.active_buffer_id = Some(buffer_id);

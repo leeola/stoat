@@ -94,7 +94,7 @@ impl AboutModal {
                     .text_size(px(12.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(0x569CD6)) // Blue for labels
-                    .child(format!("{}:", label)),
+                    .child(format!("{label}:")),
             )
             .child(
                 div()

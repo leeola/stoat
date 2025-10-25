@@ -2074,12 +2074,10 @@ pub fn aliases(action: &dyn Action) -> &'static [&'static str] {
 
 /// Map from TypeId to hidden flag for command palette filtering
 pub static HIDDEN: LazyLock<HashMap<TypeId, bool>> = LazyLock::new(|| {
-    let hidden = HashMap::new();
-
     // Actions hidden from command palette by default (dismiss actions, etc.)
     // Hidden actions are marked via the action_metadata! macro with the 'hidden' parameter
 
-    hidden
+    HashMap::new()
 });
 
 /// Get the hidden flag for a given action.

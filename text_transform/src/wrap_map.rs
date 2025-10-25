@@ -1,60 +1,62 @@
-///! WrapMap v2: Soft-wrapping transformation layer with async background processing.
-///!
-///! This implementation uses the Transform pattern with async wrapping for optimal
-/// performance: ! - **Interpolation**: Instant response by assuming wraps stay unchanged
-///! - **Background wrapping**: Real wrapping using `LineWrapper` in async task
-///! - **5ms timeout**: Fast completions update immediately, slow ones continue in background
-///!
-///! # Transform Architecture
-///!
-///! Unlike InlayMap (enum) and FoldMap (struct with Option), WrapMap uses a struct with
-///! optional `display_text` field:
-///! - `display_text == None`: Isomorphic transform (no wrap)
-///! - `display_text == Some(...)`: Wrap transform (soft wrap with indent)
-///!
-///! # Coordinate Transformation
-///!
-///! Wraps **add rows** to display:
-///! ```text
-///! TabPoint (input):         WrapPoint (output):
-///! Row 0, Col 0-100:         Row 0: "This is a very long..."
-///!                           Row 1: "  line that wraps"
-///! Row 1: "Next line"        Row 2: "Next line"
-///! ```
-///!
-///! # Async Wrapping Flow
-///!
-///! 1. Edit arrives - queue in `pending_edits`
-///! 2. Call `interpolate()` - fast estimate (assume wraps stay same)
-///! 3. Return snapshot immediately
-///! 4. Spawn background task with `LineWrapper`
-///! 5. If completes <5ms: update snapshot with real wraps
-///! 6. Else: continue in background, notify when done
-///! 7. Compose `interpolated_edits.invert()` with real edits
-///!
-///! # Performance
-///!
-///! - Interpolation: O(log n) - instant (<1ms)
-///! - Real wrapping: O(file_size) - background (20-50ms for large files)
-///! - UI never blocks: Always returns interpolated snapshot first
-///!
-///! # Point vs Anchor
-///!
-///! WrapMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
-///! - **Ephemeral transformations**: Wraps are recalculated on width/font changes
-///! - **No persistence needed**: Transform tree rebuilt on each sync
-///! - **Pixel-dependent**: Wrapping depends on font metrics, not buffer positions
-///! - **Derived from stable sources**: Input comes from TabSnapshot which derives
-///!   from FoldSnapshot's `Range<Anchor>` storage
-///!
-///! Wraps don't need to "survive" buffer edits - they're recalculated from the
-///! updated tab coordinates which are themselves derived from stable fold anchors.
-///!
-///! # Related
-///!
-///! - Input: [`TabPoint`](crate::TabPoint) from
-/// [`TabSnapshot`](crate::tab_map::TabSnapshot) ! - Output: [`WrapPoint`](crate::WrapPoint)
-///! - Uses [`gpui::LineWrapper`] for pixel-based wrapping
+//! WrapMap v2: Soft-wrapping transformation layer with async background processing.
+//!
+//! This implementation uses the Transform pattern with async wrapping for optimal
+//! performance:
+//! - **Interpolation**: Instant response by assuming wraps stay unchanged
+//! - **Background wrapping**: Real wrapping using `LineWrapper` in async task
+//! - **5ms timeout**: Fast completions update immediately, slow ones continue in background
+//!
+//! # Transform Architecture
+//!
+//! Unlike InlayMap (enum) and FoldMap (struct with Option), WrapMap uses a struct with
+//! optional `display_text` field:
+//! - `display_text == None`: Isomorphic transform (no wrap)
+//! - `display_text == Some(...)`: Wrap transform (soft wrap with indent)
+//!
+//! # Coordinate Transformation
+//!
+//! Wraps **add rows** to display:
+//! ```text
+//! TabPoint (input):         WrapPoint (output):
+//! Row 0, Col 0-100:         Row 0: "This is a very long..."
+//!                           Row 1: "  line that wraps"
+//! Row 1: "Next line"        Row 2: "Next line"
+//! ```
+//!
+//! # Async Wrapping Flow
+//!
+//! 1. Edit arrives - queue in `pending_edits`
+//! 2. Call `interpolate()` - fast estimate (assume wraps stay same)
+//! 3. Return snapshot immediately
+//! 4. Spawn background task with `LineWrapper`
+//! 5. If completes <5ms: update snapshot with real wraps
+//! 6. Else: continue in background, notify when done
+//! 7. Compose `interpolated_edits.invert()` with real edits
+//!
+//! # Performance
+//!
+//! - Interpolation: O(log n) - instant (<1ms)
+//! - Real wrapping: O(file_size) - background (20-50ms for large files)
+//! - UI never blocks: Always returns interpolated snapshot first
+//!
+//! # Point vs Anchor
+//!
+//! WrapMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
+//! - **Ephemeral transformations**: Wraps are recalculated on width/font changes
+//! - **No persistence needed**: Transform tree rebuilt on each sync
+//! - **Pixel-dependent**: Wrapping depends on font metrics, not buffer positions
+//! - **Derived from stable sources**: Input comes from TabSnapshot which derives from
+//!   FoldSnapshot's `Range<Anchor>` storage
+//!
+//! Wraps don't need to "survive" buffer edits - they're recalculated from the
+//! updated tab coordinates which are themselves derived from stable fold anchors.
+//!
+//! # Related
+//!
+//! - Input: [`TabPoint`](crate::TabPoint) from [`TabSnapshot`](crate::tab_map::TabSnapshot)
+//! - Output: [`WrapPoint`](crate::WrapPoint)
+//! - Uses [`gpui::LineWrapper`] for pixel-based wrapping
+
 use crate::{
     coords::{TabPoint, WrapPoint},
     dimensions::TabOffset,
@@ -103,7 +105,7 @@ impl Transform {
 
         Self {
             summary: TransformSummary {
-                input: summary.clone(),
+                input: summary,
                 output: summary,
             },
             display_text: None,
@@ -168,8 +170,8 @@ impl sum_tree::ContextLessSummary for TransformSummary {
     }
 
     fn add_summary(&mut self, other: &Self) {
-        self.input = self.input.clone() + other.input.clone();
-        self.output = self.output.clone() + other.output.clone();
+        self.input += other.input;
+        self.output += other.output;
     }
 }
 
@@ -740,7 +742,7 @@ impl WrapSnapshot {
         let wrap_start = cursor.start().0;
         let tab_start = cursor.start().1;
 
-        if cursor.item().map_or(false, |t| t.is_isomorphic()) {
+        if cursor.item().is_some_and(|t| t.is_isomorphic()) {
             // Isomorphic - calculate offset
             if wrap_point.row > wrap_start.row {
                 TabPoint::new(

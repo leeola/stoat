@@ -140,6 +140,7 @@ impl GutterLayout {
     /// 2. Create indicators for buffer hunks (includes deleted markers at buffer positions)
     /// 3. Position indicators at left edge of gutter
     /// 4. Size indicators based on provided strip_width
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gutter_bounds: Bounds<Pixels>,
         visible_rows: Range<u32>,

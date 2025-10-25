@@ -1,4 +1,5 @@
-///! Utility functions for working with BufferSnapshot from the text crate.
+//! Utility functions for working with BufferSnapshot from the text crate.
+
 use text::{BufferSnapshot, Point};
 
 /// Read the text of a single line from the buffer.

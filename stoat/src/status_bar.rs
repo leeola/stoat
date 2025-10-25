@@ -40,6 +40,7 @@ pub struct StatusBar {
 
 impl StatusBar {
     /// Create a new status bar.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode_display: String,
         branch_info: Option<crate::git::status::GitBranchInfo>,

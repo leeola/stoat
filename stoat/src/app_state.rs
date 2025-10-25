@@ -33,6 +33,7 @@ use text::Buffer;
 ///
 /// Contains all state for the file finder modal including input buffer,
 /// file list, filtering results, and preview.
+#[derive(Default)]
 pub struct FileFinder {
     /// Input buffer for search query
     pub input: Option<Entity<Buffer>>,
@@ -52,25 +53,11 @@ pub struct FileFinder {
     pub preview_task: Option<Task<()>>,
 }
 
-impl Default for FileFinder {
-    fn default() -> Self {
-        Self {
-            input: None,
-            files: Vec::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            previous_mode: None,
-            previous_key_context: None,
-            preview: None,
-            preview_task: None,
-        }
-    }
-}
-
 /// Buffer finder state.
 ///
 /// Contains all state for the buffer finder modal which allows switching
 /// between open buffers via fuzzy search.
+#[derive(Default)]
 pub struct BufferFinder {
     /// Input buffer for search query
     pub input: Option<Entity<Buffer>>,
@@ -86,23 +73,11 @@ pub struct BufferFinder {
     pub previous_key_context: Option<KeyContext>,
 }
 
-impl Default for BufferFinder {
-    fn default() -> Self {
-        Self {
-            input: None,
-            buffers: Vec::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            previous_mode: None,
-            previous_key_context: None,
-        }
-    }
-}
-
 /// Command palette state.
 ///
 /// Contains all state for the command palette modal which provides fuzzy
 /// searchable access to all editor commands/actions.
+#[derive(Default)]
 pub struct CommandPalette {
     /// Input buffer for search query
     pub input: Option<Entity<Buffer>>,
@@ -120,24 +95,11 @@ pub struct CommandPalette {
     pub show_hidden: bool,
 }
 
-impl Default for CommandPalette {
-    fn default() -> Self {
-        Self {
-            input: None,
-            commands: Vec::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            previous_mode: None,
-            previous_key_context: None,
-            show_hidden: false,
-        }
-    }
-}
-
 /// Git status state.
 ///
 /// Contains all state for the git status modal which displays modified
 /// files with their status (modified, added, deleted, etc.).
+#[derive(Default)]
 pub struct GitStatus {
     /// All files with git changes
     pub files: Vec<crate::git::status::GitStatusEntry>,
@@ -159,23 +121,6 @@ pub struct GitStatus {
     pub branch_info: Option<crate::git::status::GitBranchInfo>,
     /// Number of dirty files in working tree
     pub dirty_count: usize,
-}
-
-impl Default for GitStatus {
-    fn default() -> Self {
-        Self {
-            files: Vec::new(),
-            filtered: Vec::new(),
-            filter: crate::git::status::GitStatusFilter::default(),
-            selected: 0,
-            previous_mode: None,
-            previous_key_context: None,
-            preview: None,
-            preview_task: None,
-            branch_info: None,
-            dirty_count: 0,
-        }
-    }
 }
 
 impl GitStatus {
@@ -207,6 +152,7 @@ impl GitStatus {
 ///
 /// Contains all state for diff review mode which allows reviewing and
 /// approving git diff hunks across multiple files.
+#[derive(Default)]
 pub struct DiffReview {
     /// List of files with changes to review
     pub files: Vec<PathBuf>,
@@ -220,19 +166,6 @@ pub struct DiffReview {
     pub previous_mode: Option<String>,
     /// Comparison mode (working vs HEAD, working vs index, index vs HEAD)
     pub comparison_mode: crate::git::diff_review::DiffComparisonMode,
-}
-
-impl Default for DiffReview {
-    fn default() -> Self {
-        Self {
-            files: Vec::new(),
-            current_file_idx: 0,
-            current_hunk_idx: 0,
-            approved_hunks: HashMap::new(),
-            previous_mode: None,
-            comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
-        }
-    }
 }
 
 /// Application-level state shared across all panes and view types.

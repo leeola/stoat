@@ -29,8 +29,8 @@ fn main() {
             .unwrap_or(false);
 
     // Set environment variables for use in the binary
-    println!("cargo:rustc-env=STOAT_COMMIT_HASH={}", commit_hash);
-    println!("cargo:rustc-env=STOAT_COMMIT_DIRTY={}", is_dirty);
+    println!("cargo:rustc-env=STOAT_COMMIT_HASH={commit_hash}");
+    println!("cargo:rustc-env=STOAT_COMMIT_DIRTY={is_dirty}");
 
     // Re-run build script if .git/HEAD changes (branch switch)
     println!("cargo:rerun-if-changed=../.git/HEAD");

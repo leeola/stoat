@@ -1,45 +1,45 @@
-///! DisplayMap v2: Complete coordinate transformation pipeline.
-///!
-///! Integrates all transformation layers to provide end-to-end conversion
-///! between buffer coordinates ([`Point`]) and display coordinates ([`DisplayPoint`]).
-///!
-///! # Architecture
-///!
-///! The DisplayMap chains six transformation layers:
-///!
-///! ```text
-///! Point (buffer)
-///!   | InlayMap    - Adds type hints, parameter names
-///! InlayPoint
-///!   | FoldMap     - Hides folded regions
-///! FoldPoint
-///!   | TabMap      - Expands tabs to spaces
-///! TabPoint
-///!   | WrapMap     - Wraps long lines
-///! WrapPoint
-///!   | BlockMap    - Inserts visual blocks
-///! BlockPoint = DisplayPoint (final)
-///! ```
-///!
-///! # Usage
-///!
-///! ```ignore
-///! let display_map = DisplayMap::new(buffer_snapshot, tab_width);
-///! let snapshot = display_map.snapshot();
-///!
-///! // Convert buffer position to display position
-///! let buffer_point = Point::new(10, 5);
-///! let display_point = snapshot.point_to_display_point(buffer_point, Bias::Left);
-///!
-///! // Convert back
-///! let back = snapshot.display_point_to_point(display_point, Bias::Left);
-///! assert_eq!(back, buffer_point);
-///! ```
-///!
-///! # Related
-///!
-///! - See `.claude/DISPLAY_MAP.md` for implementation details
-///! - Based on Zed's DisplayMap architecture
+//! DisplayMap v2: Complete coordinate transformation pipeline.
+//!
+//! Integrates all transformation layers to provide end-to-end conversion
+//! between buffer coordinates ([`Point`]) and display coordinates ([`DisplayPoint`]).
+//!
+//! # Architecture
+//!
+//! The DisplayMap chains six transformation layers:
+//!
+//! ```text
+//! Point (buffer)
+//!   | InlayMap    - Adds type hints, parameter names
+//! InlayPoint
+//!   | FoldMap     - Hides folded regions
+//! FoldPoint
+//!   | TabMap      - Expands tabs to spaces
+//! TabPoint
+//!   | WrapMap     - Wraps long lines
+//! WrapPoint
+//!   | BlockMap    - Inserts visual blocks
+//! BlockPoint = DisplayPoint (final)
+//! ```
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let display_map = DisplayMap::new(buffer_snapshot, tab_width);
+//! let snapshot = display_map.snapshot();
+//!
+//! // Convert buffer position to display position
+//! let buffer_point = Point::new(10, 5);
+//! let display_point = snapshot.point_to_display_point(buffer_point, Bias::Left);
+//!
+//! // Convert back
+//! let back = snapshot.display_point_to_point(display_point, Bias::Left);
+//! assert_eq!(back, buffer_point);
+//! ```
+//!
+//! # Related
+//!
+//! - See `.claude/DISPLAY_MAP.md` for implementation details
+//! - Based on Zed's DisplayMap architecture
 
 // ============================================================================
 // Highlight System Types

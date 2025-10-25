@@ -91,9 +91,6 @@ const REPLACEMENT_SPACE: &str = "\u{2007}";
 /// Symbol for DEL character.
 const DEL_SYMBOL: &str = "\u{2421}";
 
-/// Ideographic space - visually wide, not treated as invisible.
-const IDEOGRAPHIC_SPACE: char = '\u{3000}';
-
 /// Unicode control picture symbols for ASCII control codes (U+2400-U+241F).
 /// Index corresponds to the control code value (0x00-0x1F).
 const CONTROL_PICTURES: &[&str] = &[

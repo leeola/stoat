@@ -1,8 +1,7 @@
-///! Coordinate types for each layer in the DisplayMap transformation pipeline.
-///!
-///! Each coordinate type represents a distinct transformation layer, preventing
-///! accidental mixing of coordinate spaces through compile-time type safety.
-
+//! Coordinate types for each layer in the DisplayMap transformation pipeline.
+//!
+//! Each coordinate type represents a distinct transformation layer, preventing
+//! accidental mixing of coordinate spaces through compile-time type safety.
 /// Coordinate after applying inlay hints.
 ///
 /// [`InlayMap`](crate::InlayMap) transforms buffer [`text::Point`] to [`InlayPoint`] by

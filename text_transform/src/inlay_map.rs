@@ -1,56 +1,57 @@
-///! InlayMap v2: Transform-based coordinate transformation for inlay hints.
-///!
-///! This implementation uses the Transform pattern with [`SumTree<Transform>`] instead
-///! of storing inlays directly, enabling efficient O(log n) coordinate conversions.
-///!
-///! # Transform Architecture
-///!
-///! The core data structure is `SumTree<Transform>` where each Transform is either:
-///! - **Isomorphic**: 1:1 mapping (no inlay), coordinates unchanged
-///! - **Inlay**: Transformation adding visual text
-///!
-///! This explicitly represents both transformed and untransformed regions, enabling
-///! efficient cursor-based seeking through the coordinate space.
-///!
-///! # Example
-///!
-///! ```text
-///! Buffer:     let x = compute(42);
-///! Display:    let x: String = compute(value: 42);
-///!                   ^^^^^^^^             ^^^^^^^
-///!                   inlay transforms
-///!
-///! SumTree<Transform>:
-///! [Isomorphic("let x"), Inlay(": String"), Isomorphic(" = compute("),
-///!  Inlay("value: "), Isomorphic("42);")]
-///! ```
-///!
-///! # Coordinate Conversion
-///!
-///! Uses [`text::TextSummary`] to track both input (buffer) and output (display)
-///! coordinates through the transform tree. Cursor seeking provides O(log n)
-///! conversion between coordinate spaces.
-///!
-///! # Anchor Stability
-///!
-///! InlayMap achieves anchor stability **without storing explicit [`Anchor`] positions**.
-///! Instead, position is implicit in the SumTree structure:
-///!
-///! - **Inlay positions** are derived from tree traversal, not stored
-///! - **Buffer anchors** handle stability through edits (InlayMap rebuilds from anchors)
-///! - **More efficient** than storing Anchor in each Transform (avoids anchor comparison)
-///! - **Simpler** than maintaining anchor-to-transform mappings
-///!
-///! This differs from FoldMap/BlockMap which store `Range<Anchor>` because:
-///! - Folds/blocks are user-visible entities that persist across syncs
-///! - Inlays are rebuilt from scratch on each sync from external sources
-///! - InlayMap is a pure transformation layer, not a persistence layer
-///!
-///! # Related
-///!
-///! - [`crate::transform`]: Base Transform pattern infrastructure
-///! - [`InlayPoint`](crate::InlayPoint): Output coordinate type
-///! - [`text::TextSummary`]: Aggregated text metadata
+//! InlayMap v2: Transform-based coordinate transformation for inlay hints.
+//!
+//! This implementation uses the Transform pattern with [`SumTree<Transform>`] instead
+//! of storing inlays directly, enabling efficient O(log n) coordinate conversions.
+//!
+//! # Transform Architecture
+//!
+//! The core data structure is `SumTree<Transform>` where each Transform is either:
+//! - **Isomorphic**: 1:1 mapping (no inlay), coordinates unchanged
+//! - **Inlay**: Transformation adding visual text
+//!
+//! This explicitly represents both transformed and untransformed regions, enabling
+//! efficient cursor-based seeking through the coordinate space.
+//!
+//! # Example
+//!
+//! ```text
+//! Buffer:     let x = compute(42);
+//! Display:    let x: String = compute(value: 42);
+//!                   ^^^^^^^^             ^^^^^^^
+//!                   inlay transforms
+//!
+//! SumTree<Transform>:
+//! [Isomorphic("let x"), Inlay(": String"), Isomorphic(" = compute("),
+//!  Inlay("value: "), Isomorphic("42);")]
+//! ```
+//!
+//! # Coordinate Conversion
+//!
+//! Uses [`text::TextSummary`] to track both input (buffer) and output (display)
+//! coordinates through the transform tree. Cursor seeking provides O(log n)
+//! conversion between coordinate spaces.
+//!
+//! # Anchor Stability
+//!
+//! InlayMap achieves anchor stability **without storing explicit [`Anchor`] positions**.
+//! Instead, position is implicit in the SumTree structure:
+//!
+//! - **Inlay positions** are derived from tree traversal, not stored
+//! - **Buffer anchors** handle stability through edits (InlayMap rebuilds from anchors)
+//! - **More efficient** than storing Anchor in each Transform (avoids anchor comparison)
+//! - **Simpler** than maintaining anchor-to-transform mappings
+//!
+//! This differs from FoldMap/BlockMap which store `Range<Anchor>` because:
+//! - Folds/blocks are user-visible entities that persist across syncs
+//! - Inlays are rebuilt from scratch on each sync from external sources
+//! - InlayMap is a pure transformation layer, not a persistence layer
+//!
+//! # Related
+//!
+//! - [`crate::transform`]: Base Transform pattern infrastructure
+//! - [`InlayPoint`](crate::InlayPoint): Output coordinate type
+//! - [`text::TextSummary`]: Aggregated text metadata
+
 use crate::{coords::InlayPoint, dimensions::InlayOffset, transform::Isomorphic};
 use std::{
     cmp::Ordering,
@@ -117,7 +118,7 @@ impl InlayTransformSummary {
     /// Create summary for an isomorphic region (1:1 mapping).
     fn isomorphic(summary: TextSummary) -> Self {
         Self {
-            input: summary.clone(),
+            input: summary,
             output: summary,
         }
     }
@@ -140,8 +141,8 @@ impl sum_tree::ContextLessSummary for InlayTransformSummary {
     }
 
     fn add_summary(&mut self, other: &Self) {
-        self.input = self.input.clone() + other.input.clone();
-        self.output = self.output.clone() + other.output.clone();
+        self.input += other.input;
+        self.output += other.output;
     }
 }
 
@@ -150,7 +151,7 @@ impl Item for Transform {
 
     fn summary(&self, _cx: ()) -> Self::Summary {
         match self {
-            Transform::Isomorphic(iso) => InlayTransformSummary::isomorphic(iso.summary().clone()),
+            Transform::Isomorphic(iso) => InlayTransformSummary::isomorphic(*iso.summary()),
             Transform::Inlay(inlay) => InlayTransformSummary::inlay(&inlay.text),
         }
     }

@@ -76,7 +76,7 @@ impl Stoat {
                     new_selections.push(Selection {
                         id: self.selections.next_id(),
                         start: end,
-                        end: end,
+                        end,
                         reversed: false,
                         goal: SelectionGoal::None,
                     });

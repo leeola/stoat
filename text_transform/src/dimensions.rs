@@ -1,39 +1,40 @@
-///! Dimension types for SumTree seeking in DisplayMap layers.
-///!
-///! Each DisplayMap layer needs custom offset types to represent positions in
-///! its coordinate space. These offset types are used with [`sum_tree::Cursor`]
-///! to efficiently seek through transform trees.
-///!
-///! # Offset Type Pattern
-///!
-///! Each layer defines its own offset type wrapping `usize`:
-///!
-///! ```ignore
-///! #[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
-///! pub struct InlayOffset(pub usize);
-///! ```
-///!
-///! These types must implement `Add`, `Sub`, `AddAssign`, `SubAssign` to work
-///! with SumTree's dimension system.
-///!
-///! # Coordinate Spaces
-///!
-///! - **Point**: Buffer coordinates (row, column) - already exists
-///! - **InlayOffset**: Byte offset in buffer space
-///! - **InlayPoint**: Point after inlay hints applied
-///! - **FoldOffset**: Byte offset after folding
-///! - **FoldPoint**: Point after folding
-///! - And so on through the layer stack
-///!
-///! # Usage with SumTree
-///!
-///! ```ignore
-///! let mut cursor = transforms.cursor::<InlayOffset>();
-///! cursor.seek(&target_offset, Bias::Left, &());
-///! ```
-///!
-///! The cursor uses these offset types as dimensions to efficiently navigate
-///! the transform tree.
+//! Dimension types for SumTree seeking in DisplayMap layers.
+//!
+//! Each DisplayMap layer needs custom offset types to represent positions in
+//! its coordinate space. These offset types are used with [`sum_tree::Cursor`]
+//! to efficiently seek through transform trees.
+//!
+//! # Offset Type Pattern
+//!
+//! Each layer defines its own offset type wrapping `usize`:
+//!
+//! ```ignore
+//! #[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
+//! pub struct InlayOffset(pub usize);
+//! ```
+//!
+//! These types must implement `Add`, `Sub`, `AddAssign`, `SubAssign` to work
+//! with SumTree's dimension system.
+//!
+//! # Coordinate Spaces
+//!
+//! - **Point**: Buffer coordinates (row, column) - already exists
+//! - **InlayOffset**: Byte offset in buffer space
+//! - **InlayPoint**: Point after inlay hints applied
+//! - **FoldOffset**: Byte offset after folding
+//! - **FoldPoint**: Point after folding
+//! - And so on through the layer stack
+//!
+//! # Usage with SumTree
+//!
+//! ```ignore
+//! let mut cursor = transforms.cursor::<InlayOffset>();
+//! cursor.seek(&target_offset, Bias::Left, &());
+//! ```
+//!
+//! The cursor uses these offset types as dimensions to efficiently navigate
+//! the transform tree.
+
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 /// Byte offset in buffer space (before any transformations).

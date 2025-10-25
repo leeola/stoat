@@ -1,44 +1,45 @@
-///! FoldMap v2: Transform-based coordinate transformation for code folding.
-///!
-///! This implementation uses the Transform pattern with dual `SumTree` architecture:
-///! - `transforms: SumTree<Transform>` - For coordinate conversion (InlayPoint -> FoldPoint)
-///! - `folds: SumTree<Fold>` - For fold metadata and rendering
-///!
-///! # Transform Architecture
-///!
-///! Unlike InlayMap which uses an enum, FoldMap uses a struct with optional placeholder:
-///! ```rust
-///! struct Transform {
-///!     summary: TransformSummary,
-///!     placeholder: Option<TransformPlaceholder>,  // None = isomorphic, Some = fold
-///! }
-///! ```
-///!
-///! This design allows efficient merging of adjacent isomorphic regions while
-///! maintaining fold-specific data separately.
-///!
-///! # Coordinate Transformation
-///!
-///! Folds **hide rows** from display:
-///! ```text
-///! InlayPoint (input):    FoldPoint (output):
-///! Row 0: fn example() {  Row 0: fn example() { ... }
-///! Row 1:     line 1      (hidden)
-///! Row 2:     line 2      (hidden)
-///! Row 3: }               (hidden)
-///! Row 4: fn another()    Row 1: fn another()
-///! ```
-///!
-///! # Dual SumTree Pattern
-///!
-///! - **transforms**: Efficient coordinate conversion via cursor seeking
-///! - **folds**: Query folds by Anchor range, ID lookup via TreeMap
-///!
-///! # Related
-///!
-///! - [`crate::transform`]: Base Transform pattern infrastructure
-///! - [`FoldPoint`](crate::FoldPoint): Output coordinate type
-///! - [`text::Anchor`]: Stable positioning through edits
+//! FoldMap v2: Transform-based coordinate transformation for code folding.
+//!
+//! This implementation uses the Transform pattern with dual `SumTree` architecture:
+//! - `transforms: SumTree<Transform>` - For coordinate conversion (InlayPoint -> FoldPoint)
+//! - `folds: SumTree<Fold>` - For fold metadata and rendering
+//!
+//! # Transform Architecture
+//!
+//! Unlike InlayMap which uses an enum, FoldMap uses a struct with optional placeholder:
+//! ```rust
+//! struct Transform {
+//!     summary: TransformSummary,
+//!     placeholder: Option<TransformPlaceholder>,  // None = isomorphic, Some = fold
+//! }
+//! ```
+//!
+//! This design allows efficient merging of adjacent isomorphic regions while
+//! maintaining fold-specific data separately.
+//!
+//! # Coordinate Transformation
+//!
+//! Folds **hide rows** from display:
+//! ```text
+//! InlayPoint (input):    FoldPoint (output):
+//! Row 0: fn example() {  Row 0: fn example() { ... }
+//! Row 1:     line 1      (hidden)
+//! Row 2:     line 2      (hidden)
+//! Row 3: }               (hidden)
+//! Row 4: fn another()    Row 1: fn another()
+//! ```
+//!
+//! # Dual SumTree Pattern
+//!
+//! - **transforms**: Efficient coordinate conversion via cursor seeking
+//! - **folds**: Query folds by Anchor range, ID lookup via TreeMap
+//!
+//! # Related
+//!
+//! - [`crate::transform`]: Base Transform pattern infrastructure
+//! - [`FoldPoint`](crate::FoldPoint): Output coordinate type
+//! - [`text::Anchor`]: Stable positioning through edits
+
 use crate::{
     coords::{FoldPoint, InlayPoint},
     dimensions::{FoldOffset, InlayOffset},
@@ -285,7 +286,7 @@ impl Transform {
     fn isomorphic(summary: TextSummary) -> Self {
         Self {
             summary: TransformSummary {
-                input: summary.clone(),
+                input: summary,
                 output: summary,
             },
             placeholder: None,
@@ -332,8 +333,8 @@ impl sum_tree::ContextLessSummary for TransformSummary {
     }
 
     fn add_summary(&mut self, other: &Self) {
-        self.input = self.input.clone() + other.input.clone();
-        self.output = self.output.clone() + other.output.clone();
+        self.input += other.input;
+        self.output += other.output;
     }
 }
 
@@ -861,8 +862,8 @@ fn push_isomorphic(transforms: &mut SumTree<Transform>, summary: TextSummary) {
     transforms.update_last(
         |last| {
             if !last.is_fold() {
-                last.summary.input = last.summary.input.clone() + summary.clone();
-                last.summary.output = last.summary.output.clone() + summary.clone();
+                last.summary.input += summary;
+                last.summary.output += summary;
                 did_merge = true;
             }
         },

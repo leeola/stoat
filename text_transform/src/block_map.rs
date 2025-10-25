@@ -1,31 +1,30 @@
-///! BlockMap v2: Block decoration transformation layer.
-///!
-///! Inserts visual blocks between lines (diagnostics, git blame, code lens, etc.).
-///! This implementation starts with basic coordinate transformation and can be
-///! enhanced with full block rendering support later.
-///!
-///! # Transform Architecture
-///!
-///! BlockMap uses a struct-based Transform similar to WrapMap:
-///! - `block_height == 0`: Isomorphic transform (no block, 1:1 mapping)
-///! - `block_height > 0`: Block transform (adds display rows)
-///!
-///! # Coordinate Transformation
-///!
-///! Blocks **add rows** to display without consuming input:
-///! ```text
-///! WrapPoint (input):        BlockPoint (output):
-///! Row 0: "fn example()"     Row 0: "fn example()"
-///!                           Row 1: [Diagnostic Block - 2 rows]
-///!                           Row 2: [continued]
-///! Row 1: "  let x = 42"     Row 3: "  let x = 42"
-///! ```
-///!
-///! # Related
-///!
-///! - Input: [`WrapPoint`](crate::WrapPoint) from
-/// [`WrapSnapshot`](crate::wrap_map::WrapSnapshot) ! - Output:
-/// [`BlockPoint`](crate::BlockPoint) which becomes final DisplayPoint
+//! BlockMap v2: Block decoration transformation layer.
+//!
+//! Inserts visual blocks between lines (diagnostics, git blame, code lens, etc.).
+//! This implementation starts with basic coordinate transformation and can be
+//! enhanced with full block rendering support later.
+//!
+//! # Transform Architecture
+//!
+//! BlockMap uses a struct-based Transform similar to WrapMap:
+//! - `block_height == 0`: Isomorphic transform (no block, 1:1 mapping)
+//! - `block_height > 0`: Block transform (adds display rows)
+//!
+//! # Coordinate Transformation
+//!
+//! Blocks **add rows** to display without consuming input:
+//! ```text
+//! WrapPoint (input):        BlockPoint (output):
+//! Row 0: "fn example()"     Row 0: "fn example()"
+//!                           Row 1: [Diagnostic Block - 2 rows]
+//!                           Row 2: [continued]
+//! Row 1: "  let x = 42"     Row 3: "  let x = 42"
+//! ```
+//!
+//! # Related
+//!
+//! - Input: [`WrapPoint`](crate::WrapPoint) from [`WrapSnapshot`](crate::wrap_map::WrapSnapshot)
+//! - Output: [`BlockPoint`](crate::BlockPoint) which becomes final DisplayPoint
 use crate::{
     coords::{BlockPoint, WrapPoint},
     dimensions::BlockOffset,
@@ -51,20 +50,15 @@ pub struct CustomBlockId(pub usize);
 pub type BlockEdit = Edit<BlockOffset>;
 
 /// Style of block rendering.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Default)]
 pub enum BlockStyle {
     /// Fixed-height block.
+    #[default]
     Fixed,
     /// Flexible-height block that can grow/shrink.
     Flex,
     /// Sticky block that stays visible when scrolling.
     Sticky,
-}
-
-impl Default for BlockStyle {
-    fn default() -> Self {
-        BlockStyle::Fixed
-    }
 }
 
 /// Placement strategy for a block relative to an anchor.
@@ -221,7 +215,7 @@ impl Transform {
 
         Self {
             summary: TransformSummary {
-                input: summary.clone(),
+                input: summary,
                 output: summary,
             },
             block_height: 0,
@@ -277,8 +271,8 @@ impl sum_tree::ContextLessSummary for TransformSummary {
     }
 
     fn add_summary(&mut self, other: &Self) {
-        self.input = self.input.clone() + other.input.clone();
-        self.output = self.output.clone() + other.output.clone();
+        self.input += other.input;
+        self.output += other.output;
     }
 }
 
@@ -728,7 +722,7 @@ impl BlockSnapshot {
         let block_start = cursor.start().0;
         let wrap_start = cursor.start().1;
 
-        if cursor.item().map_or(false, |t| t.is_isomorphic()) {
+        if cursor.item().is_some_and(|t| t.is_isomorphic()) {
             // Isomorphic - calculate offset
             if block_point.row > block_start.row {
                 WrapPoint {

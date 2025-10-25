@@ -66,7 +66,7 @@ impl Stoat {
         let state_matches = self
             .select_prev_state
             .as_ref()
-            .map_or(false, |state| state.query == query);
+            .is_some_and(|state| state.query == query);
 
         if !state_matches {
             self.select_prev_state = Some(SelectNextState {

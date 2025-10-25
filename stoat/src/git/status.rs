@@ -479,6 +479,7 @@ pub struct GitStatus {
 
 impl GitStatus {
     /// Create a new git status renderer with the given state.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         files: Vec<GitStatusEntry>,
         filtered: Vec<GitStatusEntry>,

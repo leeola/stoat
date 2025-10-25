@@ -1,7 +1,8 @@
-///! Core traits for DisplayMap layer implementations.
-///!
-///! These traits define the interfaces that all transformation layers must implement,
-///! enabling composition of the six-layer pipeline.
+//! Core traits for DisplayMap layer implementations.
+//!
+//! These traits define the interfaces that all transformation layers must implement,
+//! enabling composition of the six-layer pipeline.
+
 use text::Point;
 
 /// Edit operations on the buffer using Point coordinates
@@ -93,6 +94,7 @@ pub trait CoordinateTransform<From, To> {
     /// # Performance
     ///
     /// Implementations should achieve O(log n) performance using [`sum_tree::SumTree`].
+    #[allow(clippy::wrong_self_convention)]
     fn from_coords(&self, point: To) -> From;
 }
 

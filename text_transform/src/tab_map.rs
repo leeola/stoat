@@ -1,46 +1,47 @@
-///! TabMap v2: Tab expansion transformation layer with snapshot pattern.
-///!
-///! Unlike InlayMap and FoldMap which use SumTree<Transform>, TabMap uses a simpler
-///! line-scanning approach since tab expansion is inherently line-local and doesn't
-///! benefit from tree-based seeking.
-///!
-///! # Transform Architecture
-///!
-///! TabMap converts FoldPoint -> TabPoint by expanding tab characters:
-///! - Regular characters: 1 display column
-///! - Tab characters: Advances to next multiple of tab_width
-///!
-///! # Example
-///!
-///! ```text
-///! Buffer (tab_width=4):     Display:
-///! "\ttext"                  "    text"   (tab expands to 4 spaces)
-///! "ab\tcd"                  "ab  cd"     (tab expands to 2 spaces to align at column 4)
-///! ```
-///!
-///! # Performance
-///!
-///! - Coordinate conversion: O(line_length) - must scan entire line
-///! - No tree overhead: Tab expansion is purely local to each line
-///! - Memory: O(1) - no caching in snapshot (immutable)
-///!
-///! # Point vs Anchor
-///!
-///! TabMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
-///! - **Ephemeral transformations**: Tab expansion is recalculated on each sync
-///! - **No persistence**: No state survives across buffer edits
-///! - **Line-local**: Operates on per-line coordinates from FoldSnapshot
-///! - **Recalculated from stable sources**: Input comes from FoldSnapshot which
-///!   already handles anchor stability through its own `Range<Anchor>` storage
-///!
-///! This differs from FoldMap/BlockMap which need Anchors because they store
-///! user-visible entities that must survive buffer edits.
-///!
-///! # Related
-///!
-///! - Input: [`FoldPoint`](crate::FoldPoint) from [`FoldSnapshot`]
-///! - Output: [`TabPoint`](crate::TabPoint)
-///! - [`fold_map_v2::FoldSnapshot`] - Input layer
+//! TabMap v2: Tab expansion transformation layer with snapshot pattern.
+//!
+//! Unlike InlayMap and FoldMap which use SumTree<Transform>, TabMap uses a simpler
+//! line-scanning approach since tab expansion is inherently line-local and doesn't
+//! benefit from tree-based seeking.
+//!
+//! # Transform Architecture
+//!
+//! TabMap converts FoldPoint -> TabPoint by expanding tab characters:
+//! - Regular characters: 1 display column
+//! - Tab characters: Advances to next multiple of tab_width
+//!
+//! # Example
+//!
+//! ```text
+//! Buffer (tab_width=4):     Display:
+//! "\ttext"                  "    text"   (tab expands to 4 spaces)
+//! "ab\tcd"                  "ab  cd"     (tab expands to 2 spaces to align at column 4)
+//! ```
+//!
+//! # Performance
+//!
+//! - Coordinate conversion: O(line_length) - must scan entire line
+//! - No tree overhead: Tab expansion is purely local to each line
+//! - Memory: O(1) - no caching in snapshot (immutable)
+//!
+//! # Point vs Anchor
+//!
+//! TabMap correctly uses [`Point`] coordinates (not [`text::Anchor`]) because:
+//! - **Ephemeral transformations**: Tab expansion is recalculated on each sync
+//! - **No persistence**: No state survives across buffer edits
+//! - **Line-local**: Operates on per-line coordinates from FoldSnapshot
+//! - **Recalculated from stable sources**: Input comes from FoldSnapshot which already handles
+//!   anchor stability through its own `Range<Anchor>` storage
+//!
+//! This differs from FoldMap/BlockMap which need Anchors because they store
+//! user-visible entities that must survive buffer edits.
+//!
+//! # Related
+//!
+//! - Input: [`FoldPoint`](crate::FoldPoint) from [`FoldSnapshot`]
+//! - Output: [`TabPoint`](crate::TabPoint)
+//! - [`fold_map_v2::FoldSnapshot`] - Input layer
+
 use crate::{
     coords::{FoldPoint, TabPoint},
     dimensions::FoldOffset,
@@ -334,7 +335,8 @@ impl TabMap {
         self.snapshot.version += 1;
 
         // Convert fold edits (FoldOffset ranges) to tab edits (TabPoint ranges)
-        let tab_edits = fold_edits
+
+        fold_edits
             .into_iter()
             .map(|edit| {
                 // Convert old FoldOffsets to FoldPoints, then to TabPoints
@@ -364,9 +366,7 @@ impl TabMap {
                     new: new_start..new_end,
                 }
             })
-            .collect();
-
-        tab_edits
+            .collect()
     }
 }
 
