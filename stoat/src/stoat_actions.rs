@@ -9,16 +9,16 @@ use tracing::debug;
 
 impl Stoat {
     // ==== Git status helper methods ====
-    // FIXME: Git status methods moved to WorkspaceState and PaneGroupView as part of Phase 3.
+    // FIXME: Git status methods moved to AppState and PaneGroupView as part of Phase 3.
     // The following methods have been removed:
     // - load_git_diff_preview() -> moved to PaneGroupView::load_git_status_preview()
-    // - filter_git_status_files() -> logic moved to WorkspaceState::open_git_status()
+    // - filter_git_status_files() -> logic moved to AppState::open_git_status()
     // - git_status_files(), git_status_filtered(), git_status_filter() -> access via
-    //   workspace.git_status
-    // - git_status_branch_info() -> access via workspace.git_status.branch_info
-    // - git_status_selected() -> access via workspace.git_status.selected
-    // - git_status_preview() -> access via workspace.git_status.preview
-    // - git_dirty_count() -> access via workspace.git_status.dirty_count
+    //   app_state.git_status
+    // - git_status_branch_info() -> access via app_state.git_status.branch_info
+    // - git_status_selected() -> access via app_state.git_status.selected
+    // - git_status_preview() -> access via app_state.git_status.preview
+    // - git_dirty_count() -> access via app_state.git_status.dirty_count
 
     /// Accessor for current file path (for status bar).
     pub fn current_file_path(&self) -> Option<&std::path::Path> {

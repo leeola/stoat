@@ -234,24 +234,24 @@ pub struct Stoat {
 
     /// Temporary reference to file_finder input buffer (set when entering FileFinder context)
     ///
-    /// This is a reference (not the owner) to the file_finder input buffer from WorkspaceState.
+    /// This is a reference (not the owner) to the file_finder input buffer from AppState.
     /// It allows edit actions (insert_text, delete_left) to route to the file finder input
-    /// while maintaining the architectural separation where file_finder state lives in workspace.
+    /// while maintaining the architectural separation where file_finder state lives in app state.
     pub(crate) file_finder_input_ref: Option<Entity<Buffer>>,
 
     /// Temporary reference to command_palette input buffer (set when entering CommandPalette
     /// context)
     ///
     /// This is a reference (not the owner) to the command_palette input buffer from
-    /// WorkspaceState. It allows edit actions (insert_text, delete_left) to route to the
+    /// AppState. It allows edit actions (insert_text, delete_left) to route to the
     /// command palette input while maintaining the architectural separation where
-    /// command_palette state lives in workspace.
+    /// command_palette state lives in app state.
     pub(crate) command_palette_input_ref: Option<Entity<Buffer>>,
 
     /// Temporary reference to buffer_finder input buffer (set when entering BufferFinder context)
     ///
     /// Similar to [`command_palette_input_ref`], this is a reference (not the owner) to
-    /// the buffer_finder input buffer from WorkspaceState. It allows edit actions to route
+    /// the buffer_finder input buffer from AppState. It allows edit actions to route
     /// to the buffer finder input while maintaining architectural separation.
     pub(crate) buffer_finder_input_ref: Option<Entity<Buffer>>,
 

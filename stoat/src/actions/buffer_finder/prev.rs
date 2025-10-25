@@ -1,6 +1,6 @@
 //! Buffer finder prev action - now handled by PaneGroupView.
 //!
-//! The buffer finder state has been moved to WorkspaceState and is managed by
+//! The buffer finder state has been moved to AppState and is managed by
 //! PaneGroupView. See:
 //! - `PaneGroupView::handle_buffer_finder_prev()` for the action handler
 

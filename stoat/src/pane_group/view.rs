@@ -135,7 +135,7 @@ impl Default for MinimapVisibility {
 /// ensuring only one minimap appears regardless of split configuration.
 pub struct PaneGroupView {
     /// Workspace-level state shared across all panes
-    workspace: crate::workspace_state::WorkspaceState,
+    app_state: crate::app_state::AppState,
     pane_group: PaneGroup,
     pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
     active_pane: PaneId,
@@ -177,14 +177,14 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         // Create workspace state first (this creates worktree and buffer_store)
-        let workspace = crate::workspace_state::WorkspaceState::new(cx);
+        let app_state = crate::app_state::AppState::new(cx);
 
         // Create initial Stoat using workspace's shared resources
         let initial_stoat = cx.new(|cx| {
             let mut stoat = Stoat::new(
                 config.clone(),
-                workspace.worktree.clone(),
-                workspace.buffer_store.clone(),
+                app_state.worktree.clone(),
+                app_state.buffer_store.clone(),
                 cx,
             );
 
@@ -260,7 +260,7 @@ impl PaneGroupView {
         };
 
         Self {
-            workspace,
+            app_state,
             pane_group,
             pane_contents,
             active_pane: initial_pane_id,
@@ -358,7 +358,7 @@ impl PaneGroupView {
             };
 
             // Initialize file finder in workspace
-            self.workspace
+            self.app_state
                 .open_file_finder(current_mode, current_key_context, cx);
 
             // Update editor's key_context and mode
@@ -378,30 +378,30 @@ impl PaneGroupView {
 
     /// Load preview for the currently selected file in file finder.
     ///
-    /// Spawns an async task to load file preview. Updates workspace.file_finder.preview
+    /// Spawns an async task to load file preview. Updates app state.file_finder.preview
     /// when complete. This method follows the same pattern as Stoat's load_preview_for_selected
     /// but operates on workspace state instead.
     fn load_file_finder_preview(&mut self, cx: &mut Context<'_, Self>) {
         // Cancel existing preview task
-        self.workspace.file_finder.preview_task = None;
+        self.app_state.file_finder.preview_task = None;
 
         // Get selected file path from workspace
         let relative_path = match self
-            .workspace
+            .app_state
             .file_finder
             .filtered
-            .get(self.workspace.file_finder.selected)
+            .get(self.app_state.file_finder.selected)
         {
             Some(path) => path.clone(),
             None => {
-                self.workspace.file_finder.preview = None;
+                self.app_state.file_finder.preview = None;
                 return;
             },
         };
 
         // Build absolute path
         let root = self
-            .workspace
+            .app_state
             .worktree
             .lock()
             .snapshot()
@@ -411,11 +411,11 @@ impl PaneGroupView {
         let abs_path_for_highlight = abs_path.clone();
 
         // Spawn async task to load preview
-        self.workspace.file_finder.preview_task = Some(cx.spawn(async move |this, cx| {
+        self.app_state.file_finder.preview_task = Some(cx.spawn(async move |this, cx| {
             // Phase 1: Load plain text immediately
             if let Some(text) = crate::file_finder::load_text_only(&abs_path).await {
                 let _ = this.update(cx, |pane_group, cx| {
-                    pane_group.workspace.file_finder.preview =
+                    pane_group.app_state.file_finder.preview =
                         Some(crate::file_finder::PreviewData::Plain(text));
                     cx.notify();
                 });
@@ -426,7 +426,7 @@ impl PaneGroupView {
                 crate::file_finder::load_file_preview(&abs_path_for_highlight).await
             {
                 let _ = this.update(cx, |pane_group, cx| {
-                    pane_group.workspace.file_finder.preview = Some(highlighted);
+                    pane_group.app_state.file_finder.preview = Some(highlighted);
                     cx.notify();
                 });
             }
@@ -440,8 +440,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.file_finder.selected + 1 < self.workspace.file_finder.filtered.len() {
-            self.workspace.file_finder.selected += 1;
+        if self.app_state.file_finder.selected + 1 < self.app_state.file_finder.filtered.len() {
+            self.app_state.file_finder.selected += 1;
             self.load_file_finder_preview(cx);
             cx.notify();
         }
@@ -454,8 +454,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.file_finder.selected > 0 {
-            self.workspace.file_finder.selected -= 1;
+        if self.app_state.file_finder.selected > 0 {
+            self.app_state.file_finder.selected -= 1;
             self.load_file_finder_preview(cx);
             cx.notify();
         }
@@ -470,11 +470,11 @@ impl PaneGroupView {
     ) {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
-            if self.workspace.file_finder.selected < self.workspace.file_finder.filtered.len() {
+            if self.app_state.file_finder.selected < self.app_state.file_finder.filtered.len() {
                 let relative_path =
-                    &self.workspace.file_finder.filtered[self.workspace.file_finder.selected];
+                    &self.app_state.file_finder.filtered[self.app_state.file_finder.selected];
                 let root = self
-                    .workspace
+                    .app_state
                     .worktree
                     .lock()
                     .snapshot()
@@ -503,14 +503,14 @@ impl PaneGroupView {
     ) {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
-            self.workspace.file_finder.input = None;
-            self.workspace.file_finder.files.clear();
-            self.workspace.file_finder.filtered.clear();
-            self.workspace.file_finder.selected = 0;
-            self.workspace.file_finder.preview = None;
-            self.workspace.file_finder.preview_task = None;
+            self.app_state.file_finder.input = None;
+            self.app_state.file_finder.files.clear();
+            self.app_state.file_finder.filtered.clear();
+            self.app_state.file_finder.selected = 0;
+            self.app_state.file_finder.preview = None;
+            self.app_state.file_finder.preview_task = None;
 
-            if let Some(previous_context) = self.workspace.file_finder.previous_key_context.take() {
+            if let Some(previous_context) = self.app_state.file_finder.previous_key_context.take() {
                 editor.update(cx, |editor, cx| {
                     editor.stoat.update(cx, |stoat, cx| {
                         stoat.handle_set_key_context(previous_context, cx);
@@ -539,7 +539,7 @@ impl PaneGroupView {
             };
 
             // Initialize command palette in workspace
-            self.workspace
+            self.app_state
                 .open_command_palette(current_mode, current_key_context, cx);
 
             // Update editor's key_context and mode, and set input reference
@@ -548,7 +548,7 @@ impl PaneGroupView {
                     stoat.set_key_context(KeyContext::CommandPalette);
                     stoat.set_mode("command_palette");
                     // Set input reference for edit actions
-                    stoat.command_palette_input_ref = self.workspace.command_palette.input.clone();
+                    stoat.command_palette_input_ref = self.app_state.command_palette.input.clone();
                 });
             });
 
@@ -563,12 +563,12 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.command_palette.selected + 1
-            < self.workspace.command_palette.filtered.len()
+        if self.app_state.command_palette.selected + 1
+            < self.app_state.command_palette.filtered.len()
         {
-            self.workspace.command_palette.selected += 1;
+            self.app_state.command_palette.selected += 1;
             debug!(
-                selected = self.workspace.command_palette.selected,
+                selected = self.app_state.command_palette.selected,
                 "Command palette: next"
             );
             cx.notify();
@@ -582,10 +582,10 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.command_palette.selected > 0 {
-            self.workspace.command_palette.selected -= 1;
+        if self.app_state.command_palette.selected > 0 {
+            self.app_state.command_palette.selected -= 1;
             debug!(
-                selected = self.workspace.command_palette.selected,
+                selected = self.app_state.command_palette.selected,
                 "Command palette: prev"
             );
             cx.notify();
@@ -602,7 +602,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Dismiss command palette and get previous state to restore
-            let (_prev_mode, prev_ctx) = self.workspace.dismiss_command_palette();
+            let (_prev_mode, prev_ctx) = self.app_state.dismiss_command_palette();
 
             // Clear input reference from Stoat
             editor.update(cx, |editor, cx| {
@@ -633,15 +633,15 @@ impl PaneGroupView {
     ) {
         debug!(
             "Toggling command palette hidden commands: {} -> {}",
-            self.workspace.command_palette.show_hidden, !self.workspace.command_palette.show_hidden
+            self.app_state.command_palette.show_hidden, !self.app_state.command_palette.show_hidden
         );
 
         // Toggle the flag
-        self.workspace.command_palette.show_hidden = !self.workspace.command_palette.show_hidden;
+        self.app_state.command_palette.show_hidden = !self.app_state.command_palette.show_hidden;
 
         // Get current query from input buffer
         let query = self
-            .workspace
+            .app_state
             .command_palette
             .input
             .as_ref()
@@ -652,7 +652,7 @@ impl PaneGroupView {
         self.filter_command_palette_commands(&query);
 
         // Reset selection to avoid out-of-bounds issues
-        self.workspace.command_palette.selected = 0;
+        self.app_state.command_palette.selected = 0;
 
         cx.notify();
     }
@@ -665,11 +665,11 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         // Get the selected command's TypeId
-        let type_id = if self.workspace.command_palette.selected
-            < self.workspace.command_palette.filtered.len()
+        let type_id = if self.app_state.command_palette.selected
+            < self.app_state.command_palette.filtered.len()
         {
             Some(
-                self.workspace.command_palette.filtered[self.workspace.command_palette.selected]
+                self.app_state.command_palette.filtered[self.app_state.command_palette.selected]
                     .type_id,
             )
         } else {
@@ -691,7 +691,7 @@ impl PaneGroupView {
 
     /// Filter command palette commands based on query and show_hidden flag.
     ///
-    /// Updates [`WorkspaceState::command_palette::filtered`] with commands that match
+    /// Updates [`AppState::command_palette::filtered`] with commands that match
     /// the fuzzy search query and respect the show_hidden setting. Uses nucleo_matcher
     /// for fuzzy matching.
     fn filter_command_palette_commands(&mut self, query: &str) {
@@ -700,12 +700,12 @@ impl PaneGroupView {
             Matcher,
         };
 
-        let show_hidden = self.workspace.command_palette.show_hidden;
-        let all_commands = &self.workspace.command_palette.commands;
+        let show_hidden = self.app_state.command_palette.show_hidden;
+        let all_commands = &self.app_state.command_palette.commands;
 
         if query.is_empty() {
             // No query - show all commands (filtered by hidden state)
-            self.workspace.command_palette.filtered = all_commands
+            self.app_state.command_palette.filtered = all_commands
                 .iter()
                 .filter(|cmd| show_hidden || !cmd.hidden)
                 .cloned()
@@ -733,7 +733,7 @@ impl PaneGroupView {
             matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
 
             // Map matched strings back to commands using the parallel vector
-            self.workspace.command_palette.filtered = matches
+            self.app_state.command_palette.filtered = matches
                 .into_iter()
                 .filter_map(|(matched_str, _score)| {
                     // Find the command that produced this matched string
@@ -763,7 +763,7 @@ impl PaneGroupView {
             };
 
             // Initialize buffer finder in workspace
-            self.workspace
+            self.app_state
                 .open_buffer_finder(current_mode, current_key_context, cx);
 
             // Update editor's key_context and mode, and set input reference
@@ -772,7 +772,7 @@ impl PaneGroupView {
                     stoat.set_key_context(KeyContext::BufferFinder);
                     stoat.set_mode("buffer_finder");
                     // Set input reference for edit actions
-                    stoat.buffer_finder_input_ref = self.workspace.buffer_finder.input.clone();
+                    stoat.buffer_finder_input_ref = self.app_state.buffer_finder.input.clone();
                 });
             });
 
@@ -802,15 +802,15 @@ impl PaneGroupView {
 
         // Update buffer list with active/visible status
         let buffers = self
-            .workspace
+            .app_state
             .buffer_store
             .read(cx)
             .buffer_list(active_id, &visible_ids, cx);
-        self.workspace.buffer_finder.buffers = buffers.clone();
+        self.app_state.buffer_finder.buffers = buffers.clone();
 
         // Get current query from input buffer
         let query = self
-            .workspace
+            .app_state
             .buffer_finder
             .input
             .as_ref()
@@ -823,7 +823,7 @@ impl PaneGroupView {
 
     /// Filter buffer finder buffers based on query.
     ///
-    /// Updates [`WorkspaceState::buffer_finder::filtered`] with buffers that match
+    /// Updates [`AppState::buffer_finder::filtered`] with buffers that match
     /// the fuzzy search query. Uses nucleo_matcher for fuzzy matching.
     fn filter_buffer_finder_buffers(&mut self, query: &str) {
         use nucleo_matcher::{
@@ -831,11 +831,11 @@ impl PaneGroupView {
             Matcher,
         };
 
-        let all_buffers = &self.workspace.buffer_finder.buffers;
+        let all_buffers = &self.app_state.buffer_finder.buffers;
 
         if query.is_empty() {
             // No query - show all buffers
-            self.workspace.buffer_finder.filtered = all_buffers.clone();
+            self.app_state.buffer_finder.filtered = all_buffers.clone();
         } else {
             // Fuzzy match query against buffer display names using nucleo_matcher
             let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
@@ -853,7 +853,7 @@ impl PaneGroupView {
             matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
 
             // Map matched strings back to buffers using parallel vectors
-            self.workspace.buffer_finder.filtered = matches
+            self.app_state.buffer_finder.filtered = matches
                 .into_iter()
                 .filter_map(|(matched_str, _score)| {
                     candidates
@@ -872,8 +872,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.buffer_finder.selected + 1 < self.workspace.buffer_finder.filtered.len() {
-            self.workspace.buffer_finder.selected += 1;
+        if self.app_state.buffer_finder.selected + 1 < self.app_state.buffer_finder.filtered.len() {
+            self.app_state.buffer_finder.selected += 1;
             cx.notify();
         }
     }
@@ -885,8 +885,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.buffer_finder.selected > 0 {
-            self.workspace.buffer_finder.selected -= 1;
+        if self.app_state.buffer_finder.selected > 0 {
+            self.app_state.buffer_finder.selected -= 1;
             cx.notify();
         }
     }
@@ -900,9 +900,9 @@ impl PaneGroupView {
     ) {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
-            if self.workspace.buffer_finder.selected < self.workspace.buffer_finder.filtered.len() {
+            if self.app_state.buffer_finder.selected < self.app_state.buffer_finder.filtered.len() {
                 let buffer_entry =
-                    &self.workspace.buffer_finder.filtered[self.workspace.buffer_finder.selected];
+                    &self.app_state.buffer_finder.filtered[self.app_state.buffer_finder.selected];
                 let buffer_id = buffer_entry.buffer_id;
 
                 // Switch to the selected buffer
@@ -928,7 +928,7 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Dismiss buffer finder and get previous state to restore
-            let (_prev_mode, prev_ctx) = self.workspace.dismiss_buffer_finder();
+            let (_prev_mode, prev_ctx) = self.app_state.dismiss_buffer_finder();
 
             // Clear input reference from Stoat
             editor.update(cx, |editor, cx| {
@@ -952,37 +952,37 @@ impl PaneGroupView {
 
     /// Load preview for the currently selected file in git status.
     ///
-    /// Spawns an async task to load git diff preview. Updates workspace.git_status.preview
+    /// Spawns an async task to load git diff preview. Updates app state.git_status.preview
     /// when complete.
     fn load_git_status_preview(&mut self, cx: &mut Context<'_, Self>) {
         // Cancel existing preview task
-        self.workspace.git_status.preview_task = None;
+        self.app_state.git_status.preview_task = None;
 
         // Get selected file entry from filtered list
         let entry = match self
-            .workspace
+            .app_state
             .git_status
             .filtered
-            .get(self.workspace.git_status.selected)
+            .get(self.app_state.git_status.selected)
         {
             Some(entry) => entry.clone(),
             None => {
-                self.workspace.git_status.preview = None;
+                self.app_state.git_status.preview = None;
                 return;
             },
         };
 
         // Get repository root path
-        let root_path = self.workspace.worktree.lock().root().to_path_buf();
+        let root_path = self.app_state.worktree.lock().root().to_path_buf();
         let file_path = entry.path.clone();
 
         // Spawn async task to load diff
-        self.workspace.git_status.preview_task = Some(cx.spawn(async move |this, cx| {
+        self.app_state.git_status.preview_task = Some(cx.spawn(async move |this, cx| {
             // Load git diff
             if let Some(diff) = crate::git::status::load_git_diff(&root_path, &file_path).await {
                 // Update workspace through entity handle
                 let _ = this.update(cx, |pane_group, cx| {
-                    pane_group.workspace.git_status.preview = Some(diff);
+                    pane_group.app_state.git_status.preview = Some(diff);
                     cx.notify();
                 });
             }
@@ -1005,7 +1005,7 @@ impl PaneGroupView {
             };
 
             // Initialize git status in workspace
-            self.workspace
+            self.app_state
                 .open_git_status(current_mode, current_key_context);
 
             // Update editor's key_context and mode
@@ -1030,8 +1030,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.git_status.selected + 1 < self.workspace.git_status.filtered.len() {
-            self.workspace.git_status.selected += 1;
+        if self.app_state.git_status.selected + 1 < self.app_state.git_status.filtered.len() {
+            self.app_state.git_status.selected += 1;
             self.load_git_status_preview(cx);
             cx.notify();
         }
@@ -1044,8 +1044,8 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace.git_status.selected > 0 {
-            self.workspace.git_status.selected -= 1;
+        if self.app_state.git_status.selected > 0 {
+            self.app_state.git_status.selected -= 1;
             self.load_git_status_preview(cx);
             cx.notify();
         }
@@ -1060,9 +1060,9 @@ impl PaneGroupView {
     ) {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
-            if self.workspace.git_status.selected < self.workspace.git_status.filtered.len() {
-                let entry = &self.workspace.git_status.filtered[self.workspace.git_status.selected];
-                let root = self.workspace.worktree.lock().root().to_path_buf();
+            if self.app_state.git_status.selected < self.app_state.git_status.filtered.len() {
+                let entry = &self.app_state.git_status.filtered[self.app_state.git_status.selected];
+                let root = self.app_state.worktree.lock().root().to_path_buf();
                 let abs_path = root.join(&entry.path);
 
                 editor.update(cx, |editor, cx| {
@@ -1086,7 +1086,7 @@ impl PaneGroupView {
     ) {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
-            let (_prev_mode, prev_ctx) = self.workspace.dismiss_git_status();
+            let (_prev_mode, prev_ctx) = self.app_state.dismiss_git_status();
 
             if let Some(previous_context) = prev_ctx {
                 editor.update(cx, |editor, cx| {
@@ -1108,20 +1108,20 @@ impl PaneGroupView {
         cx: &mut Context<'_, Self>,
     ) {
         // Cycle to next filter
-        self.workspace.git_status.filter = self.workspace.git_status.filter.next();
+        self.app_state.git_status.filter = self.app_state.git_status.filter.next();
 
         // Re-filter files with new filter
-        self.workspace.git_status.filtered = self
-            .workspace
+        self.app_state.git_status.filtered = self
+            .app_state
             .git_status
             .files
             .iter()
-            .filter(|entry| self.workspace.git_status.filter.matches(entry))
+            .filter(|entry| self.app_state.git_status.filter.matches(entry))
             .cloned()
             .collect();
 
         // Reset selection to 0
-        self.workspace.git_status.selected = 0;
+        self.app_state.git_status.selected = 0;
 
         // Load preview for first filtered file
         self.load_git_status_preview(cx);
@@ -1139,20 +1139,20 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to All
-            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::All;
+            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::All;
 
             // Re-filter files
-            self.workspace.git_status.filtered = self
-                .workspace
+            self.app_state.git_status.filtered = self
+                .app_state
                 .git_status
                 .files
                 .iter()
-                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .filter(|entry| self.app_state.git_status.filter.matches(entry))
                 .cloned()
                 .collect();
 
             // Reset selection to 0
-            self.workspace.git_status.selected = 0;
+            self.app_state.git_status.selected = 0;
 
             // Load preview for first filtered file
             self.load_git_status_preview(cx);
@@ -1178,20 +1178,20 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Staged
-            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Staged;
+            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Staged;
 
             // Re-filter files
-            self.workspace.git_status.filtered = self
-                .workspace
+            self.app_state.git_status.filtered = self
+                .app_state
                 .git_status
                 .files
                 .iter()
-                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .filter(|entry| self.app_state.git_status.filter.matches(entry))
                 .cloned()
                 .collect();
 
             // Reset selection to 0
-            self.workspace.git_status.selected = 0;
+            self.app_state.git_status.selected = 0;
 
             // Load preview for first filtered file
             self.load_git_status_preview(cx);
@@ -1217,20 +1217,20 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Unstaged
-            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Unstaged;
+            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Unstaged;
 
             // Re-filter files
-            self.workspace.git_status.filtered = self
-                .workspace
+            self.app_state.git_status.filtered = self
+                .app_state
                 .git_status
                 .files
                 .iter()
-                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .filter(|entry| self.app_state.git_status.filter.matches(entry))
                 .cloned()
                 .collect();
 
             // Reset selection to 0
-            self.workspace.git_status.selected = 0;
+            self.app_state.git_status.selected = 0;
 
             // Load preview for first filtered file
             self.load_git_status_preview(cx);
@@ -1256,21 +1256,21 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to UnstagedWithUntracked
-            self.workspace.git_status.filter =
+            self.app_state.git_status.filter =
                 crate::git::status::GitStatusFilter::UnstagedWithUntracked;
 
             // Re-filter files
-            self.workspace.git_status.filtered = self
-                .workspace
+            self.app_state.git_status.filtered = self
+                .app_state
                 .git_status
                 .files
                 .iter()
-                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .filter(|entry| self.app_state.git_status.filter.matches(entry))
                 .cloned()
                 .collect();
 
             // Reset selection to 0
-            self.workspace.git_status.selected = 0;
+            self.app_state.git_status.selected = 0;
 
             // Load preview for first filtered file
             self.load_git_status_preview(cx);
@@ -1296,20 +1296,20 @@ impl PaneGroupView {
         let editor_opt = self.active_editor().cloned();
         if let Some(editor) = editor_opt {
             // Set filter to Untracked
-            self.workspace.git_status.filter = crate::git::status::GitStatusFilter::Untracked;
+            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Untracked;
 
             // Re-filter files
-            self.workspace.git_status.filtered = self
-                .workspace
+            self.app_state.git_status.filtered = self
+                .app_state
                 .git_status
                 .files
                 .iter()
-                .filter(|entry| self.workspace.git_status.filter.matches(entry))
+                .filter(|entry| self.app_state.git_status.filter.matches(entry))
                 .cloned()
                 .collect();
 
             // Reset selection to 0
-            self.workspace.git_status.selected = 0;
+            self.app_state.git_status.selected = 0;
 
             // Load preview for first filtered file
             self.load_git_status_preview(cx);
@@ -1484,8 +1484,8 @@ impl PaneGroupView {
             cx.new(|cx| {
                 Stoat::new(
                     crate::Config::default(),
-                    self.workspace.worktree.clone(),
-                    self.workspace.buffer_store.clone(),
+                    self.app_state.worktree.clone(),
+                    self.app_state.buffer_store.clone(),
                     cx,
                 )
             })
@@ -1540,8 +1540,8 @@ impl PaneGroupView {
             cx.new(|cx| {
                 Stoat::new(
                     crate::Config::default(),
-                    self.workspace.worktree.clone(),
-                    self.workspace.buffer_store.clone(),
+                    self.app_state.worktree.clone(),
+                    self.app_state.buffer_store.clone(),
                     cx,
                 )
             })
@@ -1596,8 +1596,8 @@ impl PaneGroupView {
             cx.new(|cx| {
                 Stoat::new(
                     crate::Config::default(),
-                    self.workspace.worktree.clone(),
-                    self.workspace.buffer_store.clone(),
+                    self.app_state.worktree.clone(),
+                    self.app_state.buffer_store.clone(),
                     cx,
                 )
             })
@@ -1652,8 +1652,8 @@ impl PaneGroupView {
             cx.new(|cx| {
                 Stoat::new(
                     crate::Config::default(),
-                    self.workspace.worktree.clone(),
-                    self.workspace.buffer_store.clone(),
+                    self.app_state.worktree.clone(),
+                    self.app_state.buffer_store.clone(),
                     cx,
                 )
             })
@@ -2334,7 +2334,7 @@ impl Render for PaneGroupView {
         // Extract file finder data from workspace if in FileFinder context
         let file_finder_data = if key_context == KeyContext::FileFinder {
             let query = self
-                .workspace
+                .app_state
                 .file_finder
                 .input
                 .as_ref()
@@ -2345,9 +2345,9 @@ impl Render for PaneGroupView {
                 .unwrap_or_default();
             Some((
                 query,
-                self.workspace.file_finder.filtered.clone(),
-                self.workspace.file_finder.selected,
-                self.workspace.file_finder.preview.clone(),
+                self.app_state.file_finder.filtered.clone(),
+                self.app_state.file_finder.selected,
+                self.app_state.file_finder.preview.clone(),
             ))
         } else {
             None
@@ -2356,7 +2356,7 @@ impl Render for PaneGroupView {
         // Extract command palette data from workspace if in CommandPalette context
         let command_palette_data = if key_context == KeyContext::CommandPalette {
             let query = self
-                .workspace
+                .app_state
                 .command_palette
                 .input
                 .as_ref()
@@ -2371,8 +2371,8 @@ impl Render for PaneGroupView {
 
             Some((
                 query,
-                self.workspace.command_palette.filtered.clone(),
-                self.workspace.command_palette.selected,
+                self.app_state.command_palette.filtered.clone(),
+                self.app_state.command_palette.selected,
             ))
         } else {
             None
@@ -2381,13 +2381,13 @@ impl Render for PaneGroupView {
         // Extract git status data from workspace if in Git context
         let git_status_data = if key_context == KeyContext::Git {
             Some((
-                self.workspace.git_status.files.clone(),
-                self.workspace.git_status.filtered.clone(),
-                self.workspace.git_status.filter,
-                self.workspace.git_status.dirty_count,
-                self.workspace.git_status.selected,
-                self.workspace.git_status.preview.clone(),
-                self.workspace.git_status.branch_info.clone(),
+                self.app_state.git_status.files.clone(),
+                self.app_state.git_status.filtered.clone(),
+                self.app_state.git_status.filter,
+                self.app_state.git_status.dirty_count,
+                self.app_state.git_status.selected,
+                self.app_state.git_status.preview.clone(),
+                self.app_state.git_status.branch_info.clone(),
             ))
         } else {
             None
@@ -2407,8 +2407,8 @@ impl Render for PaneGroupView {
             )| {
                 (
                     mode,
-                    self.workspace.git_status.branch_info.clone(),
-                    self.workspace.git_status.files.clone(),
+                    self.app_state.git_status.branch_info.clone(),
+                    self.app_state.git_status.files.clone(),
                     path,
                     review_progress,
                     review_file_progress,

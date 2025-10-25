@@ -1,6 +1,6 @@
-//! Workspace state management.
+//! Application state management.
 //!
-//! Defines [`WorkspaceState`] which holds all workspace-level state that should be
+//! Defines [`AppState`] which holds all application-level state that should be
 //! shared across all panes and view types. This includes:
 //!
 //! - File system navigation (worktree)
@@ -10,9 +10,9 @@
 //!
 //! # Architecture
 //!
-//! Workspace state is stored in [`PaneGroupView`](crate::pane_group::PaneGroupView) and
-//! accessed by workspace-level actions. Individual views (EditorView, ImageView, etc.)
-//! do NOT have direct access to workspace state - they communicate through actions
+//! Application state is stored in [`PaneGroupView`](crate::pane_group::PaneGroupView) and
+//! accessed by application-level actions. Individual views (EditorView, ImageView, etc.)
+//! do NOT have direct access to application state - they communicate through actions
 //! that are handled by PaneGroupView.
 //!
 //! # Separation of Concerns
@@ -235,12 +235,12 @@ impl Default for DiffReview {
     }
 }
 
-/// Workspace-level state shared across all panes and view types.
+/// Application-level state shared across all panes and view types.
 ///
 /// This struct contains all state that should be accessible from any view
 /// regardless of type (text editor, image viewer, table viewer, etc.).
-/// Workspace state is stored in [`PaneGroupView`](crate::pane_group::PaneGroupView)
-/// and accessed by workspace-level actions.
+/// Application state is stored in [`PaneGroupView`](crate::pane_group::PaneGroupView)
+/// and accessed by application-level actions.
 ///
 /// # Usage in PaneGroupView
 ///
@@ -250,7 +250,7 @@ impl Default for DiffReview {
 /// ```rust,ignore
 /// fn handle_open_file_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
 ///     // No longer need to check if active pane is EditorView!
-///     self.workspace.file_finder.input = Some(cx.new(|_| Buffer::new(...)));
+///     self.app_state.file_finder.input = Some(cx.new(|_| Buffer::new(...)));
 ///     // ... rest of file finder logic
 /// }
 /// ```
@@ -258,22 +258,22 @@ impl Default for DiffReview {
 /// # Relationship to View State
 ///
 /// Individual views maintain their own state (cursor, scroll, zoom, etc.)
-/// but do NOT duplicate workspace state. For example:
+/// but do NOT duplicate application state. For example:
 ///
 /// - [`EditorView`](crate::editor::view::EditorView) has cursor position and selections
 /// - `ImageView` has zoom level and pan offset
-/// - But both access the same worktree and buffer_store through workspace
+/// - But both access the same worktree and buffer_store through app state
 ///
 /// # Initialization
 ///
-/// Workspace state is initialized when creating
+/// Application state is initialized when creating
 /// [`PaneGroupView`](crate::pane_group::PaneGroupView):
 ///
 /// ```rust,ignore
-/// let workspace = WorkspaceState::new(cx);
+/// let workspace = AppState::new(cx);
 /// let pane_group = cx.new(|cx| PaneGroupView::new(workspace, cx));
 /// ```
-pub struct WorkspaceState {
+pub struct AppState {
     /// File system tree for navigation
     pub worktree: Arc<Mutex<Worktree>>,
     /// Central buffer management (tracks all open buffers)
@@ -290,10 +290,10 @@ pub struct WorkspaceState {
     pub diff_review: DiffReview,
 }
 
-impl WorkspaceState {
-    /// Create new workspace state.
+impl AppState {
+    /// Create new application state.
     ///
-    /// Initializes workspace state with a worktree rooted at the current directory
+    /// Initializes application state with a worktree rooted at the current directory
     /// and empty buffer store. Loads initial git status if in a git repository.
     ///
     /// # Arguments
@@ -303,7 +303,7 @@ impl WorkspaceState {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let workspace = WorkspaceState::new(cx);
+    /// let workspace = AppState::new(cx);
     /// ```
     pub fn new(cx: &mut gpui::App) -> Self {
         let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
@@ -363,7 +363,7 @@ impl WorkspaceState {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let (prev_mode, prev_ctx) = self.workspace.open_file_finder(mode, key_context, cx);
+    /// let (prev_mode, prev_ctx) = self.app_state.open_file_finder(mode, key_context, cx);
     /// editor.stoat.update(cx, |stoat, cx| {
     ///     stoat.set_key_context(KeyContext::FileFinder);
     ///     stoat.set_mode("file_finder");
@@ -430,7 +430,7 @@ impl WorkspaceState {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let (prev_mode, prev_ctx) = self.workspace.open_command_palette(mode, key_context, cx);
+    /// let (prev_mode, prev_ctx) = self.app_state.open_command_palette(mode, key_context, cx);
     /// editor.stoat.update(cx, |stoat, cx| {
     ///     stoat.set_key_context(KeyContext::CommandPalette);
     ///     stoat.set_mode("command_palette");
@@ -514,7 +514,7 @@ impl WorkspaceState {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let (prev_mode, prev_ctx) = self.workspace.open_buffer_finder(mode, key_context, cx);
+    /// let (prev_mode, prev_ctx) = self.app_state.open_buffer_finder(mode, key_context, cx);
     /// editor.stoat.update(cx, |stoat, cx| {
     ///     stoat.set_key_context(KeyContext::BufferFinder);
     ///     stoat.set_mode("buffer_finder");
@@ -593,7 +593,7 @@ impl WorkspaceState {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let (prev_mode, prev_ctx) = self.workspace.open_git_status(mode, key_context);
+    /// let (prev_mode, prev_ctx) = self.app_state.open_git_status(mode, key_context);
     /// editor.stoat.update(cx, |stoat, cx| {
     ///     stoat.set_key_context(KeyContext::Git);
     ///     stoat.set_mode("git_status");

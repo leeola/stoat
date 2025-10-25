@@ -27,6 +27,7 @@ pub mod worktree;
 
 // UI modules
 pub mod app;
+pub mod app_state;
 pub mod content_view;
 pub mod dispatch;
 pub mod gutter;
@@ -36,7 +37,6 @@ pub mod render_stats;
 pub mod static_view;
 pub mod status_bar;
 pub mod syntax;
-pub mod workspace_state;
 
 #[cfg(test)]
 pub mod test;

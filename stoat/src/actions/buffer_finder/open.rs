@@ -1,6 +1,6 @@
 //! Buffer finder open action - now handled by PaneGroupView.
 //!
-//! The buffer finder state has been moved to WorkspaceState and is managed by
+//! The buffer finder state has been moved to AppState and is managed by
 //! PaneGroupView. See:
 //! - `PaneGroupView::handle_open_buffer_finder()` for the action handler
 //! - `PaneGroupView::update_buffer_finder_list()` for list management
