@@ -6518,6 +6518,7 @@ dependencies = [
  "smallvec",
  "smol",
  "stoat_log",
+ "stoat_lsp",
  "stoat_rope",
  "stoat_text",
  "stoat_text_transform",
@@ -6578,12 +6579,14 @@ name = "stoat_lsp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "async-trait",
  "futures",
  "lsp-types",
  "parking_lot 0.12.4",
  "serde",
  "serde_json",
+ "smallvec",
  "smol",
  "stoat_lsp",
  "text",

@@ -6,7 +6,8 @@
 use crate::git::diff::BufferDiff;
 use gpui::{App, Entity};
 use parking_lot::Mutex;
-use std::{sync::Arc, time::SystemTime};
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use stoat_lsp::{BufferDiagnostic, DiagnosticSet, ServerId};
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot, LineEnding};
@@ -39,6 +40,12 @@ pub struct BufferItem {
 
     /// Line ending style for the buffer (detected on load, preserved on save)
     line_ending: LineEnding,
+
+    /// LSP diagnostics per language server
+    diagnostics: HashMap<ServerId, DiagnosticSet>,
+
+    /// Merged diagnostics (highest severity wins when multiple servers overlap)
+    merged_diagnostics: DiagnosticSet,
 }
 
 impl BufferItem {
@@ -59,6 +66,8 @@ impl BufferItem {
             saved_text: None,
             saved_mtime: None,
             line_ending: LineEnding::default(),
+            diagnostics: HashMap::new(),
+            merged_diagnostics: DiagnosticSet::new(),
         }
     }
 
@@ -289,5 +298,86 @@ impl BufferItem {
             .as_ref()
             .map(|d| d.base_text_for_hunk(hunk_idx))
             .unwrap_or("")
+    }
+
+    /// Update diagnostics from a language server.
+    ///
+    /// Replaces the diagnostic set for the given server and recomputes the merged
+    /// diagnostics across all servers. When diagnostics from different servers overlap,
+    /// the most severe diagnostic is kept in the merged set.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_id` - Unique identifier for the language server
+    /// * `diagnostics` - New diagnostic set from this server
+    /// * `cx` - Application context for accessing buffer snapshot
+    ///
+    /// # Related
+    ///
+    /// - [`diagnostics_for_row`](#method.diagnostics_for_row) - Query merged diagnostics
+    /// - [`clear_diagnostics`](#method.clear_diagnostics) - Clear diagnostics from a server
+    pub fn update_diagnostics(
+        &mut self,
+        server_id: ServerId,
+        diagnostics: DiagnosticSet,
+        cx: &App,
+    ) {
+        self.diagnostics.insert(server_id, diagnostics);
+        self.recompute_merged_diagnostics(cx);
+    }
+
+    /// Clear diagnostics from a specific server.
+    ///
+    /// Removes all diagnostics from the given server and recomputes merged diagnostics.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_id` - Unique identifier for the language server
+    /// * `cx` - Application context for accessing buffer snapshot
+    pub fn clear_diagnostics(&mut self, server_id: ServerId, cx: &App) {
+        if self.diagnostics.remove(&server_id).is_some() {
+            self.recompute_merged_diagnostics(cx);
+        }
+    }
+
+    /// Get diagnostics overlapping a specific row.
+    ///
+    /// Returns an iterator over merged diagnostics that start on, end on, or span
+    /// across the given row. Diagnostics are from the merged set, so when multiple
+    /// servers report diagnostics for the same location, only the most severe appears.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-indexed row number
+    /// * `snapshot` - Buffer snapshot for resolving anchor positions
+    ///
+    /// # Returns
+    ///
+    /// Iterator over diagnostics affecting this row
+    ///
+    /// # Related
+    ///
+    /// - [`update_diagnostics`](#method.update_diagnostics) - Update server diagnostics
+    pub fn diagnostics_for_row<'a>(
+        &'a self,
+        row: u32,
+        snapshot: &'a BufferSnapshot,
+    ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
+        self.merged_diagnostics.diagnostics_for_row(row, snapshot)
+    }
+
+    /// Recompute merged diagnostics from all servers.
+    ///
+    /// Merges diagnostics from all language servers, keeping the most severe
+    /// diagnostic when multiple servers report diagnostics for overlapping positions.
+    fn recompute_merged_diagnostics(&mut self, cx: &App) {
+        let snapshot = self.buffer_snapshot(cx);
+        let mut merged = DiagnosticSet::new();
+
+        for diag_set in self.diagnostics.values() {
+            merged.merge_with(diag_set, &snapshot);
+        }
+
+        self.merged_diagnostics = merged;
     }
 }

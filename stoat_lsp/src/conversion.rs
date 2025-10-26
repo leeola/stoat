@@ -3,10 +3,11 @@
 //! LSP uses UTF-16 code unit offsets while buffers use UTF-8 byte offsets.
 //! This module handles the conversion and creates anchors for position tracking.
 
+use crate::buffer_helpers::BufferSnapshotExt;
 use anyhow::{Context, Result};
 use lsp_types::{Position as LspPosition, Range as LspRange};
 use std::ops::Range;
-use text::{Anchor, Bias, BufferSnapshot, Point};
+use text::{Anchor, Bias, BufferSnapshot, Point, ToPoint};
 
 /// Convert LSP range to buffer anchors.
 ///

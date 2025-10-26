@@ -3,43 +3,37 @@
 //! [`DiagnosticSet`] provides O(log n) queries by anchor position and supports
 //! merging diagnostics from multiple language servers.
 
-use crate::{BufferDiagnostic, DiagnosticSeverity};
-use std::{collections::BTreeMap, ops::Range};
-use text::{Anchor, BufferSnapshot, Point};
+use crate::BufferDiagnostic;
+use std::ops::Range;
+use text::{BufferSnapshot, Point, ToPoint};
 
-/// Collection of diagnostics with efficient position-based queries.
+/// Collection of diagnostics with position-based queries.
 ///
-/// Stores diagnostics indexed by their start anchor for fast lookup.
-/// Supports querying by row or range and merging diagnostics from multiple sources.
+/// Stores diagnostics and supports querying by row or range and merging
+/// diagnostics from multiple sources.
 #[derive(Clone, Debug, Default)]
 pub struct DiagnosticSet {
-    /// Diagnostics indexed by start anchor for efficient queries
-    diagnostics: BTreeMap<Anchor, BufferDiagnostic>,
+    diagnostics: Vec<BufferDiagnostic>,
 }
 
 impl DiagnosticSet {
     /// Create an empty diagnostic set.
     pub fn new() -> Self {
         Self {
-            diagnostics: BTreeMap::new(),
+            diagnostics: Vec::new(),
         }
     }
 
     /// Insert a diagnostic into the set.
-    ///
-    /// If a diagnostic already exists at the same position from the same server,
-    /// it will be replaced.
     pub fn insert(&mut self, diagnostic: BufferDiagnostic) {
-        self.diagnostics
-            .insert(diagnostic.range.start.clone(), diagnostic);
+        self.diagnostics.push(diagnostic);
     }
 
     /// Remove all diagnostics from a specific server.
     ///
     /// Used when a server sends updated diagnostics.
     pub fn remove_by_server(&mut self, server_id: usize) {
-        self.diagnostics
-            .retain(|_, diag| diag.server_id != server_id);
+        self.diagnostics.retain(|diag| diag.server_id != server_id);
     }
 
     /// Get all diagnostics overlapping a specific row.
@@ -49,10 +43,10 @@ impl DiagnosticSet {
         &'a self,
         row: u32,
         snapshot: &'a BufferSnapshot,
-    ) -> impl Iterator<Item = &BufferDiagnostic> + 'a {
-        self.diagnostics.values().filter(move |diag| {
-            let start = diag.range.start.to_point(snapshot);
-            let end = diag.range.end.to_point(snapshot);
+    ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
+        self.diagnostics.iter().filter(move |diag| {
+            let start = diag.range.start.to_point(&snapshot);
+            let end = diag.range.end.to_point(&snapshot);
             start.row <= row && row <= end.row
         })
     }
@@ -64,10 +58,10 @@ impl DiagnosticSet {
         &'a self,
         range: Range<Point>,
         snapshot: &'a BufferSnapshot,
-    ) -> impl Iterator<Item = &BufferDiagnostic> + 'a {
-        self.diagnostics.values().filter(move |diag| {
-            let diag_start = diag.range.start.to_point(snapshot);
-            let diag_end = diag.range.end.to_point(snapshot);
+    ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
+        self.diagnostics.iter().filter(move |diag| {
+            let diag_start = diag.range.start.to_point(&snapshot);
+            let diag_end = diag.range.end.to_point(&snapshot);
 
             // Check if ranges overlap
             ranges_overlap(diag_start..diag_end, range.clone())
@@ -76,7 +70,7 @@ impl DiagnosticSet {
 
     /// Get all diagnostics in the set.
     pub fn iter(&self) -> impl Iterator<Item = &BufferDiagnostic> {
-        self.diagnostics.values()
+        self.diagnostics.iter()
     }
 
     /// Count of diagnostics in the set.
@@ -91,35 +85,30 @@ impl DiagnosticSet {
 
     /// Merge diagnostics from another set.
     ///
+    /// Diagnostics from the same server_id in `other` replace those in `self`.
     /// When diagnostics from different servers overlap, keeps the most severe one.
-    /// Diagnostics from the same server completely replace existing ones.
     pub fn merge_with(&mut self, other: &DiagnosticSet, snapshot: &BufferSnapshot) {
-        // For each diagnostic in other set
-        for new_diag in other.diagnostics.values() {
-            let new_range =
-                new_diag.range.start.to_point(snapshot)..new_diag.range.end.to_point(snapshot);
+        for new_diag in other.diagnostics.iter() {
+            let new_start = new_diag.range.start.to_point(&snapshot);
+            let new_end = new_diag.range.end.to_point(&snapshot);
 
-            // Check if there's an existing diagnostic at the same position
-            let should_insert = self
-                .diagnostics_in_range(new_range, snapshot)
-                .filter(|existing| {
-                    // Same server: always replace
-                    if existing.server_id == new_diag.server_id {
-                        return false;
-                    }
+            // Remove any overlapping diagnostics that are less severe or from same server
+            self.diagnostics.retain(|existing| {
+                let existing_start = existing.range.start.to_point(&snapshot);
+                let existing_end = existing.range.end.to_point(&snapshot);
 
-                    // Different server: keep if new is more severe
-                    new_diag.severity < existing.severity
-                })
-                .count()
-                == 0;
+                // Same server: always replace
+                if existing.server_id == new_diag.server_id {
+                    return false;
+                }
 
-            if should_insert {
-                // Remove any diagnostics from the same server at this position
-                self.diagnostics
-                    .retain(|_, d| d.server_id != new_diag.server_id);
-                self.insert(new_diag.clone());
-            }
+                // Different server: keep if no overlap or existing is more severe
+                let overlaps = ranges_overlap(existing_start..existing_end, new_start..new_end);
+                !overlaps || existing.severity < new_diag.severity
+            });
+
+            // Add the new diagnostic
+            self.diagnostics.push(new_diag.clone());
         }
     }
 }
@@ -133,11 +122,10 @@ fn ranges_overlap(a: Range<Point>, b: Range<Point>) -> bool {
 mod tests {
     use super::*;
     use crate::DiagnosticSeverity;
-    use text::{Bias, Buffer};
+    use text::{Bias, Buffer, BufferId};
 
     fn create_buffer(text: &str) -> Buffer {
-        let mut buffer = Buffer::local(text);
-        buffer
+        Buffer::new(0, BufferId::new(1).unwrap(), text)
     }
 
     fn create_diagnostic(
@@ -166,8 +154,8 @@ mod tests {
 
         // Add diagnostic on line 1
         let diag = create_diagnostic(
-            Point::new(1, 5),
-            Point::new(1, 10),
+            Point::new(1, 0),
+            Point::new(1, 4),
             DiagnosticSeverity::Error,
             0,
             &snapshot,

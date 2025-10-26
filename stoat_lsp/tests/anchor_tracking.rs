@@ -4,10 +4,10 @@
 //! text is inserted or deleted before, within, or after them.
 
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, DiagnosticSeverity};
-use text::{Bias, Buffer, Point};
+use text::{Bias, Buffer, BufferId, Point, ToPoint};
 
 fn create_buffer(text: &str) -> Buffer {
-    Buffer::local(text)
+    Buffer::new(0, BufferId::new(1).unwrap(), text)
 }
 
 fn create_diagnostic(

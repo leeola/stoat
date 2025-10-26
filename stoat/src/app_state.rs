@@ -221,6 +221,11 @@ pub struct AppState {
     pub git_status: GitStatus,
     /// Diff review mode state
     pub diff_review: DiffReview,
+    /// LSP manager for language server coordination
+    ///
+    /// Manages language server processes and routes diagnostics to buffers.
+    /// Currently requires manual diagnostic routing - automatic routing will be added later.
+    pub lsp_manager: Arc<stoat_lsp::LspManager>,
 }
 
 impl AppState {
@@ -268,6 +273,7 @@ impl AppState {
                 ..Default::default()
             },
             diff_review: DiffReview::default(),
+            lsp_manager: Arc::new(stoat_lsp::LspManager::new()),
         }
     }
 

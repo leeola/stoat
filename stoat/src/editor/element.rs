@@ -9,10 +9,11 @@ use crate::{
     gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
 };
+use stoat_lsp::BufferDiagnostic;
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
     FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
-    Style, TextRun, Window,
+    Style, TextRun, UnderlineStyle, Window,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -149,6 +150,27 @@ impl Element for EditorElement {
                 display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
             buffer_rows_in_range.push(buffer_point.row);
         }
+
+        // ===== PHASE 1.5: Query diagnostics for visible buffer rows =====
+        let diagnostics_by_row: HashMap<u32, Vec<BufferDiagnostic>> = {
+            let buffer_item = {
+                let stoat = self.view.read(cx).stoat.read(cx);
+                stoat.active_buffer(cx)
+            };
+
+            let mut diag_map = HashMap::new();
+            for &buffer_row in &buffer_rows_in_range {
+                let diags: Vec<BufferDiagnostic> = buffer_item
+                    .read(cx)
+                    .diagnostics_for_row(buffer_row, &buffer_snapshot)
+                    .cloned()
+                    .collect();
+                if !diags.is_empty() {
+                    diag_map.insert(buffer_row, diags);
+                }
+            }
+            diag_map
+        };
 
         // Get min/max buffer rows to create one HighlightedChunks iterator
         let mut highlighted_lines: HashMap<u32, Vec<TextRun>> = HashMap::new();
@@ -292,6 +314,17 @@ impl Element for EditorElement {
                         }
                     }
 
+                    // Apply diagnostic underlines if there are diagnostics for this row
+                    if let Some(row_diagnostics) = diagnostics_by_row.get(&buffer_row) {
+                        processed_runs = apply_diagnostic_underlines(
+                            processed_runs,
+                            buffer_row,
+                            row_diagnostics,
+                            &buffer_snapshot,
+                            &self.style,
+                        );
+                    }
+
                     for mut run in processed_runs {
                         // Override text color for deleted rows (shouldn't happen since we don't
                         // show phantom rows, but keep for consistency)
@@ -349,6 +382,7 @@ impl Element for EditorElement {
         EditorPrepaintState {
             line_layouts,
             gutter_width,
+            diagnostics_by_row,
         }
     }
 
@@ -472,6 +506,15 @@ impl Element for EditorElement {
 
             // Paint diff symbols (+/-) in gutter
             self.paint_diff_symbols(bounds, &prepaint.line_layouts, window, cx);
+
+            // Paint diagnostic icons in gutter
+            self.paint_diagnostic_icons(
+                bounds,
+                &prepaint.line_layouts,
+                &prepaint.diagnostics_by_row,
+                prepaint.gutter_width,
+                window,
+            );
 
             // Paint line numbers in gutter
             self.paint_line_numbers(bounds, &line_positions, prepaint.gutter_width, window, cx);
@@ -1026,6 +1069,49 @@ impl EditorElement {
         }
     }
 
+    /// Paint diagnostic icons in the gutter.
+    ///
+    /// Displays colored circles in the gutter for lines with diagnostics.
+    /// Uses the most severe diagnostic color when multiple diagnostics exist on one line.
+    fn paint_diagnostic_icons(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        diagnostics_by_row: &HashMap<u32, Vec<BufferDiagnostic>>,
+        gutter_width: Pixels,
+        window: &mut Window,
+    ) {
+        if gutter_width == Pixels::ZERO {
+            return;
+        }
+
+        let icon_radius = (self.style.line_height * 0.15).floor();
+        let icon_x = bounds.origin.x + gutter_width - icon_radius * 2.5;
+
+        for layout in line_layouts {
+            if let Some(buffer_row) = layout.buffer_row {
+                if let Some(row_diags) = diagnostics_by_row.get(&buffer_row) {
+                    if let Some(most_severe) = row_diags.iter().min_by_key(|d| d.severity) {
+                        let color = self.style.diagnostic_color(most_severe.severity);
+                        let icon_y = layout.y_position + self.style.line_height / 2.0;
+
+                        window.paint_quad(gpui::PaintQuad {
+                            bounds: Bounds {
+                                origin: point(icon_x, icon_y - icon_radius),
+                                size: size(icon_radius * 2.0, icon_radius * 2.0),
+                            },
+                            corner_radii: icon_radius.into(),
+                            background: color.into(),
+                            border_color: gpui::transparent_black(),
+                            border_widths: 0.0.into(),
+                            border_style: gpui::BorderStyle::default(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Paint full-width background bars for diff rows.
     ///
     /// Paints subtle colored rectangles spanning from gutter edge to right edge
@@ -1174,6 +1260,112 @@ fn apply_modified_range_backgrounds(
     result
 }
 
+/// Apply diagnostic underlines to text runs based on diagnostic ranges.
+///
+/// Converts diagnostic anchor ranges to column ranges, then splits text runs
+/// to apply wavy underlines to segments that overlap diagnostic ranges.
+fn apply_diagnostic_underlines(
+    runs: Vec<TextRun>,
+    buffer_row: u32,
+    diagnostics: &[BufferDiagnostic],
+    snapshot: &text::BufferSnapshot,
+    style: &EditorStyle,
+) -> Vec<TextRun> {
+    if diagnostics.is_empty() {
+        return runs;
+    }
+
+    // Convert diagnostic ranges from anchors to column ranges for this row
+    let mut diagnostic_ranges: Vec<(std::ops::Range<u32>, gpui::Hsla)> = Vec::new();
+    for diag in diagnostics {
+        use text::ToPoint;
+        let start_point = diag.range.start.to_point(&snapshot);
+        let end_point = diag.range.end.to_point(&snapshot);
+
+        // Only include diagnostics that overlap this row
+        if start_point.row <= buffer_row && end_point.row >= buffer_row {
+            let start_col = if start_point.row == buffer_row {
+                start_point.column
+            } else {
+                0
+            };
+            let end_col = if end_point.row == buffer_row {
+                end_point.column
+            } else {
+                u32::MAX // Extend to end of line
+            };
+
+            let color = style.diagnostic_color(diag.severity);
+            diagnostic_ranges.push((start_col..end_col, color));
+        }
+    }
+
+    if diagnostic_ranges.is_empty() {
+        return runs;
+    }
+
+    let mut result = Vec::new();
+    let mut char_offset = 0u32;
+
+    for run in runs {
+        // Calculate character count for this run (not byte count)
+        let run_char_count = run.len as u32; // FIXME: This assumes 1 byte = 1 char, need proper UTF-8 handling
+        let run_start = char_offset;
+        let run_end = char_offset + run_char_count;
+
+        // Find which diagnostic ranges overlap with this run
+        let mut splits = Vec::new();
+        splits.push(run_start);
+
+        for (range, _) in &diagnostic_ranges {
+            if range.start > run_start && range.start < run_end {
+                splits.push(range.start);
+            }
+            if range.end > run_start && range.end < run_end {
+                splits.push(range.end);
+            }
+        }
+
+        splits.push(run_end);
+        splits.sort_unstable();
+        splits.dedup();
+
+        // Create sub-runs for each split segment
+        for i in 0..splits.len() - 1 {
+            let segment_start = splits[i];
+            let segment_end = splits[i + 1];
+            let segment_len = (segment_end - segment_start) as usize;
+
+            if segment_len == 0 {
+                continue;
+            }
+
+            // Find the most severe diagnostic overlapping this segment
+            let underline = diagnostic_ranges
+                .iter()
+                .find(|(range, _)| segment_start >= range.start && segment_end <= range.end)
+                .map(|(_, color)| UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(*color),
+                    wavy: true,
+                });
+
+            result.push(TextRun {
+                len: segment_len,
+                font: run.font.clone(),
+                color: run.color,
+                background_color: run.background_color,
+                underline,
+                strikethrough: run.strikethrough,
+            });
+        }
+
+        char_offset = run_end;
+    }
+
+    result
+}
+
 /// Prepaint state for editor rendering (following Zed's architecture).
 ///
 /// Caches expensive computations (syntax highlighting, text shaping) done in prepaint
@@ -1183,6 +1375,8 @@ pub struct EditorPrepaintState {
     pub line_layouts: Vec<ShapedLineLayout>,
     /// Gutter width for positioning
     pub gutter_width: Pixels,
+    /// Diagnostics by buffer row (for gutter icons)
+    pub diagnostics_by_row: HashMap<u32, Vec<BufferDiagnostic>>,
 }
 
 /// A single line that has been shaped and is ready to paint.

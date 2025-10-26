@@ -9,8 +9,9 @@ use crate::{
     transport::LspTransport,
 };
 use anyhow::Result;
+use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Future, Stream};
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, NumberOrString, PublishDiagnosticsParams, Range, Uri,
 };
@@ -39,8 +40,8 @@ struct MockLspServerInner {
     diagnostics: HashMap<PathBuf, Vec<MockDiagnostic>>,
     /// Server behavior preset
     behavior: MockBehavior,
-    /// Pending notifications to emit
-    pending_notifications: Vec<String>,
+    /// Senders for active notification subscribers
+    notification_senders: Vec<Sender<String>>,
 }
 
 /// Pre-configured behavioral presets.
@@ -96,7 +97,7 @@ impl MockLspServer {
             inner: Arc::new(Mutex::new(MockLspServerInner {
                 diagnostics: HashMap::new(),
                 behavior: MockBehavior::RustAnalyzer,
-                pending_notifications: Vec::new(),
+                notification_senders: Vec::new(),
             })),
         }
     }
@@ -158,9 +159,12 @@ impl MockLspServer {
                 Some(serde_json::to_value(publish).expect("Failed to serialize")),
             );
 
+            let notification_json = notification.to_json().expect("Failed to serialize");
+
+            // Broadcast to all subscribers, removing closed channels
             inner
-                .pending_notifications
-                .push(notification.to_json().expect("Failed to serialize"));
+                .notification_senders
+                .retain(|tx| tx.try_send(notification_json.clone()).is_ok());
         }
     }
 
@@ -291,9 +295,9 @@ impl LspTransport for MockLspServer {
     }
 
     fn subscribe_notifications(&self) -> Pin<Box<dyn Stream<Item = String> + Send>> {
-        Box::pin(MockNotificationStream {
-            server: self.clone(),
-        })
+        let (tx, rx) = async_channel::unbounded();
+        self.inner.lock().notification_senders.push(tx);
+        Box::pin(MockNotificationStream { receiver: rx })
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -303,20 +307,20 @@ impl LspTransport for MockLspServer {
 
 /// Stream of mock server notifications.
 struct MockNotificationStream {
-    server: MockLspServer,
+    receiver: Receiver<String>,
 }
 
 impl Stream for MockNotificationStream {
     type Item = String;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut inner = self.server.inner.lock();
-        if let Some(notif) = inner.pending_notifications.pop() {
-            Poll::Ready(Some(notif))
-        } else {
-            // For a mock, end the stream when no notifications are available
-            // This prevents hanging - tests can subscribe after sending notifications
-            Poll::Ready(None)
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Poll the receiver's recv future
+        let receiver = &self.receiver;
+        let mut fut = std::pin::pin!(receiver.recv());
+        match fut.as_mut().poll(cx) {
+            Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
+            Poll::Ready(Err(_)) => Poll::Ready(None), // Channel closed
+            Poll::Pending => Poll::Pending,
         }
     }
 }

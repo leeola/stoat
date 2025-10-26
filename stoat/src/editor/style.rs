@@ -27,6 +27,14 @@ pub struct EditorStyle {
     pub diff_modified_color: Hsla,
     /// Color for deleted line indicators (red)
     pub diff_deleted_color: Hsla,
+    /// Color for error diagnostics (red)
+    pub diagnostic_error_color: Hsla,
+    /// Color for warning diagnostics (orange)
+    pub diagnostic_warning_color: Hsla,
+    /// Color for info diagnostics (blue)
+    pub diagnostic_info_color: Hsla,
+    /// Color for hint diagnostics (gray)
+    pub diagnostic_hint_color: Hsla,
     /// Whether to show the minimap
     pub show_minimap: bool,
     /// Color for the minimap viewport thumb
@@ -42,6 +50,17 @@ pub struct EditorStyle {
 }
 
 impl EditorStyle {
+    /// Returns the color for a given diagnostic severity.
+    pub fn diagnostic_color(&self, severity: stoat_lsp::DiagnosticSeverity) -> Hsla {
+        use stoat_lsp::DiagnosticSeverity;
+        match severity {
+            DiagnosticSeverity::Error => self.diagnostic_error_color,
+            DiagnosticSeverity::Warning => self.diagnostic_warning_color,
+            DiagnosticSeverity::Information => self.diagnostic_info_color,
+            DiagnosticSeverity::Hint => self.diagnostic_hint_color,
+        }
+    }
+
     /// Create a new editor style from configuration.
     ///
     /// Takes font settings (family and size) from the provided [`crate::Config`].
@@ -75,6 +94,10 @@ impl EditorStyle {
             diff_added_color: rgb(0x4ec9b0).into(), // Green (VS Code green)
             diff_modified_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diff_deleted_color: rgb(0xf44747).into(), // Red (VS Code red)
+            diagnostic_error_color: rgb(0xf44747).into(), // Red (VS Code red)
+            diagnostic_warning_color: rgb(0xdcdcaa).into(), // Yellow (VS Code yellow)
+            diagnostic_info_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
+            diagnostic_hint_color: rgb(0x808080).into(), // Gray
             show_minimap: true,                     /* Enabled: Now using persistent MinimapView
                                                      * entity */
             minimap_thumb_color: Hsla {
@@ -93,5 +116,32 @@ impl EditorStyle {
             syntax_theme,
             highlight_map,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stoat_lsp::DiagnosticSeverity;
+
+    #[test]
+    fn diagnostic_color_mapping() {
+        let config = crate::Config::default();
+        let style = EditorStyle::new(&config);
+
+        let error_color = style.diagnostic_color(DiagnosticSeverity::Error);
+        let warning_color = style.diagnostic_color(DiagnosticSeverity::Warning);
+        let info_color = style.diagnostic_color(DiagnosticSeverity::Information);
+        let hint_color = style.diagnostic_color(DiagnosticSeverity::Hint);
+
+        assert_eq!(error_color, style.diagnostic_error_color);
+        assert_eq!(warning_color, style.diagnostic_warning_color);
+        assert_eq!(info_color, style.diagnostic_info_color);
+        assert_eq!(hint_color, style.diagnostic_hint_color);
+
+        // Verify colors are different
+        assert_ne!(error_color, warning_color);
+        assert_ne!(error_color, info_color);
+        assert_ne!(warning_color, hint_color);
     }
 }

@@ -20,9 +20,11 @@
 //! is validated against real language servers separately. See `.claude/LSP.md`
 //! for design details.
 
+pub mod buffer_helpers;
 pub mod conversion;
 pub mod diagnostic;
 pub mod diagnostic_set;
+pub mod manager;
 pub mod protocol;
 pub mod transport;
 
@@ -30,9 +32,13 @@ pub mod transport;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
+// Re-export types
 pub use conversion::*;
 pub use diagnostic::*;
 pub use diagnostic_set::*;
 pub use lsp_types;
+pub use manager::*;
 pub use protocol::*;
+// Re-export text types for convenience
+pub use text;
 pub use transport::*;
