@@ -1,12 +1,13 @@
 use crate::{
     actions::*,
+    buffer::item::BufferItemEvent,
     editor::{element::EditorElement, style::EditorStyle},
     scroll,
     stoat::{KeyContext, Stoat},
 };
 use gpui::{
     div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Subscription, Window,
 };
 use std::sync::Arc;
 use tracing::debug;
@@ -17,6 +18,8 @@ pub struct EditorView {
     this: Option<Entity<Self>>,
     /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
     pub(crate) editor_style: Arc<EditorStyle>,
+    /// Subscription to BufferItem events for automatic UI updates when diagnostics change
+    _buffer_subscription: Subscription,
     // NOTE: Selection state (add_selections_state, select_next_state, select_prev_state)
     // is tracked in Stoat struct, not here. EditorView is just a view layer.
 }
@@ -29,11 +32,23 @@ impl EditorView {
         let config = stoat.read(cx).config().clone();
         let editor_style = Arc::new(EditorStyle::new(&config));
 
+        // Subscribe to BufferItem events to automatically re-render when diagnostics change
+        let active_buffer = stoat.read(cx).active_buffer(cx);
+        let buffer_subscription =
+            cx.subscribe(&active_buffer, |_editor_view, _buffer_item, event, cx| {
+                match event {
+                    BufferItemEvent::DiagnosticsUpdated => {
+                        cx.notify(); // Trigger re-render when diagnostics change
+                    },
+                }
+            });
+
         Self {
             stoat,
             focus_handle,
             this: None,
             editor_style,
+            _buffer_subscription: buffer_subscription,
         }
     }
 

@@ -42,6 +42,15 @@ pub trait LspTransport: Send + Sync {
     /// For process-based transports, this sends shutdown request and kills
     /// the process. For mock transports, this is a no-op.
     async fn shutdown(&self) -> Result<()>;
+
+    /// Get buffered notifications (test-only).
+    ///
+    /// Returns notifications that have been buffered but not yet consumed via subscription.
+    /// Only implemented for mock transports. Production transports return empty vec.
+    #[cfg(feature = "test-support")]
+    fn buffered_notifications(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Production LSP transport using process stdin/stdout.

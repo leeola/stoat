@@ -9,13 +9,13 @@ use crate::{
     gutter::{DisplayRowInfo, GutterLayout},
     syntax::HighlightedChunks,
 };
-use stoat_lsp::BufferDiagnostic;
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
     FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
     Style, TextRun, UnderlineStyle, Window,
 };
 use std::{collections::HashMap, sync::Arc};
+use stoat_lsp::BufferDiagnostic;
 
 pub struct EditorElement {
     view: Entity<EditorView>,

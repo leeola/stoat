@@ -1,7 +1,4 @@
 //! Helper methods for BufferSnapshot compatibility.
-//!
-//! FIXME: These are stubs. Replace with proper Buffer/BufferSnapshot usage
-//! from the text crate once we integrate with the full editor.
 
 use text::{BufferSnapshot, Point};
 
@@ -18,18 +15,17 @@ pub trait BufferSnapshotExt {
 }
 
 impl BufferSnapshotExt for BufferSnapshot {
-    fn line(&self, _row: u32) -> String {
-        // FIXME: Implement using real BufferSnapshot API
-        String::new()
+    fn line(&self, row: u32) -> String {
+        let start = Point::new(row, 0);
+        let end = Point::new(row, self.line_len(row));
+        self.chars_for_range(start..end).collect()
     }
 
-    fn line_len(&self, _row: u32) -> u32 {
-        // FIXME: Implement using real BufferSnapshot API
-        0
+    fn line_len(&self, row: u32) -> u32 {
+        self.as_rope().line_len(row)
     }
 
     fn max_point(&self) -> Point {
-        // FIXME: Implement using real BufferSnapshot API
-        Point::new(0, 0)
+        BufferSnapshot::max_point(self)
     }
 }

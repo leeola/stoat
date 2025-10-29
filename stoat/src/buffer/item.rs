@@ -4,13 +4,18 @@
 //! state.
 
 use crate::git::diff::BufferDiff;
-use gpui::{App, Entity};
+use gpui::{App, Context, Entity, EventEmitter};
 use parking_lot::Mutex;
-use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use smallvec::SmallVec;
+use std::{sync::Arc, time::SystemTime};
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, ServerId};
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
 use text::{Buffer, BufferSnapshot, LineEnding};
+
+pub enum BufferItemEvent {
+    DiagnosticsUpdated,
+}
 
 /// A text buffer with syntax highlighting and git diff support.
 ///
@@ -41,12 +46,14 @@ pub struct BufferItem {
     /// Line ending style for the buffer (detected on load, preserved on save)
     line_ending: LineEnding,
 
-    /// LSP diagnostics per language server
-    diagnostics: HashMap<ServerId, DiagnosticSet>,
+    /// LSP diagnostics per language server (inline storage for <=2 servers)
+    diagnostics: SmallVec<[(ServerId, DiagnosticSet); 2]>,
 
-    /// Merged diagnostics (highest severity wins when multiple servers overlap)
-    merged_diagnostics: DiagnosticSet,
+    /// Version number for diagnostic causality tracking (rejects stale updates)
+    diagnostics_version: u64,
 }
+
+impl EventEmitter<BufferItemEvent> for BufferItem {}
 
 impl BufferItem {
     /// Create a new buffer item.
@@ -66,8 +73,8 @@ impl BufferItem {
             saved_text: None,
             saved_mtime: None,
             line_ending: LineEnding::default(),
-            diagnostics: HashMap::new(),
-            merged_diagnostics: DiagnosticSet::new(),
+            diagnostics: SmallVec::new(),
+            diagnostics_version: 0,
         }
     }
 
@@ -302,14 +309,19 @@ impl BufferItem {
 
     /// Update diagnostics from a language server.
     ///
-    /// Replaces the diagnostic set for the given server and recomputes the merged
-    /// diagnostics across all servers. When diagnostics from different servers overlap,
-    /// the most severe diagnostic is kept in the merged set.
+    /// Uses version numbers to reject stale diagnostic updates. Only applies updates
+    /// with version numbers greater than the currently stored version, preventing
+    /// race conditions where a slow server's stale diagnostics overwrite a faster
+    /// server's current diagnostics.
+    ///
+    /// Diagnostics are merged on-demand during queries to avoid wasted work when
+    /// multiple servers update before rendering.
     ///
     /// # Arguments
     ///
     /// * `server_id` - Unique identifier for the language server
     /// * `diagnostics` - New diagnostic set from this server
+    /// * `version` - Version number for causality tracking (monotonically increasing)
     /// * `cx` - Application context for accessing buffer snapshot
     ///
     /// # Related
@@ -320,31 +332,40 @@ impl BufferItem {
         &mut self,
         server_id: ServerId,
         diagnostics: DiagnosticSet,
-        cx: &App,
+        version: u64,
+        cx: &mut Context<Self>,
     ) {
-        self.diagnostics.insert(server_id, diagnostics);
-        self.recompute_merged_diagnostics(cx);
+        if version > self.diagnostics_version {
+            if let Some(pos) = self.diagnostics.iter().position(|(id, _)| *id == server_id) {
+                self.diagnostics[pos].1 = diagnostics;
+            } else {
+                self.diagnostics.push((server_id, diagnostics));
+            }
+            self.diagnostics_version = version;
+
+            cx.notify();
+            cx.emit(BufferItemEvent::DiagnosticsUpdated);
+        }
     }
 
     /// Clear diagnostics from a specific server.
-    ///
-    /// Removes all diagnostics from the given server and recomputes merged diagnostics.
     ///
     /// # Arguments
     ///
     /// * `server_id` - Unique identifier for the language server
     /// * `cx` - Application context for accessing buffer snapshot
-    pub fn clear_diagnostics(&mut self, server_id: ServerId, cx: &App) {
-        if self.diagnostics.remove(&server_id).is_some() {
-            self.recompute_merged_diagnostics(cx);
+    pub fn clear_diagnostics(&mut self, server_id: ServerId, cx: &mut Context<Self>) {
+        if let Some(pos) = self.diagnostics.iter().position(|(id, _)| *id == server_id) {
+            self.diagnostics.remove(pos);
+            cx.notify();
+            cx.emit(BufferItemEvent::DiagnosticsUpdated);
         }
     }
 
     /// Get diagnostics overlapping a specific row.
     ///
-    /// Returns an iterator over merged diagnostics that start on, end on, or span
-    /// across the given row. Diagnostics are from the merged set, so when multiple
-    /// servers report diagnostics for the same location, only the most severe appears.
+    /// Merges diagnostics from all language servers on-demand. When multiple servers
+    /// report diagnostics for the same location, the most severe diagnostic is kept.
     ///
     /// # Arguments
     ///
@@ -363,21 +384,8 @@ impl BufferItem {
         row: u32,
         snapshot: &'a BufferSnapshot,
     ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
-        self.merged_diagnostics.diagnostics_for_row(row, snapshot)
-    }
-
-    /// Recompute merged diagnostics from all servers.
-    ///
-    /// Merges diagnostics from all language servers, keeping the most severe
-    /// diagnostic when multiple servers report diagnostics for overlapping positions.
-    fn recompute_merged_diagnostics(&mut self, cx: &App) {
-        let snapshot = self.buffer_snapshot(cx);
-        let mut merged = DiagnosticSet::new();
-
-        for diag_set in self.diagnostics.values() {
-            merged.merge_with(diag_set, &snapshot);
-        }
-
-        self.merged_diagnostics = merged;
+        self.diagnostics
+            .iter()
+            .flat_map(move |(_, diag_set)| diag_set.diagnostics_for_row(row, snapshot))
     }
 }

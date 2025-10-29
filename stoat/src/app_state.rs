@@ -23,10 +23,18 @@
 //!
 //! See [`MULTI_VIEW_ARCHITECTURE.md`](../../MULTI_VIEW_ARCHITECTURE.md) for details.
 
-use crate::{buffer::store::BufferStore, stoat::KeyContext, worktree::Worktree};
+use crate::{buffer::store::BufferStore, stoat::KeyContext, worktree::Worktree, BufferItem};
 use gpui::{AppContext, Entity, Task};
 use parking_lot::Mutex;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
+use stoat_lsp::DiagnosticSet;
 use text::Buffer;
 
 /// File finder state.
@@ -259,6 +267,48 @@ impl AppState {
                 (None, Vec::new(), 0)
             };
 
+        let lsp_manager = Arc::new(stoat_lsp::LspManager::new(cx.background_executor().clone()));
+
+        // Setup LSP background task for automatic diagnostic routing
+        {
+            let updates = lsp_manager.subscribe_diagnostic_updates();
+            let lsp_manager_clone = lsp_manager.clone();
+            let buffer_store_clone = buffer_store.clone();
+            let diagnostics_version = Arc::new(AtomicU64::new(0));
+
+            cx.spawn(async move |cx| {
+                while let Ok(update) = updates.recv().await {
+                    let path = update.path.clone();
+                    let server_id = update.server_id;
+                    let lsp_manager = lsp_manager_clone.clone();
+
+                    // Generate monotonically increasing version number
+                    let version = diagnostics_version.fetch_add(1, Ordering::SeqCst) + 1;
+
+                    // Find BufferItem and update diagnostics on main thread
+                    let result: Result<Option<(Entity<BufferItem>, DiagnosticSet)>, _> =
+                        cx.update(|cx| {
+                            let buffer_item =
+                                buffer_store_clone.read(cx).get_buffer_by_path(&path)?;
+                            let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+                            let diag_set = lsp_manager.diagnostics_for_buffer(&path, &snapshot)?;
+
+                            Some((buffer_item.clone(), diag_set))
+                        });
+                    let result = result.ok().flatten();
+
+                    if let Some((buffer_item, diag_set)) = result {
+                        let _ = buffer_item
+                            .update(cx, |item, cx| {
+                                item.update_diagnostics(server_id, diag_set, version, cx);
+                            })
+                            .ok();
+                    }
+                }
+            })
+            .detach();
+        }
+
         Self {
             worktree,
             buffer_store,
@@ -273,7 +323,7 @@ impl AppState {
                 ..Default::default()
             },
             diff_review: DiffReview::default(),
-            lsp_manager: Arc::new(stoat_lsp::LspManager::new()),
+            lsp_manager,
         }
     }
 

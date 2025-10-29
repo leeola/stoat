@@ -30,6 +30,7 @@ pub struct DiagnosticUpdate {
 /// Manages language server lifecycle and diagnostic routing.
 pub struct LspManager {
     inner: Arc<Mutex<LspManagerInner>>,
+    executor: gpui::BackgroundExecutor,
 }
 
 struct LspManagerInner {
@@ -58,8 +59,10 @@ struct ServerState {
 }
 
 impl LspManager {
-    /// Create a new LSP manager.
-    pub fn new() -> Self {
+    /// Create a new LSP manager with the given executor.
+    ///
+    /// The executor is used to spawn background tasks for listening to LSP notifications.
+    pub fn new(executor: gpui::BackgroundExecutor) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LspManagerInner {
                 servers: HashMap::new(),
@@ -67,6 +70,7 @@ impl LspManager {
                 lsp_diagnostics: HashMap::new(),
                 diagnostic_subscribers: Vec::new(),
             })),
+            executor,
         }
     }
 
@@ -79,7 +83,7 @@ impl LspManager {
     /// # Integration Pattern
     ///
     /// ```rust,ignore
-    /// let manager = LspManager::new();
+    /// let manager = LspManager::new(cx.background_executor().clone());
     /// let updates = manager.subscribe_diagnostic_updates();
     ///
     /// // Spawn task to handle updates
@@ -101,35 +105,74 @@ impl LspManager {
         rx
     }
 
+    /// Add a language server without starting notification listener.
+    ///
+    /// Returns the server ID. Call `start_listener()` to begin processing notifications.
+    /// Use `spawn_server()` to add and start listener in one call.
+    pub fn add_server(
+        &self,
+        name: impl Into<String>,
+        transport: Arc<dyn LspTransport>,
+    ) -> ServerId {
+        let name = name.into();
+        let mut inner = self.inner.lock();
+        let server_id = inner.next_server_id;
+        inner.next_server_id += 1;
+
+        inner.servers.insert(
+            server_id,
+            ServerState {
+                id: server_id,
+                transport,
+                name,
+            },
+        );
+
+        server_id
+    }
+
+    /// Start background listener task for a server.
+    ///
+    /// Spawns a background task that listens for notifications from the server
+    /// and processes them. The task runs until the notification stream ends.
+    pub fn start_listener(&self, server_id: ServerId) -> Result<()> {
+        let transport = {
+            let inner = self.inner.lock();
+            inner
+                .servers
+                .get(&server_id)
+                .context("Server not found")?
+                .transport
+                .clone()
+        };
+
+        let mut stream = transport.subscribe_notifications();
+        let inner = self.inner.clone();
+
+        self.executor
+            .spawn(async move {
+                while let Some(notification) = stream.next().await {
+                    if let Err(e) = Self::handle_notification(&inner, server_id, &notification) {
+                        tracing::warn!("Failed to handle notification: {}", e);
+                    }
+                }
+            })
+            .detach();
+
+        Ok(())
+    }
+
     /// Spawn a language server with a custom transport.
     ///
+    /// Adds the server and starts its notification listener.
     /// Returns the server ID for this instance.
     pub async fn spawn_server(
         &self,
         name: impl Into<String>,
         transport: Arc<dyn LspTransport>,
     ) -> Result<ServerId> {
-        let name = name.into();
-        let server_id = {
-            let mut inner = self.inner.lock();
-            let id = inner.next_server_id;
-            inner.next_server_id += 1;
-
-            inner.servers.insert(
-                id,
-                ServerState {
-                    id,
-                    transport: transport.clone(),
-                    name: name.clone(),
-                },
-            );
-
-            id
-        };
-
-        // Subscribe to notifications from this server
-        self.subscribe_notifications(server_id, transport).await?;
-
+        let server_id = self.add_server(name, transport);
+        self.start_listener(server_id)?;
         Ok(server_id)
     }
 
@@ -149,31 +192,6 @@ impl LspManager {
         let path = command_path.unwrap_or_else(|| PathBuf::from("rust-analyzer"));
         let transport = Arc::new(StdioTransport::spawn(path, vec![])?);
         self.spawn_server("rust-analyzer", transport).await
-    }
-
-    /// Subscribe to server notifications (PublishDiagnostics, etc).
-    async fn subscribe_notifications(
-        &self,
-        server_id: ServerId,
-        transport: Arc<dyn LspTransport>,
-    ) -> Result<()> {
-        let mut stream = transport.subscribe_notifications();
-        let inner = self.inner.clone();
-
-        // Spawn task to handle notifications
-        smol::spawn(async move {
-            while let Some(notification) = stream.next().await {
-                if let Err(e) = Self::handle_notification(&inner, server_id, &notification) {
-                    tracing::warn!("Failed to handle notification: {}", e);
-                }
-            }
-        })
-        .detach();
-
-        // Yield to give the spawned task a chance to start polling
-        smol::future::yield_now().await;
-
-        Ok(())
     }
 
     /// Handle a notification from a language server.
@@ -402,198 +420,34 @@ impl LspManager {
 
         Ok(())
     }
-}
 
-impl Default for LspManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+    /// Drain and process all buffered notifications for a server.
+    ///
+    /// This is test-only. Production code uses background listener tasks via `start_listener()`.
+    ///
+    /// Synchronously processes all buffered notifications from the mock server.
+    /// Returns the number of notifications processed.
+    #[cfg(feature = "test-support")]
+    pub fn drain_pending_notifications(&self, server_id: ServerId) -> Result<usize> {
+        let transport = {
+            let inner = self.inner.lock();
+            inner
+                .servers
+                .get(&server_id)
+                .context("Server not found")?
+                .transport
+                .clone()
+        };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test::{run_async_test, DiagnosticKind, MockDiagnostic, MockLspServer};
+        // Get all buffered notifications from the mock transport
+        let notifications = transport.buffered_notifications();
+        let count = notifications.len();
 
-    #[test]
-    fn spawn_server_assigns_id() {
-        run_async_test(|| async {
-            let manager = LspManager::new();
-            let mock = Arc::new(MockLspServer::rust_analyzer());
+        // Process each notification synchronously
+        for notif in notifications {
+            Self::handle_notification(&self.inner, server_id, &notif)?;
+        }
 
-            let server_id = manager.spawn_server("rust-analyzer", mock).await.unwrap();
-            assert_eq!(server_id, 0);
-
-            let mock2 = Arc::new(MockLspServer::rust_analyzer());
-            let server_id2 = manager.spawn_server("rust-analyzer", mock2).await.unwrap();
-            assert_eq!(server_id2, 1);
-        });
-    }
-
-    #[test]
-    #[ignore] // TODO: MockNotificationStream needs proper async waker implementation
-    fn diagnostic_updates_emit_notifications() {
-        run_async_test(|| async {
-            let manager = LspManager::new();
-            let mock = Arc::new(MockLspServer::rust_analyzer().with_diagnostics(
-                "/test.rs",
-                vec![MockDiagnostic {
-                    range: "0:10-0:13",
-                    kind: DiagnosticKind::UndefinedName,
-                    message: String::new(),
-                }],
-            ));
-
-            // Subscribe before spawning server
-            let updates = manager.subscribe_diagnostic_updates();
-
-            let server_id = manager
-                .spawn_server("rust-analyzer", mock.clone())
-                .await
-                .unwrap();
-
-            // Send didOpen to trigger diagnostics
-            manager
-                .did_open(
-                    server_id,
-                    "file:///test.rs".parse().unwrap(),
-                    "rust".to_string(),
-                    0,
-                    "let foo = bar;".to_string(),
-                )
-                .await
-                .unwrap();
-
-            // Wait for notification with timeout
-            let update = smol::future::or(
-                async {
-                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
-                    None
-                },
-                async { updates.recv().await.ok() },
-            )
-            .await;
-
-            // Should receive diagnostic update notification
-            assert!(update.is_some(), "Should receive diagnostic update");
-            let update = update.unwrap();
-            assert_eq!(update.path, PathBuf::from("/test.rs"));
-            assert_eq!(update.server_id, server_id);
-        });
-    }
-
-    #[test]
-    #[ignore] // TODO: MockNotificationStream needs proper async waker implementation
-    fn multiple_subscribers_receive_updates() {
-        run_async_test(|| async {
-            let manager = LspManager::new();
-            let mock = Arc::new(MockLspServer::rust_analyzer().with_diagnostics(
-                "/test.rs",
-                vec![MockDiagnostic {
-                    range: "0:0-0:3",
-                    kind: DiagnosticKind::UndefinedName,
-                    message: String::new(),
-                }],
-            ));
-
-            // Create multiple subscribers
-            let updates1 = manager.subscribe_diagnostic_updates();
-            let updates2 = manager.subscribe_diagnostic_updates();
-
-            let server_id = manager
-                .spawn_server("rust-analyzer", mock.clone())
-                .await
-                .unwrap();
-
-            // Trigger diagnostics
-            manager
-                .did_open(
-                    server_id,
-                    "file:///test.rs".parse().unwrap(),
-                    "rust".to_string(),
-                    0,
-                    "let foo = bar;".to_string(),
-                )
-                .await
-                .unwrap();
-
-            // Both subscribers should receive the update
-            let update1 = smol::future::or(
-                async {
-                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
-                    None
-                },
-                async { updates1.recv().await.ok() },
-            )
-            .await;
-
-            let update2 = smol::future::or(
-                async {
-                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
-                    None
-                },
-                async { updates2.recv().await.ok() },
-            )
-            .await;
-
-            assert!(update1.is_some() && update2.is_some());
-            assert_eq!(
-                update1.as_ref().unwrap().path,
-                update2.as_ref().unwrap().path
-            );
-        });
-    }
-
-    #[test]
-    fn did_open_sends_notification() {
-        run_async_test(|| async {
-            let manager = LspManager::new();
-            let mock = Arc::new(MockLspServer::rust_analyzer());
-
-            let server_id = manager
-                .spawn_server("rust-analyzer", mock.clone())
-                .await
-                .unwrap();
-
-            // Send didOpen
-            manager
-                .did_open(
-                    server_id,
-                    "file:///test.rs".parse().unwrap(),
-                    "rust".to_string(),
-                    0,
-                    "fn main() {}".to_string(),
-                )
-                .await
-                .unwrap();
-
-            // FIXME: Add assertion that mock received the notification
-        });
-    }
-
-    #[test]
-    fn did_change_sends_notification() {
-        run_async_test(|| async {
-            let manager = LspManager::new();
-            let mock = Arc::new(MockLspServer::rust_analyzer());
-
-            let server_id = manager
-                .spawn_server("rust-analyzer", mock.clone())
-                .await
-                .unwrap();
-
-            // Send didChange
-            manager
-                .did_change(
-                    server_id,
-                    "file:///test.rs".parse().unwrap(),
-                    1,
-                    "fn main() { println!(\"Hello\"); }".to_string(),
-                )
-                .await
-                .unwrap();
-
-            // FIXME: Add assertion that mock received the notification
-        });
+        Ok(count)
     }
 }

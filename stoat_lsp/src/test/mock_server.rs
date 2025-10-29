@@ -9,22 +9,14 @@ use crate::{
     transport::LspTransport,
 };
 use anyhow::Result;
-use async_channel::{Receiver, Sender};
 use async_trait::async_trait;
-use futures::{Future, Stream};
+use futures::Stream;
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, NumberOrString, PublishDiagnosticsParams, Range, Uri,
 };
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    pin::Pin,
-    str::FromStr,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{collections::HashMap, path::PathBuf, pin::Pin, str::FromStr, sync::Arc};
 
 /// Rich mock that simulates language server behavior.
 ///
@@ -40,8 +32,8 @@ struct MockLspServerInner {
     diagnostics: HashMap<PathBuf, Vec<MockDiagnostic>>,
     /// Server behavior preset
     behavior: MockBehavior,
-    /// Senders for active notification subscribers
-    notification_senders: Vec<Sender<String>>,
+    /// Buffered notifications (simple Vec for testing)
+    notification_buffer: Vec<String>,
 }
 
 /// Pre-configured behavioral presets.
@@ -97,7 +89,7 @@ impl MockLspServer {
             inner: Arc::new(Mutex::new(MockLspServerInner {
                 diagnostics: HashMap::new(),
                 behavior: MockBehavior::RustAnalyzer,
-                notification_senders: Vec::new(),
+                notification_buffer: Vec::new(),
             })),
         }
     }
@@ -116,6 +108,14 @@ impl MockLspServer {
             .diagnostics
             .insert(file.into(), diagnostics);
         self
+    }
+
+    /// Get buffered notifications for testing.
+    ///
+    /// Returns all notifications that have been buffered by this mock server.
+    #[cfg(feature = "test-support")]
+    pub fn buffered_notifications(&self) -> Vec<String> {
+        self.inner.lock().notification_buffer.clone()
     }
 
     /// Handle a textDocument/didOpen notification.
@@ -137,6 +137,13 @@ impl MockLspServer {
 
         let mut inner = self.inner.lock();
 
+        // Get source_name while holding lock
+        let source_name = match inner.behavior {
+            MockBehavior::RustAnalyzer => "rust-analyzer",
+            MockBehavior::TypeScriptLS => "typescript",
+            MockBehavior::Custom => "mock-lsp",
+        };
+
         // Early return if no diagnostics programmed at all
         if inner.diagnostics.is_empty() {
             return;
@@ -145,7 +152,7 @@ impl MockLspServer {
         if let Some(mock_diagnostics) = inner.diagnostics.get(&path) {
             let lsp_diagnostics: Vec<Diagnostic> = mock_diagnostics
                 .iter()
-                .map(|d| self.to_lsp_diagnostic(d, source))
+                .map(|d| self.to_lsp_diagnostic(d, source, source_name))
                 .collect();
 
             let publish = PublishDiagnosticsParams {
@@ -161,15 +168,18 @@ impl MockLspServer {
 
             let notification_json = notification.to_json().expect("Failed to serialize");
 
-            // Broadcast to all subscribers, removing closed channels
-            inner
-                .notification_senders
-                .retain(|tx| tx.try_send(notification_json.clone()).is_ok());
+            // Buffer notification for test retrieval
+            inner.notification_buffer.push(notification_json);
         }
     }
 
     /// Convert MockDiagnostic to LSP Diagnostic (for testing).
-    pub fn to_lsp_diagnostic(&self, mock: &MockDiagnostic, source: &str) -> Diagnostic {
+    pub fn to_lsp_diagnostic(
+        &self,
+        mock: &MockDiagnostic,
+        source: &str,
+        source_name: &str,
+    ) -> Diagnostic {
         let range = parse_range_notation(mock.range, source).expect("Invalid range notation");
 
         let (severity, code, message) = match &mock.kind {
@@ -213,13 +223,6 @@ impl MockLspServer {
             DiagnosticKind::Custom { severity, code } => {
                 (*severity, code.clone(), mock.message.clone())
             },
-        };
-
-        let inner = self.inner.lock();
-        let source_name = match inner.behavior {
-            MockBehavior::RustAnalyzer => "rust-analyzer",
-            MockBehavior::TypeScriptLS => "typescript",
-            MockBehavior::Custom => "mock-lsp",
         };
 
         Diagnostic {
@@ -295,33 +298,18 @@ impl LspTransport for MockLspServer {
     }
 
     fn subscribe_notifications(&self) -> Pin<Box<dyn Stream<Item = String> + Send>> {
-        let (tx, rx) = async_channel::unbounded();
-        self.inner.lock().notification_senders.push(tx);
-        Box::pin(MockNotificationStream { receiver: rx })
+        // For testing, notifications are retrieved via buffered_notifications()
+        // Return empty stream since tests don't use subscriptions
+        Box::pin(futures::stream::empty())
     }
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
-}
 
-/// Stream of mock server notifications.
-struct MockNotificationStream {
-    receiver: Receiver<String>,
-}
-
-impl Stream for MockNotificationStream {
-    type Item = String;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Poll the receiver's recv future
-        let receiver = &self.receiver;
-        let mut fut = std::pin::pin!(receiver.recv());
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(item)) => Poll::Ready(Some(item)),
-            Poll::Ready(Err(_)) => Poll::Ready(None), // Channel closed
-            Poll::Pending => Poll::Pending,
-        }
+    #[cfg(feature = "test-support")]
+    fn buffered_notifications(&self) -> Vec<String> {
+        self.inner.lock().notification_buffer.clone()
     }
 }
 
@@ -361,7 +349,7 @@ mod tests {
             message: String::new(),
         };
 
-        let lsp_diag = mock.to_lsp_diagnostic(&mock_diag, source);
+        let lsp_diag = mock.to_lsp_diagnostic(&mock_diag, source, "rust-analyzer");
         assert_eq!(lsp_diag.severity, Some(DiagnosticSeverity::ERROR));
         assert!(lsp_diag.message.contains("cannot find value"));
         assert!(lsp_diag.message.contains("bar"));
@@ -380,7 +368,7 @@ mod tests {
             message: String::new(),
         };
 
-        let lsp_diag = mock.to_lsp_diagnostic(&mock_diag, source);
+        let lsp_diag = mock.to_lsp_diagnostic(&mock_diag, source, "rust-analyzer");
         assert_eq!(lsp_diag.severity, Some(DiagnosticSeverity::ERROR));
         assert!(lsp_diag.message.contains("expected `i32`, found `&str`"));
     }

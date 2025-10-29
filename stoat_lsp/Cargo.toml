@@ -24,6 +24,8 @@ parking_lot = { workspace = true }
 text = { workspace = true }
 # Force const_new feature for smallvec (required by Zed text crate)
 smallvec = { workspace = true }
+gpui = { workspace = true }
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
