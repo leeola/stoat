@@ -181,6 +181,9 @@ impl Stoat {
             let _ = item.reparse(cx);
         });
 
+        // Notify LSP servers of the change
+        self.send_did_change_notification(cx);
+
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }

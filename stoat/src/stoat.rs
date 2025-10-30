@@ -285,6 +285,12 @@ pub struct Stoat {
     /// Current file path (for status bar display)
     pub(crate) current_file_path: Option<PathBuf>,
 
+    /// LSP document version numbers per file
+    pub(crate) buffer_versions: HashMap<PathBuf, i32>,
+
+    /// LSP manager for language server communication
+    pub(crate) lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
+
     /// Worktree for file scanning
     pub(crate) worktree: Arc<Mutex<Worktree>>,
 
@@ -335,14 +341,16 @@ impl Stoat {
     /// * `config` - Global configuration loaded from config.toml
     /// * `worktree` - Shared worktree from workspace
     /// * `buffer_store` - Shared buffer store from workspace
+    /// * `lsp_manager` - Optional LSP manager for language server communication
     /// * `cx` - GPUI context for entity creation
     pub fn new(
         config: crate::config::Config,
         worktree: Arc<Mutex<Worktree>>,
         buffer_store: Entity<BufferStore>,
+        lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_text(config, worktree, buffer_store, "", cx)
+        Self::new_with_text(config, worktree, buffer_store, lsp_manager, "", cx)
     }
 
     /// Create new Stoat with specific initial buffer text (primarily for tests).
@@ -350,6 +358,7 @@ impl Stoat {
         config: crate::config::Config,
         worktree: Arc<Mutex<Worktree>>,
         buffer_store: Entity<BufferStore>,
+        lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
         initial_text: &str,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -435,6 +444,8 @@ impl Stoat {
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
+            buffer_versions: HashMap::new(),
+            lsp_manager,
             worktree,
             parent_stoat: None,
             display_map,
@@ -506,6 +517,8 @@ impl Stoat {
             diff_review_previous_mode: None,
             diff_review_comparison_mode: self.diff_review_comparison_mode,
             current_file_path: self.current_file_path.clone(),
+            buffer_versions: self.buffer_versions.clone(),
+            lsp_manager: self.lsp_manager.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: None,
             display_map: self.display_map.clone(),
@@ -1070,6 +1083,44 @@ impl Stoat {
         }
     }
 
+    fn increment_buffer_version(&mut self, path: &std::path::Path) -> i32 {
+        let version = self.buffer_versions.entry(path.to_path_buf()).or_insert(0);
+        *version += 1;
+        *version
+    }
+
+    pub(crate) fn send_did_change_notification(&mut self, cx: &mut Context<Self>) {
+        // Check and clone what we need first to avoid borrow conflicts
+        let (lsp_manager, path) = match (&self.lsp_manager, &self.current_file_path) {
+            (Some(m), Some(p)) => (m.clone(), p.clone()),
+            _ => return,
+        };
+
+        // Now we can mutably borrow self
+        let version = self.increment_buffer_version(&path);
+        let buffer = self.active_buffer(cx).read(cx).buffer();
+        let text = buffer.read(cx).text();
+
+        let uri_str = format!("file://{}", path.display());
+        if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+            let executor = cx.background_executor().clone();
+            for server_id in lsp_manager.active_servers() {
+                let lsp_manager = lsp_manager.clone();
+                let uri = uri.clone();
+                let text = text.clone();
+
+                executor
+                    .spawn(async move {
+                        if let Err(e) = lsp_manager.did_change(server_id, uri, version, text).await
+                        {
+                            tracing::warn!("Failed to send didChange notification: {}", e);
+                        }
+                    })
+                    .detach();
+            }
+        }
+    }
+
     /// Load a file into the buffer.
     ///
     /// Reads file content, detects language from extension, updates buffer,
@@ -1193,6 +1244,38 @@ impl Stoat {
 
         // Drop initial buffer if it's still empty
         self.maybe_drop_initial_buffer(cx);
+
+        // Send didOpen notification to LSP servers
+        let version = self.increment_buffer_version(&path_buf);
+        if let Some(lsp_manager) = &self.lsp_manager {
+            let uri_str = format!("file://{}", path_buf.display());
+            if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+                let language_id = match language {
+                    stoat_text::Language::Rust => "rust",
+                    _ => "plaintext",
+                }
+                .to_string();
+
+                let executor = cx.background_executor().clone();
+                for server_id in lsp_manager.active_servers() {
+                    let lsp_manager = lsp_manager.clone();
+                    let uri = uri.clone();
+                    let language_id = language_id.clone();
+                    let contents = contents.clone();
+
+                    executor
+                        .spawn(async move {
+                            if let Err(e) = lsp_manager
+                                .did_open(server_id, uri, language_id, version, contents)
+                                .await
+                            {
+                                tracing::warn!("Failed to send didOpen notification: {}", e);
+                            }
+                        })
+                        .detach();
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1383,6 +1466,8 @@ impl Stoat {
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
             current_file_path: None,
+            buffer_versions: self.buffer_versions.clone(),
+            lsp_manager: self.lsp_manager.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),
             display_map: self.display_map.clone(), /* Minimap shares parent's DisplayMap (cheap

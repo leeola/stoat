@@ -185,6 +185,7 @@ impl PaneGroupView {
                 config.clone(),
                 app_state.worktree.clone(),
                 app_state.buffer_store.clone(),
+                None,
                 cx,
             );
 
@@ -1486,6 +1487,7 @@ impl PaneGroupView {
                     crate::Config::default(),
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
+                    None,
                     cx,
                 )
             })
@@ -1542,6 +1544,7 @@ impl PaneGroupView {
                     crate::Config::default(),
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
+                    None,
                     cx,
                 )
             })
@@ -1598,6 +1601,7 @@ impl PaneGroupView {
                     crate::Config::default(),
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
+                    None,
                     cx,
                 )
             })
@@ -1654,6 +1658,7 @@ impl PaneGroupView {
                     crate::Config::default(),
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
+                    None,
                     cx,
                 )
             })

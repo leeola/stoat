@@ -309,6 +309,61 @@ impl AppState {
             .detach();
         }
 
+        // Spawn rust-analyzer
+        {
+            let lsp_manager_clone = lsp_manager.clone();
+
+            cx.spawn(async move |_cx| {
+                let rust_analyzer_path = which::which("rust-analyzer")?;
+
+                tracing::info!("Spawning rust-analyzer from: {:?}", rust_analyzer_path);
+
+                let transport = stoat_lsp::StdioTransport::spawn(
+                    rust_analyzer_path,
+                    vec![],
+                    _cx.background_executor().clone(),
+                )?;
+
+                let server_id = lsp_manager_clone.add_server("rust-analyzer", Arc::new(transport));
+
+                let initialize_request = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "params": {
+                        "processId": std::process::id(),
+                        "rootUri": format!("file://{}", std::env::current_dir()?.display()),
+                        "capabilities": {
+                            "textDocument": {
+                                "publishDiagnostics": {
+                                    "relatedInformation": true,
+                                    "versionSupport": true,
+                                }
+                            }
+                        },
+                    }
+                });
+
+                let response = lsp_manager_clone
+                    .request(server_id, initialize_request)
+                    .await?;
+
+                tracing::info!("rust-analyzer initialized: {:?}", response);
+
+                let initialized_notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialized",
+                    "params": {}
+                });
+
+                lsp_manager_clone
+                    .notify(server_id, initialized_notification)
+                    .await?;
+
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        }
+
         Self {
             worktree,
             buffer_store,

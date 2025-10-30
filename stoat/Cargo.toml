@@ -15,6 +15,7 @@ stoat_text = { path = "../text" }
 stoat_text_transform = { path = "../text_transform" }
 stoat_log = { path = "../log" }
 stoat_lsp = { path = "../stoat_lsp" }
+lsp-types = "0.97"
 smol = "2.0"
 nucleo-matcher = "0.3.1"
 tracing = "0.1"
@@ -27,6 +28,9 @@ ignore = "0.4"
 enum_dispatch = "0.3"
 toml = "0.8"
 serde = { workspace = true }
+serde_json = "1.0"
+which = "6.0"
+glob = "0.3"
 thiserror = { workspace = true }
 dirs = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = [

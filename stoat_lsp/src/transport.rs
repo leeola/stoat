@@ -6,13 +6,24 @@
 //! interchangeably.
 
 use anyhow::Result;
+use async_channel::{unbounded, Receiver, Sender};
 use async_trait::async_trait;
 use futures::{
     io::{BufReader, BufWriter},
+    lock::Mutex as AsyncMutex,
     AsyncBufReadExt, AsyncWriteExt, Stream,
 };
-use smol::process::{Child, Command, Stdio};
-use std::{path::PathBuf, pin::Pin};
+use parking_lot::Mutex;
+use smol::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 /// Abstraction for LSP communication.
 ///
@@ -58,6 +69,13 @@ pub trait LspTransport: Send + Sync {
 /// Communicates with an LSP server process using the standard JSON-RPC
 /// protocol with Content-Length framing.
 ///
+/// # Architecture
+///
+/// Uses a background reader task that continuously reads from the server's stdout
+/// and routes messages to the appropriate handlers:
+/// - Responses (with `id` field) are routed to waiting request futures via channels
+/// - Notifications (without `id` field) are broadcast to subscribers
+///
 /// # Protocol
 ///
 /// Messages are framed using HTTP-style headers:
@@ -68,23 +86,43 @@ pub trait LspTransport: Send + Sync {
 /// {"jsonrpc":"2.0",...}
 /// ```
 pub struct StdioTransport {
-    process: Child,
-    stdin: BufWriter<smol::process::ChildStdin>,
-    stdout: BufReader<smol::process::ChildStdout>,
+    /// Shared stdin for sending messages (async-aware mutex)
+    stdin: Arc<AsyncMutex<BufWriter<ChildStdin>>>,
+
+    /// Monotonically increasing request ID generator
+    next_request_id: AtomicU64,
+
+    /// Maps request IDs to response channels
+    pending_requests: Arc<Mutex<HashMap<u64, Sender<String>>>>,
+
+    /// Broadcasts server-initiated notifications
+    notification_tx: Sender<String>,
+    notification_rx: Receiver<String>,
+
+    /// Background task reading stdout
+    _reader_task: gpui::Task<Result<()>>,
+
+    /// Process handle for shutdown
+    process: Arc<Mutex<Option<Child>>>,
 }
 
 impl StdioTransport {
-    /// Spawn a new LSP server process.
+    /// Spawn a new LSP server process with background reader.
     ///
     /// # Arguments
     ///
     /// * `command` - Path to the LSP server executable
     /// * `args` - Command-line arguments
+    /// * `executor` - Executor for spawning background tasks
     ///
     /// # Errors
     ///
     /// Returns error if process fails to spawn.
-    pub fn spawn(command: PathBuf, args: Vec<String>) -> Result<Self> {
+    pub fn spawn(
+        command: PathBuf,
+        args: Vec<String>,
+        executor: gpui::BackgroundExecutor,
+    ) -> Result<Self> {
         let mut process = Command::new(command)
             .args(args)
             .stdin(Stdio::piped())
@@ -92,12 +130,12 @@ impl StdioTransport {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let stdin = BufWriter::new(
+        let stdin = Arc::new(AsyncMutex::new(BufWriter::new(
             process
                 .stdin
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin"))?,
-        );
+        )));
 
         let stdout = BufReader::new(
             process
@@ -106,26 +144,67 @@ impl StdioTransport {
                 .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?,
         );
 
+        let pending_requests = Arc::new(Mutex::new(HashMap::new()));
+        let (notification_tx, notification_rx) = unbounded();
+
+        let pending_requests_clone = pending_requests.clone();
+        let notification_tx_clone = notification_tx.clone();
+
+        let reader_task = executor.spawn(async move {
+            Self::reader_loop(stdout, pending_requests_clone, notification_tx_clone).await
+        });
+
         Ok(Self {
-            process,
             stdin,
-            stdout,
+            next_request_id: AtomicU64::new(1),
+            pending_requests,
+            notification_tx,
+            notification_rx,
+            _reader_task: reader_task,
+            process: Arc::new(Mutex::new(Some(process))),
         })
     }
 
-    /// Write a JSON-RPC message with Content-Length framing.
-    async fn write_message(&mut self, message: &str) -> Result<()> {
-        let header = format!("Content-Length: {}\r\n\r\n", message.len());
-        self.stdin.write_all(header.as_bytes()).await?;
-        self.stdin.write_all(message.as_bytes()).await?;
-        self.stdin.flush().await?;
+    /// Background loop that reads messages from stdout and routes them.
+    async fn reader_loop(
+        mut stdout: BufReader<ChildStdout>,
+        pending_requests: Arc<Mutex<HashMap<u64, Sender<String>>>>,
+        notification_tx: Sender<String>,
+    ) -> Result<()> {
+        loop {
+            let message = match Self::read_message_from_stdout(&mut stdout).await {
+                Ok(msg) => msg,
+                Err(e) => {
+                    tracing::error!("Failed to read LSP message: {}", e);
+                    break;
+                },
+            };
+
+            let json: serde_json::Value = match serde_json::from_str(&message) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::error!("Failed to parse LSP message as JSON: {}", e);
+                    continue;
+                },
+            };
+
+            if let Some(id) = json.get("id").and_then(|v| v.as_u64()) {
+                let tx_opt = pending_requests.lock().remove(&id);
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(message).await;
+                }
+            } else if json.get("method").is_some() {
+                let _ = notification_tx.send(message).await;
+            }
+        }
+
         Ok(())
     }
 
-    /// Read a JSON-RPC message, stripping Content-Length framing.
-    async fn read_message(&mut self) -> Result<String> {
+    /// Read a JSON-RPC message from stdout, stripping Content-Length framing.
+    async fn read_message_from_stdout(stdout: &mut BufReader<ChildStdout>) -> Result<String> {
         let mut header = String::new();
-        self.stdout.read_line(&mut header).await?;
+        stdout.read_line(&mut header).await?;
 
         if !header.starts_with("Content-Length: ") {
             anyhow::bail!("Invalid message header: {}", header);
@@ -136,39 +215,91 @@ impl StdioTransport {
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {}", e))?;
 
-        // Read empty line
         let mut empty = String::new();
-        self.stdout.read_line(&mut empty).await?;
+        stdout.read_line(&mut empty).await?;
 
-        // Read message body
         let mut buffer = vec![0u8; content_length];
         use futures::AsyncReadExt;
-        self.stdout.read_exact(&mut buffer).await?;
+        stdout.read_exact(&mut buffer).await?;
 
         Ok(String::from_utf8(buffer)?)
+    }
+
+    /// Write a JSON-RPC message to stdin with Content-Length framing.
+    async fn write_message_to_stdin(&self, message: &str) -> Result<()> {
+        let header = format!("Content-Length: {}\r\n\r\n", message.len());
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(header.as_bytes()).await?;
+        stdin.write_all(message.as_bytes()).await?;
+        stdin.flush().await?;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl LspTransport for StdioTransport {
-    async fn send_request(&self, _request: String) -> Result<String> {
-        // FIXME: Implement request/response correlation with request IDs
-        todo!("StdioTransport request/response handling")
+    async fn send_request(&self, request: String) -> Result<String> {
+        let mut json: serde_json::Value = serde_json::from_str(&request)?;
+
+        let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        json["id"] = serde_json::json!(request_id);
+
+        let request_with_id = serde_json::to_string(&json)?;
+
+        let (response_tx, response_rx) = unbounded();
+        self.pending_requests.lock().insert(request_id, response_tx);
+
+        self.write_message_to_stdin(&request_with_id).await?;
+
+        let response = smol::future::or(
+            async {
+                response_rx
+                    .recv()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Channel closed"))
+            },
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(30)).await;
+                Err(anyhow::anyhow!("Request timeout"))
+            },
+        )
+        .await?;
+
+        Ok(response)
     }
 
-    async fn send_notification(&self, _notification: String) -> Result<()> {
-        // FIXME: Implement notification sending
-        todo!("StdioTransport notification sending")
+    async fn send_notification(&self, notification: String) -> Result<()> {
+        self.write_message_to_stdin(&notification).await
     }
 
     fn subscribe_notifications(&self) -> Pin<Box<dyn Stream<Item = String> + Send>> {
-        // FIXME: Implement notification stream from stdout
-        todo!("StdioTransport notification stream")
+        Box::pin(self.notification_rx.clone())
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // FIXME: Send shutdown request and kill process
-        todo!("StdioTransport shutdown")
+        let shutdown_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "shutdown",
+        });
+
+        let _ = self
+            .send_request(serde_json::to_string(&shutdown_request)?)
+            .await;
+
+        let exit_notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+        });
+
+        let _ = self
+            .send_notification(serde_json::to_string(&exit_notification)?)
+            .await;
+
+        if let Some(mut process) = self.process.lock().take() {
+            let _ = process.kill();
+        }
+
+        Ok(())
     }
 }
 

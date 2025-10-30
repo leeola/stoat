@@ -87,6 +87,7 @@ impl<'a> TestStoat<'a> {
                 crate::config::Config::default(),
                 worktree,
                 buffer_store,
+                None,
                 text,
                 cx,
             );

@@ -190,8 +190,59 @@ impl LspManager {
     /// Returns error if rust-analyzer process fails to spawn.
     pub async fn spawn_rust_analyzer(&self, command_path: Option<PathBuf>) -> Result<ServerId> {
         let path = command_path.unwrap_or_else(|| PathBuf::from("rust-analyzer"));
-        let transport = Arc::new(StdioTransport::spawn(path, vec![])?);
+        let transport = Arc::new(StdioTransport::spawn(path, vec![], self.executor.clone())?);
         self.spawn_server("rust-analyzer", transport).await
+    }
+
+    /// Send a request to a language server and wait for response.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_id` - Server to send request to
+    /// * `request` - JSON-RPC request payload
+    ///
+    /// # Returns
+    ///
+    /// JSON response from the server as a string
+    pub async fn request(&self, server_id: ServerId, request: serde_json::Value) -> Result<String> {
+        let transport = self
+            .inner
+            .lock()
+            .servers
+            .get(&server_id)
+            .ok_or_else(|| anyhow::anyhow!("Server not found"))?
+            .transport
+            .clone();
+
+        transport
+            .send_request(serde_json::to_string(&request)?)
+            .await
+    }
+
+    /// Send a notification to a language server (no response expected).
+    ///
+    /// # Arguments
+    ///
+    /// * `server_id` - Server to send notification to
+    /// * `notification` - JSON-RPC notification payload
+    pub async fn notify(&self, server_id: ServerId, notification: serde_json::Value) -> Result<()> {
+        let transport = self
+            .inner
+            .lock()
+            .servers
+            .get(&server_id)
+            .ok_or_else(|| anyhow::anyhow!("Server not found"))?
+            .transport
+            .clone();
+
+        transport
+            .send_notification(serde_json::to_string(&notification)?)
+            .await
+    }
+
+    /// Get list of active server IDs.
+    pub fn active_servers(&self) -> Vec<ServerId> {
+        self.inner.lock().servers.keys().copied().collect()
     }
 
     /// Handle a notification from a language server.
