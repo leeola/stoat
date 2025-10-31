@@ -135,7 +135,7 @@ impl Default for MinimapVisibility {
 /// ensuring only one minimap appears regardless of split configuration.
 pub struct PaneGroupView {
     /// Workspace-level state shared across all panes
-    app_state: crate::app_state::AppState,
+    pub app_state: crate::app_state::AppState,
     pane_group: PaneGroup,
     pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
     active_pane: PaneId,
@@ -2273,6 +2273,7 @@ impl Render for PaneGroupView {
                     } else {
                         None
                     },
+                    self.app_state.lsp_state.status.read().display_string(),
                 );
 
                 // Calculate minimap scroll position for later update
@@ -2409,6 +2410,7 @@ impl Render for PaneGroupView {
                 review_file_progress,
                 hunk_position,
                 comparison_mode,
+                lsp_status,
             )| {
                 (
                     mode,
@@ -2419,6 +2421,7 @@ impl Render for PaneGroupView {
                     review_file_progress,
                     hunk_position,
                     comparison_mode,
+                    lsp_status,
                 )
             },
         );
@@ -2649,6 +2652,7 @@ impl Render for PaneGroupView {
                     review_file_progress,
                     hunk_position,
                     comparison_mode,
+                    lsp_status,
                 )| {
                     div.child(StatusBar::new(
                         mode,
@@ -2659,6 +2663,7 @@ impl Render for PaneGroupView {
                         review_file_progress,
                         hunk_position,
                         comparison_mode,
+                        lsp_status,
                     ))
                 },
             )

@@ -48,6 +48,7 @@ mod tests;
 pub use actions::*;
 // Re-export action metadata helpers
 pub use actions::{action_name, description};
+pub use app_state::{LspState, LspStatus};
 pub use buffer::{
     BufferItem, BufferListEntry, BufferStore, DisplayBuffer, DisplayRow, OpenBuffer, RowInfo,
 };

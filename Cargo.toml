@@ -9,7 +9,7 @@ members = [
   "agent/claude_code",
   "text_transform",
   "log",
-  "stoat_lsp",
+  "lsp",
 ]
 
 [workspace.package]

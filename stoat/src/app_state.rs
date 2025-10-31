@@ -25,7 +25,7 @@
 
 use crate::{buffer::store::BufferStore, stoat::KeyContext, worktree::Worktree, BufferItem};
 use gpui::{AppContext, Entity, Task};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -36,6 +36,59 @@ use std::{
 };
 use stoat_lsp::DiagnosticSet;
 use text::Buffer;
+
+/// LSP server status.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LspStatus {
+    /// Server process starting
+    Starting,
+    /// Sending initialize request
+    Initializing,
+    /// Active operation (indexing, building, etc.)
+    Indexing { operation: String },
+    /// Idle and ready
+    Ready,
+    /// Error during startup or operation
+    Error(String),
+}
+
+impl LspStatus {
+    /// Display string for status bar (empty when Ready).
+    pub fn display_string(&self) -> String {
+        match self {
+            LspStatus::Starting => "LSP: Starting...".to_string(),
+            LspStatus::Initializing => "LSP: Initializing...".to_string(),
+            LspStatus::Indexing { operation } => format!("LSP: {}", operation),
+            LspStatus::Ready => String::new(),
+            LspStatus::Error(msg) => format!("LSP: Error: {}", msg),
+        }
+    }
+}
+
+/// Progress info for a single operation.
+#[derive(Clone, Debug)]
+struct OperationProgress {
+    title: String,
+    percentage: Option<u32>,
+}
+
+/// LSP state tracking.
+#[derive(Clone)]
+pub struct LspState {
+    /// Current status
+    pub status: Arc<RwLock<LspStatus>>,
+    /// Active operations (token -> progress info)
+    active_operations: Arc<RwLock<HashMap<String, OperationProgress>>>,
+}
+
+impl Default for LspState {
+    fn default() -> Self {
+        Self {
+            status: Arc::new(RwLock::new(LspStatus::Starting)),
+            active_operations: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+}
 
 /// File finder state.
 ///
@@ -234,6 +287,8 @@ pub struct AppState {
     /// Manages language server processes and routes diagnostics to buffers.
     /// Currently requires manual diagnostic routing - automatic routing will be added later.
     pub lsp_manager: Arc<stoat_lsp::LspManager>,
+    /// LSP state tracking (status and progress)
+    pub lsp_state: LspState,
 }
 
 impl AppState {
@@ -268,6 +323,7 @@ impl AppState {
             };
 
         let lsp_manager = Arc::new(stoat_lsp::LspManager::new(cx.background_executor().clone()));
+        let lsp_state = LspState::default();
 
         // Setup LSP background task for automatic diagnostic routing
         {
@@ -309,11 +365,157 @@ impl AppState {
             .detach();
         }
 
+        Self {
+            worktree,
+            buffer_store,
+            file_finder: FileFinder::default(),
+            buffer_finder: BufferFinder::default(),
+            command_palette: CommandPalette::default(),
+            git_status: GitStatus {
+                files: git_status_files.clone(),
+                filtered: git_status_files,
+                branch_info,
+                dirty_count,
+                ..Default::default()
+            },
+            diff_review: DiffReview::default(),
+            lsp_manager,
+            lsp_state,
+        }
+    }
+
+    /// Set up LSP progress tracking tasks.
+    ///
+    /// Spawns background tasks that update LSP status and notify the view to trigger re-renders.
+    /// Must be called from an entity context to enable automatic UI updates.
+    pub fn setup_lsp_progress_tracking<V: 'static>(
+        &self,
+        view: gpui::WeakEntity<V>,
+        cx: &mut gpui::App,
+    ) {
+        // Subscribe to LSP progress notifications
+        {
+            let lsp_state_clone = self.lsp_state.clone();
+            let progress_updates = self.lsp_manager.subscribe_progress_updates();
+            let view_clone = view.clone();
+
+            cx.spawn(async move |cx| {
+                while let Ok(update) = progress_updates.recv().await {
+                    let mut active_ops = lsp_state_clone.active_operations.write();
+
+                    match update.kind {
+                        stoat_lsp::ProgressKind::Begin => {
+                            if !update.title.is_empty() {
+                                active_ops.insert(
+                                    update.token.clone(),
+                                    OperationProgress {
+                                        title: update.title.clone(),
+                                        percentage: update.percentage,
+                                    },
+                                );
+                            }
+                        },
+                        stoat_lsp::ProgressKind::Report => {
+                            if !update.title.is_empty() {
+                                active_ops.insert(
+                                    update.token.clone(),
+                                    OperationProgress {
+                                        title: update.title.clone(),
+                                        percentage: update.percentage,
+                                    },
+                                );
+                            } else if let Some(progress) = active_ops.get_mut(&update.token) {
+                                progress.percentage = update.percentage;
+                            }
+                        },
+                        stoat_lsp::ProgressKind::End => {
+                            active_ops.remove(&update.token);
+                        },
+                    }
+
+                    let new_status = if active_ops.is_empty() {
+                        LspStatus::Ready
+                    } else {
+                        let count = active_ops.len();
+                        let operation = if count == 1 {
+                            let progress = active_ops.values().next().unwrap();
+                            if let Some(pct) = progress.percentage {
+                                format!("{} {}%", progress.title, pct)
+                            } else {
+                                progress.title.clone()
+                            }
+                        } else {
+                            let total_pct: Option<u32> = active_ops
+                                .values()
+                                .filter_map(|p| p.percentage)
+                                .sum::<u32>()
+                                .checked_div(count as u32);
+
+                            if let Some(avg_pct) = total_pct {
+                                format!("Indexing ({} tasks, {}%)", count, avg_pct)
+                            } else {
+                                format!("Indexing ({} tasks)", count)
+                            }
+                        };
+                        LspStatus::Indexing { operation }
+                    };
+
+                    drop(active_ops);
+
+                    let mut status_guard = lsp_state_clone.status.write();
+                    if *status_guard != new_status {
+                        match (&*status_guard, &new_status) {
+                            (_, LspStatus::Initializing) => {
+                                tracing::debug!("LSP initializing");
+                            },
+                            (_, LspStatus::Ready) => {
+                                tracing::debug!("LSP ready");
+                            },
+                            (_, LspStatus::Error(_)) => {
+                                tracing::debug!("LSP error: {:?}", new_status);
+                            },
+                            (LspStatus::Indexing { .. }, LspStatus::Indexing { .. }) => {
+                                tracing::trace!("LSP indexing: {:?}", new_status);
+                            },
+                            (_, LspStatus::Indexing { .. }) => {
+                                tracing::debug!("LSP indexing started");
+                            },
+                            _ => {
+                                tracing::debug!(
+                                    "LSP status changed: {:?} -> {:?}",
+                                    *status_guard,
+                                    new_status
+                                );
+                            },
+                        }
+                        *status_guard = new_status;
+                        drop(status_guard);
+
+                        // Notify the view to trigger a re-render
+                        let _ = view_clone.update(cx, |_this, cx| {
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
+
         // Spawn rust-analyzer
         {
-            let lsp_manager_clone = lsp_manager.clone();
+            let lsp_manager_clone = self.lsp_manager.clone();
+            let lsp_state_clone = self.lsp_state.clone();
+            let view_clone = view.clone();
 
-            cx.spawn(async move |_cx| {
+            cx.spawn(async move |cx| {
+                *lsp_state_clone.status.write() = LspStatus::Initializing;
+                tracing::debug!("LSP initializing");
+
+                // Notify view
+                let _ = view_clone.update(cx, |_this, cx| {
+                    cx.notify();
+                });
+
                 let rust_analyzer_path = which::which("rust-analyzer")?;
 
                 tracing::info!("Spawning rust-analyzer from: {:?}", rust_analyzer_path);
@@ -321,7 +523,7 @@ impl AppState {
                 let transport = stoat_lsp::StdioTransport::spawn(
                     rust_analyzer_path,
                     vec![],
-                    _cx.background_executor().clone(),
+                    cx.background_executor().clone(),
                 )?;
 
                 let server_id = lsp_manager_clone.add_server("rust-analyzer", Arc::new(transport));
@@ -338,6 +540,9 @@ impl AppState {
                                     "relatedInformation": true,
                                     "versionSupport": true,
                                 }
+                            },
+                            "window": {
+                                "workDoneProgress": true,
                             }
                         },
                     }
@@ -359,26 +564,19 @@ impl AppState {
                     .notify(server_id, initialized_notification)
                     .await?;
 
+                lsp_manager_clone.start_listener(server_id)?;
+
+                *lsp_state_clone.status.write() = LspStatus::Ready;
+                tracing::debug!("LSP ready");
+
+                // Notify view
+                let _ = view_clone.update(cx, |_this, cx| {
+                    cx.notify();
+                });
+
                 Ok::<_, anyhow::Error>(())
             })
             .detach();
-        }
-
-        Self {
-            worktree,
-            buffer_store,
-            file_finder: FileFinder::default(),
-            buffer_finder: BufferFinder::default(),
-            command_palette: CommandPalette::default(),
-            git_status: GitStatus {
-                files: git_status_files.clone(),
-                filtered: git_status_files,
-                branch_info,
-                dirty_count,
-                ..Default::default()
-            },
-            diff_review: DiffReview::default(),
-            lsp_manager,
         }
     }
 

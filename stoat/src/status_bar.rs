@@ -36,6 +36,8 @@ pub struct StatusBar {
     hunk_position: Option<(usize, usize)>,
     /// Diff comparison mode (only shown in diff_review mode)
     comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
+    /// LSP status string for display
+    lsp_status: String,
 }
 
 impl StatusBar {
@@ -50,6 +52,7 @@ impl StatusBar {
         review_file_progress: Option<(usize, usize)>,
         hunk_position: Option<(usize, usize)>,
         comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
+        lsp_status: String,
     ) -> Self {
         Self {
             mode_display,
@@ -59,6 +62,7 @@ impl StatusBar {
             review_file_progress,
             hunk_position,
             comparison_mode,
+            lsp_status,
         }
     }
 
@@ -207,8 +211,19 @@ impl RenderOnce for StatusBar {
             None
         };
 
-        // Build right section with git info and mode
+        // Build right section with LSP, git info, and mode
         let mut right_div = div().flex().items_center().gap_2();
+
+        // Add LSP status (before git)
+        if !self.lsp_status.is_empty() {
+            right_div = right_div
+                .child(
+                    div()
+                        .text_color(rgb(0xd4d4d4))
+                        .child(self.lsp_status.clone()),
+                )
+                .child(div().text_color(rgb(0x808080)).child("|"));
+        }
 
         // Add git branch
         right_div = right_div.child(div().text_color(rgb(0xd4d4d4)).child(git_branch));

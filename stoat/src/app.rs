@@ -41,6 +41,12 @@ pub fn run_with_paths(
                     PaneGroupView::new(config.clone(), paths.clone(), keymap.clone(), cx)
                 });
 
+                // Setup LSP progress tracking to enable automatic UI updates
+                pane_group_view.update(cx, |this, cx| {
+                    this.app_state
+                        .setup_lsp_progress_tracking(pane_group_view.downgrade(), cx);
+                });
+
                 // Focus the initial editor so input works immediately
                 // This must happen after PaneGroupView is created so the focus chain is established
                 pane_group_view.read(cx).focus_active_editor(window, cx);

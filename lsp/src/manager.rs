@@ -27,6 +27,30 @@ pub struct DiagnosticUpdate {
     pub server_id: ServerId,
 }
 
+/// Notification when LSP server reports progress.
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    /// Server that sent the progress
+    pub server_id: ServerId,
+    /// Progress token (identifies the operation)
+    pub token: String,
+    /// Kind of progress event
+    pub kind: ProgressKind,
+    /// Title of the operation
+    pub title: String,
+    /// Optional message with details
+    pub message: Option<String>,
+    /// Optional percentage (0-100)
+    pub percentage: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressKind {
+    Begin,
+    Report,
+    End,
+}
+
 /// Manages language server lifecycle and diagnostic routing.
 pub struct LspManager {
     inner: Arc<Mutex<LspManagerInner>>,
@@ -45,6 +69,9 @@ struct LspManagerInner {
 
     /// Subscribers to diagnostic update notifications
     diagnostic_subscribers: Vec<Sender<DiagnosticUpdate>>,
+
+    /// Subscribers to progress notifications
+    progress_subscribers: Vec<Sender<ProgressUpdate>>,
 }
 
 struct ServerState {
@@ -69,6 +96,7 @@ impl LspManager {
                 next_server_id: 0,
                 lsp_diagnostics: HashMap::new(),
                 diagnostic_subscribers: Vec::new(),
+                progress_subscribers: Vec::new(),
             })),
             executor,
         }
@@ -102,6 +130,16 @@ impl LspManager {
     pub fn subscribe_diagnostic_updates(&self) -> Receiver<DiagnosticUpdate> {
         let (tx, rx) = async_channel::unbounded();
         self.inner.lock().diagnostic_subscribers.push(tx);
+        rx
+    }
+
+    /// Subscribe to LSP progress notifications.
+    ///
+    /// Returns a channel that receives notifications when language servers
+    /// report progress ($/progress). Used to track operations like indexing.
+    pub fn subscribe_progress_updates(&self) -> Receiver<ProgressUpdate> {
+        let (tx, rx) = async_channel::unbounded();
+        self.inner.lock().progress_subscribers.push(tx);
         rx
     }
 
@@ -264,6 +302,9 @@ impl LspManager {
 
                 Self::handle_publish_diagnostics(inner, server_id, params)?;
             },
+            "$/progress" => {
+                Self::handle_progress(inner, server_id, &message)?;
+            },
             _ => {
                 // Ignore other notifications for now
             },
@@ -313,6 +354,60 @@ impl LspManager {
         let update = DiagnosticUpdate { path, server_id };
 
         // Send to all subscribers (non-blocking for unbounded channels)
+        for tx in subscribers {
+            let _ = tx.try_send(update.clone());
+        }
+
+        Ok(())
+    }
+
+    /// Handle $/progress notification from language server.
+    fn handle_progress(
+        inner: &Arc<Mutex<LspManagerInner>>,
+        server_id: ServerId,
+        message: &serde_json::Value,
+    ) -> Result<()> {
+        let params = &message["params"];
+
+        // Token can be string or number
+        let token = params["token"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| params["token"].as_i64().map(|i| i.to_string()))
+            .context("Missing progress token")?;
+
+        let value = &params["value"];
+        let kind_str = value["kind"].as_str().context("Missing progress kind")?;
+
+        let kind = match kind_str {
+            "begin" => ProgressKind::Begin,
+            "report" => ProgressKind::Report,
+            "end" => ProgressKind::End,
+            _ => return Ok(()), // Ignore unknown kinds
+        };
+
+        let title = value["title"].as_str().unwrap_or("").to_string();
+        let message = value["message"].as_str().map(|s| s.to_string());
+        let percentage = value["percentage"].as_u64().map(|p| p as u32);
+
+        let update = ProgressUpdate {
+            server_id,
+            token,
+            kind,
+            title,
+            message,
+            percentage,
+        };
+
+        // Notify subscribers (clean up closed channels and clone active ones)
+        let subscribers = {
+            let mut inner_guard = inner.lock();
+            inner_guard
+                .progress_subscribers
+                .retain(|tx| !tx.is_closed());
+            inner_guard.progress_subscribers.clone()
+        };
+
         for tx in subscribers {
             let _ = tx.try_send(update.clone());
         }
