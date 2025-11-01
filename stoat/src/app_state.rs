@@ -33,9 +33,15 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 use stoat_lsp::DiagnosticSet;
 use text::Buffer;
+
+/// Maximum UI notification rate for LSP progress updates (milliseconds).
+///
+/// Limits status bar re-renders to 5 per second during rust-analyzer indexing.
+const PROGRESS_DEBOUNCE_MS: u64 = 200;
 
 /// LSP server status.
 #[derive(Clone, Debug, PartialEq)]
@@ -322,7 +328,10 @@ impl AppState {
                 (None, Vec::new(), 0)
             };
 
-        let lsp_manager = Arc::new(stoat_lsp::LspManager::new(cx.background_executor().clone()));
+        let lsp_manager = Arc::new(stoat_lsp::LspManager::new(
+            cx.background_executor().clone(),
+            std::time::Duration::from_secs(120),
+        ));
         let lsp_state = LspState::default();
 
         // Setup LSP background task for automatic diagnostic routing
@@ -400,6 +409,8 @@ impl AppState {
             let view_clone = view.clone();
 
             cx.spawn(async move |cx| {
+                let mut last_notify: Option<Instant> = None;
+
                 while let Ok(update) = progress_updates.recv().await {
                     let mut active_ops = lsp_state_clone.active_operations.write();
 
@@ -488,13 +499,24 @@ impl AppState {
                                 );
                             },
                         }
-                        *status_guard = new_status;
+                        *status_guard = new_status.clone();
                         drop(status_guard);
 
-                        // Notify the view to trigger a re-render
-                        let _ = view_clone.update(cx, |_this, cx| {
-                            cx.notify();
-                        });
+                        // Debounce UI notifications to max 5 per second (200ms interval)
+                        // Always notify when transitioning to Ready for accurate final state
+                        let should_notify = match last_notify {
+                            None => true,
+                            Some(last) => {
+                                last.elapsed() >= Duration::from_millis(PROGRESS_DEBOUNCE_MS)
+                            },
+                        } || matches!(new_status, LspStatus::Ready);
+
+                        if should_notify {
+                            last_notify = Some(Instant::now());
+                            let _ = view_clone.update(cx, |_this, cx| {
+                                cx.notify();
+                            });
+                        }
                     }
                 }
             })
@@ -549,7 +571,7 @@ impl AppState {
                 });
 
                 let response = lsp_manager_clone
-                    .request(server_id, initialize_request)
+                    .request(server_id, initialize_request)?
                     .await?;
 
                 tracing::info!("rust-analyzer initialized: {:?}", response);

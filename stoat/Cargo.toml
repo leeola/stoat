@@ -43,3 +43,5 @@ tempfile = "3.12"
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3.12"
 stoat_lsp = { path = "../lsp", features = ["test-support"] }
+async-trait = { workspace = true }
+futures = "0.3"

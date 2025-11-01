@@ -75,6 +75,16 @@ pub fn point_to_lsp_position(point: Point, snapshot: &BufferSnapshot) -> LspPosi
     }
 }
 
+/// Convert point range to LSP range.
+///
+/// Converts buffer Point range to LSP range with UTF-16 offsets.
+pub fn point_range_to_lsp(range: &Range<Point>, snapshot: &BufferSnapshot) -> LspRange {
+    LspRange {
+        start: point_to_lsp_position(range.start, snapshot),
+        end: point_to_lsp_position(range.end, snapshot),
+    }
+}
+
 /// Convert anchors back to LSP range.
 ///
 /// Resolves anchors to points and converts to LSP range.

@@ -9,14 +9,82 @@ use async_channel::{Receiver, Sender};
 use futures::StreamExt;
 use lsp_types::{
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, PublishDiagnosticsParams,
-    TextDocumentContentChangeEvent, TextDocumentItem, Uri, VersionedTextDocumentIdentifier,
+    ServerCapabilities, TextDocumentContentChangeEvent, TextDocumentItem,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, VersionedTextDocumentIdentifier,
 };
 use parking_lot::Mutex;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use rustc_hash::FxHasher;
+use serde::Deserialize;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 use text::BufferSnapshot;
+
+/// LSP notification types for single-pass parsing.
+#[derive(Deserialize)]
+#[serde(tag = "method")]
+enum LspNotification {
+    #[serde(rename = "textDocument/publishDiagnostics")]
+    PublishDiagnostics { params: PublishDiagnosticsParams },
+
+    #[serde(rename = "$/progress")]
+    Progress { params: ProgressNotificationParams },
+
+    #[serde(other)]
+    Unknown,
+}
+
+/// Progress notification parameters.
+#[derive(Deserialize)]
+struct ProgressNotificationParams {
+    token: ProgressToken,
+    value: WorkDoneProgressValue,
+}
+
+/// Progress token (can be string or number).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProgressToken {
+    String(String),
+    Number(i64),
+}
+
+impl ProgressToken {
+    fn to_string(&self) -> String {
+        match self {
+            ProgressToken::String(s) => s.clone(),
+            ProgressToken::Number(n) => n.to_string(),
+        }
+    }
+}
+
+/// Work done progress value.
+#[derive(Deserialize)]
+struct WorkDoneProgressValue {
+    kind: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    percentage: Option<u32>,
+}
 
 /// Unique identifier for a language server instance.
 pub type ServerId = usize;
+
+/// Internal identifier for tracking cancellable requests.
+type PendingRequestId = u64;
+
+/// Internal identifier for buffer diagnostic storage.
+/// Using integer IDs avoids repeated PathBuf hashing.
+type BufferId = usize;
 
 /// Notification when diagnostics change for a file.
 #[derive(Debug, Clone)]
@@ -51,10 +119,76 @@ pub enum ProgressKind {
     End,
 }
 
+/// Handle to an in-flight LSP request that can be cancelled.
+///
+/// This handle can be awaited to get the request result, or cancelled to abort the request.
+pub struct RequestHandle {
+    request_id: PendingRequestId,
+    manager: Arc<Mutex<LspManagerInner>>,
+    future: futures::future::Abortable<gpui::Task<Result<String>>>,
+}
+
+impl RequestHandle {
+    /// Cancel this request.
+    ///
+    /// Aborts the local future and removes from pending request tracking.
+    /// If the request has already completed, this is a no-op.
+    pub fn cancel(&self) {
+        let mut inner = self.manager.lock();
+        if let Some(abort_handle) = inner.pending_requests.remove(&self.request_id) {
+            abort_handle.abort();
+        }
+    }
+}
+
+impl std::future::Future for RequestHandle {
+    type Output = Result<String>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        use std::pin::Pin;
+        match Pin::new(&mut self.future).poll(cx) {
+            std::task::Poll::Ready(Ok(result)) => {
+                // Clean up from pending requests
+                self.manager
+                    .lock()
+                    .pending_requests
+                    .remove(&self.request_id);
+                std::task::Poll::Ready(result)
+            },
+            std::task::Poll::Ready(Err(_aborted)) => {
+                // Request was cancelled
+                self.manager
+                    .lock()
+                    .pending_requests
+                    .remove(&self.request_id);
+                std::task::Poll::Ready(Err(anyhow::anyhow!("Request cancelled")))
+            },
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+/// Channel capacity for diagnostic update notifications.
+/// With bounded channels, slow consumers won't cause unbounded memory growth.
+const DIAGNOSTIC_CHANNEL_CAPACITY: usize = 1000;
+
+/// Channel capacity for progress update notifications.
+/// Progress updates are less frequent than diagnostics, so smaller capacity.
+const PROGRESS_CHANNEL_CAPACITY: usize = 100;
+
 /// Manages language server lifecycle and diagnostic routing.
+///
+/// Coordinates multiple language servers with timeout protection for requests.
+/// All requests are bounded by a configurable timeout to prevent indefinite hangs
+/// from unresponsive servers.
 pub struct LspManager {
     inner: Arc<Mutex<LspManagerInner>>,
     executor: gpui::BackgroundExecutor,
+    /// Maximum duration to wait for LSP request responses before timing out
+    request_timeout: std::time::Duration,
 }
 
 struct LspManagerInner {
@@ -64,14 +198,29 @@ struct LspManagerInner {
     /// Next server ID to assign
     next_server_id: ServerId,
 
-    /// Raw LSP diagnostics per file
-    lsp_diagnostics: HashMap<PathBuf, Vec<(ServerId, lsp_types::Diagnostic)>>,
+    /// Pending LSP requests that can be cancelled
+    pending_requests: HashMap<PendingRequestId, futures::future::AbortHandle>,
 
-    /// Subscribers to diagnostic update notifications
-    diagnostic_subscribers: Vec<Sender<DiagnosticUpdate>>,
+    /// Next request ID to assign
+    next_request_id: Arc<AtomicU64>,
 
-    /// Subscribers to progress notifications
-    progress_subscribers: Vec<Sender<ProgressUpdate>>,
+    /// Raw LSP diagnostics per buffer (using integer IDs for faster hashing)
+    lsp_diagnostics: HashMap<BufferId, Vec<(ServerId, lsp_types::Diagnostic)>>,
+
+    /// Mapping from buffer ID to file path
+    buffer_paths: HashMap<BufferId, PathBuf>,
+
+    /// Mapping from file path to buffer ID
+    path_to_buffer: HashMap<PathBuf, BufferId>,
+
+    /// Next buffer ID to assign
+    next_buffer_id: BufferId,
+
+    /// Subscribers to diagnostic update notifications (Arc for cheap cloning)
+    diagnostic_subscribers: Arc<[Sender<DiagnosticUpdate>]>,
+
+    /// Subscribers to progress notifications (Arc for cheap cloning)
+    progress_subscribers: Arc<[Sender<ProgressUpdate>]>,
 }
 
 struct ServerState {
@@ -83,22 +232,32 @@ struct ServerState {
 
     /// Server name (e.g., "rust-analyzer")
     name: String,
+
+    /// Text document sync kind (None, Full, or Incremental)
+    text_document_sync_kind: Option<lsp_types::TextDocumentSyncKind>,
 }
 
 impl LspManager {
-    /// Create a new LSP manager with the given executor.
+    /// Create a new LSP manager with the given executor and request timeout.
     ///
     /// The executor is used to spawn background tasks for listening to LSP notifications.
-    pub fn new(executor: gpui::BackgroundExecutor) -> Self {
+    /// The request_timeout specifies how long to wait for LSP requests before timing out.
+    pub fn new(executor: gpui::BackgroundExecutor, request_timeout: std::time::Duration) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LspManagerInner {
                 servers: HashMap::new(),
                 next_server_id: 0,
+                pending_requests: HashMap::new(),
+                next_request_id: Arc::new(AtomicU64::new(1)),
                 lsp_diagnostics: HashMap::new(),
-                diagnostic_subscribers: Vec::new(),
-                progress_subscribers: Vec::new(),
+                buffer_paths: HashMap::new(),
+                path_to_buffer: HashMap::new(),
+                next_buffer_id: 0,
+                diagnostic_subscribers: Arc::from(vec![]),
+                progress_subscribers: Arc::from(vec![]),
             })),
             executor,
+            request_timeout,
         }
     }
 
@@ -128,8 +287,14 @@ impl LspManager {
     /// }).detach();
     /// ```
     pub fn subscribe_diagnostic_updates(&self) -> Receiver<DiagnosticUpdate> {
-        let (tx, rx) = async_channel::unbounded();
-        self.inner.lock().diagnostic_subscribers.push(tx);
+        let (tx, rx) = async_channel::bounded(DIAGNOSTIC_CHANNEL_CAPACITY);
+
+        // Copy-on-write: clone Arc to Vec, push, create new Arc
+        let mut inner = self.inner.lock();
+        let mut subs = inner.diagnostic_subscribers.as_ref().to_vec();
+        subs.push(tx);
+        inner.diagnostic_subscribers = Arc::from(subs);
+
         rx
     }
 
@@ -138,8 +303,14 @@ impl LspManager {
     /// Returns a channel that receives notifications when language servers
     /// report progress ($/progress). Used to track operations like indexing.
     pub fn subscribe_progress_updates(&self) -> Receiver<ProgressUpdate> {
-        let (tx, rx) = async_channel::unbounded();
-        self.inner.lock().progress_subscribers.push(tx);
+        let (tx, rx) = async_channel::bounded(PROGRESS_CHANNEL_CAPACITY);
+
+        // Copy-on-write: clone Arc to Vec, push, create new Arc
+        let mut inner = self.inner.lock();
+        let mut subs = inner.progress_subscribers.as_ref().to_vec();
+        subs.push(tx);
+        inner.progress_subscribers = Arc::from(subs);
+
         rx
     }
 
@@ -163,10 +334,31 @@ impl LspManager {
                 id: server_id,
                 transport,
                 name,
+                text_document_sync_kind: None,
             },
         );
 
         server_id
+    }
+
+    /// Set server capabilities after initialization.
+    ///
+    /// Parses the server capabilities response to determine what sync mode the server supports.
+    /// Should be called after receiving the initialize response from the server.
+    pub fn set_capabilities(&self, server_id: ServerId, capabilities: ServerCapabilities) {
+        let mut inner = self.inner.lock();
+
+        if let Some(server) = inner.servers.get_mut(&server_id) {
+            server.text_document_sync_kind =
+                capabilities.text_document_sync.and_then(|sync| match sync {
+                    TextDocumentSyncCapability::Kind(kind) => Some(kind),
+                    TextDocumentSyncCapability::Options(opts) => opts.change,
+                });
+
+            if let Some(kind) = server.text_document_sync_kind {
+                tracing::info!("Server {} supports sync kind: {:?}", server_id, kind);
+            }
+        }
     }
 
     /// Start background listener task for a server.
@@ -234,6 +426,8 @@ impl LspManager {
 
     /// Send a request to a language server and wait for response.
     ///
+    /// Returns a handle that can be awaited to get the result, or cancelled to abort the request.
+    ///
     /// # Arguments
     ///
     /// * `server_id` - Server to send request to
@@ -241,20 +435,71 @@ impl LspManager {
     ///
     /// # Returns
     ///
-    /// JSON response from the server as a string
-    pub async fn request(&self, server_id: ServerId, request: serde_json::Value) -> Result<String> {
-        let transport = self
-            .inner
-            .lock()
-            .servers
-            .get(&server_id)
-            .ok_or_else(|| anyhow::anyhow!("Server not found"))?
-            .transport
-            .clone();
+    /// RequestHandle that can be awaited for JSON response or cancelled
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the request times out, fails, or is cancelled
+    pub fn request(
+        &self,
+        server_id: ServerId,
+        request: serde_json::Value,
+    ) -> Result<RequestHandle> {
+        let (transport, request_id_counter) = {
+            let inner = self.inner.lock();
+            let transport = inner
+                .servers
+                .get(&server_id)
+                .ok_or_else(|| anyhow::anyhow!("Server not found"))?
+                .transport
+                .clone();
+            (transport, inner.next_request_id.clone())
+        };
 
-        transport
-            .send_request(serde_json::to_string(&request)?)
-            .await
+        let request_str = serde_json::to_string(&request)?;
+
+        let timeout_duration = self.request_timeout;
+        let executor = self.executor.clone();
+
+        // Generate unique request ID
+        let request_id = request_id_counter.fetch_add(1, Ordering::SeqCst);
+
+        // Create the combined timeout + request future
+        let combined_future = {
+            let executor_clone = executor.clone();
+            executor.spawn(async move {
+                let timeout_future = executor_clone.spawn(async move {
+                    smol::Timer::after(timeout_duration).await;
+                    Err::<String, anyhow::Error>(anyhow::anyhow!(
+                        "LSP request timed out after {:?} (server may be unresponsive)",
+                        timeout_duration
+                    ))
+                });
+
+                let request_future =
+                    executor_clone.spawn(async move { transport.send_request(request_str).await });
+
+                match futures::future::select(request_future, timeout_future).await {
+                    futures::future::Either::Left((result, _)) => result,
+                    futures::future::Either::Right((timeout_err, _)) => timeout_err,
+                }
+            })
+        };
+
+        // Wrap in abortable to allow cancellation
+        let (abortable_future, abort_handle) = futures::future::abortable(combined_future);
+
+        // Track this request
+        self.inner
+            .lock()
+            .pending_requests
+            .insert(request_id, abort_handle);
+
+        Ok(RequestHandle {
+            request_id,
+            manager: self.inner.clone(),
+            future: abortable_future,
+        })
     }
 
     /// Send a notification to a language server (no response expected).
@@ -289,28 +534,53 @@ impl LspManager {
         server_id: ServerId,
         notification: &str,
     ) -> Result<()> {
-        let message: serde_json::Value =
+        // Single-pass parsing using typed enum
+        let notif: LspNotification =
             serde_json::from_str(notification).context("Failed to parse notification")?;
 
-        let method = message["method"].as_str().context("Missing method field")?;
-
-        match method {
-            "textDocument/publishDiagnostics" => {
-                let params: PublishDiagnosticsParams =
-                    serde_json::from_value(message["params"].clone())
-                        .context("Failed to parse PublishDiagnostics params")?;
-
+        match notif {
+            LspNotification::PublishDiagnostics { params } => {
                 Self::handle_publish_diagnostics(inner, server_id, params)?;
             },
-            "$/progress" => {
-                Self::handle_progress(inner, server_id, &message)?;
+            LspNotification::Progress { params } => {
+                Self::handle_progress(inner, server_id, params)?;
             },
-            _ => {
-                // Ignore other notifications for now
+            LspNotification::Unknown => {
+                // Ignore other notifications
             },
         }
 
         Ok(())
+    }
+
+    /// Compute hash of diagnostics for change detection.
+    ///
+    /// Hashes server ID, range, message, and severity to detect identical diagnostic sets.
+    fn compute_diagnostic_hash(diagnostics: &[(ServerId, lsp_types::Diagnostic)]) -> u64 {
+        let mut hasher = FxHasher::default();
+
+        for (server_id, diag) in diagnostics {
+            server_id.hash(&mut hasher);
+            diag.range.start.line.hash(&mut hasher);
+            diag.range.start.character.hash(&mut hasher);
+            diag.range.end.line.hash(&mut hasher);
+            diag.range.end.character.hash(&mut hasher);
+            diag.message.hash(&mut hasher);
+            // DiagnosticSeverity is a newtype, hash the inner value
+            if let Some(severity) = diag.severity {
+                use lsp_types::DiagnosticSeverity;
+                let severity_u8: u8 = match severity {
+                    DiagnosticSeverity::ERROR => 1,
+                    DiagnosticSeverity::WARNING => 2,
+                    DiagnosticSeverity::INFORMATION => 3,
+                    DiagnosticSeverity::HINT => 4,
+                    _ => 0, // Unknown severity
+                };
+                severity_u8.hash(&mut hasher);
+            }
+        }
+
+        hasher.finish()
     }
 
     /// Handle PublishDiagnostics notification.
@@ -327,15 +597,29 @@ impl LspManager {
             anyhow::bail!("Invalid file URI (not file://): {}", uri_str);
         };
 
-        let subscribers = {
+        let (changed, subscribers) = {
             let mut inner_guard = inner.lock();
 
-            // Remove old diagnostics from this server for this file
+            // Get or create buffer ID for this path
+            let buffer_id = if let Some(&id) = inner_guard.path_to_buffer.get(&path) {
+                id
+            } else {
+                let id = inner_guard.next_buffer_id;
+                inner_guard.next_buffer_id += 1;
+                inner_guard.buffer_paths.insert(id, path.clone());
+                inner_guard.path_to_buffer.insert(path.clone(), id);
+                id
+            };
+
             let diagnostics_for_file = inner_guard
                 .lsp_diagnostics
-                .entry(path.clone())
+                .entry(buffer_id)
                 .or_insert_with(Vec::new);
 
+            // Compute hash before update
+            let old_hash = Self::compute_diagnostic_hash(diagnostics_for_file);
+
+            // Remove old diagnostics from this server for this file
             diagnostics_for_file.retain(|(sid, _)| *sid != server_id);
 
             // Add new diagnostics from this server
@@ -343,19 +627,42 @@ impl LspManager {
                 diagnostics_for_file.push((server_id, diag));
             }
 
-            // Clean up closed channels and clone remaining subscribers
-            inner_guard
-                .diagnostic_subscribers
-                .retain(|tx| !tx.is_closed());
-            inner_guard.diagnostic_subscribers.clone()
+            // Compute hash after update
+            let new_hash = Self::compute_diagnostic_hash(diagnostics_for_file);
+
+            // Clean up closed channels
+            let mut subs = inner_guard.diagnostic_subscribers.as_ref().to_vec();
+            let old_len = subs.len();
+            subs.retain(|tx| !tx.is_closed());
+            if subs.len() != old_len {
+                inner_guard.diagnostic_subscribers = Arc::from(subs);
+            }
+
+            (
+                old_hash != new_hash,
+                inner_guard.diagnostic_subscribers.clone(), // Arc clone (cheap)
+            )
         };
 
-        // Notify subscribers that diagnostics changed (outside lock)
-        let update = DiagnosticUpdate { path, server_id };
+        // Only notify if diagnostics actually changed
+        if changed {
+            let update = DiagnosticUpdate { path, server_id };
 
-        // Send to all subscribers (non-blocking for unbounded channels)
-        for tx in subscribers {
-            let _ = tx.try_send(update.clone());
+            // Send to all subscribers with backpressure handling
+            for tx in subscribers.iter() {
+                match tx.try_send(update.clone()) {
+                    Ok(_) => {},
+                    Err(async_channel::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "Diagnostic channel full, dropping update for {}",
+                            update.path.display()
+                        );
+                    },
+                    Err(async_channel::TrySendError::Closed(_)) => {
+                        // Subscriber closed, will be cleaned up on next notification
+                    },
+                }
+            }
         }
 
         Ok(())
@@ -365,30 +672,20 @@ impl LspManager {
     fn handle_progress(
         inner: &Arc<Mutex<LspManagerInner>>,
         server_id: ServerId,
-        message: &serde_json::Value,
+        params: ProgressNotificationParams,
     ) -> Result<()> {
-        let params = &message["params"];
+        let token = params.token.to_string();
 
-        // Token can be string or number
-        let token = params["token"]
-            .as_str()
-            .map(|s| s.to_string())
-            .or_else(|| params["token"].as_i64().map(|i| i.to_string()))
-            .context("Missing progress token")?;
-
-        let value = &params["value"];
-        let kind_str = value["kind"].as_str().context("Missing progress kind")?;
-
-        let kind = match kind_str {
+        let kind = match params.value.kind.as_str() {
             "begin" => ProgressKind::Begin,
             "report" => ProgressKind::Report,
             "end" => ProgressKind::End,
             _ => return Ok(()), // Ignore unknown kinds
         };
 
-        let title = value["title"].as_str().unwrap_or("").to_string();
-        let message = value["message"].as_str().map(|s| s.to_string());
-        let percentage = value["percentage"].as_u64().map(|p| p as u32);
+        let title = params.value.title;
+        let message = params.value.message;
+        let percentage = params.value.percentage;
 
         let update = ProgressUpdate {
             server_id,
@@ -399,17 +696,35 @@ impl LspManager {
             percentage,
         };
 
-        // Notify subscribers (clean up closed channels and clone active ones)
+        // Notify subscribers (clean up closed channels and clone Arc)
         let subscribers = {
             let mut inner_guard = inner.lock();
-            inner_guard
-                .progress_subscribers
-                .retain(|tx| !tx.is_closed());
-            inner_guard.progress_subscribers.clone()
+
+            // Clean up closed channels
+            let mut subs = inner_guard.progress_subscribers.as_ref().to_vec();
+            let old_len = subs.len();
+            subs.retain(|tx| !tx.is_closed());
+            if subs.len() != old_len {
+                inner_guard.progress_subscribers = Arc::from(subs);
+            }
+
+            inner_guard.progress_subscribers.clone() // Arc clone (cheap)
         };
 
-        for tx in subscribers {
-            let _ = tx.try_send(update.clone());
+        for tx in subscribers.iter() {
+            match tx.try_send(update.clone()) {
+                Ok(_) => {},
+                Err(async_channel::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "Progress channel full, dropping update for server {} token {}",
+                        update.server_id,
+                        update.token
+                    );
+                },
+                Err(async_channel::TrySendError::Closed(_)) => {
+                    // Subscriber closed, will be cleaned up on next notification
+                },
+            }
         }
 
         Ok(())
@@ -434,12 +749,17 @@ impl LspManager {
         path: &PathBuf,
         snapshot: &BufferSnapshot,
     ) -> Option<DiagnosticSet> {
-        let inner = self.inner.lock();
-        let lsp_diags = inner.lsp_diagnostics.get(path)?;
+        // Clone raw diagnostics while holding lock, convert outside lock
+        let lsp_diags = {
+            let inner = self.inner.lock();
+            let buffer_id = inner.path_to_buffer.get(path)?;
+            inner.lsp_diagnostics.get(buffer_id)?.clone()
+        };
+        // Lock released here - allows concurrent diagnostic fetches
 
         let mut set = DiagnosticSet::new();
 
-        for (server_id, lsp_diag) in lsp_diags {
+        for (server_id, lsp_diag) in &lsp_diags {
             // Convert LSP range to anchors
             let range = match lsp_range_to_anchors(&lsp_diag.range, snapshot) {
                 Ok(r) => r,
@@ -552,6 +872,71 @@ impl LspManager {
                 range_length: None,
                 text,
             }],
+        };
+
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": params,
+        });
+
+        transport
+            .send_notification(notification.to_string())
+            .await?;
+
+        Ok(())
+    }
+
+    /// Send didChange notification with incremental or full sync.
+    ///
+    /// Uses incremental sync if the server supports it, otherwise falls back to full sync.
+    /// The method checks the server's `text_document_sync_kind` capability and sends either
+    /// individual edits or the full document content accordingly.
+    ///
+    /// # Note
+    ///
+    /// This requires editor-level change tracking to be fully utilized. Currently, the editor
+    /// must provide `Edit<Point>` events when the buffer changes.
+    pub async fn did_change_incremental(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        version: i32,
+        edits: Vec<text::Edit<text::Point>>,
+        snapshot: &BufferSnapshot,
+    ) -> Result<()> {
+        let (transport, sync_kind) = {
+            let inner = self.inner.lock();
+            let server = inner.servers.get(&server_id).context("Server not found")?;
+            (server.transport.clone(), server.text_document_sync_kind)
+        };
+
+        let content_changes = match sync_kind {
+            Some(TextDocumentSyncKind::INCREMENTAL) => edits
+                .iter()
+                .map(|edit| {
+                    let range = crate::conversion::point_range_to_lsp(&edit.new, snapshot);
+                    let text: String = snapshot.text_for_range(edit.new.clone()).collect();
+
+                    TextDocumentContentChangeEvent {
+                        range: Some(range),
+                        range_length: None,
+                        text,
+                    }
+                })
+                .collect(),
+            _ => {
+                vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: snapshot.text(),
+                }]
+            },
+        };
+
+        let params = DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier { uri, version },
+            content_changes,
         };
 
         let notification = serde_json::json!({

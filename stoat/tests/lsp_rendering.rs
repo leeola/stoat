@@ -4,7 +4,7 @@
 //! MockLspServer to LspManager to BufferItem.update_diagnostics() to EditorElement rendering
 
 use gpui::{AppContext, TestAppContext};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use stoat::buffer::BufferItem;
 use stoat_lsp::{
     test::{DiagnosticKind, MockDiagnostic, MockLspServer},
@@ -22,7 +22,10 @@ async fn diagnostic_flow_end_to_end(cx: &mut TestAppContext) {
     let (buffer_item, manager) = cx.update(|cx| {
         let buffer = cx.new(|cx| text::Buffer::new(0, buffer_id, source));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::Rust, cx));
-        let manager = Arc::new(LspManager::new(cx.background_executor().clone()));
+        let manager = Arc::new(LspManager::new(
+            cx.background_executor().clone(),
+            Duration::from_secs(5),
+        ));
         (buffer_item, manager)
     });
 
@@ -122,7 +125,10 @@ async fn stale_diagnostic_updates_are_rejected(cx: &mut TestAppContext) {
     let (buffer_item, manager) = cx.update(|cx| {
         let buffer = cx.new(|_cx| text::Buffer::new(0, buffer_id, source));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::Rust, cx));
-        let manager = Arc::new(LspManager::new(cx.background_executor().clone()));
+        let manager = Arc::new(LspManager::new(
+            cx.background_executor().clone(),
+            Duration::from_secs(5),
+        ));
         (buffer_item, manager)
     });
 

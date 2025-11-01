@@ -26,6 +26,7 @@ text = { workspace = true }
 smallvec = { workspace = true }
 gpui = { workspace = true }
 rand = "0.9"
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
