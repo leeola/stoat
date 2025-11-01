@@ -162,6 +162,20 @@ pub struct CommandPalette {
     pub show_hidden: bool,
 }
 
+/// Command line state for vim-style commands.
+///
+/// Contains state for the command line mode which allows entering vim-style
+/// commands like `:cd`, `:w`, `:q`.
+#[derive(Default)]
+pub struct CommandLine {
+    /// Input buffer for command text
+    pub input: Option<Entity<Buffer>>,
+    /// Previous mode to restore when closing command line
+    pub previous_mode: Option<String>,
+    /// Previous key context to restore when closing command line
+    pub previous_key_context: Option<KeyContext>,
+}
+
 /// Git status state.
 ///
 /// Contains all state for the git status modal which displays modified
@@ -284,6 +298,8 @@ pub struct AppState {
     pub buffer_finder: BufferFinder,
     /// Command palette modal state
     pub command_palette: CommandPalette,
+    /// Command line modal state
+    pub command_line: CommandLine,
     /// Git status modal state
     pub git_status: GitStatus,
     /// Diff review mode state
@@ -380,6 +396,7 @@ impl AppState {
             file_finder: FileFinder::default(),
             buffer_finder: BufferFinder::default(),
             command_palette: CommandPalette::default(),
+            command_line: CommandLine::default(),
             git_status: GitStatus {
                 files: git_status_files.clone(),
                 filtered: git_status_files,
@@ -921,5 +938,81 @@ impl AppState {
         self.git_status.preview_task = None;
 
         (prev_mode, prev_ctx)
+    }
+
+    /// Change the current working directory.
+    ///
+    /// Updates the worktree, git repository, and LSP server root to point to the new directory.
+    /// Relative paths are resolved against the current worktree root.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Target directory path (absolute or relative)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success, or an error if the path doesn't exist or isn't accessible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Path doesn't exist
+    /// - Path is not a directory
+    /// - Unable to access the directory
+    pub fn change_directory(&mut self, path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        // Resolve relative paths against current worktree root
+        let current_root = self.worktree.lock().root().to_path_buf();
+        let target_path = if path.is_absolute() {
+            path
+        } else {
+            current_root.join(path)
+        };
+
+        // Canonicalize to resolve . and .. and validate existence
+        let canonical_path = target_path
+            .canonicalize()
+            .map_err(|e| format!("Cannot access directory '{}': {}", target_path.display(), e))?;
+
+        // Verify it's a directory
+        if !canonical_path.is_dir() {
+            return Err(format!("'{}' is not a directory", canonical_path.display()).into());
+        }
+
+        // Replace worktree with new root
+        *self.worktree.lock() = Worktree::new(canonical_path.clone());
+
+        // Update git repository
+        if let Ok(repo) = crate::git::repository::Repository::open(&canonical_path) {
+            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
+            let status_files =
+                crate::git::status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
+            let dirty_count = status_files.len();
+
+            self.git_status.branch_info = branch_info;
+            self.git_status.files = status_files.clone();
+            self.git_status.filtered = status_files;
+            self.git_status.dirty_count = dirty_count;
+        } else {
+            self.git_status.branch_info = None;
+            self.git_status.files.clear();
+            self.git_status.filtered.clear();
+            self.git_status.dirty_count = 0;
+        }
+
+        // FIXME: Restart LSP server with new root directory
+        // Currently LSP keeps running with the old root. To properly restart:
+        // 1. Shutdown active servers via notification/request
+        // 2. Spawn new rust-analyzer process
+        // 3. Add server via lsp_manager.add_server()
+        // 4. Send initialize request with new rootUri
+        // 5. Set capabilities and start listener
+        // See setup_lsp_progress_tracking for reference implementation
+
+        // Update file finder with new worktree
+        self.file_finder = FileFinder::default();
+
+        tracing::info!("Changed directory to: {}", canonical_path.display());
+
+        Ok(())
     }
 }

@@ -9,6 +9,7 @@ pub mod actions;
 pub mod buffer;
 pub mod build_info;
 pub mod command;
+pub mod command_line;
 pub mod config;
 pub mod cursor;
 pub mod editor;

@@ -15,6 +15,9 @@ pub enum Command {
         #[arg(short, long, env = "STOAT_CONFIG", help = "Path to config file")]
         config: Option<std::path::PathBuf>,
 
+        #[arg(long, help = "Set working directory at startup")]
+        cwd: Option<std::path::PathBuf>,
+
         #[arg(help = "Files to open")]
         paths: Vec<std::path::PathBuf>,
     },
@@ -40,9 +43,9 @@ fn main() {
 
     // Handle subcommands
     match cli.command {
-        Some(Command::Gui { config, paths }) => {
+        Some(Command::Gui { config, cwd, paths }) => {
             // Launch GUI
-            if let Err(e) = stoat_bin::commands::gui::run(config, paths) {
+            if let Err(e) = stoat_bin::commands::gui::run(config, cwd, paths) {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }

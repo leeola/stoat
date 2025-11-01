@@ -747,6 +747,92 @@ impl PaneGroupView {
         }
     }
 
+    /// Handle showing the command line prompt
+    fn handle_show_command_line(
+        &mut self,
+        _: &crate::actions::ShowCommandLine,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Get current mode and key_context from active editor
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            // Store previous mode/context for restoration
+            self.app_state.command_line.previous_mode = Some(current_mode);
+            self.app_state.command_line.previous_key_context = Some(current_key_context);
+
+            // Create input buffer if needed
+            if self.app_state.command_line.input.is_none() {
+                use std::num::NonZeroU64;
+                use text::{Buffer, BufferId};
+
+                let buffer_id = BufferId::from(NonZeroU64::new(4).unwrap());
+                let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+                self.app_state.command_line.input = Some(input_buffer);
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Handle dismissing the command line prompt
+    fn handle_command_line_dismiss(
+        &mut self,
+        _: &crate::actions::CommandLineDismiss,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Restore previous mode and context
+            let prev_mode = self.app_state.command_line.previous_mode.take();
+            let prev_ctx = self.app_state.command_line.previous_key_context.take();
+
+            // Clear input buffer
+            self.app_state.command_line.input = None;
+
+            // Restore mode if we have a previous mode
+            if let (Some(mode), Some(ctx)) = (prev_mode, prev_ctx) {
+                editor.update(cx, |_editor, cx| {
+                    let set_mode = crate::actions::SetMode(mode);
+                    let set_ctx = crate::actions::SetKeyContext(ctx);
+                    cx.dispatch_action(&set_mode);
+                    cx.dispatch_action(&set_ctx);
+                });
+            }
+        }
+
+        cx.notify();
+    }
+
+    /// Handle the ChangeDirectory action by parsing command line input and changing directory
+    fn handle_change_directory(
+        &mut self,
+        action: &crate::actions::ChangeDirectory,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Attempt to change directory
+        match self.app_state.change_directory(action.path.clone()) {
+            Ok(()) => {
+                // Success - dismiss command line
+                self.handle_command_line_dismiss(&crate::actions::CommandLineDismiss, _window, cx);
+            },
+            Err(e) => {
+                // Error - keep command line open and show error
+                tracing::error!("Failed to change directory: {}", e);
+                // TODO: Display error in status line or command line
+            },
+        }
+
+        cx.notify();
+    }
+
     /// Handle opening the buffer finder
     fn handle_open_buffer_finder(
         &mut self,
@@ -2500,6 +2586,9 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_command_palette_dismiss))
                     .on_action(cx.listener(Self::handle_command_palette_toggle_hidden))
                     .on_action(cx.listener(Self::handle_command_palette_execute))
+                    .on_action(cx.listener(Self::handle_show_command_line))
+                    .on_action(cx.listener(Self::handle_command_line_dismiss))
+                    .on_action(cx.listener(Self::handle_change_directory))
                     .on_action(cx.listener(Self::handle_open_buffer_finder))
                     .on_action(cx.listener(Self::handle_buffer_finder_next))
                     .on_action(cx.listener(Self::handle_buffer_finder_prev))

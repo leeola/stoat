@@ -156,6 +156,17 @@ actions!(
     ]
 );
 
+// Command line actions
+actions!(
+    stoat,
+    [
+        /// Open command line prompt for vim-style commands
+        ShowCommandLine,
+        /// Dismiss command line prompt
+        CommandLineDismiss,
+    ]
+);
+
 // Git status actions
 actions!(
     stoat,
@@ -373,6 +384,14 @@ pub struct SetKeyContext(pub KeyContext);
 #[derive(Clone, PartialEq, Action)]
 #[action(no_json)]
 pub struct SetMode(pub String);
+
+/// Change the current working directory
+#[derive(Clone, PartialEq, Action)]
+#[action(no_json)]
+pub struct ChangeDirectory {
+    /// Target directory path
+    pub path: std::path::PathBuf,
+}
 
 // ==== Action Metadata System ====
 
