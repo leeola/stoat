@@ -1,9 +1,27 @@
 use crate::pane_group::PaneGroupView;
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
+#[cfg(debug_assertions)]
 pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
+    timeout: Option<u64>,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_paths_impl(config_path, Some(timeout), paths)
+}
+
+#[cfg(not(debug_assertions))]
+pub fn run_with_paths(
+    config_path: Option<std::path::PathBuf>,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_paths_impl(config_path, None, paths)
+}
+
+fn run_with_paths_impl(
+    config_path: Option<std::path::PathBuf>,
+    timeout: Option<Option<u64>>,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
@@ -48,13 +66,30 @@ pub fn run_with_paths(
                 });
 
                 // Focus the initial editor so input works immediately
-                // This must happen after PaneGroupView is created so the focus chain is established
+                // This must happen after PaneGroupView is created so the focus chain is
+                // established
                 pane_group_view.read(cx).focus_active_editor(window, cx);
 
                 pane_group_view
             },
         )
         .expect("failed to open window");
+
+        // If timeout was requested (dev builds only), auto-quit after timeout expires
+        if let Some(Some(timeout_secs)) = timeout {
+            tracing::info!("Auto-quit timeout set: {} seconds", timeout_secs);
+            cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(timeout_secs))
+                    .await;
+
+                tracing::info!("Timeout reached, quitting");
+                let _ = cx.update(|cx| {
+                    cx.quit();
+                });
+            })
+            .detach();
+        }
 
         cx.on_window_closed(|cx| {
             cx.quit();

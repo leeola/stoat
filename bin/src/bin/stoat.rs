@@ -18,12 +18,30 @@ pub enum Command {
         #[arg(long, help = "Set working directory at startup")]
         cwd: Option<std::path::PathBuf>,
 
+        #[arg(long, help = "Set log level (info, debug, trace)")]
+        log: Option<String>,
+
+        #[cfg(debug_assertions)]
+        #[arg(long, help = "Auto-quit after N seconds (dev builds only)")]
+        timeout: Option<u64>,
+
         #[arg(help = "Files to open")]
         paths: Vec<std::path::PathBuf>,
     },
 }
 
 fn main() {
+    let cli = Cli::parse();
+
+    // Set STOAT_LOG env var if --log flag was provided
+    if let Some(Command::Gui {
+        log: Some(ref log_level),
+        ..
+    }) = cli.command
+    {
+        std::env::set_var("STOAT_LOG", log_level);
+    }
+
     // Initialize logging with STOAT_LOG support
     if let Err(e) = stoat::log::init() {
         eprintln!("Failed to initialize logging: {e}");
@@ -39,13 +57,23 @@ fn main() {
         "Build information"
     );
 
-    let cli = Cli::parse();
-
     // Handle subcommands
     match cli.command {
-        Some(Command::Gui { config, cwd, paths }) => {
+        Some(Command::Gui {
+            config,
+            cwd,
+            log: _,
+            #[cfg(debug_assertions)]
+            timeout,
+            paths,
+        }) => {
             // Launch GUI
-            if let Err(e) = stoat_bin::commands::gui::run(config, cwd, paths) {
+            #[cfg(debug_assertions)]
+            let result = stoat_bin::commands::gui::run(config, cwd, timeout, paths);
+            #[cfg(not(debug_assertions))]
+            let result = stoat_bin::commands::gui::run(config, cwd, paths);
+
+            if let Err(e) = result {
                 eprintln!("Error: Failed to launch GUI: {e}");
                 std::process::exit(1);
             }
