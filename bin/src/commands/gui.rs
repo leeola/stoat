@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub fn run(
     config_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    input: Option<String>,
     #[cfg(debug_assertions)] timeout: Option<u64>,
     paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -13,11 +14,11 @@ pub fn run(
     }
     #[cfg(debug_assertions)]
     {
-        stoat::app::run_with_paths(config_path, timeout, paths)
+        stoat::app::run_with_paths(config_path, input, timeout, paths)
     }
     #[cfg(not(debug_assertions))]
     {
-        stoat::app::run_with_paths(config_path, paths)
+        stoat::app::run_with_paths(config_path, input, paths)
     }
 }
 
@@ -25,6 +26,7 @@ pub fn run(
 pub fn run(
     _config_path: Option<PathBuf>,
     _cwd: Option<PathBuf>,
+    _input: Option<String>,
     #[cfg(debug_assertions)] _timeout: Option<u64>,
     _paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -5,22 +5,25 @@ use std::{rc::Rc, time::Duration};
 #[cfg(debug_assertions)]
 pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
+    input_sequence: Option<String>,
     timeout: Option<u64>,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_paths_impl(config_path, Some(timeout), paths)
+    run_with_paths_impl(config_path, input_sequence, Some(timeout), paths)
 }
 
 #[cfg(not(debug_assertions))]
 pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
+    input_sequence: Option<String>,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_paths_impl(config_path, None, paths)
+    run_with_paths_impl(config_path, input_sequence, None, paths)
 }
 
 fn run_with_paths_impl(
     config_path: Option<std::path::PathBuf>,
+    input_sequence: Option<String>,
     timeout: Option<Option<u64>>,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -69,6 +72,38 @@ fn run_with_paths_impl(
                 // This must happen after PaneGroupView is created so the focus chain is
                 // established
                 pane_group_view.read(cx).focus_active_editor(window, cx);
+
+                // If input simulation was requested, schedule it for next frame
+                // This ensures view hierarchy is fully initialized before dispatching
+                if let Some(input_str) = input_sequence.clone() {
+                    tracing::info!("Input simulation requested: {}", input_str);
+                    let keystrokes = crate::input_simulator::parse_input_sequence(&input_str);
+                    tracing::info!("Parsed {} keystrokes", keystrokes.len());
+
+                    let window_handle = window.window_handle();
+                    window.on_next_frame(move |_, cx| {
+                        tracing::debug!("Starting input simulation on next frame");
+                        cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                            for keystroke in keystrokes {
+                                tracing::debug!("Dispatching keystroke: {:?}", keystroke);
+                                if let Err(e) = window_handle.update(cx, |_, window, cx| {
+                                    window.dispatch_keystroke(keystroke.clone(), cx);
+                                }) {
+                                    tracing::error!("Failed to dispatch keystroke: {}", e);
+                                    break;
+                                }
+
+                                // Small delay between keystrokes to allow processing
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(50))
+                                    .await;
+                            }
+
+                            tracing::info!("Input simulation complete");
+                        })
+                        .detach();
+                    });
+                }
 
                 pane_group_view
             },

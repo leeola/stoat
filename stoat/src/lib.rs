@@ -15,6 +15,7 @@ pub mod cursor;
 pub mod editor;
 pub mod file_finder;
 pub mod git;
+pub mod input_simulator;
 pub mod keymap;
 pub use stoat_log as log;
 pub mod modal;

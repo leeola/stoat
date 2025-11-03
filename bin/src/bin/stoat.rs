@@ -18,6 +18,12 @@ pub enum Command {
         #[arg(long, help = "Set working directory at startup")]
         cwd: Option<std::path::PathBuf>,
 
+        #[arg(
+            long,
+            help = "Simulate keystroke input for testing/debugging (e.g., ':cd foo<Enter>')"
+        )]
+        input: Option<String>,
+
         #[arg(long, help = "Set log level (info, debug, trace)")]
         log: Option<String>,
 
@@ -62,6 +68,7 @@ fn main() {
         Some(Command::Gui {
             config,
             cwd,
+            input,
             log: _,
             #[cfg(debug_assertions)]
             timeout,
@@ -69,9 +76,9 @@ fn main() {
         }) => {
             // Launch GUI
             #[cfg(debug_assertions)]
-            let result = stoat_bin::commands::gui::run(config, cwd, timeout, paths);
+            let result = stoat_bin::commands::gui::run(config, cwd, input, timeout, paths);
             #[cfg(not(debug_assertions))]
-            let result = stoat_bin::commands::gui::run(config, cwd, paths);
+            let result = stoat_bin::commands::gui::run(config, cwd, input, paths);
 
             if let Err(e) = result {
                 eprintln!("Error: Failed to launch GUI: {e}");
