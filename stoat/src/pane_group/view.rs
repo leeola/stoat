@@ -1,14 +1,17 @@
 use crate::{
     actions::{
-        AboutModalDismiss, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-        GitStatusCycleFilter, GitStatusDismiss, GitStatusNext, GitStatusPrev, GitStatusSelect,
-        GitStatusSetFilterAll, GitStatusSetFilterStaged, GitStatusSetFilterUnstaged,
+        AboutModalDismiss, AcceptCommandPaletteV2, DismissCommandPaletteV2, FocusPaneDown,
+        FocusPaneLeft, FocusPaneRight, FocusPaneUp, GitStatusCycleFilter, GitStatusDismiss,
+        GitStatusNext, GitStatusPrev, GitStatusSelect, GitStatusSetFilterAll,
+        GitStatusSetFilterStaged, GitStatusSetFilterUnstaged,
         GitStatusSetFilterUnstagedWithUntracked, GitStatusSetFilterUntracked, HelpModalDismiss,
-        OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenDiffReview, OpenFileFinder,
-        OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, ShowMinimapOnScroll, SplitDown,
-        SplitLeft, SplitRight, SplitUp, ToggleMinimap,
+        OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenCommandPaletteV2, OpenDiffReview,
+        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, SelectNextCommandV2,
+        SelectPrevCommandV2, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight, SplitUp,
+        ToggleMinimap,
     },
     command::{overlay::CommandOverlay, palette::CommandPalette},
+    command_palette_v2::CommandPaletteV2,
     editor::view::EditorView,
     file_finder::Finder,
     git::status::GitStatus,
@@ -296,6 +299,27 @@ impl PaneGroupView {
         if let Some(editor) = self.active_editor() {
             window.focus(&editor.read(cx).focus_handle(cx));
         }
+    }
+
+    /// Sync a Stoat entity's mode field with AppState based on its current KeyContext.
+    ///
+    /// This helper method ensures that a Stoat entity's mode reflects the appropriate
+    /// mode stored in AppState for its current context. Call this after changing a
+    /// Stoat's `key_context` field to update its `mode` accordingly.
+    ///
+    /// # Architecture Note
+    ///
+    /// Mode state is per-editor-type (stored in AppState):
+    /// - `TextEditor` context uses `text_editor_mode`
+    /// - `CommandPaletteV2` context uses `inline_editor_mode`
+    ///
+    /// This method bridges the gap between AppState's mode storage and Stoat's
+    /// mode field, which is kept for backward compatibility with existing code.
+    fn sync_stoat_mode(&self, stoat: &Entity<Stoat>, cx: &mut App) {
+        stoat.update(cx, |s, _| {
+            let new_mode = self.app_state.mode_for_context(s.key_context);
+            s.mode = new_mode.to_string();
+        });
     }
 
     /// Exit Pane mode if currently in it, returning to Normal mode.
@@ -744,6 +768,146 @@ impl PaneGroupView {
                         .and_then(|idx| visible_commands.get(idx).cloned())
                 })
                 .collect();
+        }
+    }
+
+    fn handle_open_command_palette_v2(
+        &mut self,
+        _: &OpenCommandPaletteV2,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Save current KeyContext for restoration
+            let previous_key_context = editor.read(cx).stoat.read(cx).key_context();
+
+            // Build command list
+            let commands = crate::stoat_actions::build_command_list();
+
+            // Create or update the palette
+            if self.app_state.command_palette_v2.is_none() {
+                let palette = cx.new(|cx| {
+                    let mut palette = CommandPaletteV2::new(commands, cx);
+                    palette.set_previous_key_context(previous_key_context);
+                    palette
+                });
+                self.app_state.command_palette_v2 = Some(palette);
+            } else {
+                // Palette already exists, update its previous context
+                if let Some(palette) = &self.app_state.command_palette_v2 {
+                    palette.update(cx, |p, _| {
+                        p.set_previous_key_context(previous_key_context);
+                    });
+                }
+            }
+
+            // Update Stoat's key_context and sync mode
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _| {
+                    stoat.set_key_context(KeyContext::CommandPaletteV2);
+                    stoat.sync_mode_to_context(&self.app_state);
+                });
+            });
+
+            // Focus the InlineEditor so it receives keyboard input
+            if let Some(palette) = &self.app_state.command_palette_v2 {
+                let input_focus = palette.read(cx).input().read(cx).focus_handle(cx);
+                window.focus(&input_focus);
+            }
+
+            cx.notify();
+        }
+    }
+
+    fn handle_dismiss_command_palette_v2(
+        &mut self,
+        _: &DismissCommandPaletteV2,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            // Get previous KeyContext from palette
+            let previous_key_context = self
+                .app_state
+                .command_palette_v2
+                .as_ref()
+                .and_then(|p| p.read(cx).previous_key_context());
+
+            // Clear the palette
+            self.app_state.command_palette_v2 = None;
+
+            // Restore previous KeyContext and sync mode
+            if let Some(prev_context) = previous_key_context {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, _| {
+                        stoat.set_key_context(prev_context);
+                        stoat.sync_mode_to_context(&self.app_state);
+                    });
+                });
+            }
+
+            // Restore focus to the editor
+            let editor_focus = editor.read(cx).focus_handle(cx);
+            window.focus(&editor_focus);
+
+            cx.notify();
+        }
+    }
+
+    fn handle_accept_command_palette_v2(
+        &mut self,
+        _: &AcceptCommandPaletteV2,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // Get the selected command's TypeId
+        let type_id = self
+            .app_state
+            .command_palette_v2
+            .as_ref()
+            .and_then(|p| p.read(cx).selected_command())
+            .map(|cmd| cmd.type_id);
+
+        // Dismiss the palette first
+        self.handle_dismiss_command_palette_v2(&DismissCommandPaletteV2, window, cx);
+
+        // Dispatch the selected command
+        if let (Some(type_id), Some(editor)) = (type_id, self.active_editor().cloned()) {
+            editor.update(cx, |_editor, cx| {
+                crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
+            });
+        }
+
+        cx.notify();
+    }
+
+    fn handle_select_next_command_v2(
+        &mut self,
+        _: &SelectNextCommandV2,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(palette) = &self.app_state.command_palette_v2 {
+            palette.update(cx, |p, _| {
+                p.select_next();
+            });
+            cx.notify();
+        }
+    }
+
+    fn handle_select_prev_command_v2(
+        &mut self,
+        _: &SelectPrevCommandV2,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(palette) = &self.app_state.command_palette_v2 {
+            palette.update(cx, |p, _| {
+                p.select_prev();
+            });
+            cx.notify();
         }
     }
 
@@ -2586,6 +2750,11 @@ impl Render for PaneGroupView {
                     .on_action(cx.listener(Self::handle_command_palette_dismiss))
                     .on_action(cx.listener(Self::handle_command_palette_toggle_hidden))
                     .on_action(cx.listener(Self::handle_command_palette_execute))
+                    .on_action(cx.listener(Self::handle_open_command_palette_v2))
+                    .on_action(cx.listener(Self::handle_dismiss_command_palette_v2))
+                    .on_action(cx.listener(Self::handle_accept_command_palette_v2))
+                    .on_action(cx.listener(Self::handle_select_next_command_v2))
+                    .on_action(cx.listener(Self::handle_select_prev_command_v2))
                     .on_action(cx.listener(Self::handle_show_command_line))
                     .on_action(cx.listener(Self::handle_command_line_dismiss))
                     .on_action(cx.listener(Self::handle_change_directory))
@@ -2639,6 +2808,14 @@ impl Render for PaneGroupView {
                                 selected,
                                 self.command_palette_scroll.clone(),
                             ))
+                        } else {
+                            div
+                        }
+                    })
+                    .when(key_context == KeyContext::CommandPaletteV2, |div| {
+                        // Render command palette V2 overlay when in CommandPaletteV2 context
+                        if let Some(palette) = &self.app_state.command_palette_v2 {
+                            div.child(palette.clone())
                         } else {
                             div
                         }

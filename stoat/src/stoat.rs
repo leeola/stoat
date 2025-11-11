@@ -36,6 +36,10 @@ pub enum KeyContext {
     BufferFinder,
     /// Command palette modal context
     CommandPalette,
+    /// Command palette V2 modal context (uses InlineEditor)
+    CommandPaletteV2,
+    /// Generic inline input context (for future modal inputs)
+    InlineInput,
     /// Diff review mode context
     DiffReview,
     /// Help modal context
@@ -53,6 +57,8 @@ impl KeyContext {
             Self::FileFinder => "FileFinder",
             Self::BufferFinder => "BufferFinder",
             Self::CommandPalette => "CommandPalette",
+            Self::CommandPaletteV2 => "CommandPaletteV2",
+            Self::InlineInput => "InlineInput",
             Self::DiffReview => "DiffReview",
             Self::HelpModal => "HelpModal",
             Self::AboutModal => "AboutModal",
@@ -68,6 +74,8 @@ impl KeyContext {
             "FileFinder" => Ok(Self::FileFinder),
             "BufferFinder" => Ok(Self::BufferFinder),
             "CommandPalette" => Ok(Self::CommandPalette),
+            "CommandPaletteV2" => Ok(Self::CommandPaletteV2),
+            "InlineInput" => Ok(Self::InlineInput),
             "DiffReview" => Ok(Self::DiffReview),
             "HelpModal" => Ok(Self::HelpModal),
             "AboutModal" => Ok(Self::AboutModal),
@@ -746,6 +754,15 @@ impl Stoat {
     /// Set mode
     pub fn set_mode(&mut self, mode: &str) {
         self.mode = mode.to_string();
+    }
+
+    /// Sync mode field with AppState's mode for current KeyContext.
+    ///
+    /// Call this after changing key_context to ensure mode field reflects
+    /// the appropriate shared mode state from AppState.
+    pub fn sync_mode_to_context(&mut self, app_state: &crate::app_state::AppState) {
+        let new_mode = app_state.mode_for_context(self.key_context);
+        self.mode = new_mode.to_string();
     }
 
     /// Get mode metadata by name.

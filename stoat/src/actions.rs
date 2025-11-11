@@ -156,6 +156,23 @@ actions!(
     ]
 );
 
+// CommandPaletteV2 actions (new entity-based palette)
+actions!(
+    stoat,
+    [
+        /// Open command palette V2
+        OpenCommandPaletteV2,
+        /// Dismiss command palette V2
+        DismissCommandPaletteV2,
+        /// Execute selected command in palette V2
+        AcceptCommandPaletteV2,
+        /// Move to next command in palette V2
+        SelectNextCommandV2,
+        /// Move to previous command in palette V2
+        SelectPrevCommandV2,
+    ]
+);
+
 // Command line actions
 actions!(
     stoat,

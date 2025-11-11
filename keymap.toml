@@ -822,6 +822,47 @@ key = "ctrl-h"
 action = "ToggleCommandPaletteHidden"
 context = "CommandPalette"
 
+# Command Palette V2 - Entity-based command palette with InlineEditor
+[[bindings]]
+key = ";"
+action = "OpenCommandPaletteV2"
+context = "TextEditor && mode == normal"
+
+[[bindings]]
+key = "escape"
+action = "DismissCommandPaletteV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "up"
+action = "SelectPrevCommandV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "down"
+action = "SelectNextCommandV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "ctrl-p"
+action = "SelectPrevCommandV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "ctrl-n"
+action = "SelectNextCommandV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "enter"
+action = "AcceptCommandPaletteV2"
+context = "CommandPaletteV2"
+
+[[bindings]]
+key = "backspace"
+action = "DeleteLeft"
+context = "CommandPaletteV2"
+
 # Git Status Mode - View modified files
 [[bindings]]
 key = "escape"

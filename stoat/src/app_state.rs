@@ -298,6 +298,11 @@ pub struct AppState {
     pub buffer_finder: BufferFinder,
     /// Command palette modal state
     pub command_palette: CommandPalette,
+    /// CommandPaletteV2 entity (new entity-based palette)
+    ///
+    /// Entity-based command palette using InlineEditor. Created when opened,
+    /// dropped when dismissed. None when not visible.
+    pub command_palette_v2: Option<Entity<crate::command_palette_v2::CommandPaletteV2>>,
     /// Command line modal state
     pub command_line: CommandLine,
     /// Git status modal state
@@ -311,6 +316,16 @@ pub struct AppState {
     pub lsp_manager: Arc<stoat_lsp::LspManager>,
     /// LSP state tracking (status and progress)
     pub lsp_state: LspState,
+    /// Mode state shared by all TextEditor panes.
+    ///
+    /// All text editor panes in all splits share this mode state. When switching
+    /// between text editor panes, they maintain the same mode (normal, insert, visual, etc.).
+    pub text_editor_mode: String,
+    /// Mode state shared by all InlineEditor instances.
+    ///
+    /// All inline editors (command palette, file finder inputs, etc.) share this mode state.
+    /// Separate from text_editor_mode so opening a modal doesn't affect text editing mode.
+    pub inline_editor_mode: String,
 }
 
 impl AppState {
@@ -396,6 +411,7 @@ impl AppState {
             file_finder: FileFinder::default(),
             buffer_finder: BufferFinder::default(),
             command_palette: CommandPalette::default(),
+            command_palette_v2: None,
             command_line: CommandLine::default(),
             git_status: GitStatus {
                 files: git_status_files.clone(),
@@ -407,6 +423,8 @@ impl AppState {
             diff_review: DiffReview::default(),
             lsp_manager,
             lsp_state,
+            text_editor_mode: "normal".to_string(),
+            inline_editor_mode: "normal".to_string(),
         }
     }
 
@@ -1014,5 +1032,37 @@ impl AppState {
         tracing::info!("Changed directory to: {}", canonical_path.display());
 
         Ok(())
+    }
+
+    /// Get mode for the given KeyContext.
+    ///
+    /// Returns the appropriate mode string based on the context:
+    /// - `TextEditor`: Returns `text_editor_mode` (shared by all text editor panes)
+    /// - `CommandPalette`, `CommandPaletteV2`, `InlineInput`: Returns `inline_editor_mode`
+    /// - Other contexts: Default to `text_editor_mode`
+    pub fn mode_for_context(&self, key_context: KeyContext) -> &str {
+        match key_context {
+            KeyContext::TextEditor => &self.text_editor_mode,
+            KeyContext::CommandPalette | KeyContext::CommandPaletteV2 | KeyContext::InlineInput => {
+                &self.inline_editor_mode
+            },
+            _ => &self.text_editor_mode,
+        }
+    }
+
+    /// Set mode for the given KeyContext.
+    ///
+    /// Updates the appropriate mode field based on the context:
+    /// - `TextEditor`: Updates `text_editor_mode` (affects all text editor panes)
+    /// - `CommandPalette`, `CommandPaletteV2`, `InlineInput`: Updates `inline_editor_mode`
+    /// - Other contexts: Updates `text_editor_mode` by default
+    pub fn set_mode_for_context(&mut self, key_context: KeyContext, mode: String) {
+        match key_context {
+            KeyContext::TextEditor => self.text_editor_mode = mode,
+            KeyContext::CommandPalette | KeyContext::CommandPaletteV2 | KeyContext::InlineInput => {
+                self.inline_editor_mode = mode
+            },
+            _ => self.text_editor_mode = mode,
+        }
     }
 }

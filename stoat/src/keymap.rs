@@ -135,6 +135,13 @@ fn create_keybinding(binding_config: &BindingConfig) -> Result<KeyBinding, Strin
         "CommandPaletteExecute" => Ok(KeyBinding::new(key, CommandPaletteExecute, context)),
         "CommandPaletteDismiss" => Ok(KeyBinding::new(key, CommandPaletteDismiss, context)),
 
+        // Command palette V2 actions (entity-based)
+        "OpenCommandPaletteV2" => Ok(KeyBinding::new(key, OpenCommandPaletteV2, context)),
+        "DismissCommandPaletteV2" => Ok(KeyBinding::new(key, DismissCommandPaletteV2, context)),
+        "AcceptCommandPaletteV2" => Ok(KeyBinding::new(key, AcceptCommandPaletteV2, context)),
+        "SelectNextCommandV2" => Ok(KeyBinding::new(key, SelectNextCommandV2, context)),
+        "SelectPrevCommandV2" => Ok(KeyBinding::new(key, SelectPrevCommandV2, context)),
+
         // Git status actions
         "OpenGitStatus" => Ok(KeyBinding::new(key, OpenGitStatus, context)),
         "GitStatusNext" => Ok(KeyBinding::new(key, GitStatusNext, context)),
