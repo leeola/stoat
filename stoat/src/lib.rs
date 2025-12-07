@@ -1,4 +1,5 @@
-pub use stoat_core::Stoat;
+mod app;
+mod workspace;
 
-#[cfg(any(feature = "cli_bin", feature = "cli_config"))]
-pub mod cli;
+pub use app::run;
+pub use stoat_log as log;

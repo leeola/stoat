@@ -1,8 +1,8 @@
 [package]
 name = "stoat_bin"
 version = "0.1.0"
-edition = "2021"
-description = "An exploration into a canvas based, relational and structured text editor."
+edition.workspace = true
+publish.workspace = true
 readme = "../README.md"
 authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
@@ -15,22 +15,10 @@ path = "src/bin/stoat.rs"
 name = "stoat_bin"
 path = "src/lib.rs"
 
-[features]
-default = ["gui"]
-# Enable GUI support
-gui = ["stoat_gui", "stoat/gui"]
-
 [lints]
 workspace = true
 
 [dependencies]
-stoat = { path = "../stoat", features = ["cli_bin"] }
-stoat_core = { path = "../core" }
-stoat_gui = { path = "../gui", optional = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+stoat = { path = "../stoat" }
 clap.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
-stoat_core = { path = "../core", features = ["test-utils"] }
-tempfile = "3.8"

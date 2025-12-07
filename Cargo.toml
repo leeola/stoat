@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["stoat", "core", "bin", "gui", "text", "rope", "stoat_ast", "rope_v2", "agent/claude_code"]
+members = ["bin", "stoat", "log"]
+
+[workspace.package]
+edition = "2021"
+publish = false
 
 [workspace.lints.clippy]
 all = "warn"
@@ -14,20 +18,18 @@ unused_qualifications = "warn"
 [workspace.dependencies]
 snafu = "0.8"
 anyhow = "1.0"
-chrono = "0.4"
 thiserror = "1.0"
 tracing = "0.1"
-async-trait = "0.1"
-tokio = "1.36"
 clap = { version = "4.5", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = [
   "parking_lot",
   "env-filter",
 ] }
 serde = { version = "1.0", features = ["derive"] }
-compact_str = "0.9"
-smallvec = "1.13"
-rustc-hash = "2.0"
+dirs = "5.0"
+
+# Zed dependencies - pinned to specific commit
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
