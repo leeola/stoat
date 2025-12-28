@@ -9,5 +9,6 @@ workspace = true
 
 [dependencies]
 stoat_log = { path = "../log" }
-gpui.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 tracing.workspace = true

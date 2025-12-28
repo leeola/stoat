@@ -27,9 +27,8 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 dirs = "5.0"
-
-# Zed dependencies - pinned to specific commit
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "46b6adadf908fd673d2f37d83c9247b44bc81465" }
+ratatui = "0.30.0"
+crossterm = "0.29"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

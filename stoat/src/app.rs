@@ -1,47 +1,50 @@
-//! Application entry point for the GPUI-based GUI.
-
-use crate::workspace::Workspace;
-use gpui::{
-    actions, prelude::*, px, size, App, Application, Bounds, KeyBinding, WindowBounds,
-    WindowOptions,
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
 };
+use ratatui::{
+    layout::{Constraint, Layout},
+    style::{Color, Style},
+    text::Text,
+    widgets::Paragraph,
+    DefaultTerminal,
+};
+use std::io::{self, stdout};
 
-actions!(stoat, [Quit]);
+pub fn run() -> io::Result<()> {
+    stdout().execute(EnterAlternateScreen)?;
+    enable_raw_mode()?;
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    Application::new().run(|cx: &mut App| {
-        cx.bind_keys([KeyBinding::new("Escape", Quit, None)]);
+    let result = run_app(ratatui::init());
 
-        cx.on_action(|_: &Quit, cx: &mut App| {
-            cx.quit();
-        });
+    stdout().execute(LeaveAlternateScreen)?;
+    disable_raw_mode()?;
 
-        let window_size = cx
-            .primary_display()
-            .map(|display| {
-                let screen = display.bounds().size;
-                size(screen.width * 0.8, screen.height * 0.8)
-            })
-            .unwrap_or_else(|| size(px(1200.0), px(800.0)));
+    result
+}
 
-        let bounds = Bounds::centered(None, window_size, cx);
+fn run_app(mut terminal: DefaultTerminal) -> io::Result<()> {
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let vertical = Layout::vertical([Constraint::Min(0)]);
+            let [main] = vertical.areas(area);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(|_cx| Workspace::new()),
-        )
-        .expect("failed to open window");
+            let text = Text::styled("Stoat", Style::default().fg(Color::Cyan));
+            let paragraph = Paragraph::new(text).centered();
+            frame.render_widget(paragraph, main);
+        })?;
 
-        cx.on_window_closed(|cx| {
-            cx.quit();
-        })
-        .detach();
-
-        cx.activate(true);
-    });
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    _ => {},
+                }
+            }
+        }
+    }
 
     Ok(())
 }
