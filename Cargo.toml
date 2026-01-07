@@ -29,6 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 dirs = "5.0"
 ratatui = "0.30.0"
 crossterm = "0.29"
+compact_str = "0.8"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

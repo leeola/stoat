@@ -12,3 +12,4 @@ stoat_log = { path = "../log" }
 ratatui.workspace = true
 crossterm.workspace = true
 tracing.workspace = true
+compact_str.workspace = true

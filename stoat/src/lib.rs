@@ -1,3 +1,4 @@
+pub mod actions;
 mod app;
 
 pub use app::run;
