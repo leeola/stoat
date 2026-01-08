@@ -1,5 +1,8 @@
-use crate::actions::{Action, Value};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crate::{
+    actions::{Action, Value},
+    keymap::{Binding, Key, KeymapContext},
+};
+use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
@@ -11,11 +14,26 @@ use std::io;
 
 pub struct Stoat {
     should_exit: bool,
+    bindings: Vec<Binding>,
 }
 
 impl Stoat {
     pub fn new() -> Self {
-        Self { should_exit: false }
+        Self {
+            should_exit: false,
+            bindings: Vec::new(),
+        }
+    }
+
+    pub fn keymap<F>(&mut self, key: Key, action: Action, predicate: F)
+    where
+        F: Fn(&KeymapContext) -> bool + Send + Sync + 'static,
+    {
+        self.bindings.push(Binding {
+            key,
+            action,
+            predicate: Box::new(predicate),
+        });
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -37,13 +55,15 @@ impl Stoat {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
-                        self.dispatch(Action::Exit);
-                    },
-                    _ => {},
+        if let Event::Key(event) = event::read()? {
+            if event.kind == KeyEventKind::Press {
+                let key = Key::from(event);
+                let ctx = KeymapContext {};
+                for binding in &self.bindings {
+                    if binding.key == key && (binding.predicate)(&ctx) {
+                        self.dispatch(binding.action);
+                        break;
+                    }
                 }
             }
         }
@@ -72,5 +92,7 @@ impl Default for Stoat {
 
 pub fn run() -> io::Result<()> {
     let mut stoat = Stoat::new();
+    stoat.keymap(Key::char('q'), Action::Exit, |_| true);
+    stoat.keymap(Key::esc(), Action::Exit, |_| true);
     ratatui::run(|terminal| stoat.run(terminal))
 }
