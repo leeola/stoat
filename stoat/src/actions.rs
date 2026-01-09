@@ -47,4 +47,5 @@ impl Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Exit,
+    SetMode(&'static str),
 }

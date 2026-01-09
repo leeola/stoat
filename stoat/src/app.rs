@@ -15,6 +15,7 @@ use std::io;
 pub struct Stoat {
     should_exit: bool,
     bindings: Vec<Binding>,
+    mode: &'static str,
 }
 
 impl Stoat {
@@ -22,6 +23,7 @@ impl Stoat {
         Self {
             should_exit: false,
             bindings: Vec::new(),
+            mode: "normal",
         }
     }
 
@@ -76,11 +78,19 @@ impl Stoat {
                 self.exit();
                 Value::Null
             },
+            Action::SetMode(mode) => {
+                self.set_mode(mode);
+                Value::Null
+            },
         }
     }
 
     pub fn exit(&mut self) {
         self.should_exit = true;
+    }
+
+    pub fn set_mode(&mut self, mode: &'static str) {
+        self.mode = mode;
     }
 }
 
