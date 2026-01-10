@@ -100,9 +100,6 @@ impl Default for Stoat {
     }
 }
 
-pub fn run() -> io::Result<()> {
-    let mut stoat = Stoat::new();
-    stoat.keymap(Key::char('q'), Action::Exit, |_| true);
-    stoat.keymap(Key::esc(), Action::Exit, |_| true);
+pub fn run(mut stoat: Stoat) -> io::Result<()> {
     ratatui::run(|terminal| stoat.run(terminal))
 }
