@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 stoat_log = { path = "../log" }
+stoat_text = { path = "../text" }
 ratatui.workspace = true
 crossterm.workspace = true
 tracing.workspace = true

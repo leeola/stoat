@@ -1275,6 +1275,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "stoat_log",
+ "stoat_text",
  "tracing",
 ]
 
