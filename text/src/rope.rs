@@ -252,12 +252,6 @@ impl<'a> Dimension<'a, TextSummary> for usize {
     }
 }
 
-impl<'a> crate::SeekTarget<'a, TextSummary, usize> for usize {
-    fn cmp(&self, cursor_location: &usize, _cx: ()) -> cmp::Ordering {
-        Ord::cmp(self, cursor_location)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

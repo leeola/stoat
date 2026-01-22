@@ -9,7 +9,12 @@ workspace = true
 
 [dependencies]
 stoat_log = { path = "../log" }
+stoat_text = { path = "../text" }
 ratatui.workspace = true
 crossterm.workspace = true
 tracing.workspace = true
 compact_str.workspace = true
+git2 = { version = "0.19", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

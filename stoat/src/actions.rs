@@ -48,4 +48,8 @@ impl Value {
 pub enum Action {
     Exit,
     SetMode(&'static str),
+    ScrollDown(u32),
+    ScrollUp(u32),
+    PageDown,
+    PageUp,
 }

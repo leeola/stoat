@@ -1,8 +1,29 @@
 pub mod actions;
 mod app;
+pub mod buffer;
+pub mod display_map;
+pub mod editor;
+pub mod git;
 pub mod keymap;
+pub mod multi_buffer;
+pub mod pane;
+pub mod view;
+pub mod workspace;
 
 pub use actions::Action;
 pub use app::{run, Stoat};
+pub use buffer::{BufferId, BufferStore, SharedBuffer, TextBuffer};
+pub use display_map::{
+    BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, DisplayMap, DisplayPoint,
+    DisplayRow, DisplaySnapshot,
+};
+pub use editor::Editor;
+pub use git::{BufferDiff, DeletedHunk, DiffStatus};
 pub use keymap::Key;
+pub use multi_buffer::{
+    ExcerptId, MultiBuffer, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
+};
+pub use pane::Pane;
 pub use stoat_log as log;
+pub use view::View;
+pub use workspace::Workspace;
