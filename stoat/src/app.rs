@@ -83,10 +83,9 @@ impl Stoat {
         ]);
         let [gutter_area, content_area] = vertical.areas(area);
 
-        let buffer = editor.buffer.read().expect("buffer lock poisoned");
-        let rope_str = buffer.rope.to_string();
-        let lines: Vec<&str> = rope_str.lines().collect();
-        let scroll_offset = editor.scroll_offset as usize;
+        let snapshot = editor.display_snapshot();
+        let lines: Vec<&str> = snapshot.lines().collect();
+        let scroll_offset = editor.scroll_offset.0 as usize;
         let visible_lines = area.height as usize;
 
         let mut gutter_lines = Vec::new();

@@ -1,6 +1,7 @@
 pub mod actions;
 mod app;
 pub mod buffer;
+pub mod display_map;
 pub mod editor;
 pub mod keymap;
 pub mod pane;
@@ -10,6 +11,7 @@ pub mod workspace;
 pub use actions::Action;
 pub use app::{run, Stoat};
 pub use buffer::{BufferId, BufferStore, SharedBuffer, TextBuffer};
+pub use display_map::{DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot};
 pub use editor::Editor;
 pub use keymap::Key;
 pub use pane::Pane;
