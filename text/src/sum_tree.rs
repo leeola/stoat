@@ -32,6 +32,24 @@ pub trait Dimension<'a, S: Summary>: Clone {
     fn add_summary(&mut self, summary: &'a S, cx: S::Context<'_>);
 }
 
+#[derive(Clone, Default, Debug)]
+pub struct Dimensions<D1, D2>(pub D1, pub D2);
+
+impl<'a, S, D1, D2> Dimension<'a, S> for Dimensions<D1, D2>
+where
+    S: Summary,
+    D1: Dimension<'a, S>,
+    D2: Dimension<'a, S>,
+{
+    fn zero(cx: S::Context<'_>) -> Self {
+        Dimensions(D1::zero(cx), D2::zero(cx))
+    }
+    fn add_summary(&mut self, summary: &'a S, cx: S::Context<'_>) {
+        self.0.add_summary(summary, cx);
+        self.1.add_summary(summary, cx);
+    }
+}
+
 pub trait SeekTarget<'a, S: Summary, D: Dimension<'a, S>> {
     fn cmp(&self, cursor_location: &D, cx: S::Context<'_>) -> Ordering;
 }

@@ -13,9 +13,12 @@ pub mod workspace;
 pub use actions::Action;
 pub use app::{run, Stoat};
 pub use buffer::{BufferId, BufferStore, SharedBuffer, TextBuffer};
-pub use display_map::{DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot};
+pub use display_map::{
+    BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, DisplayMap, DisplayPoint,
+    DisplayRow, DisplaySnapshot,
+};
 pub use editor::Editor;
-pub use git::{BufferDiff, DiffStatus};
+pub use git::{BufferDiff, DeletedHunk, DiffStatus};
 pub use keymap::Key;
 pub use multi_buffer::{
     ExcerptId, MultiBuffer, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,

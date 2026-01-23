@@ -1,5 +1,6 @@
 use crate::{
     actions::{Action, Value},
+    display_map::BlockRowKind,
     editor::Editor,
     git::DiffStatus,
     keymap::{Binding, Key, KeymapContext},
@@ -85,41 +86,58 @@ impl Stoat {
         let [gutter_area, content_area] = vertical.areas(area);
 
         let snapshot = editor.display_snapshot();
-        let lines: Vec<&str> = snapshot.lines().collect();
+        let buffer_lines: Vec<&str> = snapshot.lines().collect();
         let scroll_offset = editor.scroll_offset.0 as usize;
         let visible_lines = area.height as usize;
+        let total_display_lines = snapshot.line_count() as usize;
 
         let mut gutter_lines = Vec::new();
         let mut content_lines = Vec::new();
 
         for i in 0..visible_lines {
-            let line_num = scroll_offset + i;
-            if line_num < lines.len() {
-                let line_idx = line_num as u32;
-                let has_deletion = snapshot.has_deletion_after(line_idx);
-                let (marker, color) = match snapshot.line_diff_status(line_idx) {
-                    DiffStatus::Added => {
-                        if has_deletion {
-                            ("~", Color::Yellow)
-                        } else {
-                            ("+", Color::Green)
-                        }
+            let display_row = (scroll_offset + i) as u32;
+            if (display_row as usize) < total_display_lines {
+                match snapshot.classify_row(display_row) {
+                    BlockRowKind::BufferRow { buffer_row } => {
+                        let has_deletion = snapshot.has_deletion_after(buffer_row);
+                        let (marker, color) = match snapshot.line_diff_status(buffer_row) {
+                            DiffStatus::Added => {
+                                if has_deletion {
+                                    ("~", Color::Yellow)
+                                } else {
+                                    ("+", Color::Green)
+                                }
+                            },
+                            DiffStatus::Modified => ("~", Color::Yellow),
+                            DiffStatus::Unchanged => {
+                                if has_deletion {
+                                    ("-", Color::Red)
+                                } else {
+                                    (" ", Color::DarkGray)
+                                }
+                            },
+                        };
+                        let num_str = format!("{}{:>3}", marker, buffer_row + 1);
+                        gutter_lines.push(Line::from(Span::styled(
+                            num_str,
+                            Style::default().fg(color),
+                        )));
+                        let line_content =
+                            buffer_lines.get(buffer_row as usize).copied().unwrap_or("");
+                        content_lines.push(Line::from(line_content));
                     },
-                    DiffStatus::Modified => ("~", Color::Yellow),
-                    DiffStatus::Unchanged => {
-                        if has_deletion {
-                            ("-", Color::Red)
-                        } else {
-                            (" ", Color::DarkGray)
-                        }
+                    BlockRowKind::Block { block, line_index } => {
+                        let num_str = "   -".to_string();
+                        gutter_lines.push(Line::from(Span::styled(
+                            num_str,
+                            Style::default().fg(Color::Red),
+                        )));
+                        content_lines.push(Line::from(Span::styled(
+                            block.get_line(line_index),
+                            Style::default().fg(Color::Red),
+                        )));
                     },
-                };
-                let num_str = format!("{}{:>3}", marker, line_num + 1);
-                gutter_lines.push(Line::from(Span::styled(
-                    num_str,
-                    Style::default().fg(color),
-                )));
-                content_lines.push(Line::from(lines[line_num]));
+                }
             } else {
                 gutter_lines.push(Line::from(Span::styled(
                     "  ~ ",

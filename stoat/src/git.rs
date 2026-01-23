@@ -1,7 +1,9 @@
 use git2::{Patch, Repository, Status};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -12,10 +14,18 @@ pub enum DiffStatus {
     Modified,
 }
 
+#[derive(Clone, Debug)]
+pub struct DeletedHunk {
+    pub after_buffer_line: u32,
+    pub base_byte_range: Range<usize>,
+    pub line_count: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BufferDiff {
     line_status: HashMap<u32, DiffStatus>,
-    deletion_markers: HashSet<u32>,
+    base_text: Option<Arc<String>>,
+    deleted_hunks: Vec<DeletedHunk>,
 }
 
 impl BufferDiff {
@@ -24,15 +34,46 @@ impl BufferDiff {
     }
 
     pub fn has_deletion_after(&self, line: u32) -> bool {
-        self.deletion_markers.contains(&line)
+        self.deleted_hunks
+            .iter()
+            .any(|h| h.after_buffer_line == line)
+    }
+
+    pub fn deleted_hunks(&self) -> &[DeletedHunk] {
+        &self.deleted_hunks
+    }
+
+    pub fn base_text(&self) -> Option<&Arc<String>> {
+        self.base_text.as_ref()
+    }
+
+    pub fn deleted_content(&self, hunk: &DeletedHunk) -> &str {
+        self.base_text
+            .as_ref()
+            .map(|t| &t[hunk.base_byte_range.clone()])
+            .unwrap_or("")
+    }
+
+    pub fn total_deleted_lines(&self) -> u32 {
+        self.deleted_hunks.iter().map(|h| h.line_count).sum()
+    }
+
+    #[cfg(test)]
+    pub fn set_base_text(&mut self, text: Arc<String>) {
+        self.base_text = Some(text);
+    }
+
+    #[cfg(test)]
+    pub fn add_deleted_hunk(&mut self, hunk: DeletedHunk) {
+        self.deleted_hunks.push(hunk);
     }
 }
 
 pub fn query_diff(file_path: &Path) -> Option<BufferDiff> {
     let repo = Repository::discover(file_path).ok()?;
-    let head_content = load_head_content(&repo, file_path)?;
+    let head_content = Arc::new(load_head_content(&repo, file_path)?);
     let working_content = std::fs::read_to_string(file_path).ok()?;
-    compute_diff(&head_content, &working_content)
+    compute_diff(head_content, &working_content)
 }
 
 pub fn modified_files(cwd: &Path) -> Option<Vec<PathBuf>> {
@@ -69,43 +110,110 @@ fn load_head_content(repo: &Repository, file_path: &Path) -> Option<String> {
     Some(content.to_string())
 }
 
-fn compute_diff(old: &str, new: &str) -> Option<BufferDiff> {
+fn compute_diff(old: Arc<String>, new: &str) -> Option<BufferDiff> {
     let patch = Patch::from_buffers(old.as_bytes(), None, new.as_bytes(), None, None).ok()?;
 
-    let mut diff = BufferDiff::default();
+    let mut diff = BufferDiff {
+        base_text: Some(old.clone()),
+        ..Default::default()
+    };
 
     for hunk_idx in 0..patch.num_hunks() {
         let (hunk, num_lines) = patch.hunk(hunk_idx).ok()?;
         let new_start = hunk.new_start();
 
         let mut new_line = new_start;
+        let mut pending_deletion_start: Option<usize> = None;
+        let mut pending_deletion_after: u32 = 0;
+        let mut pending_deletion_line_count: u32 = 0;
+
         for line_idx in 0..num_lines {
             let line = patch.line_in_hunk(hunk_idx, line_idx).ok()?;
             match line.origin() {
                 '+' => {
+                    flush_pending_deletion(
+                        &mut diff,
+                        &mut pending_deletion_start,
+                        pending_deletion_after,
+                        pending_deletion_line_count,
+                        &old,
+                        line.old_lineno(),
+                    );
+                    pending_deletion_line_count = 0;
                     diff.line_status.insert(new_line - 1, DiffStatus::Added);
                     new_line += 1;
                 },
                 '-' => {
-                    if new_line > 1 {
-                        diff.deletion_markers.insert(new_line - 2);
-                    } else {
-                        diff.deletion_markers.insert(0);
+                    let content_start = line.content_offset() as usize;
+                    if pending_deletion_start.is_none() {
+                        pending_deletion_start = Some(content_start);
+                        pending_deletion_after = if new_line > 1 { new_line - 2 } else { 0 };
                     }
+                    pending_deletion_line_count += 1;
                 },
                 ' ' => {
+                    flush_pending_deletion(
+                        &mut diff,
+                        &mut pending_deletion_start,
+                        pending_deletion_after,
+                        pending_deletion_line_count,
+                        &old,
+                        line.old_lineno(),
+                    );
+                    pending_deletion_line_count = 0;
                     new_line += 1;
                 },
                 _ => {},
             }
         }
+
+        flush_pending_deletion(
+            &mut diff,
+            &mut pending_deletion_start,
+            pending_deletion_after,
+            pending_deletion_line_count,
+            &old,
+            None,
+        );
     }
 
-    if diff.line_status.is_empty() && diff.deletion_markers.is_empty() {
+    if diff.line_status.is_empty() && diff.deleted_hunks.is_empty() {
         return None;
     }
 
     Some(diff)
+}
+
+fn flush_pending_deletion(
+    diff: &mut BufferDiff,
+    pending_start: &mut Option<usize>,
+    after_line: u32,
+    line_count: u32,
+    old: &str,
+    next_old_lineno: Option<u32>,
+) {
+    if let Some(start) = pending_start.take() {
+        if line_count > 0 {
+            let end = if let Some(lineno) = next_old_lineno {
+                line_byte_offset(old, lineno - 1)
+            } else {
+                old.len()
+            };
+            let mut byte_end = end;
+            while byte_end > start && old.as_bytes().get(byte_end - 1) == Some(&b'\n') {
+                byte_end -= 1;
+            }
+            diff.deleted_hunks.push(DeletedHunk {
+                after_buffer_line: after_line,
+                base_byte_range: start..byte_end,
+                line_count,
+            });
+        }
+    }
+}
+
+fn line_byte_offset(text: &str, line: u32) -> usize {
+    text.lines().take(line as usize).map(|l| l.len() + 1).sum()
 }
 
 #[cfg(test)]
