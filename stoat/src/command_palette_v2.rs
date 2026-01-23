@@ -9,8 +9,8 @@ use crate::{
 };
 use gpui::{
     div, prelude::FluentBuilder, px, rgb, rgba, App, AppContext, Context, Entity, EventEmitter,
-    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
-    StatefulInteractiveElement, Styled, Subscription, Window,
+    FontWeight, InteractiveElement, IntoElement, KeyContext as GpuiKeyContext, KeyDownEvent,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 /// CommandPaletteV2 entity for fuzzy command search.
@@ -191,6 +191,11 @@ impl Render for CommandPaletteV2 {
             .items_center()
             .justify_center()
             .on_key_down(cx.listener(Self::handle_overlay_key_down))
+            .key_context({
+                let mut ctx = GpuiKeyContext::new_with_defaults();
+                ctx.add("CommandPaletteV2");
+                ctx
+            })
             .child(
                 div()
                     .flex()
