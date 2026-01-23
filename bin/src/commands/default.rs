@@ -22,6 +22,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(path) = args.file {
         stoat.open_file(path)?;
+    } else if let Some(files) = stoat::git::modified_files(&std::env::current_dir()?) {
+        for file in files {
+            stoat.open_file(file)?;
+        }
     }
 
     Ok(stoat::run(stoat)?)

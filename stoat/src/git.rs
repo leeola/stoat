@@ -1,7 +1,7 @@
-use git2::{Patch, Repository};
+use git2::{Patch, Repository, Status};
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -33,6 +33,27 @@ pub fn query_diff(file_path: &Path) -> Option<BufferDiff> {
     let head_content = load_head_content(&repo, file_path)?;
     let working_content = std::fs::read_to_string(file_path).ok()?;
     compute_diff(&head_content, &working_content)
+}
+
+pub fn modified_files(cwd: &Path) -> Option<Vec<PathBuf>> {
+    let repo = Repository::discover(cwd).ok()?;
+    let workdir = repo.workdir()?.to_path_buf();
+    let statuses = repo.statuses(None).ok()?;
+
+    let dominated_status =
+        Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::WT_NEW | Status::WT_MODIFIED;
+
+    let files: Vec<PathBuf> = statuses
+        .iter()
+        .filter(|entry| entry.status().intersects(dominated_status))
+        .filter_map(|entry| entry.path().map(|p| workdir.join(p)))
+        .collect();
+
+    if files.is_empty() {
+        None
+    } else {
+        Some(files)
+    }
 }
 
 fn load_head_content(repo: &Repository, file_path: &Path) -> Option<String> {

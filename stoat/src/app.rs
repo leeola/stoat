@@ -96,14 +96,23 @@ impl Stoat {
             let line_num = scroll_offset + i;
             if line_num < lines.len() {
                 let line_idx = line_num as u32;
-                let (marker, color) = if snapshot.has_deletion_after(line_idx) {
-                    ("-", Color::Red)
-                } else {
-                    match snapshot.line_diff_status(line_idx) {
-                        DiffStatus::Added => ("+", Color::Green),
-                        DiffStatus::Modified => ("~", Color::Yellow),
-                        DiffStatus::Unchanged => (" ", Color::DarkGray),
-                    }
+                let has_deletion = snapshot.has_deletion_after(line_idx);
+                let (marker, color) = match snapshot.line_diff_status(line_idx) {
+                    DiffStatus::Added => {
+                        if has_deletion {
+                            ("~", Color::Yellow)
+                        } else {
+                            ("+", Color::Green)
+                        }
+                    },
+                    DiffStatus::Modified => ("~", Color::Yellow),
+                    DiffStatus::Unchanged => {
+                        if has_deletion {
+                            ("-", Color::Red)
+                        } else {
+                            (" ", Color::DarkGray)
+                        }
+                    },
                 };
                 let num_str = format!("{}{:>3}", marker, line_num + 1);
                 gutter_lines.push(Line::from(Span::styled(
