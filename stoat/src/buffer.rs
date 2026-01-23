@@ -9,6 +9,12 @@ use stoat_text::Rope;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);
 
+impl BufferId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 pub struct TextBuffer {
     pub rope: Rope,
     pub path: Option<PathBuf>,

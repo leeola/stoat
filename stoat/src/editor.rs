@@ -1,6 +1,7 @@
 use crate::{
     buffer::{BufferId, SharedBuffer},
     display_map::{DisplayMap, DisplayRow, DisplaySnapshot},
+    multi_buffer::MultiBuffer,
 };
 use stoat_text::Point;
 
@@ -14,7 +15,8 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(buffer_id: BufferId, buffer: SharedBuffer) -> Self {
-        let display_map = DisplayMap::new(buffer.clone());
+        let multi_buffer = MultiBuffer::singleton(buffer_id, buffer.clone());
+        let display_map = DisplayMap::new(multi_buffer);
         Self {
             buffer_id,
             buffer,

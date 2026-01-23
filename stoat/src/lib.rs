@@ -4,6 +4,7 @@ pub mod buffer;
 pub mod display_map;
 pub mod editor;
 pub mod keymap;
+pub mod multi_buffer;
 pub mod pane;
 pub mod view;
 pub mod workspace;
@@ -14,6 +15,9 @@ pub use buffer::{BufferId, BufferStore, SharedBuffer, TextBuffer};
 pub use display_map::{DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot};
 pub use editor::Editor;
 pub use keymap::Key;
+pub use multi_buffer::{
+    ExcerptId, MultiBuffer, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
+};
 pub use pane::Pane;
 pub use stoat_log as log;
 pub use view::View;

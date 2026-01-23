@@ -1,4 +1,4 @@
-use crate::buffer::SharedBuffer;
+use crate::multi_buffer::MultiBuffer;
 use stoat_text::Point;
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,19 +17,19 @@ impl DisplayPoint {
 pub struct DisplayRow(pub u32);
 
 pub struct DisplayMap {
-    buffer: SharedBuffer,
+    multi_buffer: MultiBuffer,
 }
 
 impl DisplayMap {
-    pub fn new(buffer: SharedBuffer) -> Self {
-        Self { buffer }
+    pub fn new(multi_buffer: MultiBuffer) -> Self {
+        Self { multi_buffer }
     }
 
     pub fn snapshot(&self) -> DisplaySnapshot {
-        let buffer = self.buffer.read().expect("buffer lock poisoned");
+        let mb_snapshot = self.multi_buffer.snapshot();
         DisplaySnapshot {
-            line_count: buffer.line_count(),
-            text: buffer.rope.to_string(),
+            line_count: mb_snapshot.line_count(),
+            text: mb_snapshot.text().to_string(),
         }
     }
 }
@@ -78,16 +78,24 @@ impl DisplaySnapshot {
 #[cfg(test)]
 mod tests {
     use super::{DisplayMap, DisplayPoint, DisplayRow};
-    use crate::buffer::TextBuffer;
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        multi_buffer::MultiBuffer,
+    };
     use std::sync::{Arc, RwLock};
     use stoat_text::Point;
 
+    fn create_display_map(content: &str) -> DisplayMap {
+        let mut buffer = TextBuffer::new();
+        buffer.rope.push(content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        DisplayMap::new(multi_buffer)
+    }
+
     #[test]
     fn passthrough_coordinates() {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push("hello\nworld\n");
-        let shared = Arc::new(RwLock::new(buffer));
-        let display_map = DisplayMap::new(shared);
+        let display_map = create_display_map("hello\nworld\n");
         let snapshot = display_map.snapshot();
 
         let buffer_point = Point::new(1, 3);
@@ -100,21 +108,14 @@ mod tests {
 
     #[test]
     fn line_count() {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push("line1\nline2\nline3");
-        let shared = Arc::new(RwLock::new(buffer));
-        let display_map = DisplayMap::new(shared);
+        let display_map = create_display_map("line1\nline2\nline3");
         let snapshot = display_map.snapshot();
-
         assert_eq!(snapshot.line_count(), 3);
     }
 
     #[test]
     fn max_point() {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push("short\nlonger line\nx");
-        let shared = Arc::new(RwLock::new(buffer));
-        let display_map = DisplayMap::new(shared);
+        let display_map = create_display_map("short\nlonger line\nx");
         let snapshot = display_map.snapshot();
 
         let max = snapshot.max_point();
