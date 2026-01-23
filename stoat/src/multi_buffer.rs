@@ -1,4 +1,7 @@
-use crate::buffer::{BufferId, SharedBuffer};
+use crate::{
+    buffer::{BufferId, SharedBuffer},
+    git::BufferDiff,
+};
 use stoat_text::Point;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +62,7 @@ impl MultiBuffer {
             singleton: self.singleton,
             line_count: buffer.line_count(),
             text: buffer.rope.to_string(),
+            diff: buffer.diff.clone(),
         }
     }
 
@@ -75,6 +79,7 @@ pub struct MultiBufferSnapshot {
     singleton: bool,
     line_count: u32,
     text: String,
+    pub diff: Option<BufferDiff>,
 }
 
 impl MultiBufferSnapshot {

@@ -1,4 +1,7 @@
-use crate::multi_buffer::MultiBuffer;
+use crate::{
+    git::{BufferDiff, DiffStatus},
+    multi_buffer::MultiBuffer,
+};
 use stoat_text::Point;
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -30,6 +33,7 @@ impl DisplayMap {
         DisplaySnapshot {
             line_count: mb_snapshot.line_count(),
             text: mb_snapshot.text().to_string(),
+            diff: mb_snapshot.diff,
         }
     }
 }
@@ -37,6 +41,7 @@ impl DisplayMap {
 pub struct DisplaySnapshot {
     line_count: u32,
     text: String,
+    diff: Option<BufferDiff>,
 }
 
 impl DisplaySnapshot {
@@ -72,6 +77,20 @@ impl DisplaySnapshot {
 
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.text.lines()
+    }
+
+    pub fn line_diff_status(&self, line: u32) -> DiffStatus {
+        self.diff
+            .as_ref()
+            .map(|d| d.status_for_line(line))
+            .unwrap_or_default()
+    }
+
+    pub fn has_deletion_after(&self, line: u32) -> bool {
+        self.diff
+            .as_ref()
+            .map(|d| d.has_deletion_after(line))
+            .unwrap_or(false)
     }
 }
 

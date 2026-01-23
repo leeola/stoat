@@ -1,3 +1,4 @@
+use crate::git::{self, BufferDiff};
 use std::{
     collections::HashMap,
     fs, io,
@@ -19,6 +20,7 @@ pub struct TextBuffer {
     pub rope: Rope,
     pub path: Option<PathBuf>,
     pub dirty: bool,
+    pub diff: Option<BufferDiff>,
 }
 
 impl TextBuffer {
@@ -27,6 +29,7 @@ impl TextBuffer {
             rope: Rope::new(),
             path: None,
             dirty: false,
+            diff: None,
         }
     }
 
@@ -34,10 +37,12 @@ impl TextBuffer {
         let content = fs::read_to_string(&path)?;
         let mut rope = Rope::new();
         rope.push(&content);
+        let diff = git::query_diff(&path);
         Ok(Self {
             rope,
             path: Some(path),
             dirty: false,
+            diff,
         })
     }
 

@@ -1,6 +1,7 @@
 use crate::{
     actions::{Action, Value},
     editor::Editor,
+    git::DiffStatus,
     keymap::{Binding, Key, KeymapContext},
     view::View,
     workspace::Workspace,
@@ -94,10 +95,20 @@ impl Stoat {
         for i in 0..visible_lines {
             let line_num = scroll_offset + i;
             if line_num < lines.len() {
-                let num_str = format!("{:>3} ", line_num + 1);
+                let line_idx = line_num as u32;
+                let (marker, color) = if snapshot.has_deletion_after(line_idx) {
+                    ("-", Color::Red)
+                } else {
+                    match snapshot.line_diff_status(line_idx) {
+                        DiffStatus::Added => ("+", Color::Green),
+                        DiffStatus::Modified => ("~", Color::Yellow),
+                        DiffStatus::Unchanged => (" ", Color::DarkGray),
+                    }
+                };
+                let num_str = format!("{}{:>3}", marker, line_num + 1);
                 gutter_lines.push(Line::from(Span::styled(
                     num_str,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(color),
                 )));
                 content_lines.push(Line::from(lines[line_num]));
             } else {
