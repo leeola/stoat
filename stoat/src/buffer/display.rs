@@ -204,8 +204,11 @@ impl DisplayBuffer {
                             buffer_snapshot.max_point()
                         };
 
-                        let content: String = buffer_snapshot.text_for_range(start..end).collect();
-                        let content = content.trim_end_matches('\n').to_string();
+                        let mut content: String =
+                            buffer_snapshot.text_for_range(start..end).collect();
+                        if content.ends_with('\n') {
+                            content.pop();
+                        }
 
                         rows.push(RowInfo {
                             display_row: DisplayRow(display_row),
@@ -275,9 +278,11 @@ impl DisplayBuffer {
                                 buffer_snapshot.max_point()
                             };
 
-                            let content: String =
+                            let mut content: String =
                                 buffer_snapshot.text_for_range(start..end).collect();
-                            let content = content.trim_end_matches('\n').to_string();
+                            if content.ends_with('\n') {
+                                content.pop();
+                            }
 
                             // Compute modified_ranges for Modified rows
                             let modified_ranges = if is_modified {
@@ -316,8 +321,10 @@ impl DisplayBuffer {
                         buffer_snapshot.max_point()
                     };
 
-                    let content: String = buffer_snapshot.text_for_range(start..end).collect();
-                    let content = content.trim_end_matches('\n').to_string();
+                    let mut content: String = buffer_snapshot.text_for_range(start..end).collect();
+                    if content.ends_with('\n') {
+                        content.pop();
+                    }
 
                     rows.push(RowInfo {
                         display_row: DisplayRow(display_row),
@@ -343,8 +350,10 @@ impl DisplayBuffer {
                     buffer_snapshot.max_point()
                 };
 
-                let content: String = buffer_snapshot.text_for_range(start..end).collect();
-                let content = content.trim_end_matches('\n').to_string();
+                let mut content: String = buffer_snapshot.text_for_range(start..end).collect();
+                if content.ends_with('\n') {
+                    content.pop();
+                }
 
                 rows.push(RowInfo {
                     display_row: DisplayRow(display_row),

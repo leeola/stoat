@@ -867,30 +867,19 @@ impl EditorElement {
                     .iter()
                     .find(|l| l.buffer_row == Some(start.row))
                 {
-                    let line_text = buffer_snapshot
+                    let line_text: String = buffer_snapshot
                         .text_for_range(
                             text::Point::new(start.row, 0)..text::Point::new(start.row, end.column),
                         )
-                        .collect::<String>();
+                        .collect();
 
-                    let text_before_start = if start.column > 0 {
-                        line_text
-                            .chars()
-                            .take(start.column as usize)
-                            .collect::<String>()
-                    } else {
-                        String::new()
-                    };
-
-                    let selected_text = line_text
-                        .chars()
-                        .skip(start.column as usize)
-                        .take((end.column - start.column) as usize)
-                        .collect::<String>();
+                    // Byte slice directly - Point.column is byte offset
+                    let text_before_start = &line_text[..start.column as usize];
+                    let selected_text = &line_text[start.column as usize..];
 
                     // Measure text widths
-                    let start_x_offset = self.measure_text_width(&text_before_start, &font, window);
-                    let selection_width = self.measure_text_width(&selected_text, &font, window);
+                    let start_x_offset = self.measure_text_width(text_before_start, &font, window);
+                    let selection_width = self.measure_text_width(selected_text, &font, window);
 
                     let selection_bounds = Bounds {
                         origin: point(
@@ -927,32 +916,20 @@ impl EditorElement {
                             (0, line_end)
                         };
 
-                        let line_text = buffer_snapshot
+                        let line_text: String = buffer_snapshot
                             .text_for_range(
                                 text::Point::new(row, 0)..text::Point::new(row, col_end),
                             )
-                            .collect::<String>();
+                            .collect();
 
-                        let text_before_start = if col_start > 0 {
-                            line_text
-                                .chars()
-                                .take(col_start as usize)
-                                .collect::<String>()
-                        } else {
-                            String::new()
-                        };
-
-                        let selected_text = line_text
-                            .chars()
-                            .skip(col_start as usize)
-                            .take((col_end - col_start) as usize)
-                            .collect::<String>();
+                        // Byte slice directly - Point.column is byte offset
+                        let text_before_start = &line_text[..col_start as usize];
+                        let selected_text = &line_text[col_start as usize..];
 
                         // Measure text widths
                         let start_x_offset =
-                            self.measure_text_width(&text_before_start, &font, window);
-                        let selection_width =
-                            self.measure_text_width(&selected_text, &font, window);
+                            self.measure_text_width(text_before_start, &font, window);
+                        let selection_width = self.measure_text_width(selected_text, &font, window);
 
                         let selection_bounds = Bounds {
                             origin: point(
@@ -1321,13 +1298,12 @@ fn apply_diagnostic_underlines(
     }
 
     let mut result = Vec::new();
-    let mut char_offset = 0u32;
+    let mut byte_offset = 0u32;
 
     for run in runs {
-        // Calculate character count for this run (not byte count)
-        let run_char_count = run.len as u32; // FIXME: This assumes 1 byte = 1 char, need proper UTF-8 handling
-        let run_start = char_offset;
-        let run_end = char_offset + run_char_count;
+        let run_byte_len = run.len as u32;
+        let run_start = byte_offset;
+        let run_end = byte_offset + run_byte_len;
 
         // Find which diagnostic ranges overlap with this run
         let mut splits = Vec::new();
@@ -1376,7 +1352,7 @@ fn apply_diagnostic_underlines(
             });
         }
 
-        char_offset = run_end;
+        byte_offset = run_end;
     }
 
     result
