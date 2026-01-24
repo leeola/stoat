@@ -74,27 +74,37 @@ impl Element for EditorElement {
         let font_size = self.style.font_size;
         let line_height = self.style.line_height;
 
+        // Gutter font (reused in paint functions)
+        let gutter_font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+
         let snapshot_start = Instant::now();
         // Get buffer snapshot, token snapshot, display snapshot, and display buffer
-        let buffer_snapshot = {
+        // Batch reads to reduce lock overhead
+        let (buffer_snapshot, token_snapshot, is_in_diff_review, display_map_entity) = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
-            buffer_item.read(cx).buffer().read(cx).snapshot()
+            let buffer_item_read = buffer_item.read(cx);
+
+            let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot();
+            let token_snapshot = buffer_item_read.token_snapshot();
+            let is_in_diff_review = stoat.is_in_diff_review();
+            let display_map_entity = stoat.display_map(cx).clone();
+
+            (
+                buffer_snapshot,
+                token_snapshot,
+                is_in_diff_review,
+                display_map_entity,
+            )
         };
-        let token_snapshot = {
-            let stoat = self.view.read(cx).stoat.read(cx);
-            let buffer_item = stoat.active_buffer(cx);
-            buffer_item.read(cx).token_snapshot()
-        };
-        let is_in_diff_review = {
-            let stoat = self.view.read(cx).stoat.read(cx);
-            stoat.is_in_diff_review()
-        };
-        // DisplaySnapshot for wrapping/folding coordinate transformations
-        let display_snapshot = {
-            let stoat = self.view.read(cx).stoat.read(cx);
-            stoat.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx))
-        };
+        // DisplaySnapshot requires mutable access, done separately
+        let display_snapshot = display_map_entity.update(cx, |dm, cx| dm.snapshot(cx));
         // DisplayBuffer for git diff phantom rows (used for metadata only, not coordinates)
         let display_buffer = {
             let stoat = self.view.read(cx).stoat.read(cx);
@@ -120,7 +130,7 @@ impl Element for EditorElement {
         let gutter_width = if is_minimap {
             Pixels::ZERO
         } else {
-            self.calculate_gutter_width(max_point.row + 1, window, cx)
+            self.calculate_gutter_width(max_point.row + 1, &gutter_font, window, cx)
         };
 
         // Calculate visible display row range using DisplaySnapshot (handles wrapping/folding)
@@ -221,8 +231,7 @@ impl Element for EditorElement {
                 for (split_ix, line_chunk) in chunk.text.split('\n').enumerate() {
                     if split_ix > 0 {
                         // Store runs for completed row
-                        highlighted_lines.insert(current_buffer_row, runs.clone());
-                        runs.clear();
+                        highlighted_lines.insert(current_buffer_row, std::mem::take(&mut runs));
                         current_buffer_row += 1;
                     }
 
@@ -399,6 +408,7 @@ impl Element for EditorElement {
             line_layouts,
             gutter_width,
             diagnostics_by_row,
+            gutter_font,
         }
     }
 
@@ -456,6 +466,7 @@ impl Element for EditorElement {
                 bounds,
                 &prepaint.line_layouts,
                 prepaint.gutter_width,
+                &prepaint.gutter_font,
                 window,
                 cx,
             );
@@ -521,7 +532,13 @@ impl Element for EditorElement {
             );
 
             // Paint diff symbols (+/-) in gutter
-            self.paint_diff_symbols(bounds, &prepaint.line_layouts, window, cx);
+            self.paint_diff_symbols(
+                bounds,
+                &prepaint.line_layouts,
+                &prepaint.gutter_font,
+                window,
+                cx,
+            );
 
             // Paint diagnostic icons in gutter
             self.paint_diagnostic_icons(
@@ -533,10 +550,24 @@ impl Element for EditorElement {
             );
 
             // Paint line numbers in gutter
-            self.paint_line_numbers(bounds, &line_positions, prepaint.gutter_width, window, cx);
+            self.paint_line_numbers(
+                bounds,
+                &line_positions,
+                prepaint.gutter_width,
+                &prepaint.gutter_font,
+                window,
+                cx,
+            );
 
             // Paint cursor on top of text
-            self.paint_cursor(bounds, &line_positions, prepaint.gutter_width, window, cx);
+            self.paint_cursor(
+                bounds,
+                &line_positions,
+                prepaint.gutter_width,
+                &prepaint.gutter_font,
+                window,
+                cx,
+            );
         }
     }
 }
@@ -548,21 +579,13 @@ impl EditorElement {
         bounds: Bounds<Pixels>,
         line_positions: &[(u32, Pixels)],
         gutter_width: Pixels,
+        gutter_font: &Font,
         window: &mut Window,
         cx: &mut App,
     ) {
         if !self.style.show_line_numbers || gutter_width == Pixels::ZERO {
             return;
         }
-
-        // Create font for line numbers
-        let font = Font {
-            family: SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            fallbacks: None,
-        };
 
         // Dimmed color for line numbers (60% opacity)
         let line_number_color = gpui::Hsla {
@@ -579,7 +602,7 @@ impl EditorElement {
 
             let text_run = TextRun {
                 len: line_number_shared.len(),
-                font: font.clone(),
+                font: gutter_font.clone(),
                 color: line_number_color,
                 background_color: None,
                 underline: None,
@@ -607,6 +630,7 @@ impl EditorElement {
         &self,
         bounds: Bounds<Pixels>,
         line_layouts: &[ShapedLineLayout],
+        gutter_font: &Font,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -615,14 +639,6 @@ impl EditorElement {
         if !stoat.is_in_diff_review() {
             return;
         }
-
-        let font = Font {
-            family: SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            fallbacks: None,
-        };
 
         // Strip width: wider during diff review for better visibility
         let strip_width = (0.6 * self.style.line_height).floor();
@@ -646,7 +662,7 @@ impl EditorElement {
             let symbol_shared = SharedString::from(symbol);
             let text_run = TextRun {
                 len: symbol_shared.len(),
-                font: font.clone(),
+                font: gutter_font.clone(),
                 color: symbol_color,
                 background_color: None,
                 underline: None,
@@ -675,6 +691,7 @@ impl EditorElement {
     fn calculate_gutter_width(
         &self,
         max_line_number: u32,
+        gutter_font: &Font,
         window: &mut Window,
         cx: &mut App,
     ) -> Pixels {
@@ -685,20 +702,11 @@ impl EditorElement {
         // Format the maximum line number to measure its width
         let max_line_text = format!("{max_line_number}");
 
-        // Create font for line numbers (same as code font)
-        let font = Font {
-            family: SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            fallbacks: None,
-        };
-
         // Measure the width of the maximum line number
         let line_number_shared = SharedString::from(max_line_text);
         let text_run = TextRun {
             len: line_number_shared.len(),
-            font,
+            font: gutter_font.clone(),
             color: self.style.text_color,
             background_color: None,
             underline: None,
@@ -729,6 +737,7 @@ impl EditorElement {
         bounds: Bounds<Pixels>,
         line_positions: &[(u32, Pixels)],
         gutter_width: Pixels,
+        gutter_font: &Font,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -773,18 +782,10 @@ impl EditorElement {
 
         // Measure text width
         let text_width = if !text_before_cursor.is_empty() {
-            let font = Font {
-                family: SharedString::from("Menlo"),
-                features: Default::default(),
-                weight: FontWeight::NORMAL,
-                style: FontStyle::Normal,
-                fallbacks: None,
-            };
-
             let text_shared = SharedString::from(text_before_cursor);
             let text_run = TextRun {
                 len: text_shared.len(),
-                font,
+                font: gutter_font.clone(),
                 color: self.style.text_color,
                 background_color: None,
                 underline: None,
@@ -826,6 +827,7 @@ impl EditorElement {
         bounds: Bounds<Pixels>,
         line_positions: &[ShapedLineLayout],
         gutter_width: Pixels,
+        gutter_font: &Font,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -841,15 +843,6 @@ impl EditorElement {
             s: 0.7,
             l: 0.5,
             a: 0.3,
-        };
-
-        // Font for measuring text width
-        let font = Font {
-            family: SharedString::from("Menlo"),
-            features: Default::default(),
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            fallbacks: None,
         };
 
         for selection in selections {
@@ -878,8 +871,10 @@ impl EditorElement {
                     let selected_text = &line_text[start.column as usize..];
 
                     // Measure text widths
-                    let start_x_offset = self.measure_text_width(text_before_start, &font, window);
-                    let selection_width = self.measure_text_width(selected_text, &font, window);
+                    let start_x_offset =
+                        self.measure_text_width(text_before_start, gutter_font, window);
+                    let selection_width =
+                        self.measure_text_width(selected_text, gutter_font, window);
 
                     let selection_bounds = Bounds {
                         origin: point(
@@ -928,8 +923,9 @@ impl EditorElement {
 
                         // Measure text widths
                         let start_x_offset =
-                            self.measure_text_width(text_before_start, &font, window);
-                        let selection_width = self.measure_text_width(selected_text, &font, window);
+                            self.measure_text_width(text_before_start, gutter_font, window);
+                        let selection_width =
+                            self.measure_text_width(selected_text, gutter_font, window);
 
                         let selection_bounds = Bounds {
                             origin: point(
@@ -1369,6 +1365,8 @@ pub struct EditorPrepaintState {
     pub gutter_width: Pixels,
     /// Diagnostics by buffer row (for gutter icons)
     pub diagnostics_by_row: HashMap<u32, Vec<BufferDiagnostic>>,
+    /// Gutter font (reused across paint functions)
+    pub gutter_font: Font,
 }
 
 /// A single line that has been shaped and is ready to paint.
