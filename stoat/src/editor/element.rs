@@ -393,6 +393,189 @@ impl Element for EditorElement {
         }
 
         let shape_time = shape_start.elapsed();
+
+        // ===== PHASE 3: Pre-shape line numbers =====
+        let line_number_color = gpui::Hsla {
+            h: self.style.text_color.h,
+            s: self.style.text_color.s,
+            l: self.style.text_color.l,
+            a: self.style.text_color.a * 0.6,
+        };
+        let line_number_font_size = font_size * 0.9;
+
+        let shaped_line_numbers: Vec<(gpui::ShapedLine, Pixels, Pixels)> =
+            if !is_minimap && self.style.show_line_numbers && gutter_width != Pixels::ZERO {
+                line_layouts
+                    .iter()
+                    .filter_map(|layout| {
+                        let buffer_row = layout.buffer_row?;
+                        let line_number = format!("{}", buffer_row + 1);
+                        let line_number_shared = SharedString::from(line_number);
+                        let text_run = TextRun {
+                            len: line_number_shared.len(),
+                            font: gutter_font.clone(),
+                            color: line_number_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            line_number_shared,
+                            line_number_font_size,
+                            &[text_run],
+                            None,
+                        );
+                        let x = bounds.origin.x + gutter_width - shaped.width - px(8.0);
+                        Some((shaped, x, layout.y_position))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        // ===== PHASE 4: Pre-shape diff symbols =====
+        let is_in_diff_review_for_symbols = is_in_diff_review;
+        let strip_width = (0.6 * line_height).floor();
+        let symbol_color = gpui::Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.95,
+            a: 1.0,
+        };
+
+        let shaped_diff_symbols: Vec<(gpui::ShapedLine, Pixels, Pixels)> =
+            if !is_minimap && is_in_diff_review_for_symbols {
+                line_layouts
+                    .iter()
+                    .filter_map(|layout| {
+                        let symbol = match layout.diff_status {
+                            Some(DiffHunkStatus::Added) => "+",
+                            Some(DiffHunkStatus::Deleted) => "-",
+                            Some(DiffHunkStatus::Modified) => "~",
+                            None => return None,
+                        };
+                        let symbol_shared = SharedString::from(symbol);
+                        let text_run = TextRun {
+                            len: symbol_shared.len(),
+                            font: gutter_font.clone(),
+                            color: symbol_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shaped = window.text_system().shape_line(
+                            symbol_shared,
+                            font_size,
+                            &[text_run],
+                            None,
+                        );
+                        let x = bounds.origin.x + (strip_width - shaped.width) / 2.0;
+                        Some((shaped, x, layout.y_position))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+        // ===== PHASE 5: Pre-compute cursor layout =====
+        let cursor_layout: Option<Bounds<Pixels>> = if !is_minimap {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            if self.view.read(cx).is_focused(window) {
+                let cursor_position = stoat.cursor_position();
+
+                line_layouts.iter().find_map(|layout| {
+                    if layout.buffer_row == Some(cursor_position.row) {
+                        let x_offset = layout.shaped.x_for_index(cursor_position.column as usize);
+                        let cursor_x =
+                            bounds.origin.x + gutter_width + self.style.padding + x_offset;
+                        Some(Bounds {
+                            origin: point(cursor_x, layout.y_position),
+                            size: size(px(2.0), line_height),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // ===== PHASE 6: Pre-compute selection bounds =====
+        let selection_bounds: Vec<Bounds<Pixels>> = if !is_minimap {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            let selections = stoat.active_selections(cx);
+
+            selections
+                .iter()
+                .filter(|s| !s.is_empty())
+                .flat_map(|selection| {
+                    let start = selection.start;
+                    let end = selection.end;
+                    let mut bounds_list = Vec::new();
+
+                    if start.row == end.row {
+                        // Single-line selection
+                        if let Some(layout) = line_layouts
+                            .iter()
+                            .find(|l| l.buffer_row == Some(start.row))
+                        {
+                            let start_x = layout.shaped.x_for_index(start.column as usize);
+                            let end_x = layout.shaped.x_for_index(end.column as usize);
+                            let selection_width = end_x - start_x;
+
+                            bounds_list.push(Bounds {
+                                origin: point(
+                                    bounds.origin.x + gutter_width + self.style.padding + start_x,
+                                    layout.y_position,
+                                ),
+                                size: size(selection_width, line_height),
+                            });
+                        }
+                    } else {
+                        // Multi-line selection
+                        for row in start.row..=end.row {
+                            if let Some(layout) =
+                                line_layouts.iter().find(|l| l.buffer_row == Some(row))
+                            {
+                                let (col_start, col_end) = if row == start.row {
+                                    (start.column, u32::MAX)
+                                } else if row == end.row {
+                                    (0, end.column)
+                                } else {
+                                    (0, u32::MAX)
+                                };
+
+                                let start_x = layout.shaped.x_for_index(col_start as usize);
+                                let end_x = if col_end == u32::MAX {
+                                    layout.shaped.width
+                                } else {
+                                    layout.shaped.x_for_index(col_end as usize)
+                                };
+                                let selection_width = end_x - start_x;
+
+                                bounds_list.push(Bounds {
+                                    origin: point(
+                                        bounds.origin.x
+                                            + gutter_width
+                                            + self.style.padding
+                                            + start_x,
+                                        layout.y_position,
+                                    ),
+                                    size: size(selection_width, line_height),
+                                });
+                            }
+                        }
+                    }
+                    bounds_list
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let total_prepaint = prepaint_start.elapsed();
         if !is_minimap {
             tracing::debug!(
@@ -409,6 +592,10 @@ impl Element for EditorElement {
             gutter_width,
             diagnostics_by_row,
             gutter_font,
+            shaped_line_numbers,
+            shaped_diff_symbols,
+            cursor_layout,
+            selection_bounds,
         }
     }
 
@@ -462,14 +649,7 @@ impl Element for EditorElement {
 
         // Paint selections (before text)
         if !is_minimap {
-            self.paint_selections(
-                bounds,
-                &prepaint.line_layouts,
-                prepaint.gutter_width,
-                &prepaint.gutter_font,
-                window,
-                cx,
-            );
+            self.paint_selections(prepaint, window);
         }
 
         // Collect buffer line positions for cursor/gutter rendering (only real buffer rows, not
@@ -532,13 +712,7 @@ impl Element for EditorElement {
             );
 
             // Paint diff symbols (+/-) in gutter
-            self.paint_diff_symbols(
-                bounds,
-                &prepaint.line_layouts,
-                &prepaint.gutter_font,
-                window,
-                cx,
-            );
+            self.paint_diff_symbols(prepaint, window, cx);
 
             // Paint diagnostic icons in gutter
             self.paint_diagnostic_icons(
@@ -550,140 +724,38 @@ impl Element for EditorElement {
             );
 
             // Paint line numbers in gutter
-            self.paint_line_numbers(
-                bounds,
-                &line_positions,
-                prepaint.gutter_width,
-                &prepaint.gutter_font,
-                window,
-                cx,
-            );
+            self.paint_line_numbers(prepaint, window, cx);
 
             // Paint cursor on top of text
-            self.paint_cursor(
-                bounds,
-                &line_positions,
-                prepaint.gutter_width,
-                &prepaint.gutter_font,
-                window,
-                cx,
-            );
+            self.paint_cursor(prepaint, window);
         }
     }
 }
 
 impl EditorElement {
-    /// Paint line numbers in the gutter
+    /// Paint line numbers in the gutter (uses pre-shaped lines from prepaint)
     fn paint_line_numbers(
         &self,
-        bounds: Bounds<Pixels>,
-        line_positions: &[(u32, Pixels)],
-        gutter_width: Pixels,
-        gutter_font: &Font,
+        prepaint: &EditorPrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        if !self.style.show_line_numbers || gutter_width == Pixels::ZERO {
-            return;
-        }
-
-        // Dimmed color for line numbers (60% opacity)
-        let line_number_color = gpui::Hsla {
-            h: self.style.text_color.h,
-            s: self.style.text_color.s,
-            l: self.style.text_color.l,
-            a: self.style.text_color.a * 0.6,
-        };
-
-        // Render each visible line number
-        for (line_idx, y) in line_positions {
-            let line_number = format!("{}", line_idx + 1); // 1-indexed line numbers
-            let line_number_shared = SharedString::from(line_number);
-
-            let text_run = TextRun {
-                len: line_number_shared.len(),
-                font: gutter_font.clone(),
-                color: line_number_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-
-            let shaped = window.text_system().shape_line(
-                line_number_shared,
-                self.style.font_size * 0.9, // Slightly smaller
-                &[text_run],
-                None,
-            );
-
-            // Right-align within gutter (subtract text width from gutter width)
-            let x = bounds.origin.x + gutter_width - shaped.width - px(8.0);
-
-            if let Err(e) = shaped.paint(point(x, *y), self.style.line_height, window, cx) {
-                tracing::error!("Failed to paint line number {}: {:?}", line_idx + 1, e);
+        for (shaped, x, y) in &prepaint.shaped_line_numbers {
+            if let Err(e) = shaped.paint(point(*x, *y), self.style.line_height, window, cx) {
+                tracing::error!("Failed to paint line number: {:?}", e);
             }
         }
     }
 
-    /// Paint diff symbols (+/-) in the gutter
+    /// Paint diff symbols (+/-) in the gutter (uses pre-shaped symbols from prepaint)
     fn paint_diff_symbols(
         &self,
-        bounds: Bounds<Pixels>,
-        line_layouts: &[ShapedLineLayout],
-        gutter_font: &Font,
+        prepaint: &EditorPrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Only show symbols in review mode
-        let stoat = self.view.read(cx).stoat.read(cx);
-        if !stoat.is_in_diff_review() {
-            return;
-        }
-
-        // Strip width: wider during diff review for better visibility
-        let strip_width = (0.6 * self.style.line_height).floor();
-
-        for layout in line_layouts {
-            let symbol = match layout.diff_status {
-                Some(DiffHunkStatus::Added) => "+",
-                Some(DiffHunkStatus::Deleted) => "-",
-                Some(DiffHunkStatus::Modified) => "~",
-                None => continue,
-            };
-
-            // White symbols for better visibility on colored backgrounds
-            let symbol_color = gpui::Hsla {
-                h: 0.0,
-                s: 0.0,
-                l: 0.95,
-                a: 1.0,
-            };
-
-            let symbol_shared = SharedString::from(symbol);
-            let text_run = TextRun {
-                len: symbol_shared.len(),
-                font: gutter_font.clone(),
-                color: symbol_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-
-            let shaped = window.text_system().shape_line(
-                symbol_shared,
-                self.style.font_size,
-                &[text_run],
-                None,
-            );
-
-            // Center symbol on the diff strip
-            let x = bounds.origin.x + (strip_width - shaped.width) / 2.0;
-            let _ = shaped.paint(
-                point(x, layout.y_position),
-                self.style.line_height,
-                window,
-                cx,
-            );
+        for (shaped, x, y) in &prepaint.shaped_diff_symbols {
+            let _ = shaped.paint(point(*x, *y), self.style.line_height, window, cx);
         }
     }
 
@@ -731,249 +803,39 @@ impl EditorElement {
         strip_width + shaped.width + px(16.0)
     }
 
-    /// Paint the cursor at the current position
-    fn paint_cursor(
-        &self,
-        bounds: Bounds<Pixels>,
-        line_positions: &[(u32, Pixels)],
-        gutter_width: Pixels,
-        gutter_font: &Font,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        // Only paint cursor if the editor view is focused
-        if !self.view.read(cx).is_focused(window) {
-            return;
+    /// Paint the cursor (uses pre-computed bounds from prepaint)
+    fn paint_cursor(&self, prepaint: &EditorPrepaintState, window: &mut Window) {
+        if let Some(cursor_bounds) = prepaint.cursor_layout {
+            window.paint_quad(gpui::PaintQuad {
+                bounds: cursor_bounds,
+                corner_radii: 0.0.into(),
+                background: self.style.text_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
         }
-
-        // Get cursor position from stoat
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let cursor_position = stoat.cursor_position();
-
-        // Find the y position for the cursor's line
-        let cursor_y = line_positions
-            .iter()
-            .find(|(line_idx, _)| *line_idx == cursor_position.row)
-            .map(|(_, y)| *y);
-
-        let Some(cursor_y) = cursor_y else {
-            // Cursor not in visible range
-            return;
-        };
-
-        // Get the buffer snapshot to measure text before cursor
-        let buffer_item = stoat.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer().read(cx);
-        let buffer_snapshot = buffer.snapshot();
-
-        // Calculate cursor x position by measuring text before cursor
-        let text_before_cursor = if cursor_position.column > 0 {
-            let line_start = text::Point::new(cursor_position.row, 0);
-            let cursor_point = text::Point::new(cursor_position.row, cursor_position.column);
-
-            let mut text_before = String::new();
-            for chunk in buffer_snapshot.text_for_range(line_start..cursor_point) {
-                text_before.push_str(chunk);
-            }
-            text_before
-        } else {
-            String::new()
-        };
-
-        // Measure text width
-        let text_width = if !text_before_cursor.is_empty() {
-            let text_shared = SharedString::from(text_before_cursor);
-            let text_run = TextRun {
-                len: text_shared.len(),
-                font: gutter_font.clone(),
-                color: self.style.text_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-
-            let shaped = window.text_system().shape_line(
-                text_shared,
-                self.style.font_size,
-                &[text_run],
-                None,
-            );
-
-            shaped.width
-        } else {
-            Pixels::ZERO
-        };
-
-        // Paint cursor as 2px vertical bar
-        let cursor_x = bounds.origin.x + gutter_width + self.style.padding + text_width;
-        let cursor_bounds = Bounds {
-            origin: point(cursor_x, cursor_y),
-            size: size(px(2.0), self.style.line_height),
-        };
-
-        window.paint_quad(gpui::PaintQuad {
-            bounds: cursor_bounds,
-            corner_radii: 0.0.into(),
-            background: self.style.text_color.into(),
-            border_color: gpui::transparent_black(),
-            border_widths: 0.0.into(),
-            border_style: gpui::BorderStyle::default(),
-        });
     }
 
-    /// Paint selections as highlighted backgrounds
-    fn paint_selections(
-        &self,
-        bounds: Bounds<Pixels>,
-        line_positions: &[ShapedLineLayout],
-        gutter_width: Pixels,
-        gutter_font: &Font,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        // Get selections from stoat
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let buffer_item = stoat.active_buffer(cx);
-        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        let selections = stoat.active_selections(cx);
-
-        // Selection background color (subtle blue with transparency)
+    /// Paint selections (uses pre-computed bounds from prepaint)
+    fn paint_selections(&self, prepaint: &EditorPrepaintState, window: &mut Window) {
         let selection_color = gpui::Hsla {
-            h: 210.0 / 360.0, // blue hue
+            h: 210.0 / 360.0,
             s: 0.7,
             l: 0.5,
             a: 0.3,
         };
 
-        for selection in selections {
-            if selection.is_empty() {
-                continue; // Skip empty selections (just cursor)
-            }
-
-            let start = selection.start;
-            let end = selection.end;
-
-            // Handle single-line vs multi-line selections
-            if start.row == end.row {
-                // Single-line selection
-                if let Some(layout) = line_positions
-                    .iter()
-                    .find(|l| l.buffer_row == Some(start.row))
-                {
-                    let line_text: String = buffer_snapshot
-                        .text_for_range(
-                            text::Point::new(start.row, 0)..text::Point::new(start.row, end.column),
-                        )
-                        .collect();
-
-                    // Byte slice directly - Point.column is byte offset
-                    let text_before_start = &line_text[..start.column as usize];
-                    let selected_text = &line_text[start.column as usize..];
-
-                    // Measure text widths
-                    let start_x_offset =
-                        self.measure_text_width(text_before_start, gutter_font, window);
-                    let selection_width =
-                        self.measure_text_width(selected_text, gutter_font, window);
-
-                    let selection_bounds = Bounds {
-                        origin: point(
-                            bounds.origin.x + gutter_width + self.style.padding + start_x_offset,
-                            layout.y_position,
-                        ),
-                        size: size(selection_width, self.style.line_height),
-                    };
-
-                    window.paint_quad(gpui::PaintQuad {
-                        bounds: selection_bounds,
-                        corner_radii: 0.0.into(),
-                        background: selection_color.into(),
-                        border_color: gpui::transparent_black(),
-                        border_widths: 0.0.into(),
-                        border_style: gpui::BorderStyle::default(),
-                    });
-                }
-            } else {
-                // Multi-line selection
-                for row in start.row..=end.row {
-                    if let Some(layout) = line_positions.iter().find(|l| l.buffer_row == Some(row))
-                    {
-                        let (col_start, col_end) = if row == start.row {
-                            // First line: from start.column to end of line
-                            let line_end = buffer_snapshot.line_len(row);
-                            (start.column, line_end)
-                        } else if row == end.row {
-                            // Last line: from beginning to end.column
-                            (0, end.column)
-                        } else {
-                            // Middle lines: entire line
-                            let line_end = buffer_snapshot.line_len(row);
-                            (0, line_end)
-                        };
-
-                        let line_text: String = buffer_snapshot
-                            .text_for_range(
-                                text::Point::new(row, 0)..text::Point::new(row, col_end),
-                            )
-                            .collect();
-
-                        // Byte slice directly - Point.column is byte offset
-                        let text_before_start = &line_text[..col_start as usize];
-                        let selected_text = &line_text[col_start as usize..];
-
-                        // Measure text widths
-                        let start_x_offset =
-                            self.measure_text_width(text_before_start, gutter_font, window);
-                        let selection_width =
-                            self.measure_text_width(selected_text, gutter_font, window);
-
-                        let selection_bounds = Bounds {
-                            origin: point(
-                                bounds.origin.x
-                                    + gutter_width
-                                    + self.style.padding
-                                    + start_x_offset,
-                                layout.y_position,
-                            ),
-                            size: size(selection_width, self.style.line_height),
-                        };
-
-                        window.paint_quad(gpui::PaintQuad {
-                            bounds: selection_bounds,
-                            corner_radii: 0.0.into(),
-                            background: selection_color.into(),
-                            border_color: gpui::transparent_black(),
-                            border_widths: 0.0.into(),
-                            border_style: gpui::BorderStyle::default(),
-                        });
-                    }
-                }
-            }
+        for bounds in &prepaint.selection_bounds {
+            window.paint_quad(gpui::PaintQuad {
+                bounds: *bounds,
+                corner_radii: 0.0.into(),
+                background: selection_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
         }
-    }
-
-    /// Measure the width of text when rendered
-    fn measure_text_width(&self, text: &str, font: &Font, window: &mut Window) -> Pixels {
-        if text.is_empty() {
-            return Pixels::ZERO;
-        }
-
-        let text_shared = SharedString::from(text.to_string());
-        let text_run = TextRun {
-            len: text_shared.len(),
-            font: font.clone(),
-            color: self.style.text_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-
-        let shaped =
-            window
-                .text_system()
-                .shape_line(text_shared, self.style.font_size, &[text_run], None);
-
-        shaped.width
     }
 
     /// Paint git diff indicators in the gutter
@@ -1367,6 +1229,14 @@ pub struct EditorPrepaintState {
     pub diagnostics_by_row: HashMap<u32, Vec<BufferDiagnostic>>,
     /// Gutter font (reused across paint functions)
     pub gutter_font: Font,
+    /// Pre-shaped line numbers: (shaped_line, x_position, y_position)
+    pub shaped_line_numbers: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
+    /// Pre-shaped diff symbols: (shaped_line, x_position, y_position)
+    pub shaped_diff_symbols: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
+    /// Pre-computed cursor bounds (if visible)
+    pub cursor_layout: Option<Bounds<Pixels>>,
+    /// Pre-computed selection bounds
+    pub selection_bounds: Vec<Bounds<Pixels>>,
 }
 
 /// A single line that has been shaped and is ready to paint.
