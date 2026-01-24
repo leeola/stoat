@@ -44,10 +44,82 @@ impl TokenMap {
     /// Used when re-parsing the entire buffer or loading a new file.
     /// This clears existing tokens and inserts the new ones.
     pub fn replace_tokens(&mut self, tokens: Vec<TokenEntry>, buffer: &BufferSnapshot) {
+        self.snapshot.tokens = SumTree::from_iter(tokens, buffer);
+        self.snapshot.version = buffer.version().clone();
+    }
+
+    /// Update tokens only in specified ranges
+    ///
+    /// More efficient than replace_tokens when only part of the buffer changed.
+    /// Keeps tokens outside the changed ranges and replaces only those within.
+    pub fn update_tokens_in_ranges(
+        &mut self,
+        all_tokens: Vec<TokenEntry>,
+        changed_ranges: &[Range<usize>],
+        buffer: &BufferSnapshot,
+    ) {
+        if changed_ranges.is_empty() {
+            return;
+        }
+
+        let merged_range = changed_ranges
+            .iter()
+            .fold(changed_ranges[0].clone(), |acc, r| {
+                acc.start.min(r.start)..acc.end.max(r.end)
+            });
+
+        let start_anchor = buffer.anchor_before(merged_range.start);
+        let end_anchor = buffer.anchor_after(merged_range.end);
+
+        let (prefix_tokens, suffix_tokens) = {
+            let mut prefix = Vec::new();
+            let mut suffix = Vec::new();
+            let mut cursor = self.snapshot.tokens.cursor::<TokenSummary>(buffer);
+            cursor.next();
+
+            while let Some(token) = cursor.item() {
+                if token.range.end.cmp(&start_anchor, buffer).is_gt() {
+                    break;
+                }
+                prefix.push(token.clone());
+                cursor.next();
+            }
+
+            while let Some(token) = cursor.item() {
+                if token.range.start.cmp(&end_anchor, buffer).is_ge() {
+                    break;
+                }
+                cursor.next();
+            }
+
+            while let Some(token) = cursor.item() {
+                suffix.push(token.clone());
+                cursor.next();
+            }
+
+            (prefix, suffix)
+        };
+
+        let new_tokens_in_range: Vec<_> = all_tokens
+            .into_iter()
+            .filter(|t| {
+                let t_start = t.range.start.to_offset(buffer);
+                let t_end = t.range.end.to_offset(buffer);
+                t_start < merged_range.end && t_end > merged_range.start
+            })
+            .collect();
+
         self.snapshot.tokens = SumTree::new(buffer);
-        for token in tokens {
+        for token in prefix_tokens {
             self.snapshot.tokens.push(token, buffer);
         }
+        for token in new_tokens_in_range {
+            self.snapshot.tokens.push(token, buffer);
+        }
+        for token in suffix_tokens {
+            self.snapshot.tokens.push(token, buffer);
+        }
+
         self.snapshot.version = buffer.version().clone();
     }
 

@@ -9,7 +9,7 @@ pub mod language;
 pub mod parser;
 
 pub use language::Language;
-pub use parser::Parser;
+pub use parser::{ParseResult, Parser};
 pub use stoat_rope::TokenEntry;
 
 /// Parse text into tokens using tree-sitter

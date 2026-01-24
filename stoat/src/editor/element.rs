@@ -14,7 +14,7 @@ use gpui::{
     FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
     Style, TextRun, UnderlineStyle, Window,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoat_lsp::BufferDiagnostic;
 
 pub struct EditorElement {
@@ -64,6 +64,8 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let prepaint_start = Instant::now();
+
         // Detect if this EditorElement is rendering a minimap (for conditional gutter rendering)
         let is_minimap = self.view.read(cx).stoat.read(cx).is_minimap();
 
@@ -72,6 +74,7 @@ impl Element for EditorElement {
         let font_size = self.style.font_size;
         let line_height = self.style.line_height;
 
+        let snapshot_start = Instant::now();
         // Get buffer snapshot, token snapshot, display snapshot, and display buffer
         let buffer_snapshot = {
             let stoat = self.view.read(cx).stoat.read(cx);
@@ -98,6 +101,7 @@ impl Element for EditorElement {
             let buffer_item = stoat.active_buffer(cx);
             buffer_item.read(cx).display_buffer(cx, is_in_diff_review)
         };
+        let snapshot_time = snapshot_start.elapsed();
 
         // Calculate visible range
         let max_point = buffer_snapshot.max_point();
@@ -179,6 +183,7 @@ impl Element for EditorElement {
             let min_buffer_row = *buffer_rows_in_range.iter().min().unwrap();
             let max_buffer_row = *buffer_rows_in_range.iter().max().unwrap();
 
+            let highlight_start = Instant::now();
             // Calculate byte offset range for all visible buffer rows
             let start_offset = buffer_snapshot.point_to_offset(text::Point::new(min_buffer_row, 0));
             let end_offset = if max_buffer_row >= max_point.row {
@@ -239,8 +244,16 @@ impl Element for EditorElement {
             if !runs.is_empty() {
                 highlighted_lines.insert(current_buffer_row, runs);
             }
+            let highlight_time = highlight_start.elapsed();
+            tracing::debug!(
+                "prepaint phase1 highlight: {:?} rows={}..{}",
+                highlight_time,
+                min_buffer_row,
+                max_buffer_row
+            );
         }
 
+        let shape_start = Instant::now();
         // ===== PHASE 2: Build ShapedLineLayout for each display row =====
         let mut line_layouts = Vec::with_capacity((end_display_row - start_display_row) as usize);
         let mut y = bounds.origin.y + self.style.padding;
@@ -370,14 +383,17 @@ impl Element for EditorElement {
             }
         }
 
-        // DEBUG: Log how many lines were actually rendered
-        tracing::trace!(
-            "EditorElement rendered {} lines (expected {}..{} = {} lines)",
-            line_layouts.len(),
-            start_display_row,
-            end_display_row,
-            end_display_row - start_display_row
-        );
+        let shape_time = shape_start.elapsed();
+        let total_prepaint = prepaint_start.elapsed();
+        if !is_minimap {
+            tracing::debug!(
+                "prepaint total={:?} (snapshot={:?}, shape={:?}) lines={}",
+                total_prepaint,
+                snapshot_time,
+                shape_time,
+                line_layouts.len()
+            );
+        }
 
         EditorPrepaintState {
             line_layouts,

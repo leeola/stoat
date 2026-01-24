@@ -7,7 +7,10 @@ use crate::git::diff::BufferDiff;
 use gpui::{App, Context, Entity, EventEmitter};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-use std::{sync::Arc, time::SystemTime};
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, ServerId};
 use stoat_rope::{TokenMap, TokenSnapshot};
 use stoat_text::{Language, Parser};
@@ -130,19 +133,83 @@ impl BufferItem {
     ///
     /// Should be called after buffer edits to keep tokens in sync.
     pub fn reparse(&mut self, cx: &App) -> Result<(), String> {
-        let contents = self.buffer.read(cx).text();
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let start = Instant::now();
 
+        let contents = self.buffer.read(cx).text();
+        let text_time = start.elapsed();
+
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let snapshot_time = start.elapsed() - text_time;
+
+        let parse_start = Instant::now();
         match self.parser.parse(&contents, &buffer_snapshot) {
             Ok(tokens) => {
+                let parse_time = parse_start.elapsed();
+                let token_count = tokens.len();
+
+                let replace_start = Instant::now();
                 self.token_map
                     .lock()
                     .replace_tokens(tokens, &buffer_snapshot);
+                let replace_time = replace_start.elapsed();
+
+                let total = start.elapsed();
+                tracing::debug!(
+                    "reparse: total={:?} (text={:?}, snapshot={:?}, parse={:?}, replace={:?}) tokens={} bytes={}",
+                    total, text_time, snapshot_time, parse_time, replace_time, token_count, contents.len()
+                );
                 Ok(())
             },
             Err(e) => {
                 tracing::debug!("Failed to parse buffer: {}", e);
                 Err(format!("Parse error: {e}"))
+            },
+        }
+    }
+
+    /// Reparse buffer content incrementally using edit information.
+    ///
+    /// Uses tree-sitter's incremental parsing for faster syntax tree updates,
+    /// with full token replacement. Falls back to full reparse on failure.
+    pub fn reparse_incremental(
+        &mut self,
+        edits: &[text::Edit<usize>],
+        cx: &App,
+    ) -> Result<(), String> {
+        let start = Instant::now();
+        let contents = self.buffer.read(cx).text();
+        let buffer_snapshot = self.buffer.read(cx).snapshot();
+
+        match self
+            .parser
+            .parse_incremental(&contents, &buffer_snapshot, edits)
+        {
+            Ok(result) => {
+                let parse_time = start.elapsed();
+                let token_count = result.tokens.len();
+
+                let replace_start = Instant::now();
+                self.token_map
+                    .lock()
+                    .replace_tokens(result.tokens, &buffer_snapshot);
+                let replace_time = replace_start.elapsed();
+
+                tracing::debug!(
+                    "reparse_incremental: total={:?} (parse={:?}, replace={:?}) tokens={}",
+                    start.elapsed(),
+                    parse_time,
+                    replace_time,
+                    token_count
+                );
+
+                Ok(())
+            },
+            Err(e) => {
+                tracing::debug!(
+                    "Incremental parse failed, falling back to full reparse: {}",
+                    e
+                );
+                self.reparse(cx)
             },
         }
     }

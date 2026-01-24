@@ -177,9 +177,21 @@ impl Stoat {
         }
 
         // Reparse for syntax highlighting
-        buffer_item.update(cx, |item, cx| {
-            let _ = item.reparse(cx);
-        });
+        // Use incremental for single-cursor (common case), full reparse for multi-cursor
+        if selections_with_offsets.len() == 1 {
+            let (old_offset, _) = &selections_with_offsets[0];
+            let text_edit = text::Edit {
+                old: *old_offset..*old_offset,
+                new: *old_offset..(*old_offset + text_byte_len),
+            };
+            buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse_incremental(&[text_edit], cx);
+            });
+        } else {
+            buffer_item.update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+        }
 
         // Notify LSP servers of the change
         self.send_did_change_notification(cx);
