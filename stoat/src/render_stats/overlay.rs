@@ -179,12 +179,18 @@ impl RenderStatsOverlay {
 /// Displays frame render time which is more accurate than FPS for event-driven UIs.
 pub struct RenderStatsOverlayElement {
     frame_timer: Rc<RefCell<FrameTimer>>,
+    cached_text: RefCell<Option<String>>,
+    cached_shaped: RefCell<Option<gpui::ShapedLine>>,
 }
 
 impl RenderStatsOverlayElement {
     /// Creates a new render stats overlay element.
     pub fn new(frame_timer: Rc<RefCell<FrameTimer>>) -> Self {
-        Self { frame_timer }
+        Self {
+            frame_timer,
+            cached_text: RefCell::new(None),
+            cached_shaped: RefCell::new(None),
+        }
     }
 }
 
@@ -244,13 +250,144 @@ impl Element for RenderStatsOverlayElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Only render if render stats tracking is enabled
         if !is_render_stats_enabled() {
             return;
         }
 
-        // Render the render stats overlay
-        let overlay = RenderStatsOverlay::new(self.frame_timer.clone());
-        overlay.paint(window, cx);
+        let tracker = self.frame_timer.borrow();
+        let avg_ms = tracker.avg_frame_time_ms();
+        let frame_text = format!("Frame: {avg_ms:.1}ms");
+
+        // Use cached shaped text if the string hasn't changed
+        let shaped_text = {
+            let cached_text = self.cached_text.borrow();
+            if cached_text.as_deref() == Some(&frame_text) {
+                self.cached_shaped.borrow().clone()
+            } else {
+                None
+            }
+        };
+
+        let shaped_text = shaped_text.unwrap_or_else(|| {
+            let font = Font {
+                family: SharedString::from("Menlo"),
+                features: Default::default(),
+                weight: FontWeight::NORMAL,
+                style: FontStyle::Normal,
+                fallbacks: None,
+            };
+            let text_run = TextRun {
+                len: frame_text.len(),
+                font,
+                color: Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 0.9,
+                    a: 1.0,
+                },
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window.text_system().shape_line(
+                SharedString::from(frame_text.clone()),
+                px(12.0),
+                &[text_run],
+                None,
+            );
+            *self.cached_text.borrow_mut() = Some(frame_text);
+            *self.cached_shaped.borrow_mut() = Some(shaped.clone());
+            shaped
+        });
+
+        let frame_times = tracker.frame_times();
+        let graph_width = if frame_times.is_empty() {
+            px(0.0)
+        } else {
+            (GRAPH_BAR_WIDTH + GRAPH_BAR_SPACING) * frame_times.len() as f32 - GRAPH_BAR_SPACING
+        };
+
+        let content_width = shaped_text.width.max(graph_width) + OVERLAY_PADDING * 2.0;
+        let content_height = px(16.0) + OVERLAY_PADDING * 3.0 + GRAPH_HEIGHT;
+
+        let overlay_bounds = Bounds {
+            origin: point(px(10.0), px(10.0)),
+            size: size(content_width, content_height),
+        };
+
+        window.paint_quad(gpui::PaintQuad {
+            bounds: overlay_bounds,
+            corner_radii: px(4.0).into(),
+            background: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.1,
+                a: 0.8,
+            }
+            .into(),
+            border_color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.3,
+                a: 0.8,
+            },
+            border_widths: px(1.0).into(),
+            border_style: gpui::BorderStyle::default(),
+        });
+
+        let text_origin = point(
+            overlay_bounds.origin.x + OVERLAY_PADDING,
+            overlay_bounds.origin.y + OVERLAY_PADDING,
+        );
+        let _ = shaped_text.paint(text_origin, px(16.0), window, cx);
+
+        if !frame_times.is_empty() {
+            let graph_origin_y = overlay_bounds.origin.y + px(16.0) + OVERLAY_PADDING * 2.0;
+            let mut bar_x = overlay_bounds.origin.x + OVERLAY_PADDING;
+
+            for &frame_time in frame_times.iter() {
+                let height_ratio = frame_time.as_secs_f64() / GRAPH_CEILING.as_secs_f64();
+                let bar_height = GRAPH_HEIGHT * height_ratio.min(1.0) as f32;
+
+                let color = if frame_time <= TARGET_FRAME_TIME {
+                    Hsla {
+                        h: 120.0,
+                        s: 0.8,
+                        l: 0.5,
+                        a: 0.9,
+                    }
+                } else if frame_time <= TARGET_FRAME_TIME * 2 {
+                    Hsla {
+                        h: 60.0,
+                        s: 0.8,
+                        l: 0.5,
+                        a: 0.9,
+                    }
+                } else {
+                    Hsla {
+                        h: 0.0,
+                        s: 0.8,
+                        l: 0.5,
+                        a: 0.9,
+                    }
+                };
+
+                let bar_bounds = Bounds {
+                    origin: point(bar_x, graph_origin_y + (GRAPH_HEIGHT - bar_height)),
+                    size: size(GRAPH_BAR_WIDTH, bar_height),
+                };
+
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: bar_bounds,
+                    corner_radii: px(1.0).into(),
+                    background: color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+
+                bar_x += GRAPH_BAR_WIDTH + GRAPH_BAR_SPACING;
+            }
+        }
     }
 }

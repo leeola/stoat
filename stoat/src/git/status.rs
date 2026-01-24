@@ -652,13 +652,17 @@ impl GitStatus {
 /// - Context lines in default color
 struct DiffPreviewElement {
     preview: Option<DiffPreviewData>,
+    cached_text_ptr: Option<*const str>,
+    cached_layout: Option<DiffPreviewLayout>,
 }
 
+#[derive(Clone)]
 struct DiffPreviewLayout {
     lines: Vec<ShapedLineWithPosition>,
     bounds: Bounds<Pixels>,
 }
 
+#[derive(Clone)]
 struct ShapedLineWithPosition {
     shaped: ShapedLine,
     position: gpui::Point<Pixels>,
@@ -666,7 +670,11 @@ struct ShapedLineWithPosition {
 
 impl DiffPreviewElement {
     fn new(preview: Option<DiffPreviewData>) -> Self {
-        Self { preview }
+        Self {
+            preview,
+            cached_text_ptr: None,
+            cached_layout: None,
+        }
     }
 }
 
@@ -707,11 +715,25 @@ impl Element for DiffPreviewElement {
         _cx: &mut App,
     ) -> Self::PrepaintState {
         let Some(preview) = &self.preview else {
+            self.cached_text_ptr = None;
+            self.cached_layout = None;
             return DiffPreviewLayout {
                 lines: Vec::new(),
                 bounds,
             };
         };
+
+        let preview_text = preview.text();
+        let text_ptr = preview_text as *const str;
+
+        // Return cached layout if preview hasn't changed and bounds match
+        if self.cached_text_ptr == Some(text_ptr) {
+            if let Some(ref cached) = self.cached_layout {
+                if cached.bounds == bounds {
+                    return cached.clone();
+                }
+            }
+        }
 
         // Font configuration
         let font = Font {
@@ -738,7 +760,7 @@ impl Element for DiffPreviewElement {
         let mut lines = Vec::new();
         let mut y_offset = bounds.origin.y + px(12.0);
 
-        for (line_idx, line_text) in preview.text().lines().enumerate() {
+        for (line_idx, line_text) in preview_text.lines().enumerate() {
             if line_idx >= max_visible_lines {
                 break;
             }
@@ -781,7 +803,10 @@ impl Element for DiffPreviewElement {
             y_offset += line_height;
         }
 
-        DiffPreviewLayout { lines, bounds }
+        let layout = DiffPreviewLayout { lines, bounds };
+        self.cached_text_ptr = Some(text_ptr);
+        self.cached_layout = Some(layout.clone());
+        layout
     }
 
     fn paint(

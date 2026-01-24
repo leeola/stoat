@@ -5,8 +5,8 @@
 
 use crate::{
     editor::{style::EditorStyle, view::EditorView},
-    git::diff::DiffHunkStatus,
-    gutter::{DisplayRowInfo, GutterLayout},
+    git::diff::{BufferDiff, DiffHunkStatus},
+    gutter::{DisplayRow, GutterLayout},
     syntax::HighlightedChunks,
 };
 use gpui::{
@@ -16,6 +16,7 @@ use gpui::{
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoat_lsp::BufferDiagnostic;
+use text::BufferSnapshot;
 
 pub struct EditorElement {
     view: Entity<EditorView>,
@@ -84,9 +85,9 @@ impl Element for EditorElement {
         };
 
         let snapshot_start = Instant::now();
-        // Get buffer snapshot, token snapshot, display snapshot, and display buffer
+        // Get buffer snapshot, token snapshot, display snapshot, diff, and display buffer
         // Batch reads to reduce lock overhead
-        let (buffer_snapshot, token_snapshot, is_in_diff_review, display_map_entity) = {
+        let (buffer_snapshot, token_snapshot, is_in_diff_review, display_map_entity, diff) = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
             let buffer_item_read = buffer_item.read(cx);
@@ -95,12 +96,14 @@ impl Element for EditorElement {
             let token_snapshot = buffer_item_read.token_snapshot();
             let is_in_diff_review = stoat.is_in_diff_review();
             let display_map_entity = stoat.display_map(cx).clone();
+            let diff = buffer_item_read.diff().cloned();
 
             (
                 buffer_snapshot,
                 token_snapshot,
                 is_in_diff_review,
                 display_map_entity,
+                diff,
             )
         };
         // DisplaySnapshot requires mutable access, done separately
@@ -434,42 +437,53 @@ impl Element for EditorElement {
             };
 
         // ===== PHASE 4: Pre-shape diff symbols =====
-        let is_in_diff_review_for_symbols = is_in_diff_review;
-        let strip_width = (0.6 * line_height).floor();
-        let symbol_color = gpui::Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.95,
-            a: 1.0,
-        };
-
+        let diff_strip_width = (0.6 * line_height).floor();
         let shaped_diff_symbols: Vec<(gpui::ShapedLine, Pixels, Pixels)> =
-            if !is_minimap && is_in_diff_review_for_symbols {
+            if !is_minimap && is_in_diff_review {
+                // Shape the three symbols once, then clone for each line
+                let symbol_color = gpui::Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 0.95,
+                    a: 1.0,
+                };
+                let make_text_run = |s: &str| TextRun {
+                    len: s.len(),
+                    font: gutter_font.clone(),
+                    color: symbol_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped_plus = window.text_system().shape_line(
+                    SharedString::from("+"),
+                    font_size,
+                    &[make_text_run("+")],
+                    None,
+                );
+                let shaped_minus = window.text_system().shape_line(
+                    SharedString::from("-"),
+                    font_size,
+                    &[make_text_run("-")],
+                    None,
+                );
+                let shaped_tilde = window.text_system().shape_line(
+                    SharedString::from("~"),
+                    font_size,
+                    &[make_text_run("~")],
+                    None,
+                );
+
                 line_layouts
                     .iter()
                     .filter_map(|layout| {
-                        let symbol = match layout.diff_status {
-                            Some(DiffHunkStatus::Added) => "+",
-                            Some(DiffHunkStatus::Deleted) => "-",
-                            Some(DiffHunkStatus::Modified) => "~",
+                        let shaped = match layout.diff_status {
+                            Some(DiffHunkStatus::Added) => shaped_plus.clone(),
+                            Some(DiffHunkStatus::Deleted) => shaped_minus.clone(),
+                            Some(DiffHunkStatus::Modified) => shaped_tilde.clone(),
                             None => return None,
                         };
-                        let symbol_shared = SharedString::from(symbol);
-                        let text_run = TextRun {
-                            len: symbol_shared.len(),
-                            font: gutter_font.clone(),
-                            color: symbol_color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        };
-                        let shaped = window.text_system().shape_line(
-                            symbol_shared,
-                            font_size,
-                            &[text_run],
-                            None,
-                        );
-                        let x = bounds.origin.x + (strip_width - shaped.width) / 2.0;
+                        let x = bounds.origin.x + (diff_strip_width - shaped.width) / 2.0;
                         Some((shaped, x, layout.y_position))
                     })
                     .collect()
@@ -576,6 +590,13 @@ impl Element for EditorElement {
             Vec::new()
         };
 
+        // Pre-compute strip width for gutter diff indicators
+        let strip_width = if is_in_diff_review {
+            (0.6 * line_height).floor()
+        } else {
+            (0.275 * line_height).floor()
+        };
+
         let total_prepaint = prepaint_start.elapsed();
         if !is_minimap {
             tracing::debug!(
@@ -596,6 +617,9 @@ impl Element for EditorElement {
             shaped_diff_symbols,
             cursor_layout,
             selection_bounds,
+            diff,
+            buffer_snapshot,
+            strip_width,
         }
     }
 
@@ -656,6 +680,9 @@ impl Element for EditorElement {
         // phantoms)
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
 
+        // Pre-compute content X position (constant for all lines)
+        let content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
+
         // Paint all pre-shaped lines (includes both buffer rows and phantom rows)
         for layout in &prepaint.line_layouts {
             // Track buffer row positions for cursor/line numbers
@@ -663,15 +690,13 @@ impl Element for EditorElement {
                 line_positions.push((buffer_row, layout.y_position));
             }
 
-            // Paint the line (backgrounds first, then text)
-            let x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
-
             // Paint backgrounds first
-            if let Err(e) =
-                layout
-                    .shaped
-                    .paint_background(point(x, layout.y_position), line_height, window, cx)
-            {
+            if let Err(e) = layout.shaped.paint_background(
+                point(content_x, layout.y_position),
+                line_height,
+                window,
+                cx,
+            ) {
                 tracing::error!(
                     "Failed to paint background for display row {} (buffer row {:?}): {:?}",
                     layout.display_row,
@@ -684,7 +709,7 @@ impl Element for EditorElement {
             if let Err(e) =
                 layout
                     .shaped
-                    .paint(point(x, layout.y_position), line_height, window, cx)
+                    .paint(point(content_x, layout.y_position), line_height, window, cx)
             {
                 tracing::error!(
                     "Failed to paint display row {} (buffer row {:?}): {:?}",
@@ -702,14 +727,7 @@ impl Element for EditorElement {
             let end_line = line_positions.last().map(|(idx, _)| *idx + 1).unwrap_or(0);
 
             // Paint git diff indicators in gutter (behind line numbers)
-            self.paint_gutter(
-                bounds,
-                start_line..end_line,
-                &prepaint.line_layouts,
-                prepaint.gutter_width,
-                window,
-                cx,
-            );
+            self.paint_gutter(bounds, start_line..end_line, prepaint, window);
 
             // Paint diff symbols (+/-) in gutter
             self.paint_diff_symbols(prepaint, window, cx);
@@ -843,54 +861,30 @@ impl EditorElement {
         &self,
         bounds: Bounds<Pixels>,
         visible_rows: std::ops::Range<u32>,
-        line_layouts: &[ShapedLineLayout],
-        gutter_width: Pixels,
+        prepaint: &EditorPrepaintState,
         window: &mut Window,
-        cx: &mut App,
     ) {
-        if !self.style.show_diff_indicators || gutter_width == Pixels::ZERO {
+        if !self.style.show_diff_indicators || prepaint.gutter_width == Pixels::ZERO {
             return;
         }
-
-        // Get diff from buffer item
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let buffer_item = stoat.active_buffer(cx);
-        let diff = buffer_item.read(cx).diff();
-        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-
-        // Calculate strip width: wider during diff review for better visibility
-        let strip_width = if stoat.is_in_diff_review() {
-            (0.6 * self.style.line_height).floor() // Wider in review mode
-        } else {
-            (0.275 * self.style.line_height).floor() // Normal width
-        };
 
         // Create gutter bounds (left portion of editor)
         let gutter_bounds = Bounds {
             origin: bounds.origin,
-            size: size(gutter_width, bounds.size.height),
+            size: size(prepaint.gutter_width, bounds.size.height),
         };
 
-        // Build display row info from line layouts
-        let display_rows: Vec<DisplayRowInfo> = line_layouts
-            .iter()
-            .map(|layout| DisplayRowInfo {
-                y_position: layout.y_position,
-                diff_status: layout.diff_status,
-            })
-            .collect();
-
-        // Create gutter layout with diff indicators
+        // Create gutter layout with diff indicators (uses precomputed values)
         let gutter_layout = GutterLayout::new(
             gutter_bounds,
             visible_rows,
-            &display_rows,
-            diff,
-            &buffer_snapshot,
-            gutter_width,
+            &prepaint.line_layouts,
+            prepaint.diff.as_ref(),
+            &prepaint.buffer_snapshot,
+            prepaint.gutter_width,
             self.style.padding,
             self.style.line_height,
-            strip_width,
+            prepaint.strip_width,
         );
 
         // Paint diff indicators
@@ -1237,6 +1231,12 @@ pub struct EditorPrepaintState {
     pub cursor_layout: Option<Bounds<Pixels>>,
     /// Pre-computed selection bounds
     pub selection_bounds: Vec<Bounds<Pixels>>,
+    /// Git diff for gutter indicators
+    pub diff: Option<BufferDiff>,
+    /// Buffer snapshot for gutter diff position calculation
+    pub buffer_snapshot: BufferSnapshot,
+    /// Width of diff indicator strip (wider in diff review mode)
+    pub strip_width: Pixels,
 }
 
 /// A single line that has been shaped and is ready to paint.
@@ -1254,6 +1254,16 @@ pub struct ShapedLineLayout {
     pub y_position: Pixels,
     /// Diff status for gutter symbol rendering
     pub diff_status: Option<DiffHunkStatus>,
+}
+
+impl DisplayRow for ShapedLineLayout {
+    fn y_position(&self) -> Pixels {
+        self.y_position
+    }
+
+    fn diff_status(&self) -> Option<DiffHunkStatus> {
+        self.diff_status
+    }
 }
 
 impl IntoElement for EditorElement {

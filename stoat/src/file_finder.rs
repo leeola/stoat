@@ -295,14 +295,18 @@ struct PreviewElement {
     preview: Option<PreviewData>,
     theme: SyntaxTheme,
     highlight_map: HighlightMap,
+    cached_text_ptr: Option<*const str>,
+    cached_layout: Option<PreviewLayout>,
 }
 
 /// Layout state prepared during prepaint
+#[derive(Clone)]
 struct PreviewLayout {
     lines: Vec<ShapedLineWithPosition>,
     bounds: Bounds<Pixels>,
 }
 
+#[derive(Clone)]
 struct ShapedLineWithPosition {
     shaped: ShapedLine,
     position: gpui::Point<Pixels>,
@@ -317,6 +321,8 @@ impl PreviewElement {
             preview,
             theme,
             highlight_map,
+            cached_text_ptr: None,
+            cached_layout: None,
         }
     }
 }
@@ -358,14 +364,25 @@ impl Element for PreviewElement {
         _cx: &mut App,
     ) -> Self::PrepaintState {
         let Some(preview) = &self.preview else {
+            self.cached_text_ptr = None;
+            self.cached_layout = None;
             return PreviewLayout {
                 lines: Vec::new(),
                 bounds,
             };
         };
 
-        // Create buffer snapshot from preview text (avoid cloning - use reference)
         let preview_text = preview.text();
+        let text_ptr = preview_text as *const str;
+
+        // Return cached layout if preview hasn't changed and bounds match
+        if self.cached_text_ptr == Some(text_ptr) {
+            if let Some(ref cached) = self.cached_layout {
+                if cached.bounds == bounds {
+                    return cached.clone();
+                }
+            }
+        }
         let buffer = text::Buffer::new(
             0,
             text::BufferId::new(1).expect("BufferId::new(1) should never fail"),
@@ -486,7 +503,10 @@ impl Element for PreviewElement {
             current_offset = line_end_offset + 1; // +1 for newline character
         }
 
-        PreviewLayout { lines, bounds }
+        let layout = PreviewLayout { lines, bounds };
+        self.cached_text_ptr = Some(text_ptr);
+        self.cached_layout = Some(layout.clone());
+        layout
     }
 
     fn paint(

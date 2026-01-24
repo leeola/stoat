@@ -38,15 +38,10 @@ use gpui::{point, px, size, Bounds, Corners, Pixels, Point};
 use std::ops::Range;
 use text::{BufferSnapshot, ToPoint};
 
-/// Display row info for gutter rendering.
-///
-/// Used to create diff indicators for both buffer rows and phantom rows.
-#[derive(Debug, Clone)]
-pub struct DisplayRowInfo {
-    /// Y position where this row is painted
-    pub y_position: Pixels,
-    /// Diff status for this row
-    pub diff_status: Option<DiffHunkStatus>,
+/// Minimal row info needed for gutter rendering.
+pub trait DisplayRow {
+    fn y_position(&self) -> Pixels;
+    fn diff_status(&self) -> Option<DiffHunkStatus>;
 }
 
 /// Dimensions and position of the gutter area.
@@ -141,10 +136,10 @@ impl GutterLayout {
     /// 3. Position indicators at left edge of gutter
     /// 4. Size indicators based on provided strip_width
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new<T: DisplayRow>(
         gutter_bounds: Bounds<Pixels>,
         visible_rows: Range<u32>,
-        display_rows: &[DisplayRowInfo],
+        display_rows: &[T],
         diff: Option<&BufferDiff>,
         buffer_snapshot: &BufferSnapshot,
         gutter_width: Pixels,
@@ -165,11 +160,12 @@ impl GutterLayout {
         let mut current_group: Option<(DiffHunkStatus, Pixels, Pixels)> = None;
 
         for row in display_rows {
-            if let Some(status) = row.diff_status {
+            if let Some(status) = row.diff_status() {
                 match current_group {
                     Some((group_status, start_y, _)) if group_status == status => {
                         // Extend current group
-                        current_group = Some((group_status, start_y, row.y_position + line_height));
+                        current_group =
+                            Some((group_status, start_y, row.y_position() + line_height));
                     },
                     Some((group_status, start_y, end_y)) => {
                         // Finish current group and start new one
@@ -182,12 +178,12 @@ impl GutterLayout {
                             corner_radii: Corners::all(px(0.0)),
                         });
                         current_group =
-                            Some((status, row.y_position, row.y_position + line_height));
+                            Some((status, row.y_position(), row.y_position() + line_height));
                     },
                     None => {
                         // Start new group
                         current_group =
-                            Some((status, row.y_position, row.y_position + line_height));
+                            Some((status, row.y_position(), row.y_position() + line_height));
                     },
                 }
             } else {
