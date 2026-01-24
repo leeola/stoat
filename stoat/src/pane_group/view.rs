@@ -386,9 +386,11 @@ impl PaneGroupView {
             self.app_state
                 .open_file_finder(current_mode, current_key_context, cx);
 
-            // Update editor's key_context and mode
+            // Update editor's key_context and mode, and connect input buffer reference
+            let input_buffer = self.app_state.file_finder.input.clone();
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.file_finder_input_ref = input_buffer;
                     stoat.set_key_context(KeyContext::FileFinder);
                     stoat.set_mode("file_finder");
                 });
@@ -767,6 +769,39 @@ impl PaneGroupView {
                         .position(|s| s.as_str() == matched_str)
                         .and_then(|idx| visible_commands.get(idx).cloned())
                 })
+                .collect();
+        }
+    }
+
+    fn filter_file_finder_files(&mut self, query: &str) {
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Matcher,
+        };
+
+        let all_files = &self.app_state.file_finder.files;
+
+        if query.is_empty() {
+            self.app_state.file_finder.filtered = all_files
+                .iter()
+                .map(|e| PathBuf::from(e.path.as_unix_str()))
+                .collect();
+        } else {
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+
+            let candidates: Vec<String> = all_files
+                .iter()
+                .map(|e| e.path.as_unix_str().to_string())
+                .collect();
+
+            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+            let mut matches = pattern.match_list(candidate_refs, &mut matcher);
+            matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+            self.app_state.file_finder.filtered = matches
+                .into_iter()
+                .map(|(matched_str, _score)| PathBuf::from(matched_str))
                 .collect();
         }
     }
@@ -2599,6 +2634,9 @@ impl Render for PaneGroupView {
                     buffer_snapshot.text()
                 })
                 .unwrap_or_default();
+
+            self.filter_file_finder_files(&query);
+
             Some((
                 query,
                 self.app_state.file_finder.filtered.clone(),
