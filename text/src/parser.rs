@@ -134,9 +134,18 @@ impl Parser {
                     None => vec![0..text.len()],
                 };
 
-                self.old_tree = Some(new_tree.clone());
-
-                let tokens = convert::tree_to_tokens(&new_tree, text, buffer, self.language);
+                let tokens = if changed_ranges.is_empty() || changed_ranges[0] == (0..text.len()) {
+                    convert::tree_to_tokens(&new_tree, text, buffer, self.language)
+                } else {
+                    convert::tree_to_tokens_in_ranges(
+                        &new_tree,
+                        text,
+                        buffer,
+                        self.language,
+                        &changed_ranges,
+                    )
+                };
+                self.old_tree = Some(new_tree);
 
                 Ok(ParseResult {
                     tokens,

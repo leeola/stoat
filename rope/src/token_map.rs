@@ -68,9 +68,6 @@ impl TokenMap {
                 acc.start.min(r.start)..acc.end.max(r.end)
             });
 
-        let start_anchor = buffer.anchor_before(merged_range.start);
-        let end_anchor = buffer.anchor_after(merged_range.end);
-
         let (prefix_tokens, suffix_tokens) = {
             let mut prefix = Vec::new();
             let mut suffix = Vec::new();
@@ -78,22 +75,14 @@ impl TokenMap {
             cursor.next();
 
             while let Some(token) = cursor.item() {
-                if token.range.end.cmp(&start_anchor, buffer).is_gt() {
-                    break;
-                }
-                prefix.push(token.clone());
-                cursor.next();
-            }
+                let token_end = token.range.end.to_offset(buffer);
+                let token_start = token.range.start.to_offset(buffer);
 
-            while let Some(token) = cursor.item() {
-                if token.range.start.cmp(&end_anchor, buffer).is_ge() {
-                    break;
+                if token_end <= merged_range.start {
+                    prefix.push(token.clone());
+                } else if token_start >= merged_range.end {
+                    suffix.push(token.clone());
                 }
-                cursor.next();
-            }
-
-            while let Some(token) = cursor.item() {
-                suffix.push(token.clone());
                 cursor.next();
             }
 

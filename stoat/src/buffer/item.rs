@@ -189,17 +189,28 @@ impl BufferItem {
                 let token_count = result.tokens.len();
 
                 let replace_start = Instant::now();
-                self.token_map
-                    .lock()
-                    .replace_tokens(result.tokens, &buffer_snapshot);
+                if result.changed_ranges.is_empty()
+                    || result.changed_ranges[0] == (0..contents.len())
+                {
+                    self.token_map
+                        .lock()
+                        .replace_tokens(result.tokens, &buffer_snapshot);
+                } else {
+                    self.token_map.lock().update_tokens_in_ranges(
+                        result.tokens,
+                        &result.changed_ranges,
+                        &buffer_snapshot,
+                    );
+                }
                 let replace_time = replace_start.elapsed();
 
                 tracing::debug!(
-                    "reparse_incremental: total={:?} (parse={:?}, replace={:?}) tokens={}",
+                    "reparse_incremental: total={:?} (parse={:?}, replace={:?}) tokens={} ranges={:?}",
                     start.elapsed(),
                     parse_time,
                     replace_time,
-                    token_count
+                    token_count,
+                    result.changed_ranges.len()
                 );
 
                 Ok(())

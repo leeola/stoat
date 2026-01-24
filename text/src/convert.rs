@@ -1,6 +1,7 @@
 //! Convert tree-sitter AST to flat token list
 
 use crate::language::Language;
+use std::ops::Range;
 use stoat_rope::{Language as RopeLanguage, SyntaxKind, TokenEntry};
 use text::BufferSnapshot;
 use tree_sitter::{Node, Tree};
@@ -15,6 +16,70 @@ pub fn tree_to_tokens(
     let mut tokens = Vec::new();
     walk_tree(tree.root_node(), source, buffer, language, &mut tokens);
     tokens
+}
+
+/// Convert tree-sitter tree to tokens, walking only nodes overlapping changed ranges
+pub fn tree_to_tokens_in_ranges(
+    tree: &Tree,
+    source: &str,
+    buffer: &BufferSnapshot,
+    language: Language,
+    changed_ranges: &[Range<usize>],
+) -> Vec<TokenEntry> {
+    let mut tokens = Vec::new();
+    walk_tree_filtered(
+        tree.root_node(),
+        None,
+        source,
+        buffer,
+        language,
+        changed_ranges,
+        &mut tokens,
+    );
+    tokens
+}
+
+fn walk_tree_filtered(
+    node: Node<'_>,
+    parent: Option<Node<'_>>,
+    source: &str,
+    buffer: &BufferSnapshot,
+    language: Language,
+    changed_ranges: &[Range<usize>],
+    tokens: &mut Vec<TokenEntry>,
+) {
+    let node_range = node.start_byte()..node.end_byte();
+
+    if !ranges_overlap(&node_range, changed_ranges) {
+        return;
+    }
+
+    if node.kind() == "whitespace" {
+        return;
+    }
+
+    if node.child_count() == 0 {
+        create_token_with_context(node, parent, source, buffer, language, tokens);
+    } else {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_tree_filtered(
+                child,
+                Some(node),
+                source,
+                buffer,
+                language,
+                changed_ranges,
+                tokens,
+            );
+        }
+    }
+}
+
+fn ranges_overlap(node_range: &Range<usize>, changed_ranges: &[Range<usize>]) -> bool {
+    changed_ranges
+        .iter()
+        .any(|r| node_range.start < r.end && node_range.end > r.start)
 }
 
 /// Walk tree-sitter tree and extract leaf tokens
