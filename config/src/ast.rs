@@ -40,7 +40,6 @@ pub enum Statement {
     FnDecl(FnDecl),
     FnCall(Spanned<String>),
     PredicateBlock(PredicateBlock),
-    PrefixBlock(PrefixBlock),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,84 +67,80 @@ pub struct PredicateBlock {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PrefixBlock {
-    pub key: Spanned<KeyCombo>,
-    pub body: Vec<Spanned<Statement>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub key: Spanned<KeyCombo>,
     pub action: Spanned<ActionExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyCombo {
-    pub keys: Vec<KeyPart>,
+pub enum Key {
+    Char(char),
+    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyPart {
-    pub modifiers: Vec<String>,
-    pub key: String,
+    pub keys: Vec<Key>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCombo {
+    pub parts: Vec<KeyPart>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
-    Var(Spanned<String>),
     Eq(Spanned<String>, Spanned<Value>),
-    Ne(Spanned<String>, Spanned<Value>),
+    NotEq(Spanned<String>, Spanned<Value>),
     Gt(Spanned<String>, Spanned<Value>),
     Lt(Spanned<String>, Spanned<Value>),
-    Ge(Spanned<String>, Spanned<Value>),
-    Le(Spanned<String>, Spanned<Value>),
+    Gte(Spanned<String>, Spanned<Value>),
+    Lte(Spanned<String>, Spanned<Value>),
     Matches(Spanned<String>, Spanned<String>),
+    Bool(Spanned<String>),
     And(Box<Spanned<Predicate>>, Box<Spanned<Predicate>>),
     Or(Box<Spanned<Predicate>>, Box<Spanned<Predicate>>),
-    Not(Box<Spanned<Predicate>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionExpr {
-    Single(ActionCall),
-    Sequence(Vec<ActionCall>),
+    Single(Action),
+    Sequence(Vec<Spanned<Action>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ActionCall {
+pub struct Action {
     pub name: String,
-    pub args: Vec<Arg>,
+    pub args: Vec<Spanned<Arg>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
-    Positional(Expr),
-    Named(String, Expr),
+    Positional(Spanned<Value>),
+    Named {
+        name: Spanned<String>,
+        value: Spanned<Value>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Ident(String),
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    StateRef(String),
-    Default(Box<Expr>, Box<Expr>),
-    If(Box<Expr>, Box<Expr>, Box<Expr>),
-    Var(String),
-    Eq(Box<Expr>, Box<Expr>),
-    Ne(Box<Expr>, Box<Expr>),
+    Value(Value),
+    If {
+        condition: Box<Spanned<Predicate>>,
+        then_expr: Box<Spanned<Expr>>,
+        else_expr: Box<Spanned<Expr>>,
+    },
+    Variable(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(String),
-    Int(i64),
-    Float(f64),
+    Number(f64),
     Bool(bool),
     Ident(String),
-    Enum(String, String),
-    Array(Vec<Value>),
+    Enum { ty: String, variant: String },
+    Array(Vec<Spanned<Value>>),
     StateRef(String),
 }

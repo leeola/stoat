@@ -1,0 +1,278 @@
+# Stoat Editor Default Keymap Configuration
+#
+# Key syntax: single chars are literal (h, G, 0, $, :), multi-char are named (Space, Enter, Escape).
+# Modifiers use dash separator: ctrl-s, shift-tab.
+# Sequences use spaces: g g, d d, : q.
+
+on key {
+    # TextEditor Context
+    focus == "TextEditor" {
+        # Global bindings (all modes)
+        ctrl-c -> Copy();
+        ctrl-x -> Cut();
+        ctrl-v -> Paste();
+        ctrl-q -> Quit();
+        ctrl-o -> Open();
+        Tab -> Indent();
+        shift-Tab -> Outdent();
+
+        # Normal Mode
+        mode == "normal" {
+            # Navigation
+            h -> MoveLeft();
+            j -> MoveDown();
+            k -> MoveUp();
+            l -> MoveRight();
+            w -> SelectNextSymbol();
+            b -> SelectPrevSymbol();
+            W -> SelectNextToken();
+            B -> SelectPrevToken();
+            0 -> MoveToLineStart();
+            $ -> MoveToLineEnd();
+            g g -> MoveToFileStart();
+            G -> MoveToFileEnd();
+            ctrl-b -> PageUp();
+            ctrl-f -> PageDown();
+            pageup -> PageUp();
+            pagedown -> PageDown();
+
+            # Mode transitions
+            i -> SetMode(insert);
+            v -> SetMode(visual);
+            space -> SetMode(space);
+
+            # Editing
+            x -> DeleteRight();
+            shift-x -> DeleteLeft();
+            d d -> DeleteLine();
+            D -> DeleteToEndOfLine();
+
+            # Undo/Redo
+            u -> Undo();
+            ctrl-r -> Redo();
+
+            # File operations
+            ctrl-s -> Save();
+
+            # Git diff hunks
+            ] h -> GotoNextHunk();
+            [ h -> GotoPrevHunk();
+
+            # Multi-cursor
+            ctrl-shift-l -> SplitSelectionIntoLines();
+            ctrl-d -> SelectNext();
+            ctrl-shift-d -> SelectPrevious();
+            ctrl-shift-g -> SelectAllMatches();
+            ctrl-alt-up -> AddSelectionAbove();
+            ctrl-alt-down -> AddSelectionBelow();
+
+            # Command palette
+            : -> OpenCommandPalette();
+            ; -> OpenCommandPaletteV2();
+
+            # Help
+            ? -> OpenHelpOverlay();
+
+            ctrl-a -> SelectAll();
+        }
+
+        # Insert Mode
+        mode == "insert" {
+            escape -> SetMode(normal);
+
+            # Navigation
+            left -> MoveLeft();
+            right -> MoveRight();
+            up -> MoveUp();
+            down -> MoveDown();
+            alt-left -> MoveWordLeft();
+            alt-right -> MoveWordRight();
+            ctrl-a -> MoveToLineStart();
+            ctrl-e -> MoveToLineEnd();
+
+            # Deletion
+            backspace -> DeleteLeft();
+            delete -> DeleteRight();
+            alt-backspace -> DeleteWordLeft();
+            alt-delete -> DeleteWordRight();
+
+            # Editing
+            enter -> NewLine();
+
+            # File operations
+            ctrl-s -> Save();
+
+            # Undo/Redo
+            ctrl-z -> Undo();
+            ctrl-shift-z -> Redo();
+        }
+
+        # Visual Mode
+        mode == "visual" {
+            escape -> SetMode(normal);
+
+            # Selection movement
+            h -> SelectLeft();
+            j -> SelectDown();
+            k -> SelectUp();
+            l -> SelectRight();
+            left -> SelectLeft();
+            right -> SelectRight();
+            up -> SelectUp();
+            down -> SelectDown();
+            w -> SelectNextSymbol();
+            b -> SelectPrevSymbol();
+            W -> SelectNextToken();
+            B -> SelectPrevToken();
+            0 -> SelectToLineStart();
+            $ -> SelectToLineEnd();
+
+            # Operations on selection
+            y -> Copy();
+            d -> Cut();
+            x -> Cut();
+
+            # Multi-cursor
+            ctrl-shift-l -> SplitSelectionIntoLines();
+            ctrl-d -> SelectNext();
+            ctrl-shift-d -> SelectPrevious();
+            ctrl-shift-g -> SelectAllMatches();
+            ctrl-alt-up -> AddSelectionAbove();
+            ctrl-alt-down -> AddSelectionBelow();
+        }
+
+        # Pane Mode
+        mode == "pane" {
+            escape -> SetMode(normal);
+
+            # Splitting
+            v -> SplitDown();
+            s -> SplitRight();
+            ctrl-v -> SplitRight();
+            ctrl-s -> SplitDown();
+
+            # Close
+            q -> ClosePane();
+
+            # Focus navigation
+            h -> FocusPaneLeft();
+            j -> FocusPaneDown();
+            k -> FocusPaneUp();
+            l -> FocusPaneRight();
+            ctrl-h -> FocusPaneLeft();
+            ctrl-j -> FocusPaneDown();
+            ctrl-k -> FocusPaneUp();
+            ctrl-l -> FocusPaneRight();
+        }
+
+        # Space Mode (leader key)
+        mode == "space" {
+            escape -> SetMode(normal);
+            a -> SetMode(pane);
+            p -> OpenFileFinder();
+            b -> OpenBufferFinder();
+            g -> OpenGitStatus();
+            d -> ToggleDiffHunk();
+            r -> OpenDiffReview();
+        }
+    }
+
+    # FileFinder Context
+    focus == "FileFinder" {
+        escape -> SetKeyContext(TextEditor);
+        up -> FileFinderPrev();
+        down -> FileFinderNext();
+        ctrl-p -> FileFinderPrev();
+        ctrl-n -> FileFinderNext();
+        backspace -> DeleteLeft();
+        enter -> FileFinderSelect();
+    }
+
+    # BufferFinder Context
+    focus == "BufferFinder" {
+        escape -> SetKeyContext(TextEditor);
+        up -> BufferFinderPrev();
+        down -> BufferFinderNext();
+        ctrl-p -> BufferFinderPrev();
+        ctrl-n -> BufferFinderNext();
+        backspace -> DeleteLeft();
+        enter -> BufferFinderSelect();
+    }
+
+    # CommandPalette Context
+    focus == "CommandPalette" {
+        escape -> SetKeyContext(TextEditor);
+        up -> CommandPalettePrev();
+        down -> CommandPaletteNext();
+        ctrl-p -> CommandPalettePrev();
+        ctrl-n -> CommandPaletteNext();
+        enter -> CommandPaletteExecute();
+        backspace -> DeleteLeft();
+        ctrl-h -> ToggleCommandPaletteHidden();
+    }
+
+    # CommandPaletteV2 Context
+    focus == "CommandPaletteV2" {
+        escape -> DismissCommandPaletteV2();
+        up -> SelectPrevCommandV2();
+        down -> SelectNextCommandV2();
+        ctrl-p -> SelectPrevCommandV2();
+        ctrl-n -> SelectNextCommandV2();
+        enter -> AcceptCommandPaletteV2();
+        backspace -> DeleteLeft();
+    }
+
+    # Git Context
+    focus == "Git" {
+        mode == "git_status" {
+            escape -> SetKeyContext(TextEditor);
+            j -> GitStatusNext();
+            k -> GitStatusPrev();
+            down -> GitStatusNext();
+            up -> GitStatusPrev();
+            ctrl-n -> GitStatusNext();
+            ctrl-p -> GitStatusPrev();
+            enter -> GitStatusSelect();
+            f -> SetMode(git_filter);
+        }
+
+        mode == "git_filter" {
+            escape -> SetMode(git_status);
+            a -> GitStatusSetFilterAll();
+            s -> GitStatusSetFilterStaged();
+            u -> GitStatusSetFilterUnstaged();
+            w -> GitStatusSetFilterUnstagedWithUntracked();
+            t -> GitStatusSetFilterUntracked();
+        }
+    }
+
+    # DiffReview Context
+    focus == "DiffReview" {
+        escape -> SetKeyContext(TextEditor);
+        j -> DiffReviewNextHunk();
+        k -> DiffReviewPrevHunk();
+        down -> DiffReviewNextHunk();
+        up -> DiffReviewPrevHunk();
+        ctrl-n -> DiffReviewNextHunk();
+        ctrl-p -> DiffReviewPrevHunk();
+        space -> DiffReviewApproveHunk();
+        a -> DiffReviewApproveHunk();
+        enter -> DiffReviewApproveHunk();
+        t -> DiffReviewToggleApproval();
+        n -> DiffReviewNextUnreviewedHunk();
+        R -> DiffReviewResetProgress();
+        ? -> OpenHelpOverlay();
+        : q -> DiffReviewDismiss();
+        c -> DiffReviewCycleComparisonMode();
+    }
+
+    # HelpModal Context
+    focus == "HelpModal" {
+        escape -> SetKeyContext(TextEditor);
+    }
+
+    # AboutModal Context
+    focus == "AboutModal" {
+        escape -> SetKeyContext(TextEditor);
+    }
+}
