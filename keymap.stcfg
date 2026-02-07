@@ -2,7 +2,6 @@
 #
 # Key syntax: single chars are literal (h, G, 0, $, :), multi-char are named (Space, Enter, Escape).
 # Modifiers use dash separator: ctrl-s, shift-tab.
-# Sequences use spaces: g g, d d, : q.
 
 on key {
     # TextEditor Context
@@ -29,7 +28,6 @@ on key {
             B -> SelectPrevToken();
             0 -> MoveToLineStart();
             $ -> MoveToLineEnd();
-            g g -> MoveToFileStart();
             G -> MoveToFileEnd();
             ctrl-b -> PageUp();
             ctrl-f -> PageDown();
@@ -44,7 +42,6 @@ on key {
             # Editing
             x -> DeleteRight();
             shift-x -> DeleteLeft();
-            d d -> DeleteLine();
             D -> DeleteToEndOfLine();
 
             # Undo/Redo
@@ -53,10 +50,6 @@ on key {
 
             # File operations
             ctrl-s -> Save();
-
-            # Git diff hunks
-            ] h -> GotoNextHunk();
-            [ h -> GotoPrevHunk();
 
             # Multi-cursor
             ctrl-shift-l -> SplitSelectionIntoLines();
@@ -262,7 +255,7 @@ on key {
         n -> DiffReviewNextUnreviewedHunk();
         R -> DiffReviewResetProgress();
         ? -> OpenHelpOverlay();
-        : q -> DiffReviewDismiss();
+        q -> DiffReviewDismiss();
         c -> DiffReviewCycleComparisonMode();
     }
 

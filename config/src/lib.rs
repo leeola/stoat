@@ -3,8 +3,8 @@ mod error;
 mod parser;
 
 pub use ast::{
-    Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyCombo,
-    KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, Value,
+    Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart,
+    LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, Value,
 };
 pub use error::{format_errors, ParseError};
 
@@ -95,16 +95,14 @@ mod tests {
     fn single_char_keys() {
         let config = parse_ok("on key { h -> MoveLeft(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 1);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('h')]);
+        assert_eq!(binding.key.node.keys, vec![key_char('h')]);
     }
 
     #[test]
     fn uppercase_char_keys() {
         let config = parse_ok("on key { G -> MoveToFileEnd(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 1);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('G')]);
+        assert_eq!(binding.key.node.keys, vec![key_char('G')]);
         match &binding.action.node {
             ActionExpr::Single(action) => assert_eq!(action.name, "MoveToFileEnd"),
             _ => panic!("expected single action"),
@@ -115,41 +113,28 @@ mod tests {
     fn digit_keys() {
         let config = parse_ok("on key { 0 -> MoveToLineStart(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('0')]);
+        assert_eq!(binding.key.node.keys, vec![key_char('0')]);
     }
 
     #[test]
     fn punctuation_keys() {
         let config = parse_ok("on key { $ -> MoveToLineEnd(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('$')]);
-    }
-
-    #[test]
-    fn bracket_keys() {
-        let config = parse_ok("on key { ] h -> GotoNextHunk(); }");
-        let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 2);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char(']')]);
-        assert_eq!(binding.key.node.parts[1].keys, vec![key_char('h')]);
+        assert_eq!(binding.key.node.keys, vec![key_char('$')]);
     }
 
     #[test]
     fn colon_key() {
         let config = parse_ok("on key { : -> OpenCommandPalette(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char(':')]);
+        assert_eq!(binding.key.node.keys, vec![key_char(':')]);
     }
 
     #[test]
     fn modifier_shorthand() {
         let config = parse_ok("on key { C-s -> Save(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 1);
-        assert_eq!(
-            binding.key.node.parts[0].keys,
-            vec![key_char('C'), key_char('s')]
-        );
+        assert_eq!(binding.key.node.keys, vec![key_char('C'), key_char('s')]);
     }
 
     #[test]
@@ -157,7 +142,7 @@ mod tests {
         let config = parse_ok("on key { C-S-p -> CommandPalette(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
         assert_eq!(
-            binding.key.node.parts[0].keys,
+            binding.key.node.keys,
             vec![key_char('C'), key_char('S'), key_char('p')]
         );
     }
@@ -167,7 +152,7 @@ mod tests {
         let config = parse_ok("on key { Ctrl-s -> Save(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
         assert_eq!(
-            binding.key.node.parts[0].keys,
+            binding.key.node.keys,
             vec![key_named("Ctrl"), key_char('s')]
         );
     }
@@ -176,52 +161,28 @@ mod tests {
     fn cmd_modifier() {
         let config = parse_ok("on key { Cmd-s -> Save(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(
-            binding.key.node.parts[0].keys,
-            vec![key_named("Cmd"), key_char('s')]
-        );
+        assert_eq!(binding.key.node.keys, vec![key_named("Cmd"), key_char('s')]);
     }
 
     #[test]
     fn named_keys() {
         let config = parse_ok("on key { Space -> SetMode(space); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_named("Space")]);
+        assert_eq!(binding.key.node.keys, vec![key_named("Space")]);
     }
 
     #[test]
     fn escape_key() {
         let config = parse_ok("on key { Escape -> SetMode(normal); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_named("Escape")]);
-    }
-
-    #[test]
-    fn key_sequences() {
-        let config = parse_ok("on key { g g -> MoveToFileStart(); }");
-        let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 2);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('g')]);
-        assert_eq!(binding.key.node.parts[1].keys, vec![key_char('g')]);
-    }
-
-    #[test]
-    fn key_sequence_with_named() {
-        let config = parse_ok("on key { : q -> Dismiss(); }");
-        let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 2);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char(':')]);
-        assert_eq!(binding.key.node.parts[1].keys, vec![key_char('q')]);
+        assert_eq!(binding.key.node.keys, vec![key_named("Escape")]);
     }
 
     #[test]
     fn modifier_with_named_key() {
         let config = parse_ok("on key { S-Tab -> Outdent(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(
-            binding.key.node.parts[0].keys,
-            vec![key_char('S'), key_named("Tab")]
-        );
+        assert_eq!(binding.key.node.keys, vec![key_char('S'), key_named("Tab")]);
     }
 
     #[test]
@@ -574,7 +535,7 @@ mod tests {
 
     #[test]
     fn action_sequences() {
-        let config = parse_ok("on key { C-k C-c -> [SelectLine(), Comment()]; }");
+        let config = parse_ok("on key { C-k -> [SelectLine(), Comment()]; }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
         match &binding.action.node {
             ActionExpr::Sequence(actions) => {
@@ -782,29 +743,16 @@ mod tests {
     }
 
     #[test]
-    fn d_d_key_sequence() {
-        let config = parse_ok("on key { d d -> DeleteLine(); }");
-        let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 2);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_char('d')]);
-        assert_eq!(binding.key.node.parts[1].keys, vec![key_char('d')]);
-    }
-
-    #[test]
     fn chord_keys() {
         let config = parse_ok("on key { h-j -> Diagonal(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts.len(), 1);
-        assert_eq!(
-            binding.key.node.parts[0].keys,
-            vec![key_char('h'), key_char('j')]
-        );
+        assert_eq!(binding.key.node.keys, vec![key_char('h'), key_char('j')]);
     }
 
     #[test]
     fn f_keys() {
         let config = parse_ok("on key { F1 -> Help(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
-        assert_eq!(binding.key.node.parts[0].keys, vec![key_named("F1")]);
+        assert_eq!(binding.key.node.keys, vec![key_named("F1")]);
     }
 }

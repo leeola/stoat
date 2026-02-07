@@ -1,8 +1,7 @@
 use crate::{
     ast::{
         Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key,
-        KeyCombo, KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Spanned, Statement,
-        Value,
+        KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Spanned, Statement, Value,
     },
     error::ParseError,
 };
@@ -218,15 +217,8 @@ fn key_part() -> impl Parser<char, KeyPart, Error = Simple<char>> + Clone {
         .map(|keys| KeyPart { keys })
 }
 
-fn key_combo() -> impl Parser<char, KeyCombo, Error = Simple<char>> + Clone {
-    key_part()
-        .separated_by(just(' ').repeated().at_least(1))
-        .at_least(1)
-        .map(|parts| KeyCombo { parts })
-}
-
-fn spanned_key_combo() -> impl Parser<char, Spanned<KeyCombo>, Error = Simple<char>> + Clone {
-    key_combo().map_with_span(Spanned::new)
+fn spanned_key_part() -> impl Parser<char, Spanned<KeyPart>, Error = Simple<char>> + Clone {
+    key_part().map_with_span(Spanned::new)
 }
 
 fn arg() -> impl Parser<char, Spanned<Arg>, Error = Simple<char>> + Clone {
@@ -372,7 +364,7 @@ fn setting() -> impl Parser<char, Setting, Error = Simple<char>> + Clone {
 }
 
 fn binding() -> impl Parser<char, Binding, Error = Simple<char>> + Clone {
-    spanned_key_combo()
+    spanned_key_part()
         .then_ignore(ws())
         .then_ignore(just("->"))
         .then_ignore(ws())

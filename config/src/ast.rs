@@ -68,7 +68,7 @@ pub struct PredicateBlock {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
-    pub key: Spanned<KeyCombo>,
+    pub key: Spanned<KeyPart>,
     pub action: Spanned<ActionExpr>,
 }
 
@@ -81,11 +81,6 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyPart {
     pub keys: Vec<Key>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyCombo {
-    pub parts: Vec<KeyPart>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
