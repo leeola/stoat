@@ -6551,6 +6551,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
+ "stoat_config",
  "stoat_log",
  "stoat_lsp",
  "stoat_rope",

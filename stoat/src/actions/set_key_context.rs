@@ -31,7 +31,7 @@ impl Stoat {
     ///
     /// # Behavior
     ///
-    /// - Each KeyContext has a default mode defined in keymap.toml
+    /// - Each KeyContext has a default mode defined in keymap.stcfg
     /// - Setting context automatically switches to default mode
     /// - Example: SetKeyContext(Git) sets context to Git and mode to "git_status"
     /// - Within Git context, can switch between git_status and git_filter modes
@@ -55,7 +55,7 @@ impl Stoat {
     ///
     /// # Integration
     ///
-    /// Called by [`crate::actions::SetKeyContext`] action, bound in keymap.toml to
+    /// Called by [`crate::actions::SetKeyContext`] action, bound in keymap.stcfg to
     /// keys that switch contexts (e.g., Escape to return to TextEditor, Space+g for
     /// Git). The GUI layer listens to the Changed event to update rendered UI.
     ///

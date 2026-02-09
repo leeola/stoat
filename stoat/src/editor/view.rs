@@ -1,7 +1,10 @@
 use crate::{
-    actions::*,
     buffer::item::BufferItemEvent,
     editor::{element::EditorElement, style::EditorStyle},
+    keymap::{
+        compiled::CompiledKey,
+        dispatch::{dispatch_editor_action, dispatch_pane_action},
+    },
     scroll,
     stoat::{KeyContext, Stoat},
 };
@@ -60,673 +63,10 @@ impl EditorView {
         self.focus_handle.is_focused(window)
     }
 
-    // ==== Action handlers ====
-
-    fn handle_insert_text(
-        &mut self,
-        command: &InsertText,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // For TextEditor context, only allow insertion in insert mode
-        // For other contexts (FileFinder, CommandPalette, etc), always allow
-        let key_context = self.stoat.read(cx).key_context();
-        let mode = self.stoat.read(cx).mode().to_string();
-
-        if key_context == KeyContext::TextEditor && mode != "insert" {
-            return; // No-op for normal/visual/etc modes
-        }
-
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.insert_text(&command.0, cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_left(
-        &mut self,
-        _: &DeleteLeft,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_left(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_right(
-        &mut self,
-        _: &DeleteRight,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_right(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_word_left(
-        &mut self,
-        _: &DeleteWordLeft,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_word_left(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_word_right(
-        &mut self,
-        _: &DeleteWordRight,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_word_right(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_next_symbol(
-        &mut self,
-        _: &SelectNextSymbol,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_next_symbol(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_prev_symbol(
-        &mut self,
-        _: &SelectPrevSymbol,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_prev_symbol(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_next_token(
-        &mut self,
-        _: &SelectNextToken,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_next_token(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_prev_token(
-        &mut self,
-        _: &SelectPrevToken,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_prev_token(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_left(
-        &mut self,
-        _: &SelectLeft,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_left(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_right(
-        &mut self,
-        _: &SelectRight,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_right(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_up(&mut self, _: &SelectUp, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_up(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_down(
-        &mut self,
-        _: &SelectDown,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_down(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_to_line_start(
-        &mut self,
-        _: &SelectToLineStart,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_to_line_start(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_to_line_end(
-        &mut self,
-        _: &SelectToLineEnd,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_to_line_end(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_split_selection_into_lines(
-        &mut self,
-        _: &SplitSelectionIntoLines,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.split_selection_into_lines(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_next(
-        &mut self,
-        _: &SelectNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_next(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_previous(
-        &mut self,
-        _: &SelectPrevious,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_previous(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_select_all_matches(
-        &mut self,
-        _: &SelectAllMatches,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.select_all_matches(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_add_selection_above(
-        &mut self,
-        _: &AddSelectionAbove,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.add_selection_above(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_add_selection_below(
-        &mut self,
-        _: &AddSelectionBelow,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.add_selection_below(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_new_line(&mut self, _: &NewLine, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.new_line(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_line(
-        &mut self,
-        _: &DeleteLine,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_line(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_delete_to_end_of_line(
-        &mut self,
-        _: &DeleteToEndOfLine,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.delete_to_end_of_line(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_up(&mut self, _: &MoveUp, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_up(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_down(&mut self, _: &MoveDown, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_down(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_left(&mut self, _: &MoveLeft, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_left(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_right(
-        &mut self,
-        _: &MoveRight,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_right(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_to_line_start(
-        &mut self,
-        _: &MoveToLineStart,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_to_line_start(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_to_line_end(
-        &mut self,
-        _: &MoveToLineEnd,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_to_line_end(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_word_left(
-        &mut self,
-        _: &MoveWordLeft,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_word_left(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_word_right(
-        &mut self,
-        _: &MoveWordRight,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_word_right(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_to_file_start(
-        &mut self,
-        _: &MoveToFileStart,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_to_file_start(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_move_to_file_end(
-        &mut self,
-        _: &MoveToFileEnd,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.move_to_file_end(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_page_up(&mut self, _: &PageUp, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.page_up(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_page_down(&mut self, _: &PageDown, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.page_down(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_insert_mode(
-        &mut self,
-        _: &EnterInsertMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_insert_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_normal_mode(
-        &mut self,
-        _: &EnterNormalMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_normal_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_space_mode(
-        &mut self,
-        _: &EnterSpaceMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_space_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_pane_mode(
-        &mut self,
-        _: &EnterPaneMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_pane_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_git_filter_mode(
-        &mut self,
-        _: &EnterGitFilterMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_git_filter_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_enter_visual_mode(
-        &mut self,
-        _: &EnterVisualMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.enter_visual_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_set_key_context(
-        &mut self,
-        action: &SetKeyContext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.handle_set_key_context(action.0, cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_set_mode(
-        &mut self,
-        action: &SetMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.set_mode_by_name(&action.0, cx);
-        });
-        cx.notify();
-    }
-
-    // FIXME: BufferFinder handlers moved to PaneGroupView
-    // FIXME: GitStatus handlers moved to PaneGroupView
-
-    fn handle_toggle_diff_hunk(
-        &mut self,
-        _: &ToggleDiffHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        tracing::info!("handle_toggle_diff_hunk called in EditorView");
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.toggle_diff_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_goto_next_hunk(
-        &mut self,
-        _: &GotoNextHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.goto_next_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_goto_prev_hunk(
-        &mut self,
-        _: &GotoPrevHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.goto_prev_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_next_hunk(
-        &mut self,
-        _: &DiffReviewNextHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_next_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_prev_hunk(
-        &mut self,
-        _: &DiffReviewPrevHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_prev_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_approve_hunk(
-        &mut self,
-        _: &DiffReviewApproveHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_approve_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_dismiss(
-        &mut self,
-        _: &DiffReviewDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_dismiss(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_toggle_approval(
-        &mut self,
-        _: &DiffReviewToggleApproval,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_toggle_approval(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_next_unreviewed_hunk(
-        &mut self,
-        _: &DiffReviewNextUnreviewedHunk,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_next_unreviewed_hunk(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_reset_progress(
-        &mut self,
-        _: &DiffReviewResetProgress,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_reset_progress(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_diff_review_cycle_comparison_mode(
-        &mut self,
-        _: &DiffReviewCycleComparisonMode,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            stoat.diff_review_cycle_comparison_mode(cx);
-        });
-        cx.notify();
-    }
-
-    fn handle_write_file(
-        &mut self,
-        _: &WriteFile,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.stoat.update(cx, |stoat, cx| {
-            if let Err(e) = stoat.write_file(cx) {
-                tracing::error!("WriteFile action failed: {}", e);
-            }
-        });
-        cx.notify();
-    }
-
-    fn handle_write_all(&mut self, _: &WriteAll, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.stoat.update(cx, |stoat, cx| {
-            if let Err(e) = stoat.write_all(cx) {
-                tracing::error!("WriteAll action failed: {}", e);
-            }
-        });
-        cx.notify();
-    }
-
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         debug!(
@@ -734,10 +74,33 @@ impl EditorView {
             event.keystroke, event.keystroke.key_char
         );
 
+        let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
+
+        // Look up in compiled keymap
+        let matched_action = {
+            let stoat = self.stoat.read(cx);
+            stoat
+                .compiled_keymap
+                .lookup(&compiled_key, stoat)
+                .map(|binding| binding.action.clone())
+        };
+
+        if let Some(action) = matched_action {
+            if dispatch_editor_action(&self.stoat, &action, cx) {
+                cx.notify();
+                return;
+            }
+            if dispatch_pane_action(&self.stoat, &action, cx) {
+                cx.notify();
+                return;
+            }
+            return;
+        }
+
+        // No keymap match: InsertText fallback for text-input contexts
         let key_context = self.stoat.read(cx).key_context();
         let mode = self.stoat.read(cx).mode().to_string();
 
-        // Only dispatch InsertText for contexts/modes that allow text input
         let should_insert = match key_context {
             KeyContext::FileFinder | KeyContext::CommandPalette | KeyContext::BufferFinder => true,
             KeyContext::TextEditor => mode == "insert",
@@ -746,7 +109,10 @@ impl EditorView {
 
         if should_insert {
             if let Some(key_char) = &event.keystroke.key_char {
-                window.dispatch_action(Box::new(InsertText(key_char.clone())), cx);
+                self.stoat.update(cx, |stoat, cx| {
+                    stoat.insert_text(key_char, cx);
+                });
+                cx.notify();
             }
         }
     }
@@ -760,8 +126,6 @@ impl Focusable for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let mode = self.stoat.read(cx).mode().to_string();
-
         let view_entity = self
             .this
             .clone()
@@ -769,73 +133,7 @@ impl Render for EditorView {
 
         div()
             .id("editor")
-            .key_context({
-                let context = self.stoat.read(cx).key_context();
-                let mut ctx = gpui::KeyContext::new_with_defaults();
-                ctx.add(context.as_str());
-                ctx.set("mode", mode.clone());
-                ctx
-            })
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::handle_insert_text))
-            .on_action(cx.listener(Self::handle_delete_left))
-            .on_action(cx.listener(Self::handle_delete_right))
-            .on_action(cx.listener(Self::handle_delete_word_left))
-            .on_action(cx.listener(Self::handle_delete_word_right))
-            .on_action(cx.listener(Self::handle_select_next_symbol))
-            .on_action(cx.listener(Self::handle_select_prev_symbol))
-            .on_action(cx.listener(Self::handle_select_next_token))
-            .on_action(cx.listener(Self::handle_select_prev_token))
-            .on_action(cx.listener(Self::handle_select_left))
-            .on_action(cx.listener(Self::handle_select_right))
-            .on_action(cx.listener(Self::handle_select_up))
-            .on_action(cx.listener(Self::handle_select_down))
-            .on_action(cx.listener(Self::handle_select_to_line_start))
-            .on_action(cx.listener(Self::handle_select_to_line_end))
-            .on_action(cx.listener(Self::handle_split_selection_into_lines))
-            .on_action(cx.listener(Self::handle_select_next))
-            .on_action(cx.listener(Self::handle_select_previous))
-            .on_action(cx.listener(Self::handle_select_all_matches))
-            .on_action(cx.listener(Self::handle_add_selection_above))
-            .on_action(cx.listener(Self::handle_add_selection_below))
-            .on_action(cx.listener(Self::handle_new_line))
-            .on_action(cx.listener(Self::handle_delete_line))
-            .on_action(cx.listener(Self::handle_delete_to_end_of_line))
-            .on_action(cx.listener(Self::handle_move_up))
-            .on_action(cx.listener(Self::handle_move_down))
-            .on_action(cx.listener(Self::handle_move_left))
-            .on_action(cx.listener(Self::handle_move_right))
-            .on_action(cx.listener(Self::handle_move_to_line_start))
-            .on_action(cx.listener(Self::handle_move_to_line_end))
-            .on_action(cx.listener(Self::handle_move_word_left))
-            .on_action(cx.listener(Self::handle_move_word_right))
-            .on_action(cx.listener(Self::handle_move_to_file_start))
-            .on_action(cx.listener(Self::handle_move_to_file_end))
-            .on_action(cx.listener(Self::handle_page_up))
-            .on_action(cx.listener(Self::handle_page_down))
-            .on_action(cx.listener(Self::handle_enter_insert_mode))
-            .on_action(cx.listener(Self::handle_enter_normal_mode))
-            .on_action(cx.listener(Self::handle_enter_visual_mode))
-            .on_action(cx.listener(Self::handle_enter_space_mode))
-            .on_action(cx.listener(Self::handle_enter_pane_mode))
-            .on_action(cx.listener(Self::handle_enter_git_filter_mode))
-            .on_action(cx.listener(Self::handle_set_key_context))
-            .on_action(cx.listener(Self::handle_set_mode))
-            // FIXME: BufferFinder actions now handled by PaneGroupView
-            // FIXME: GitStatus actions now handled by PaneGroupView
-            .on_action(cx.listener(Self::handle_toggle_diff_hunk))
-            .on_action(cx.listener(Self::handle_goto_next_hunk))
-            .on_action(cx.listener(Self::handle_goto_prev_hunk))
-            .on_action(cx.listener(Self::handle_diff_review_next_hunk))
-            .on_action(cx.listener(Self::handle_diff_review_prev_hunk))
-            .on_action(cx.listener(Self::handle_diff_review_approve_hunk))
-            .on_action(cx.listener(Self::handle_diff_review_toggle_approval))
-            .on_action(cx.listener(Self::handle_diff_review_next_unreviewed_hunk))
-            .on_action(cx.listener(Self::handle_diff_review_reset_progress))
-            .on_action(cx.listener(Self::handle_diff_review_dismiss))
-            .on_action(cx.listener(Self::handle_diff_review_cycle_comparison_mode))
-            .on_action(cx.listener(Self::handle_write_file))
-            .on_action(cx.listener(Self::handle_write_all))
             .on_key_down(cx.listener(Self::handle_key_down))
             .on_scroll_wheel(cx.listener(
                 |view: &mut EditorView,

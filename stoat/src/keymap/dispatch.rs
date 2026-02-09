@@ -1,0 +1,217 @@
+use crate::{
+    keymap::compiled::{action_first_string_arg, action_name},
+    stoat::{KeyContext, Stoat, StoatEvent},
+};
+use gpui::{AppContext, Entity};
+use stoat_config::ActionExpr;
+
+/// Dispatch an editor-level action directly on the [`Stoat`] entity.
+///
+/// Handles movement, editing, selection, mode transitions, diff review,
+/// and file write actions. Returns `true` if the action was recognized
+/// and dispatched.
+pub fn dispatch_editor_action<C: AppContext>(
+    stoat: &Entity<Stoat>,
+    action: &ActionExpr,
+    cx: &mut C,
+) -> bool {
+    let name = action_name(action);
+
+    macro_rules! ed {
+        ($stoat:ident, $cx:ident, |$s:ident, $c:ident| $body:expr) => {{
+            let _ = $stoat.update($cx, |$s, $c| $body);
+        }};
+    }
+
+    match name {
+        "MoveLeft" => ed!(stoat, cx, |s, cx| s.move_left(cx)),
+        "MoveRight" => ed!(stoat, cx, |s, cx| s.move_right(cx)),
+        "MoveUp" => ed!(stoat, cx, |s, cx| s.move_up(cx)),
+        "MoveDown" => ed!(stoat, cx, |s, cx| s.move_down(cx)),
+        "MoveWordLeft" => ed!(stoat, cx, |s, cx| s.move_word_left(cx)),
+        "MoveWordRight" => ed!(stoat, cx, |s, cx| s.move_word_right(cx)),
+        "MoveToLineStart" => ed!(stoat, cx, |s, cx| s.move_to_line_start(cx)),
+        "MoveToLineEnd" => ed!(stoat, cx, |s, cx| s.move_to_line_end(cx)),
+        "MoveToFileStart" => ed!(stoat, cx, |s, cx| s.move_to_file_start(cx)),
+        "MoveToFileEnd" => ed!(stoat, cx, |s, cx| s.move_to_file_end(cx)),
+        "PageUp" => ed!(stoat, cx, |s, cx| s.page_up(cx)),
+        "PageDown" => ed!(stoat, cx, |s, cx| s.page_down(cx)),
+
+        "DeleteLeft" => ed!(stoat, cx, |s, cx| s.delete_left(cx)),
+        "DeleteRight" => ed!(stoat, cx, |s, cx| s.delete_right(cx)),
+        "DeleteWordLeft" => ed!(stoat, cx, |s, cx| s.delete_word_left(cx)),
+        "DeleteWordRight" => ed!(stoat, cx, |s, cx| s.delete_word_right(cx)),
+        "NewLine" => ed!(stoat, cx, |s, cx| s.new_line(cx)),
+        "DeleteLine" => ed!(stoat, cx, |s, cx| s.delete_line(cx)),
+        "DeleteToEndOfLine" => ed!(stoat, cx, |s, cx| s.delete_to_end_of_line(cx)),
+
+        "SelectNextSymbol" => ed!(stoat, cx, |s, cx| s.select_next_symbol(cx)),
+        "SelectPrevSymbol" => ed!(stoat, cx, |s, cx| s.select_prev_symbol(cx)),
+        "SelectNextToken" => ed!(stoat, cx, |s, cx| s.select_next_token(cx)),
+        "SelectPrevToken" => ed!(stoat, cx, |s, cx| s.select_prev_token(cx)),
+        "SelectLeft" => ed!(stoat, cx, |s, cx| s.select_left(cx)),
+        "SelectRight" => ed!(stoat, cx, |s, cx| s.select_right(cx)),
+        "SelectUp" => ed!(stoat, cx, |s, cx| s.select_up(cx)),
+        "SelectDown" => ed!(stoat, cx, |s, cx| s.select_down(cx)),
+        "SelectToLineStart" => ed!(stoat, cx, |s, cx| s.select_to_line_start(cx)),
+        "SelectToLineEnd" => ed!(stoat, cx, |s, cx| s.select_to_line_end(cx)),
+        "SplitSelectionIntoLines" => ed!(stoat, cx, |s, cx| s.split_selection_into_lines(cx)),
+        "SelectNext" => ed!(stoat, cx, |s, cx| s.select_next(cx)),
+        "SelectPrevious" => ed!(stoat, cx, |s, cx| s.select_previous(cx)),
+        "SelectAllMatches" => ed!(stoat, cx, |s, cx| s.select_all_matches(cx)),
+        "AddSelectionAbove" => ed!(stoat, cx, |s, cx| s.add_selection_above(cx)),
+        "AddSelectionBelow" => ed!(stoat, cx, |s, cx| s.add_selection_below(cx)),
+
+        "SetMode" => {
+            if let Some(mode_name) = action_first_string_arg(action) {
+                let _ = stoat.update(cx, |s, cx| s.set_mode_by_name(&mode_name, cx));
+            }
+        },
+        "EnterInsertMode" => ed!(stoat, cx, |s, cx| s.enter_insert_mode(cx)),
+        "EnterNormalMode" => ed!(stoat, cx, |s, cx| s.enter_normal_mode(cx)),
+        "EnterVisualMode" => ed!(stoat, cx, |s, cx| s.enter_visual_mode(cx)),
+        "EnterSpaceMode" => ed!(stoat, cx, |s, cx| s.enter_space_mode(cx)),
+        "EnterPaneMode" => ed!(stoat, cx, |s, cx| s.enter_pane_mode(cx)),
+        "EnterGitFilterMode" => ed!(stoat, cx, |s, cx| s.enter_git_filter_mode(cx)),
+
+        "SetKeyContext" => {
+            if let Some(ctx_name) = action_first_string_arg(action) {
+                if let Ok(key_context) = KeyContext::from_str(&ctx_name) {
+                    let _ = stoat.update(cx, |s, cx| s.handle_set_key_context(key_context, cx));
+                }
+            }
+        },
+
+        "ToggleDiffHunk" => ed!(stoat, cx, |s, cx| s.toggle_diff_hunk(cx)),
+        "GotoNextHunk" => ed!(stoat, cx, |s, cx| s.goto_next_hunk(cx)),
+        "GotoPrevHunk" => ed!(stoat, cx, |s, cx| s.goto_prev_hunk(cx)),
+
+        "DiffReviewNextHunk" => ed!(stoat, cx, |s, cx| s.diff_review_next_hunk(cx)),
+        "DiffReviewPrevHunk" => ed!(stoat, cx, |s, cx| s.diff_review_prev_hunk(cx)),
+        "DiffReviewApproveHunk" => ed!(stoat, cx, |s, cx| s.diff_review_approve_hunk(cx)),
+        "DiffReviewToggleApproval" => ed!(stoat, cx, |s, cx| s.diff_review_toggle_approval(cx)),
+        "DiffReviewNextUnreviewedHunk" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_next_unreviewed_hunk(cx))
+        },
+        "DiffReviewResetProgress" => ed!(stoat, cx, |s, cx| s.diff_review_reset_progress(cx)),
+        "DiffReviewDismiss" => ed!(stoat, cx, |s, cx| s.diff_review_dismiss(cx)),
+        "DiffReviewCycleComparisonMode" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_cycle_comparison_mode(cx))
+        },
+
+        "WriteFile" | "Save" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.write_file(cx) {
+                    tracing::error!("WriteFile failed: {}", e);
+                }
+            });
+        },
+        "WriteAll" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.write_all(cx) {
+                    tracing::error!("WriteAll failed: {}", e);
+                }
+            });
+        },
+
+        _ => return false,
+    }
+
+    true
+}
+
+/// Dispatch a pane-level action by emitting [`StoatEvent::Action`].
+///
+/// Handles actions that require the [`PaneGroupView`] layer: pane management,
+/// finders, command palette, git status, help/about modals, and application
+/// quit. Returns `true` if the action was recognized.
+pub fn dispatch_pane_action<C: AppContext>(
+    stoat: &Entity<Stoat>,
+    action: &ActionExpr,
+    cx: &mut C,
+) -> bool {
+    let name = action_name(action);
+
+    let is_pane_action = matches!(
+        name,
+        // Pane management
+        "SplitUp"
+            | "SplitDown"
+            | "SplitLeft"
+            | "SplitRight"
+            | "Quit"
+            | "ClosePane"
+            | "FocusPaneUp"
+            | "FocusPaneDown"
+            | "FocusPaneLeft"
+            | "FocusPaneRight"
+            // Finders
+            | "OpenFileFinder"
+            | "FileFinderNext"
+            | "FileFinderPrev"
+            | "FileFinderSelect"
+            | "FileFinderDismiss"
+            | "OpenBufferFinder"
+            | "BufferFinderNext"
+            | "BufferFinderPrev"
+            | "BufferFinderSelect"
+            | "BufferFinderDismiss"
+            // Command palette
+            | "OpenCommandPalette"
+            | "CommandPaletteNext"
+            | "CommandPalettePrev"
+            | "CommandPaletteExecute"
+            | "CommandPaletteDismiss"
+            | "ToggleCommandPaletteHidden"
+            | "OpenCommandPaletteV2"
+            | "DismissCommandPaletteV2"
+            | "AcceptCommandPaletteV2"
+            | "SelectNextCommandV2"
+            | "SelectPrevCommandV2"
+            // Git status
+            | "OpenGitStatus"
+            | "GitStatusNext"
+            | "GitStatusPrev"
+            | "GitStatusSelect"
+            | "GitStatusDismiss"
+            | "GitStatusCycleFilter"
+            | "GitStatusSetFilterAll"
+            | "GitStatusSetFilterStaged"
+            | "GitStatusSetFilterUnstaged"
+            | "GitStatusSetFilterUnstagedWithUntracked"
+            | "GitStatusSetFilterUntracked"
+            // Help/About
+            | "OpenHelpOverlay"
+            | "OpenHelpModal"
+            | "HelpModalDismiss"
+            | "OpenAboutModal"
+            | "AboutModalDismiss"
+            // View
+            | "ToggleMinimap"
+            | "ShowMinimapOnScroll"
+            // Diff review (open from pane level)
+            | "OpenDiffReview"
+            // Command line
+            | "ShowCommandLine"
+            | "CommandLineDismiss"
+            | "ChangeDirectory"
+            // Application
+            | "QuitAll"
+    );
+
+    if !is_pane_action {
+        return false;
+    }
+
+    let action_name = name.to_string();
+    let args: Vec<String> = action_first_string_arg(action).into_iter().collect();
+
+    let _ = stoat.update(cx, |_, cx| {
+        cx.emit(StoatEvent::Action {
+            name: action_name,
+            args,
+        });
+    });
+
+    true
+}

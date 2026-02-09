@@ -20,18 +20,19 @@ use crate::{
     pane_group::element::pane_axis,
     render_stats::{FrameTimer, RenderStatsOverlayElement},
     status_bar::StatusBar,
-    stoat::{KeyContext, Stoat},
+    stoat::{KeyContext, Stoat, StoatEvent},
 };
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
     Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Window,
+    Subscription, Window,
 };
 use std::{
     cell::RefCell,
     collections::HashMap,
     path::PathBuf,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tracing::debug;
@@ -143,7 +144,7 @@ pub struct PaneGroupView {
     pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
     active_pane: PaneId,
     focus_handle: FocusHandle,
-    keymap: Rc<gpui::Keymap>,
+    compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
     file_finder_scroll: ScrollHandle,
     command_palette_scroll: ScrollHandle,
     buffer_finder_scroll: ScrollHandle,
@@ -159,6 +160,11 @@ pub struct PaneGroupView {
     minimap_fade_state: MinimapFadeState,
     /// Help overlay visibility (non-modal overlay showing hint to press ? again)
     help_overlay_visible: bool,
+    /// Subscriptions to StoatEvent::Action on each pane's Stoat entity
+    stoat_subscriptions: Vec<Subscription>,
+    /// Pending actions queued from StoatEvent::Action, processed in render() (which has window
+    /// access)
+    pending_actions: Vec<(String, Vec<String>)>,
 }
 
 impl PaneGroupView {
@@ -176,7 +182,7 @@ impl PaneGroupView {
     pub fn new(
         config: crate::Config,
         initial_paths: Vec<std::path::PathBuf>,
-        keymap: Rc<gpui::Keymap>,
+        compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         // Create workspace state first (this creates worktree and buffer_store)
@@ -189,6 +195,7 @@ impl PaneGroupView {
                 app_state.worktree.clone(),
                 app_state.buffer_store.clone(),
                 None,
+                compiled_keymap.clone(),
                 cx,
             );
 
@@ -263,13 +270,21 @@ impl PaneGroupView {
             minimap_view
         };
 
+        let initial_stoat_ref = initial_editor.read(cx).stoat.clone();
+        let initial_sub = cx.subscribe(&initial_stoat_ref, |this: &mut Self, _stoat, event, cx| {
+            if let StoatEvent::Action { name, args } = event {
+                this.pending_actions.push((name.clone(), args.clone()));
+                cx.notify();
+            }
+        });
+
         Self {
             app_state,
             pane_group,
             pane_contents,
             active_pane: initial_pane_id,
             focus_handle: cx.focus_handle(),
-            keymap,
+            compiled_keymap,
             file_finder_scroll: ScrollHandle::new(),
             command_palette_scroll: ScrollHandle::new(),
             buffer_finder_scroll: ScrollHandle::new(),
@@ -280,6 +295,8 @@ impl PaneGroupView {
             last_editor_scroll_y: None,
             minimap_fade_state: MinimapFadeState::Hidden,
             help_overlay_visible: false,
+            stoat_subscriptions: vec![initial_sub],
+            pending_actions: Vec::new(),
         }
     }
 
@@ -363,6 +380,238 @@ impl PaneGroupView {
                 minimap_view.stoat = new_minimap_stoat;
                 cx.notify();
             });
+        }
+    }
+
+    fn subscribe_to_stoat(&mut self, stoat: &Entity<Stoat>, cx: &mut Context<'_, Self>) {
+        let sub = cx.subscribe(stoat, |this: &mut Self, _stoat, event, cx| {
+            if let StoatEvent::Action { name, args } = event {
+                this.pending_actions.push((name.clone(), args.clone()));
+                cx.notify();
+            }
+        });
+        self.stoat_subscriptions.push(sub);
+    }
+
+    fn dispatch_action_by_name(
+        &mut self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::keymap::dispatch::dispatch_editor_action;
+        use stoat_config::{Action, ActionExpr};
+
+        let action = ActionExpr::Single(Action {
+            name: name.to_string(),
+            args: vec![],
+        });
+
+        // Try editor-level dispatch first
+        if let Some(editor) = self.active_editor().cloned() {
+            let stoat = editor.read(cx).stoat.clone();
+            if dispatch_editor_action(&stoat, &action, cx) {
+                cx.notify();
+                return;
+            }
+        }
+
+        // Fall through to pane-level dispatch
+        self.pending_actions.push((name.to_string(), vec![]));
+        self.process_pending_actions(window, cx);
+    }
+
+    fn process_pending_actions(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let actions = std::mem::take(&mut self.pending_actions);
+        for (name, _args) in actions {
+            match name.as_str() {
+                "SplitUp" => self.handle_split_up(&SplitUp, window, cx),
+                "SplitDown" => self.handle_split_down(&SplitDown, window, cx),
+                "SplitLeft" => self.handle_split_left(&SplitLeft, window, cx),
+                "SplitRight" => self.handle_split_right(&SplitRight, window, cx),
+                "Quit" | "ClosePane" => self.handle_quit(&Quit, window, cx),
+                "FocusPaneUp" => self.handle_focus_pane_up(&FocusPaneUp, window, cx),
+                "FocusPaneDown" => self.handle_focus_pane_down(&FocusPaneDown, window, cx),
+                "FocusPaneLeft" => self.handle_focus_pane_left(&FocusPaneLeft, window, cx),
+                "FocusPaneRight" => self.handle_focus_pane_right(&FocusPaneRight, window, cx),
+                "OpenFileFinder" => self.handle_open_file_finder(&OpenFileFinder, window, cx),
+                "FileFinderNext" => {
+                    self.handle_file_finder_next(&crate::actions::FileFinderNext, window, cx);
+                },
+                "FileFinderPrev" => {
+                    self.handle_file_finder_prev(&crate::actions::FileFinderPrev, window, cx);
+                },
+                "FileFinderSelect" => {
+                    self.handle_file_finder_select(&crate::actions::FileFinderSelect, window, cx);
+                },
+                "FileFinderDismiss" => {
+                    self.handle_file_finder_dismiss(&crate::actions::FileFinderDismiss, window, cx);
+                },
+                "OpenCommandPalette" => {
+                    self.handle_open_command_palette(&OpenCommandPalette, window, cx);
+                },
+                "CommandPaletteNext" => {
+                    self.handle_command_palette_next(
+                        &crate::actions::CommandPaletteNext,
+                        window,
+                        cx,
+                    );
+                },
+                "CommandPalettePrev" => {
+                    self.handle_command_palette_prev(
+                        &crate::actions::CommandPalettePrev,
+                        window,
+                        cx,
+                    );
+                },
+                "CommandPaletteExecute" => {
+                    self.handle_command_palette_execute(
+                        &crate::actions::CommandPaletteExecute,
+                        window,
+                        cx,
+                    );
+                },
+                "CommandPaletteDismiss" => {
+                    self.handle_command_palette_dismiss(
+                        &crate::actions::CommandPaletteDismiss,
+                        window,
+                        cx,
+                    );
+                },
+                "ToggleCommandPaletteHidden" => {
+                    self.handle_command_palette_toggle_hidden(
+                        &crate::actions::ToggleCommandPaletteHidden,
+                        window,
+                        cx,
+                    );
+                },
+                "OpenCommandPaletteV2" => {
+                    self.handle_open_command_palette_v2(&OpenCommandPaletteV2, window, cx);
+                },
+                "DismissCommandPaletteV2" => {
+                    self.handle_dismiss_command_palette_v2(&DismissCommandPaletteV2, window, cx);
+                },
+                "AcceptCommandPaletteV2" => {
+                    self.handle_accept_command_palette_v2(
+                        &crate::actions::AcceptCommandPaletteV2,
+                        window,
+                        cx,
+                    );
+                },
+                "SelectNextCommandV2" => {
+                    self.handle_select_next_command_v2(&SelectNextCommandV2, window, cx);
+                },
+                "SelectPrevCommandV2" => {
+                    self.handle_select_prev_command_v2(&SelectPrevCommandV2, window, cx);
+                },
+                "OpenBufferFinder" => {
+                    self.handle_open_buffer_finder(&OpenBufferFinder, window, cx);
+                },
+                "BufferFinderNext" => {
+                    self.handle_buffer_finder_next(&crate::actions::BufferFinderNext, window, cx);
+                },
+                "BufferFinderPrev" => {
+                    self.handle_buffer_finder_prev(&crate::actions::BufferFinderPrev, window, cx);
+                },
+                "BufferFinderSelect" => {
+                    self.handle_buffer_finder_select(
+                        &crate::actions::BufferFinderSelect,
+                        window,
+                        cx,
+                    );
+                },
+                "BufferFinderDismiss" => {
+                    self.handle_buffer_finder_dismiss(
+                        &crate::actions::BufferFinderDismiss,
+                        window,
+                        cx,
+                    );
+                },
+                "OpenGitStatus" => self.handle_open_git_status(&OpenGitStatus, window, cx),
+                "GitStatusNext" => {
+                    self.handle_git_status_next(&GitStatusNext, window, cx);
+                },
+                "GitStatusPrev" => {
+                    self.handle_git_status_prev(&GitStatusPrev, window, cx);
+                },
+                "GitStatusSelect" => {
+                    self.handle_git_status_select(&GitStatusSelect, window, cx);
+                },
+                "GitStatusDismiss" => {
+                    self.handle_git_status_dismiss(&GitStatusDismiss, window, cx);
+                },
+                "GitStatusCycleFilter" => {
+                    self.handle_git_status_cycle_filter(&GitStatusCycleFilter, window, cx);
+                },
+                "GitStatusSetFilterAll" => {
+                    self.handle_git_status_set_filter_all(&GitStatusSetFilterAll, window, cx);
+                },
+                "GitStatusSetFilterStaged" => {
+                    self.handle_git_status_set_filter_staged(&GitStatusSetFilterStaged, window, cx);
+                },
+                "GitStatusSetFilterUnstaged" => {
+                    self.handle_git_status_set_filter_unstaged(
+                        &GitStatusSetFilterUnstaged,
+                        window,
+                        cx,
+                    );
+                },
+                "GitStatusSetFilterUnstagedWithUntracked" => {
+                    self.handle_git_status_set_filter_unstaged_with_untracked(
+                        &GitStatusSetFilterUnstagedWithUntracked,
+                        window,
+                        cx,
+                    );
+                },
+                "GitStatusSetFilterUntracked" => {
+                    self.handle_git_status_set_filter_untracked(
+                        &GitStatusSetFilterUntracked,
+                        window,
+                        cx,
+                    );
+                },
+                "OpenDiffReview" => self.handle_open_diff_review(&OpenDiffReview, window, cx),
+                "OpenHelpOverlay" => {
+                    self.handle_open_help_overlay(&OpenHelpOverlay, window, cx);
+                },
+                "OpenHelpModal" => self.handle_open_help_modal(&OpenHelpModal, window, cx),
+                "HelpModalDismiss" => {
+                    self.handle_help_modal_dismiss(&HelpModalDismiss, window, cx);
+                },
+                "OpenAboutModal" => self.handle_open_about_modal(&OpenAboutModal, window, cx),
+                "AboutModalDismiss" => {
+                    self.handle_about_modal_dismiss(&AboutModalDismiss, window, cx);
+                },
+                "ToggleMinimap" => self.handle_toggle_minimap(&ToggleMinimap, window, cx),
+                "ShowMinimapOnScroll" => {
+                    self.handle_show_minimap_on_scroll(&ShowMinimapOnScroll, window, cx);
+                },
+                "ShowCommandLine" => {
+                    self.handle_show_command_line(&crate::actions::ShowCommandLine, window, cx);
+                },
+                "CommandLineDismiss" => {
+                    self.handle_command_line_dismiss(
+                        &crate::actions::CommandLineDismiss,
+                        window,
+                        cx,
+                    );
+                },
+                "ChangeDirectory" => {
+                    if let Some(path) = _args.first() {
+                        self.handle_change_directory(
+                            &crate::actions::ChangeDirectory {
+                                path: std::path::PathBuf::from(path),
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                },
+                "QuitAll" => cx.quit(),
+                _ => {
+                    tracing::warn!("Unknown pane action: {}", name);
+                },
+            }
         }
     }
 
@@ -684,33 +933,28 @@ impl PaneGroupView {
         cx.notify();
     }
 
-    /// Handle command palette execute action
     fn handle_command_palette_execute(
         &mut self,
         _: &crate::actions::CommandPaletteExecute,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Get the selected command's TypeId
-        let type_id = if self.app_state.command_palette.selected
+        let command_name = if self.app_state.command_palette.selected
             < self.app_state.command_palette.filtered.len()
         {
             Some(
                 self.app_state.command_palette.filtered[self.app_state.command_palette.selected]
-                    .type_id,
+                    .name
+                    .clone(),
             )
         } else {
             None
         };
 
-        // Dismiss the command palette first
         self.handle_command_palette_dismiss(&crate::actions::CommandPaletteDismiss, window, cx);
 
-        // Dispatch the selected command via the active editor
-        if let (Some(type_id), Some(editor)) = (type_id, self.active_editor().cloned()) {
-            editor.update(cx, |_editor, cx| {
-                crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
-            });
+        if let Some(name) = command_name {
+            self.dispatch_action_by_name(&name, window, cx);
         }
 
         cx.notify();
@@ -897,22 +1141,17 @@ impl PaneGroupView {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        // Get the selected command's TypeId
-        let type_id = self
+        let command_name = self
             .app_state
             .command_palette_v2
             .as_ref()
             .and_then(|p| p.read(cx).selected_command())
-            .map(|cmd| cmd.type_id);
+            .map(|cmd| cmd.name.clone());
 
-        // Dismiss the palette first
         self.handle_dismiss_command_palette_v2(&DismissCommandPaletteV2, window, cx);
 
-        // Dispatch the selected command
-        if let (Some(type_id), Some(editor)) = (type_id, self.active_editor().cloned()) {
-            editor.update(cx, |_editor, cx| {
-                crate::dispatch::dispatch_command_by_type_id(type_id, window, cx);
-            });
+        if let Some(name) = command_name {
+            self.dispatch_action_by_name(&name, window, cx);
         }
 
         cx.notify();
@@ -1773,11 +2012,16 @@ impl PaneGroupView {
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
                     None,
+                    self.compiled_keymap.clone(),
                     cx,
                 )
             })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        {
+            let stoat = new_editor.read(cx).stoat.clone();
+            self.subscribe_to_stoat(&stoat, cx);
+        }
 
         // Set entity reference so EditorView can pass it to EditorElement
         new_editor.update(cx, |view, _| {
@@ -1830,11 +2074,16 @@ impl PaneGroupView {
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
                     None,
+                    self.compiled_keymap.clone(),
                     cx,
                 )
             })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        {
+            let stoat = new_editor.read(cx).stoat.clone();
+            self.subscribe_to_stoat(&stoat, cx);
+        }
 
         // Set entity reference so EditorView can pass it to EditorElement
         new_editor.update(cx, |view, _| {
@@ -1887,11 +2136,16 @@ impl PaneGroupView {
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
                     None,
+                    self.compiled_keymap.clone(),
                     cx,
                 )
             })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        {
+            let stoat = new_editor.read(cx).stoat.clone();
+            self.subscribe_to_stoat(&stoat, cx);
+        }
 
         // Set entity reference so EditorView can pass it to EditorElement
         new_editor.update(cx, |view, _| {
@@ -1944,11 +2198,16 @@ impl PaneGroupView {
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
                     None,
+                    self.compiled_keymap.clone(),
                     cx,
                 )
             })
         };
         let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
+        {
+            let stoat = new_editor.read(cx).stoat.clone();
+            self.subscribe_to_stoat(&stoat, cx);
+        }
 
         // Set entity reference so EditorView can pass it to EditorElement
         new_editor.update(cx, |view, _| {
@@ -2356,6 +2615,11 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // Process any pending actions from StoatEvent::Action subscriptions
+        if !self.pending_actions.is_empty() {
+            self.process_pending_actions(window, cx);
+        }
+
         // Track scroll position for ScrollHint mode
         // Extract early to avoid borrow conflicts with later code
         let current_scroll_y = self
@@ -2729,7 +2993,7 @@ impl Render for PaneGroupView {
         }
 
         // Query keymap for bindings in the current mode
-        let bindings = crate::keymap::query::bindings_for_mode(&self.keymap, &active_mode);
+        let bindings = crate::keymap::query::bindings_for_mode(&self.compiled_keymap, &active_mode);
 
         // Calculate minimap thumb bounds using pre-extracted data
         // Following Zed's architecture: thumb is sized and positioned using minimap line heights
@@ -2768,60 +3032,6 @@ impl Render for PaneGroupView {
                     .flex_1()
                     .relative() // Enable absolute positioning for overlay
                     .track_focus(&self.focus_handle)
-                    .on_action(cx.listener(Self::handle_split_up))
-                    .on_action(cx.listener(Self::handle_split_down))
-                    .on_action(cx.listener(Self::handle_split_left))
-                    .on_action(cx.listener(Self::handle_split_right))
-                    .on_action(cx.listener(Self::handle_quit))
-                    .on_action(cx.listener(Self::handle_focus_pane_up))
-                    .on_action(cx.listener(Self::handle_focus_pane_down))
-                    .on_action(cx.listener(Self::handle_focus_pane_left))
-                    .on_action(cx.listener(Self::handle_focus_pane_right))
-                    .on_action(cx.listener(Self::handle_open_file_finder))
-                    .on_action(cx.listener(Self::handle_file_finder_next))
-                    .on_action(cx.listener(Self::handle_file_finder_prev))
-                    .on_action(cx.listener(Self::handle_file_finder_select))
-                    .on_action(cx.listener(Self::handle_file_finder_dismiss))
-                    .on_action(cx.listener(Self::handle_open_command_palette))
-                    .on_action(cx.listener(Self::handle_command_palette_next))
-                    .on_action(cx.listener(Self::handle_command_palette_prev))
-                    .on_action(cx.listener(Self::handle_command_palette_dismiss))
-                    .on_action(cx.listener(Self::handle_command_palette_toggle_hidden))
-                    .on_action(cx.listener(Self::handle_command_palette_execute))
-                    .on_action(cx.listener(Self::handle_open_command_palette_v2))
-                    .on_action(cx.listener(Self::handle_dismiss_command_palette_v2))
-                    .on_action(cx.listener(Self::handle_accept_command_palette_v2))
-                    .on_action(cx.listener(Self::handle_select_next_command_v2))
-                    .on_action(cx.listener(Self::handle_select_prev_command_v2))
-                    .on_action(cx.listener(Self::handle_show_command_line))
-                    .on_action(cx.listener(Self::handle_command_line_dismiss))
-                    .on_action(cx.listener(Self::handle_change_directory))
-                    .on_action(cx.listener(Self::handle_open_buffer_finder))
-                    .on_action(cx.listener(Self::handle_buffer_finder_next))
-                    .on_action(cx.listener(Self::handle_buffer_finder_prev))
-                    .on_action(cx.listener(Self::handle_buffer_finder_select))
-                    .on_action(cx.listener(Self::handle_buffer_finder_dismiss))
-                    .on_action(cx.listener(Self::handle_open_git_status))
-                    .on_action(cx.listener(Self::handle_git_status_next))
-                    .on_action(cx.listener(Self::handle_git_status_prev))
-                    .on_action(cx.listener(Self::handle_git_status_select))
-                    .on_action(cx.listener(Self::handle_git_status_dismiss))
-                    .on_action(cx.listener(Self::handle_git_status_cycle_filter))
-                    .on_action(cx.listener(Self::handle_git_status_set_filter_all))
-                    .on_action(cx.listener(Self::handle_git_status_set_filter_staged))
-                    .on_action(cx.listener(Self::handle_git_status_set_filter_unstaged))
-                    .on_action(
-                        cx.listener(Self::handle_git_status_set_filter_unstaged_with_untracked),
-                    )
-                    .on_action(cx.listener(Self::handle_git_status_set_filter_untracked))
-                    .on_action(cx.listener(Self::handle_open_diff_review))
-                    .on_action(cx.listener(Self::handle_open_help_overlay))
-                    .on_action(cx.listener(Self::handle_open_help_modal))
-                    .on_action(cx.listener(Self::handle_help_modal_dismiss))
-                    .on_action(cx.listener(Self::handle_open_about_modal))
-                    .on_action(cx.listener(Self::handle_about_modal_dismiss))
-                    .on_action(cx.listener(Self::handle_toggle_minimap))
-                    .on_action(cx.listener(Self::handle_show_minimap_on_scroll))
                     .child(self.render_member(self.pane_group.root(), 0))
                     .when(key_context == KeyContext::FileFinder, |div| {
                         // Render file finder overlay when in FileFinder context

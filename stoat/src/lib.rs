@@ -33,7 +33,6 @@ pub mod worktree;
 pub mod app;
 pub mod app_state;
 pub mod content_view;
-pub mod dispatch;
 pub mod gutter;
 pub mod minimap;
 pub mod pane_group;

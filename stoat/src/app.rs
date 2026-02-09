@@ -1,6 +1,6 @@
-use crate::pane_group::PaneGroupView;
+use crate::{keymap::compiled::CompiledKeymap, pane_group::PaneGroupView};
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
-use std::{rc::Rc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 #[cfg(debug_assertions)]
 pub fn run_with_paths(
@@ -31,14 +31,20 @@ fn run_with_paths_impl(
         // Load configuration with optional override from CLI --config or STOAT_CONFIG env var
         let config = crate::Config::load_with_overrides(config_path.as_deref()).unwrap_or_default();
 
-        // Register keybindings
-        let keymap = Rc::new(crate::keymap::create_default_keymap());
-        cx.bind_keys(keymap.bindings().cloned());
-
-        // Register global action handlers
-        cx.on_action(|_: &crate::actions::QuitAll, cx: &mut App| {
-            cx.quit();
-        });
+        // Build compiled keymap from stcfg
+        let stcfg_source = include_str!("../../keymap.stcfg");
+        let (stcfg_config, errors) = stoat_config::parse(stcfg_source);
+        if !errors.is_empty() {
+            tracing::warn!(
+                "keymap.stcfg parse errors:\n{}",
+                stoat_config::format_errors(stcfg_source, &errors)
+            );
+        }
+        let compiled_keymap = Arc::new(
+            stcfg_config
+                .map(|c| CompiledKeymap::compile(&c))
+                .unwrap_or_else(|| CompiledKeymap { bindings: vec![] }),
+        );
 
         // Size window to 80% of screen size
         let window_size = cx
@@ -59,7 +65,7 @@ fn run_with_paths_impl(
             move |window, cx| {
                 // Create PaneGroupView (handles workspace, stoat, and editor initialization)
                 let pane_group_view = cx.new(|cx| {
-                    PaneGroupView::new(config.clone(), paths.clone(), keymap.clone(), cx)
+                    PaneGroupView::new(config.clone(), paths.clone(), compiled_keymap.clone(), cx)
                 });
 
                 // Setup LSP progress tracking to enable automatic UI updates

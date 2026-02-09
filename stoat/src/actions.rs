@@ -2071,6 +2071,20 @@ pub fn help_text(action: &dyn Action) -> Option<&'static str> {
     HELP_TEXT.get(&action.type_id()).copied()
 }
 
+/// Get help text for an action by its string name (e.g., "MoveLeft").
+pub fn help_text_by_name(name: &str) -> Option<&'static str> {
+    static HELP_BY_NAME: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
+        let mut map = HashMap::new();
+        for (type_id, action_name) in ACTION_NAMES.iter() {
+            if let Some(text) = HELP_TEXT.get(type_id) {
+                map.insert(*action_name, *text);
+            }
+        }
+        map
+    });
+    HELP_BY_NAME.get(name).copied()
+}
+
 /// Map from TypeId to action aliases
 pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLock::new(|| {
     let mut aliases = HashMap::new();

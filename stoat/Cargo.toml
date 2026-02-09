@@ -13,6 +13,7 @@ clock = { workspace = true }
 stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
 stoat_text_transform = { path = "../text_transform" }
+stoat_config = { path = "../config" }
 stoat_log = { path = "../log" }
 stoat_lsp = { path = "../lsp" }
 lsp-types = "0.97"

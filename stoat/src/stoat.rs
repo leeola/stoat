@@ -181,6 +181,8 @@ pub struct CommandInfo {
 pub enum StoatEvent {
     /// Editor content or state changed
     Changed,
+    /// Pane-level action dispatched from the compiled keymap
+    Action { name: String, args: Vec<String> },
 }
 
 /// Main editor entity.
@@ -335,9 +337,30 @@ pub struct Stoat {
     /// [`select_previous`](Self::select_previous) and reused for subsequent
     /// invocations with the same query.
     pub(crate) select_prev_state: Option<crate::editor::state::SelectNextState>,
+
+    /// Compiled keymap from stcfg configuration, shared across all views.
+    pub(crate) compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
 }
 
 impl EventEmitter<StoatEvent> for Stoat {}
+
+impl crate::keymap::compiled::KeymapState for Stoat {
+    fn get_string(&self, name: &str) -> Option<&str> {
+        match name {
+            "focus" => Some(self.key_context.as_str()),
+            "mode" => Some(&self.mode),
+            _ => None,
+        }
+    }
+
+    fn get_number(&self, _name: &str) -> Option<f64> {
+        None
+    }
+
+    fn get_bool(&self, _name: &str) -> Option<bool> {
+        None
+    }
+}
 
 impl Stoat {
     /// Create new Stoat entity.
@@ -356,9 +379,18 @@ impl Stoat {
         worktree: Arc<Mutex<Worktree>>,
         buffer_store: Entity<BufferStore>,
         lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
+        compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_text(config, worktree, buffer_store, lsp_manager, "", cx)
+        Self::new_with_text(
+            config,
+            worktree,
+            buffer_store,
+            lsp_manager,
+            compiled_keymap,
+            "",
+            cx,
+        )
     }
 
     /// Create new Stoat with specific initial buffer text (primarily for tests).
@@ -367,6 +399,7 @@ impl Stoat {
         worktree: Arc<Mutex<Worktree>>,
         buffer_store: Entity<BufferStore>,
         lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
+        compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
         initial_text: &str,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -392,11 +425,8 @@ impl Stoat {
         let buffer_snapshot = buffer.read(cx).snapshot();
         let selections = SelectionsCollection::new(&buffer_snapshot);
 
-        // Initialize mode registry from keymap.toml
-        let modes = crate::keymap::parse_modes_from_config();
-
-        // Initialize KeyContext registry from keymap.toml
-        let contexts = crate::keymap::parse_contexts_from_config();
+        let modes = crate::keymap::default_modes();
+        let contexts = crate::keymap::default_contexts();
         let key_context = KeyContext::TextEditor; // Default context
 
         // Initialize DisplayMap for coordinate transformations
@@ -459,6 +489,7 @@ impl Stoat {
             display_map,
             select_next_state: None,
             select_prev_state: None,
+            compiled_keymap,
         }
     }
 
@@ -532,6 +563,7 @@ impl Stoat {
             display_map: self.display_map.clone(),
             select_next_state: None,
             select_prev_state: None,
+            compiled_keymap: self.compiled_keymap.clone(),
         }
     }
 
@@ -1487,10 +1519,10 @@ impl Stoat {
             lsp_manager: self.lsp_manager.clone(),
             worktree: self.worktree.clone(),
             parent_stoat: Some(parent_weak),
-            display_map: self.display_map.clone(), /* Minimap shares parent's DisplayMap (cheap
-                                                    * Entity clone) */
+            display_map: self.display_map.clone(),
             select_next_state: None,
             select_prev_state: None,
+            compiled_keymap: self.compiled_keymap.clone(),
         })
     }
 

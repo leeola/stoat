@@ -29,7 +29,7 @@ impl Stoat {
     /// # Behavior
     ///
     /// - Does NOT change KeyContext (UI stays the same)
-    /// - Changes active keybindings based on mode in keymap.toml
+    /// - Changes active keybindings based on mode in keymap.stcfg
     /// - Example: Switching from "git_status" to "git_filter" within Git context
     /// - Git modal stays visible, but different keys are active
     ///
@@ -51,7 +51,7 @@ impl Stoat {
     ///
     /// # Integration
     ///
-    /// Called by [`crate::actions::SetMode`] action, bound in keymap.toml to keys
+    /// Called by [`crate::actions::SetMode`] action, bound in keymap.stcfg to keys
     /// that switch modes within a context (e.g., `/` in git_status mode to enter
     /// git_filter mode). The GUI layer listens to Changed event to update status bar.
     ///

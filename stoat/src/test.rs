@@ -83,11 +83,14 @@ impl<'a> TestStoat<'a> {
             let buffer_store = cx.new(|_| crate::buffer::store::BufferStore::new());
 
             // Create Stoat with test text directly (avoids buffer edit after creation)
+            let empty_keymap =
+                Arc::new(crate::keymap::compiled::CompiledKeymap { bindings: vec![] });
             let mut stoat = Stoat::new_with_text(
                 crate::config::Config::default(),
                 worktree,
                 buffer_store,
                 None,
+                empty_keymap,
                 text,
                 cx,
             );

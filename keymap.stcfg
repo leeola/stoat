@@ -41,7 +41,7 @@ on key {
 
             # Editing
             x -> DeleteRight();
-            shift-x -> DeleteLeft();
+            X -> DeleteLeft();
             D -> DeleteToEndOfLine();
 
             # Undo/Redo

@@ -72,7 +72,7 @@ pub struct Binding {
     pub action: Spanned<ActionExpr>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
     Char(char),
     Named(String),
