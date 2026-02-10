@@ -1,7 +1,15 @@
-//! Buffer finder prev action - now handled by PaneGroupView.
-//!
-//! The buffer finder state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `PaneGroupView::handle_buffer_finder_prev()` for the action handler
+use crate::pane_group::view::PaneGroupView;
+use gpui::{Context, Window};
 
-// FIXME: This file can be removed once all buffer_finder actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_buffer_finder_prev(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.app_state.buffer_finder.selected > 0 {
+            self.app_state.buffer_finder.selected -= 1;
+            cx.notify();
+        }
+    }
+}

@@ -1,17 +1,5 @@
 use crate::{
-    actions::{
-        AboutModalDismiss, AcceptCommandPaletteV2, DismissCommandPaletteV2, FocusPaneDown,
-        FocusPaneLeft, FocusPaneRight, FocusPaneUp, GitStatusCycleFilter, GitStatusDismiss,
-        GitStatusNext, GitStatusPrev, GitStatusSelect, GitStatusSetFilterAll,
-        GitStatusSetFilterStaged, GitStatusSetFilterUnstaged,
-        GitStatusSetFilterUnstagedWithUntracked, GitStatusSetFilterUntracked, HelpModalDismiss,
-        OpenAboutModal, OpenBufferFinder, OpenCommandPalette, OpenCommandPaletteV2, OpenDiffReview,
-        OpenFileFinder, OpenGitStatus, OpenHelpModal, OpenHelpOverlay, Quit, SelectNextCommandV2,
-        SelectPrevCommandV2, ShowMinimapOnScroll, SplitDown, SplitLeft, SplitRight, SplitUp,
-        ToggleMinimap,
-    },
     command::{overlay::CommandOverlay, palette::CommandPalette},
-    command_palette_v2::CommandPaletteV2,
     editor::view::EditorView,
     file_finder::Finder,
     git::status::GitStatus,
@@ -35,7 +23,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::debug;
 
 /// Pixel offset to adjust the minimap thumb's Y position.
 ///
@@ -67,7 +54,7 @@ const THUMB_HEIGHT_OFFSET_PX: f64 = 1.0;
 /// Scroll changes smaller than this threshold won't trigger the minimap hint.
 /// Set to 5 lines to prevent small movements (like single jk presses) from
 /// causing the minimap to blink in and out.
-const SCROLL_HINT_DEFAULT_THRESHOLD: f32 = 5.0;
+pub(crate) const SCROLL_HINT_DEFAULT_THRESHOLD: f32 = 5.0;
 
 /// Duration the minimap hint stays visible after a large scroll.
 ///
@@ -85,7 +72,7 @@ const FADE_OUT_DURATION: Duration = Duration::from_millis(300);
 /// Tracks the current fade animation state of the minimap in ScrollHint mode.
 /// Transitions: Hidden -> FadingIn -> Visible -> FadingOut -> Hidden
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum MinimapFadeState {
+pub(crate) enum MinimapFadeState {
     /// Minimap is not rendered
     Hidden,
     /// Minimap is fading in (opacity 0.0 to 1.0)
@@ -140,11 +127,11 @@ impl Default for MinimapVisibility {
 pub struct PaneGroupView {
     /// Workspace-level state shared across all panes
     pub app_state: crate::app_state::AppState,
-    pane_group: PaneGroup,
-    pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
-    active_pane: PaneId,
+    pub(crate) pane_group: PaneGroup,
+    pub(crate) pane_contents: HashMap<PaneId, crate::content_view::PaneContent>,
+    pub(crate) active_pane: PaneId,
     focus_handle: FocusHandle,
-    compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
+    pub(crate) compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
     file_finder_scroll: ScrollHandle,
     command_palette_scroll: ScrollHandle,
     buffer_finder_scroll: ScrollHandle,
@@ -153,18 +140,18 @@ pub struct PaneGroupView {
     /// Single minimap view for the entire window (updates to show active pane's content)
     minimap_view: Entity<EditorView>,
     /// Minimap visibility mode
-    minimap_visibility: MinimapVisibility,
+    pub(crate) minimap_visibility: MinimapVisibility,
     /// Last editor scroll position (for detecting scroll changes in ScrollHint mode)
-    last_editor_scroll_y: Option<f32>,
+    pub(crate) last_editor_scroll_y: Option<f32>,
     /// Minimap fade animation state (for ScrollHint mode)
-    minimap_fade_state: MinimapFadeState,
+    pub(crate) minimap_fade_state: MinimapFadeState,
     /// Help overlay visibility (non-modal overlay showing hint to press ? again)
-    help_overlay_visible: bool,
+    pub(crate) help_overlay_visible: bool,
     /// Subscriptions to StoatEvent::Action on each pane's Stoat entity
     stoat_subscriptions: Vec<Subscription>,
     /// Pending actions queued from StoatEvent::Action, processed in render() (which has window
     /// access)
-    pending_actions: Vec<(String, Vec<String>)>,
+    pub(crate) pending_actions: Vec<(String, Vec<String>)>,
 }
 
 impl PaneGroupView {
@@ -318,31 +305,10 @@ impl PaneGroupView {
         }
     }
 
-    /// Sync a Stoat entity's mode field with AppState based on its current KeyContext.
-    ///
-    /// This helper method ensures that a Stoat entity's mode reflects the appropriate
-    /// mode stored in AppState for its current context. Call this after changing a
-    /// Stoat's `key_context` field to update its `mode` accordingly.
-    ///
-    /// # Architecture Note
-    ///
-    /// Mode state is per-editor-type (stored in AppState):
-    /// - `TextEditor` context uses `text_editor_mode`
-    /// - `CommandPaletteV2` context uses `inline_editor_mode`
-    ///
-    /// This method bridges the gap between AppState's mode storage and Stoat's
-    /// mode field, which is kept for backward compatibility with existing code.
-    fn sync_stoat_mode(&self, stoat: &Entity<Stoat>, cx: &mut App) {
-        stoat.update(cx, |s, _| {
-            let new_mode = self.app_state.mode_for_context(s.key_context);
-            s.mode = new_mode.to_string();
-        });
-    }
-
     /// Exit Pane mode if currently in it, returning to Normal mode.
     ///
     /// This is called after pane commands execute to make Pane mode a one-shot mode.
-    fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(editor) = self
             .pane_contents
             .get_mut(&self.active_pane)
@@ -364,7 +330,7 @@ impl PaneGroupView {
     ///
     /// This should be called whenever the active pane changes (focus, split, close).
     /// The minimap's Stoat will be updated to point to the same buffer as the active editor.
-    fn update_minimap_to_active_pane(&mut self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn update_minimap_to_active_pane(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(active_editor) = self
             .pane_contents
             .get(&self.active_pane)
@@ -383,7 +349,7 @@ impl PaneGroupView {
         }
     }
 
-    fn subscribe_to_stoat(&mut self, stoat: &Entity<Stoat>, cx: &mut Context<'_, Self>) {
+    pub(crate) fn subscribe_to_stoat(&mut self, stoat: &Entity<Stoat>, cx: &mut Context<'_, Self>) {
         let sub = cx.subscribe(stoat, |this: &mut Self, _stoat, event, cx| {
             if let StoatEvent::Action { name, args } = event {
                 this.pending_actions.push((name.clone(), args.clone()));
@@ -393,7 +359,7 @@ impl PaneGroupView {
         self.stoat_subscriptions.push(sub);
     }
 
-    fn dispatch_action_by_name(
+    pub(crate) fn dispatch_action_by_name(
         &mut self,
         name: &str,
         window: &mut Window,
@@ -425,186 +391,74 @@ impl PaneGroupView {
         let actions = std::mem::take(&mut self.pending_actions);
         for (name, _args) in actions {
             match name.as_str() {
-                "SplitUp" => self.handle_split_up(&SplitUp, window, cx),
-                "SplitDown" => self.handle_split_down(&SplitDown, window, cx),
-                "SplitLeft" => self.handle_split_left(&SplitLeft, window, cx),
-                "SplitRight" => self.handle_split_right(&SplitRight, window, cx),
-                "Quit" | "ClosePane" => self.handle_quit(&Quit, window, cx),
-                "FocusPaneUp" => self.handle_focus_pane_up(&FocusPaneUp, window, cx),
-                "FocusPaneDown" => self.handle_focus_pane_down(&FocusPaneDown, window, cx),
-                "FocusPaneLeft" => self.handle_focus_pane_left(&FocusPaneLeft, window, cx),
-                "FocusPaneRight" => self.handle_focus_pane_right(&FocusPaneRight, window, cx),
-                "OpenFileFinder" => self.handle_open_file_finder(&OpenFileFinder, window, cx),
-                "FileFinderNext" => {
-                    self.handle_file_finder_next(&crate::actions::FileFinderNext, window, cx);
-                },
-                "FileFinderPrev" => {
-                    self.handle_file_finder_prev(&crate::actions::FileFinderPrev, window, cx);
-                },
-                "FileFinderSelect" => {
-                    self.handle_file_finder_select(&crate::actions::FileFinderSelect, window, cx);
-                },
-                "FileFinderDismiss" => {
-                    self.handle_file_finder_dismiss(&crate::actions::FileFinderDismiss, window, cx);
-                },
-                "OpenCommandPalette" => {
-                    self.handle_open_command_palette(&OpenCommandPalette, window, cx);
-                },
-                "CommandPaletteNext" => {
-                    self.handle_command_palette_next(
-                        &crate::actions::CommandPaletteNext,
-                        window,
-                        cx,
-                    );
-                },
-                "CommandPalettePrev" => {
-                    self.handle_command_palette_prev(
-                        &crate::actions::CommandPalettePrev,
-                        window,
-                        cx,
-                    );
-                },
-                "CommandPaletteExecute" => {
-                    self.handle_command_palette_execute(
-                        &crate::actions::CommandPaletteExecute,
-                        window,
-                        cx,
-                    );
-                },
-                "CommandPaletteDismiss" => {
-                    self.handle_command_palette_dismiss(
-                        &crate::actions::CommandPaletteDismiss,
-                        window,
-                        cx,
-                    );
-                },
+                "SplitUp" => self.handle_split_up(window, cx),
+                "SplitDown" => self.handle_split_down(window, cx),
+                "SplitLeft" => self.handle_split_left(window, cx),
+                "SplitRight" => self.handle_split_right(window, cx),
+                "Quit" | "ClosePane" => self.handle_quit(window, cx),
+                "FocusPaneUp" => self.handle_focus_pane_up(window, cx),
+                "FocusPaneDown" => self.handle_focus_pane_down(window, cx),
+                "FocusPaneLeft" => self.handle_focus_pane_left(window, cx),
+                "FocusPaneRight" => self.handle_focus_pane_right(window, cx),
+                "OpenFileFinder" => self.handle_open_file_finder(window, cx),
+                "FileFinderNext" => self.handle_file_finder_next(window, cx),
+                "FileFinderPrev" => self.handle_file_finder_prev(window, cx),
+                "FileFinderSelect" => self.handle_file_finder_select(window, cx),
+                "FileFinderDismiss" => self.handle_file_finder_dismiss(window, cx),
+                "OpenCommandPalette" => self.handle_open_command_palette(window, cx),
+                "CommandPaletteNext" => self.handle_command_palette_next(window, cx),
+                "CommandPalettePrev" => self.handle_command_palette_prev(window, cx),
+                "CommandPaletteExecute" => self.handle_command_palette_execute(window, cx),
+                "CommandPaletteDismiss" => self.handle_command_palette_dismiss(window, cx),
                 "ToggleCommandPaletteHidden" => {
-                    self.handle_command_palette_toggle_hidden(
-                        &crate::actions::ToggleCommandPaletteHidden,
-                        window,
-                        cx,
-                    );
+                    self.handle_command_palette_toggle_hidden(window, cx);
                 },
-                "OpenCommandPaletteV2" => {
-                    self.handle_open_command_palette_v2(&OpenCommandPaletteV2, window, cx);
-                },
+                "OpenCommandPaletteV2" => self.handle_open_command_palette_v2(window, cx),
                 "DismissCommandPaletteV2" => {
-                    self.handle_dismiss_command_palette_v2(&DismissCommandPaletteV2, window, cx);
+                    self.handle_dismiss_command_palette_v2(window, cx);
                 },
                 "AcceptCommandPaletteV2" => {
-                    self.handle_accept_command_palette_v2(
-                        &crate::actions::AcceptCommandPaletteV2,
-                        window,
-                        cx,
-                    );
+                    self.handle_accept_command_palette_v2(window, cx);
                 },
-                "SelectNextCommandV2" => {
-                    self.handle_select_next_command_v2(&SelectNextCommandV2, window, cx);
-                },
-                "SelectPrevCommandV2" => {
-                    self.handle_select_prev_command_v2(&SelectPrevCommandV2, window, cx);
-                },
-                "OpenBufferFinder" => {
-                    self.handle_open_buffer_finder(&OpenBufferFinder, window, cx);
-                },
-                "BufferFinderNext" => {
-                    self.handle_buffer_finder_next(&crate::actions::BufferFinderNext, window, cx);
-                },
-                "BufferFinderPrev" => {
-                    self.handle_buffer_finder_prev(&crate::actions::BufferFinderPrev, window, cx);
-                },
-                "BufferFinderSelect" => {
-                    self.handle_buffer_finder_select(
-                        &crate::actions::BufferFinderSelect,
-                        window,
-                        cx,
-                    );
-                },
-                "BufferFinderDismiss" => {
-                    self.handle_buffer_finder_dismiss(
-                        &crate::actions::BufferFinderDismiss,
-                        window,
-                        cx,
-                    );
-                },
-                "OpenGitStatus" => self.handle_open_git_status(&OpenGitStatus, window, cx),
-                "GitStatusNext" => {
-                    self.handle_git_status_next(&GitStatusNext, window, cx);
-                },
-                "GitStatusPrev" => {
-                    self.handle_git_status_prev(&GitStatusPrev, window, cx);
-                },
-                "GitStatusSelect" => {
-                    self.handle_git_status_select(&GitStatusSelect, window, cx);
-                },
-                "GitStatusDismiss" => {
-                    self.handle_git_status_dismiss(&GitStatusDismiss, window, cx);
-                },
-                "GitStatusCycleFilter" => {
-                    self.handle_git_status_cycle_filter(&GitStatusCycleFilter, window, cx);
-                },
-                "GitStatusSetFilterAll" => {
-                    self.handle_git_status_set_filter_all(&GitStatusSetFilterAll, window, cx);
-                },
+                "SelectNextCommandV2" => self.handle_select_next_command_v2(window, cx),
+                "SelectPrevCommandV2" => self.handle_select_prev_command_v2(window, cx),
+                "OpenBufferFinder" => self.handle_open_buffer_finder(window, cx),
+                "BufferFinderNext" => self.handle_buffer_finder_next(window, cx),
+                "BufferFinderPrev" => self.handle_buffer_finder_prev(window, cx),
+                "BufferFinderSelect" => self.handle_buffer_finder_select(window, cx),
+                "BufferFinderDismiss" => self.handle_buffer_finder_dismiss(window, cx),
+                "OpenGitStatus" => self.handle_open_git_status(window, cx),
+                "GitStatusNext" => self.handle_git_status_next(window, cx),
+                "GitStatusPrev" => self.handle_git_status_prev(window, cx),
+                "GitStatusSelect" => self.handle_git_status_select(window, cx),
+                "GitStatusDismiss" => self.handle_git_status_dismiss(window, cx),
+                "GitStatusCycleFilter" => self.handle_git_status_cycle_filter(window, cx),
+                "GitStatusSetFilterAll" => self.handle_git_status_set_filter_all(window, cx),
                 "GitStatusSetFilterStaged" => {
-                    self.handle_git_status_set_filter_staged(&GitStatusSetFilterStaged, window, cx);
+                    self.handle_git_status_set_filter_staged(window, cx);
                 },
                 "GitStatusSetFilterUnstaged" => {
-                    self.handle_git_status_set_filter_unstaged(
-                        &GitStatusSetFilterUnstaged,
-                        window,
-                        cx,
-                    );
+                    self.handle_git_status_set_filter_unstaged(window, cx);
                 },
                 "GitStatusSetFilterUnstagedWithUntracked" => {
-                    self.handle_git_status_set_filter_unstaged_with_untracked(
-                        &GitStatusSetFilterUnstagedWithUntracked,
-                        window,
-                        cx,
-                    );
+                    self.handle_git_status_set_filter_unstaged_with_untracked(window, cx);
                 },
                 "GitStatusSetFilterUntracked" => {
-                    self.handle_git_status_set_filter_untracked(
-                        &GitStatusSetFilterUntracked,
-                        window,
-                        cx,
-                    );
+                    self.handle_git_status_set_filter_untracked(window, cx);
                 },
-                "OpenDiffReview" => self.handle_open_diff_review(&OpenDiffReview, window, cx),
-                "OpenHelpOverlay" => {
-                    self.handle_open_help_overlay(&OpenHelpOverlay, window, cx);
-                },
-                "OpenHelpModal" => self.handle_open_help_modal(&OpenHelpModal, window, cx),
-                "HelpModalDismiss" => {
-                    self.handle_help_modal_dismiss(&HelpModalDismiss, window, cx);
-                },
-                "OpenAboutModal" => self.handle_open_about_modal(&OpenAboutModal, window, cx),
-                "AboutModalDismiss" => {
-                    self.handle_about_modal_dismiss(&AboutModalDismiss, window, cx);
-                },
-                "ToggleMinimap" => self.handle_toggle_minimap(&ToggleMinimap, window, cx),
-                "ShowMinimapOnScroll" => {
-                    self.handle_show_minimap_on_scroll(&ShowMinimapOnScroll, window, cx);
-                },
-                "ShowCommandLine" => {
-                    self.handle_show_command_line(&crate::actions::ShowCommandLine, window, cx);
-                },
-                "CommandLineDismiss" => {
-                    self.handle_command_line_dismiss(
-                        &crate::actions::CommandLineDismiss,
-                        window,
-                        cx,
-                    );
-                },
+                "OpenDiffReview" => self.handle_open_diff_review(window, cx),
+                "OpenHelpOverlay" => self.handle_open_help_overlay(window, cx),
+                "OpenHelpModal" => self.handle_open_help_modal(window, cx),
+                "HelpModalDismiss" => self.handle_help_modal_dismiss(window, cx),
+                "OpenAboutModal" => self.handle_open_about_modal(window, cx),
+                "AboutModalDismiss" => self.handle_about_modal_dismiss(window, cx),
+                "ToggleMinimap" => self.handle_toggle_minimap(window, cx),
+                "ShowMinimapOnScroll" => self.handle_show_minimap_on_scroll(window, cx),
+                "ShowCommandLine" => self.handle_show_command_line(window, cx),
+                "CommandLineDismiss" => self.handle_command_line_dismiss(window, cx),
                 "ChangeDirectory" => {
                     if let Some(path) = _args.first() {
-                        self.handle_change_directory(
-                            &crate::actions::ChangeDirectory {
-                                path: std::path::PathBuf::from(path),
-                            },
-                            window,
-                            cx,
-                        );
+                        self.handle_change_directory(&std::path::PathBuf::from(path), window, cx);
                     }
                 },
                 "QuitAll" => cx.quit(),
@@ -615,49 +469,12 @@ impl PaneGroupView {
         }
     }
 
-    /// Handle opening the file finder
-    fn handle_open_file_finder(
-        &mut self,
-        _: &OpenFileFinder,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Get current mode and key_context from active editor
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Extract current mode and key_context
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
-
-            // Initialize file finder in workspace
-            self.app_state
-                .open_file_finder(current_mode, current_key_context, cx);
-
-            // Update editor's key_context and mode, and connect input buffer reference
-            let input_buffer = self.app_state.file_finder.input.clone();
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.file_finder_input_ref = input_buffer;
-                    stoat.set_key_context(KeyContext::FileFinder);
-                    stoat.set_mode("file_finder");
-                });
-            });
-
-            // Load preview for first file
-            self.load_file_finder_preview(cx);
-
-            cx.notify();
-        }
-    }
-
     /// Load preview for the currently selected file in file finder.
     ///
     /// Spawns an async task to load file preview. Updates app state.file_finder.preview
     /// when complete. This method follows the same pattern as Stoat's load_preview_for_selected
     /// but operates on workspace state instead.
-    fn load_file_finder_preview(&mut self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn load_file_finder_preview(&mut self, cx: &mut Context<'_, Self>) {
         // Cancel existing preview task
         self.app_state.file_finder.preview_task = None;
 
@@ -709,263 +526,12 @@ impl PaneGroupView {
         }));
     }
 
-    /// Handle file finder next action
-    fn handle_file_finder_next(
-        &mut self,
-        _: &crate::actions::FileFinderNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.file_finder.selected + 1 < self.app_state.file_finder.filtered.len() {
-            self.app_state.file_finder.selected += 1;
-            self.load_file_finder_preview(cx);
-            cx.notify();
-        }
-    }
-
-    /// Handle file finder prev action
-    fn handle_file_finder_prev(
-        &mut self,
-        _: &crate::actions::FileFinderPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.file_finder.selected > 0 {
-            self.app_state.file_finder.selected -= 1;
-            self.load_file_finder_preview(cx);
-            cx.notify();
-        }
-    }
-
-    /// Handle file finder select action
-    fn handle_file_finder_select(
-        &mut self,
-        _: &crate::actions::FileFinderSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            if self.app_state.file_finder.selected < self.app_state.file_finder.filtered.len() {
-                let relative_path =
-                    &self.app_state.file_finder.filtered[self.app_state.file_finder.selected];
-                let root = self
-                    .app_state
-                    .worktree
-                    .lock()
-                    .snapshot()
-                    .root()
-                    .to_path_buf();
-                let abs_path = root.join(relative_path);
-
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        if let Err(e) = stoat.load_file(&abs_path, cx) {
-                            tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                        }
-                    });
-                });
-            }
-            self.handle_file_finder_dismiss(&crate::actions::FileFinderDismiss, _window, cx);
-        }
-    }
-
-    /// Handle file finder dismiss action
-    fn handle_file_finder_dismiss(
-        &mut self,
-        _: &crate::actions::FileFinderDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            self.app_state.file_finder.input = None;
-            self.app_state.file_finder.files.clear();
-            self.app_state.file_finder.filtered.clear();
-            self.app_state.file_finder.selected = 0;
-            self.app_state.file_finder.preview = None;
-            self.app_state.file_finder.preview_task = None;
-
-            if let Some(previous_context) = self.app_state.file_finder.previous_key_context.take() {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        stoat.handle_set_key_context(previous_context, cx);
-                    });
-                });
-            }
-
-            cx.notify();
-        }
-    }
-
-    /// Handle opening the command palette
-    fn handle_open_command_palette(
-        &mut self,
-        _: &OpenCommandPalette,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Get current mode and key_context from active editor
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Extract current mode and key_context
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
-
-            // Initialize command palette in workspace
-            self.app_state
-                .open_command_palette(current_mode, current_key_context, cx);
-
-            // Update editor's key_context and mode, and set input reference
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_key_context(KeyContext::CommandPalette);
-                    stoat.set_mode("command_palette");
-                    // Set input reference for edit actions
-                    stoat.command_palette_input_ref = self.app_state.command_palette.input.clone();
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle command palette next action
-    fn handle_command_palette_next(
-        &mut self,
-        _: &crate::actions::CommandPaletteNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.command_palette.selected + 1
-            < self.app_state.command_palette.filtered.len()
-        {
-            self.app_state.command_palette.selected += 1;
-            debug!(
-                selected = self.app_state.command_palette.selected,
-                "Command palette: next"
-            );
-            cx.notify();
-        }
-    }
-
-    /// Handle command palette prev action
-    fn handle_command_palette_prev(
-        &mut self,
-        _: &crate::actions::CommandPalettePrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.command_palette.selected > 0 {
-            self.app_state.command_palette.selected -= 1;
-            debug!(
-                selected = self.app_state.command_palette.selected,
-                "Command palette: prev"
-            );
-            cx.notify();
-        }
-    }
-
-    /// Handle command palette dismiss action
-    fn handle_command_palette_dismiss(
-        &mut self,
-        _: &crate::actions::CommandPaletteDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Dismiss command palette and get previous state to restore
-            let (_prev_mode, prev_ctx) = self.app_state.dismiss_command_palette();
-
-            // Clear input reference from Stoat
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.command_palette_input_ref = None;
-                });
-            });
-
-            // Restore previous KeyContext (this auto-applies the default mode for that context)
-            if let Some(previous_context) = prev_ctx {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        stoat.handle_set_key_context(previous_context, cx);
-                    });
-                });
-            }
-
-            cx.notify();
-        }
-    }
-
-    /// Handle command palette toggle hidden action
-    fn handle_command_palette_toggle_hidden(
-        &mut self,
-        _: &crate::actions::ToggleCommandPaletteHidden,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        debug!(
-            "Toggling command palette hidden commands: {} -> {}",
-            self.app_state.command_palette.show_hidden, !self.app_state.command_palette.show_hidden
-        );
-
-        // Toggle the flag
-        self.app_state.command_palette.show_hidden = !self.app_state.command_palette.show_hidden;
-
-        // Get current query from input buffer
-        let query = self
-            .app_state
-            .command_palette
-            .input
-            .as_ref()
-            .map(|buffer| buffer.read(cx).text())
-            .unwrap_or_default();
-
-        // Re-filter commands with new hidden state
-        self.filter_command_palette_commands(&query);
-
-        // Reset selection to avoid out-of-bounds issues
-        self.app_state.command_palette.selected = 0;
-
-        cx.notify();
-    }
-
-    fn handle_command_palette_execute(
-        &mut self,
-        _: &crate::actions::CommandPaletteExecute,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let command_name = if self.app_state.command_palette.selected
-            < self.app_state.command_palette.filtered.len()
-        {
-            Some(
-                self.app_state.command_palette.filtered[self.app_state.command_palette.selected]
-                    .name
-                    .clone(),
-            )
-        } else {
-            None
-        };
-
-        self.handle_command_palette_dismiss(&crate::actions::CommandPaletteDismiss, window, cx);
-
-        if let Some(name) = command_name {
-            self.dispatch_action_by_name(&name, window, cx);
-        }
-
-        cx.notify();
-    }
-
     /// Filter command palette commands based on query and show_hidden flag.
     ///
     /// Updates [`AppState::command_palette::filtered`] with commands that match
     /// the fuzzy search query and respect the show_hidden setting. Uses nucleo_matcher
     /// for fuzzy matching.
-    fn filter_command_palette_commands(&mut self, query: &str) {
+    pub(crate) fn filter_command_palette_commands(&mut self, query: &str) {
         use nucleo_matcher::{
             pattern::{CaseMatching, Normalization, Pattern},
             Matcher,
@@ -1050,436 +616,11 @@ impl PaneGroupView {
         }
     }
 
-    fn handle_open_command_palette_v2(
-        &mut self,
-        _: &OpenCommandPaletteV2,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Save current KeyContext for restoration
-            let previous_key_context = editor.read(cx).stoat.read(cx).key_context();
-
-            // Build command list
-            let commands = crate::stoat_actions::build_command_list();
-
-            // Create or update the palette
-            if self.app_state.command_palette_v2.is_none() {
-                let palette = cx.new(|cx| {
-                    let mut palette = CommandPaletteV2::new(commands, cx);
-                    palette.set_previous_key_context(previous_key_context);
-                    palette
-                });
-                self.app_state.command_palette_v2 = Some(palette);
-            } else {
-                // Palette already exists, update its previous context
-                if let Some(palette) = &self.app_state.command_palette_v2 {
-                    palette.update(cx, |p, _| {
-                        p.set_previous_key_context(previous_key_context);
-                    });
-                }
-            }
-
-            // Update Stoat's key_context and sync mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _| {
-                    stoat.set_key_context(KeyContext::CommandPaletteV2);
-                    stoat.sync_mode_to_context(&self.app_state);
-                });
-            });
-
-            // Focus the InlineEditor so it receives keyboard input
-            if let Some(palette) = &self.app_state.command_palette_v2 {
-                let input_focus = palette.read(cx).input().read(cx).focus_handle(cx);
-                window.focus(&input_focus);
-            }
-
-            cx.notify();
-        }
-    }
-
-    fn handle_dismiss_command_palette_v2(
-        &mut self,
-        _: &DismissCommandPaletteV2,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Get previous KeyContext from palette
-            let previous_key_context = self
-                .app_state
-                .command_palette_v2
-                .as_ref()
-                .and_then(|p| p.read(cx).previous_key_context());
-
-            // Clear the palette
-            self.app_state.command_palette_v2 = None;
-
-            // Restore previous KeyContext and sync mode
-            if let Some(prev_context) = previous_key_context {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, _| {
-                        stoat.set_key_context(prev_context);
-                        stoat.sync_mode_to_context(&self.app_state);
-                    });
-                });
-            }
-
-            // Restore focus to the editor
-            let editor_focus = editor.read(cx).focus_handle(cx);
-            window.focus(&editor_focus);
-
-            cx.notify();
-        }
-    }
-
-    fn handle_accept_command_palette_v2(
-        &mut self,
-        _: &AcceptCommandPaletteV2,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let command_name = self
-            .app_state
-            .command_palette_v2
-            .as_ref()
-            .and_then(|p| p.read(cx).selected_command())
-            .map(|cmd| cmd.name.clone());
-
-        self.handle_dismiss_command_palette_v2(&DismissCommandPaletteV2, window, cx);
-
-        if let Some(name) = command_name {
-            self.dispatch_action_by_name(&name, window, cx);
-        }
-
-        cx.notify();
-    }
-
-    fn handle_select_next_command_v2(
-        &mut self,
-        _: &SelectNextCommandV2,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(palette) = &self.app_state.command_palette_v2 {
-            palette.update(cx, |p, _| {
-                p.select_next();
-            });
-            cx.notify();
-        }
-    }
-
-    fn handle_select_prev_command_v2(
-        &mut self,
-        _: &SelectPrevCommandV2,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(palette) = &self.app_state.command_palette_v2 {
-            palette.update(cx, |p, _| {
-                p.select_prev();
-            });
-            cx.notify();
-        }
-    }
-
-    /// Handle showing the command line prompt
-    fn handle_show_command_line(
-        &mut self,
-        _: &crate::actions::ShowCommandLine,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Get current mode and key_context from active editor
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
-
-            // Store previous mode/context for restoration
-            self.app_state.command_line.previous_mode = Some(current_mode);
-            self.app_state.command_line.previous_key_context = Some(current_key_context);
-
-            // Create input buffer if needed
-            if self.app_state.command_line.input.is_none() {
-                use std::num::NonZeroU64;
-                use text::{Buffer, BufferId};
-
-                let buffer_id = BufferId::from(NonZeroU64::new(4).unwrap());
-                let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
-                self.app_state.command_line.input = Some(input_buffer);
-            }
-        }
-
-        cx.notify();
-    }
-
-    /// Handle dismissing the command line prompt
-    fn handle_command_line_dismiss(
-        &mut self,
-        _: &crate::actions::CommandLineDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Restore previous mode and context
-            let prev_mode = self.app_state.command_line.previous_mode.take();
-            let prev_ctx = self.app_state.command_line.previous_key_context.take();
-
-            // Clear input buffer
-            self.app_state.command_line.input = None;
-
-            // Restore mode if we have a previous mode
-            if let (Some(mode), Some(ctx)) = (prev_mode, prev_ctx) {
-                editor.update(cx, |_editor, cx| {
-                    let set_mode = crate::actions::SetMode(mode);
-                    let set_ctx = crate::actions::SetKeyContext(ctx);
-                    cx.dispatch_action(&set_mode);
-                    cx.dispatch_action(&set_ctx);
-                });
-            }
-        }
-
-        cx.notify();
-    }
-
-    /// Handle the ChangeDirectory action by parsing command line input and changing directory
-    fn handle_change_directory(
-        &mut self,
-        action: &crate::actions::ChangeDirectory,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Attempt to change directory
-        match self.app_state.change_directory(action.path.clone()) {
-            Ok(()) => {
-                // Success - dismiss command line
-                self.handle_command_line_dismiss(&crate::actions::CommandLineDismiss, _window, cx);
-            },
-            Err(e) => {
-                // Error - keep command line open and show error
-                tracing::error!("Failed to change directory: {}", e);
-                // TODO: Display error in status line or command line
-            },
-        }
-
-        cx.notify();
-    }
-
-    /// Handle opening the buffer finder
-    fn handle_open_buffer_finder(
-        &mut self,
-        _: &OpenBufferFinder,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Get current mode and key_context from active editor
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Extract current mode and key_context
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
-
-            // Initialize buffer finder in workspace
-            self.app_state
-                .open_buffer_finder(current_mode, current_key_context, cx);
-
-            // Update editor's key_context and mode, and set input reference
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_key_context(KeyContext::BufferFinder);
-                    stoat.set_mode("buffer_finder");
-                    // Set input reference for edit actions
-                    stoat.buffer_finder_input_ref = self.app_state.buffer_finder.input.clone();
-                });
-            });
-
-            // Update buffer list with active/visible status
-            self.update_buffer_finder_list(cx);
-
-            cx.notify();
-        }
-    }
-
-    /// Update buffer finder list with current active/visible status.
-    ///
-    /// Refreshes the buffer list from BufferStore with current active/visible flags.
-    fn update_buffer_finder_list(&mut self, cx: &mut Context<'_, Self>) {
-        // Get active buffer ID
-        let active_id = self
-            .active_editor()
-            .and_then(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx));
-
-        // Collect buffer IDs visible in all panes
-        let visible_ids: Vec<text::BufferId> = self
-            .pane_contents
-            .values()
-            .filter_map(|content| content.as_editor())
-            .filter_map(|editor| editor.read(cx).stoat.read(cx).active_buffer_id(cx))
-            .collect();
-
-        // Update buffer list with active/visible status
-        let buffers = self
-            .app_state
-            .buffer_store
-            .read(cx)
-            .buffer_list(active_id, &visible_ids, cx);
-        self.app_state.buffer_finder.buffers = buffers.clone();
-
-        // Get current query from input buffer
-        let query = self
-            .app_state
-            .buffer_finder
-            .input
-            .as_ref()
-            .map(|buffer| buffer.read(cx).text())
-            .unwrap_or_default();
-
-        // Re-filter with updated list
-        self.filter_buffer_finder_buffers(&query);
-    }
-
-    /// Filter buffer finder buffers based on query.
-    ///
-    /// Updates [`AppState::buffer_finder::filtered`] with buffers that match
-    /// the fuzzy search query. Uses nucleo_matcher for fuzzy matching.
-    fn filter_buffer_finder_buffers(&mut self, query: &str) {
-        use nucleo_matcher::{
-            pattern::{CaseMatching, Normalization, Pattern},
-            Matcher,
-        };
-
-        let all_buffers = &self.app_state.buffer_finder.buffers;
-
-        if query.is_empty() {
-            // No query - show all buffers
-            self.app_state.buffer_finder.filtered = all_buffers.clone();
-        } else {
-            // Fuzzy match query against buffer display names using nucleo_matcher
-            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-            let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-
-            // Build haystack strings
-            let candidates: Vec<String> = all_buffers
-                .iter()
-                .map(|buf| buf.display_name.clone())
-                .collect();
-
-            // Match and collect results
-            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-            let mut matches = pattern.match_list(candidate_refs, &mut matcher);
-            matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
-
-            // Map matched strings back to buffers using parallel vectors
-            self.app_state.buffer_finder.filtered = matches
-                .into_iter()
-                .filter_map(|(matched_str, _score)| {
-                    candidates
-                        .iter()
-                        .position(|s| s.as_str() == matched_str)
-                        .and_then(|idx| all_buffers.get(idx).cloned())
-                })
-                .collect();
-        }
-    }
-
-    /// Handle buffer finder next action
-    fn handle_buffer_finder_next(
-        &mut self,
-        _: &crate::actions::BufferFinderNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.buffer_finder.selected + 1 < self.app_state.buffer_finder.filtered.len() {
-            self.app_state.buffer_finder.selected += 1;
-            cx.notify();
-        }
-    }
-
-    /// Handle buffer finder prev action
-    fn handle_buffer_finder_prev(
-        &mut self,
-        _: &crate::actions::BufferFinderPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.buffer_finder.selected > 0 {
-            self.app_state.buffer_finder.selected -= 1;
-            cx.notify();
-        }
-    }
-
-    /// Handle buffer finder select action
-    fn handle_buffer_finder_select(
-        &mut self,
-        _: &crate::actions::BufferFinderSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            if self.app_state.buffer_finder.selected < self.app_state.buffer_finder.filtered.len() {
-                let buffer_entry =
-                    &self.app_state.buffer_finder.filtered[self.app_state.buffer_finder.selected];
-                let buffer_id = buffer_entry.buffer_id;
-
-                // Switch to the selected buffer
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        if let Err(e) = stoat.switch_to_buffer(buffer_id, cx) {
-                            tracing::error!("Failed to switch to buffer {:?}: {}", buffer_id, e);
-                        }
-                    });
-                });
-            }
-            self.handle_buffer_finder_dismiss(&crate::actions::BufferFinderDismiss, _window, cx);
-        }
-    }
-
-    /// Handle buffer finder dismiss action
-    fn handle_buffer_finder_dismiss(
-        &mut self,
-        _: &crate::actions::BufferFinderDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Dismiss buffer finder and get previous state to restore
-            let (_prev_mode, prev_ctx) = self.app_state.dismiss_buffer_finder();
-
-            // Clear input reference from Stoat
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.buffer_finder_input_ref = None;
-                });
-            });
-
-            // Restore previous KeyContext (this auto-applies the default mode for that context)
-            if let Some(previous_context) = prev_ctx {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        stoat.handle_set_key_context(previous_context, cx);
-                    });
-                });
-            }
-
-            cx.notify();
-        }
-    }
-
     /// Load preview for the currently selected file in git status.
     ///
     /// Spawns an async task to load git diff preview. Updates app state.git_status.preview
     /// when complete.
-    fn load_git_status_preview(&mut self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn load_git_status_preview(&mut self, cx: &mut Context<'_, Self>) {
         // Cancel existing preview task
         self.app_state.git_status.preview_task = None;
 
@@ -1514,465 +655,6 @@ impl PaneGroupView {
         }));
     }
 
-    /// Handle opening the git status modal
-    fn handle_open_git_status(
-        &mut self,
-        _: &OpenGitStatus,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Extract current mode and key_context
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
-
-            // Initialize git status in workspace
-            self.app_state
-                .open_git_status(current_mode, current_key_context);
-
-            // Update editor's key_context and mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_key_context(KeyContext::Git);
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            // Load preview for first file
-            self.load_git_status_preview(cx);
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status next action
-    fn handle_git_status_next(
-        &mut self,
-        _: &GitStatusNext,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.git_status.selected + 1 < self.app_state.git_status.filtered.len() {
-            self.app_state.git_status.selected += 1;
-            self.load_git_status_preview(cx);
-            cx.notify();
-        }
-    }
-
-    /// Handle git status prev action
-    fn handle_git_status_prev(
-        &mut self,
-        _: &GitStatusPrev,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.app_state.git_status.selected > 0 {
-            self.app_state.git_status.selected -= 1;
-            self.load_git_status_preview(cx);
-            cx.notify();
-        }
-    }
-
-    /// Handle git status select action
-    fn handle_git_status_select(
-        &mut self,
-        _: &GitStatusSelect,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            if self.app_state.git_status.selected < self.app_state.git_status.filtered.len() {
-                let entry = &self.app_state.git_status.filtered[self.app_state.git_status.selected];
-                let root = self.app_state.worktree.lock().root().to_path_buf();
-                let abs_path = root.join(&entry.path);
-
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        if let Err(e) = stoat.load_file(&abs_path, cx) {
-                            tracing::error!("Failed to load file {:?}: {}", abs_path, e);
-                        }
-                    });
-                });
-            }
-            self.handle_git_status_dismiss(&GitStatusDismiss, _window, cx);
-        }
-    }
-
-    /// Handle git status dismiss action
-    fn handle_git_status_dismiss(
-        &mut self,
-        _: &GitStatusDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            let (_prev_mode, prev_ctx) = self.app_state.dismiss_git_status();
-
-            if let Some(previous_context) = prev_ctx {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        stoat.handle_set_key_context(previous_context, cx);
-                    });
-                });
-            }
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status cycle filter action
-    fn handle_git_status_cycle_filter(
-        &mut self,
-        _: &GitStatusCycleFilter,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Cycle to next filter
-        self.app_state.git_status.filter = self.app_state.git_status.filter.next();
-
-        // Re-filter files with new filter
-        self.app_state.git_status.filtered = self
-            .app_state
-            .git_status
-            .files
-            .iter()
-            .filter(|entry| self.app_state.git_status.filter.matches(entry))
-            .cloned()
-            .collect();
-
-        // Reset selection to 0
-        self.app_state.git_status.selected = 0;
-
-        // Load preview for first filtered file
-        self.load_git_status_preview(cx);
-
-        cx.notify();
-    }
-
-    /// Handle git status set filter to All action
-    fn handle_git_status_set_filter_all(
-        &mut self,
-        _: &GitStatusSetFilterAll,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Set filter to All
-            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::All;
-
-            // Re-filter files
-            self.app_state.git_status.filtered = self
-                .app_state
-                .git_status
-                .files
-                .iter()
-                .filter(|entry| self.app_state.git_status.filter.matches(entry))
-                .cloned()
-                .collect();
-
-            // Reset selection to 0
-            self.app_state.git_status.selected = 0;
-
-            // Load preview for first filtered file
-            self.load_git_status_preview(cx);
-
-            // Transition from git_filter mode to git_status mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status set filter to Staged action
-    fn handle_git_status_set_filter_staged(
-        &mut self,
-        _: &GitStatusSetFilterStaged,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Set filter to Staged
-            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Staged;
-
-            // Re-filter files
-            self.app_state.git_status.filtered = self
-                .app_state
-                .git_status
-                .files
-                .iter()
-                .filter(|entry| self.app_state.git_status.filter.matches(entry))
-                .cloned()
-                .collect();
-
-            // Reset selection to 0
-            self.app_state.git_status.selected = 0;
-
-            // Load preview for first filtered file
-            self.load_git_status_preview(cx);
-
-            // Transition from git_filter mode to git_status mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status set filter to Unstaged action
-    fn handle_git_status_set_filter_unstaged(
-        &mut self,
-        _: &GitStatusSetFilterUnstaged,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Set filter to Unstaged
-            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Unstaged;
-
-            // Re-filter files
-            self.app_state.git_status.filtered = self
-                .app_state
-                .git_status
-                .files
-                .iter()
-                .filter(|entry| self.app_state.git_status.filter.matches(entry))
-                .cloned()
-                .collect();
-
-            // Reset selection to 0
-            self.app_state.git_status.selected = 0;
-
-            // Load preview for first filtered file
-            self.load_git_status_preview(cx);
-
-            // Transition from git_filter mode to git_status mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status set filter to UnstagedWithUntracked action
-    fn handle_git_status_set_filter_unstaged_with_untracked(
-        &mut self,
-        _: &GitStatusSetFilterUnstagedWithUntracked,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Set filter to UnstagedWithUntracked
-            self.app_state.git_status.filter =
-                crate::git::status::GitStatusFilter::UnstagedWithUntracked;
-
-            // Re-filter files
-            self.app_state.git_status.filtered = self
-                .app_state
-                .git_status
-                .files
-                .iter()
-                .filter(|entry| self.app_state.git_status.filter.matches(entry))
-                .cloned()
-                .collect();
-
-            // Reset selection to 0
-            self.app_state.git_status.selected = 0;
-
-            // Load preview for first filtered file
-            self.load_git_status_preview(cx);
-
-            // Transition from git_filter mode to git_status mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle git status set filter to Untracked action
-    fn handle_git_status_set_filter_untracked(
-        &mut self,
-        _: &GitStatusSetFilterUntracked,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            // Set filter to Untracked
-            self.app_state.git_status.filter = crate::git::status::GitStatusFilter::Untracked;
-
-            // Re-filter files
-            self.app_state.git_status.filtered = self
-                .app_state
-                .git_status
-                .files
-                .iter()
-                .filter(|entry| self.app_state.git_status.filter.matches(entry))
-                .cloned()
-                .collect();
-
-            // Reset selection to 0
-            self.app_state.git_status.selected = 0;
-
-            // Load preview for first filtered file
-            self.load_git_status_preview(cx);
-
-            // Transition from git_filter mode to git_status mode
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_mode("git_status");
-                });
-            });
-
-            cx.notify();
-        }
-    }
-
-    /// Handle opening the diff review mode
-    fn handle_open_diff_review(
-        &mut self,
-        _: &OpenDiffReview,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        // Open diff review in the active editor's Stoat instance
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_diff_review(cx);
-                });
-            });
-            cx.notify();
-        }
-    }
-
-    /// Handle opening the help overlay or modal.
-    ///
-    /// This implements the double-? pattern:
-    /// - First press: Show help overlay (non-modal)
-    /// - Second press (while overlay visible): Open help modal (modal)
-    fn handle_open_help_overlay(
-        &mut self,
-        _: &OpenHelpOverlay,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        debug!(
-            "handle_open_help_overlay called, help_overlay_visible={}",
-            self.help_overlay_visible
-        );
-        if self.help_overlay_visible {
-            // Overlay already showing - open full modal
-            debug!("Opening help modal");
-            if let Some(editor) = self.active_editor() {
-                editor.update(cx, |editor, cx| {
-                    editor.stoat.update(cx, |stoat, cx| {
-                        stoat.open_help_modal(cx);
-                    });
-                });
-            }
-            self.help_overlay_visible = false;
-        } else {
-            // Show overlay
-            debug!("Showing help overlay");
-            self.help_overlay_visible = true;
-        }
-        cx.notify();
-    }
-
-    /// Handle opening the help modal directly.
-    ///
-    /// This is for command palette or programmatic access to help.
-    fn handle_open_help_modal(
-        &mut self,
-        _: &OpenHelpModal,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_help_modal(cx);
-                });
-            });
-        }
-        self.help_overlay_visible = false;
-        cx.notify();
-    }
-
-    /// Handle dismissing the help modal.
-    fn handle_help_modal_dismiss(
-        &mut self,
-        _: &HelpModalDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.help_modal_dismiss(cx);
-                });
-            });
-        }
-        cx.notify();
-    }
-
-    /// Handle opening the about modal.
-    fn handle_open_about_modal(
-        &mut self,
-        _: &OpenAboutModal,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_about_modal(cx);
-                });
-            });
-        }
-        cx.notify();
-    }
-
-    /// Handle dismissing the about modal.
-    fn handle_about_modal_dismiss(
-        &mut self,
-        _: &AboutModalDismiss,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.about_modal_dismiss(cx);
-                });
-            });
-        }
-        cx.notify();
-    }
-
     /// Split the active pane in the given direction.
     ///
     /// This is public so it can be called from actions with access to Window context.
@@ -1990,251 +672,8 @@ impl PaneGroupView {
         self.active_pane = new_pane_id;
     }
 
-    /// Handle split up action
-    fn handle_split_up(&mut self, _: &SplitUp, window: &mut Window, cx: &mut Context<'_, Self>) {
-        debug!(
-            active_pane = self.active_pane,
-            direction = "Up",
-            "Splitting pane"
-        );
-
-        // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self
-            .pane_contents
-            .get(&self.active_pane)
-            .and_then(|content| content.as_editor())
-        {
-            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
-        } else {
-            cx.new(|cx| {
-                Stoat::new(
-                    crate::Config::default(),
-                    self.app_state.worktree.clone(),
-                    self.app_state.buffer_store.clone(),
-                    None,
-                    self.compiled_keymap.clone(),
-                    cx,
-                )
-            })
-        };
-        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
-        {
-            let stoat = new_editor.read(cx).stoat.clone();
-            self.subscribe_to_stoat(&stoat, cx);
-        }
-
-        // Set entity reference so EditorView can pass it to EditorElement
-        new_editor.update(cx, |view, _| {
-            view.set_entity(new_editor.clone());
-        });
-
-        self.split(SplitDirection::Up, new_editor.clone(), cx);
-
-        debug!(
-            new_pane = self.active_pane,
-            "Split complete, focusing new pane"
-        );
-
-        // Focus the newly created editor
-        window.focus(&new_editor.read(cx).focus_handle(cx));
-
-        // Update minimap to show new active pane's content
-        self.update_minimap_to_active_pane(cx);
-
-        // Exit Pane mode after command
-        self.exit_pane_mode(cx);
-
-        cx.notify();
-    }
-
-    /// Handle split down action
-    fn handle_split_down(
-        &mut self,
-        _: &SplitDown,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        debug!(
-            active_pane = self.active_pane,
-            direction = "Down",
-            "Splitting pane"
-        );
-
-        // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self
-            .pane_contents
-            .get(&self.active_pane)
-            .and_then(|content| content.as_editor())
-        {
-            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
-        } else {
-            cx.new(|cx| {
-                Stoat::new(
-                    crate::Config::default(),
-                    self.app_state.worktree.clone(),
-                    self.app_state.buffer_store.clone(),
-                    None,
-                    self.compiled_keymap.clone(),
-                    cx,
-                )
-            })
-        };
-        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
-        {
-            let stoat = new_editor.read(cx).stoat.clone();
-            self.subscribe_to_stoat(&stoat, cx);
-        }
-
-        // Set entity reference so EditorView can pass it to EditorElement
-        new_editor.update(cx, |view, _| {
-            view.set_entity(new_editor.clone());
-        });
-
-        self.split(SplitDirection::Down, new_editor.clone(), cx);
-
-        debug!(
-            new_pane = self.active_pane,
-            "Split complete, focusing new pane"
-        );
-
-        // Focus the newly created editor
-        window.focus(&new_editor.read(cx).focus_handle(cx));
-
-        // Update minimap to show new active pane's content
-        self.update_minimap_to_active_pane(cx);
-
-        // Exit Pane mode after command
-        self.exit_pane_mode(cx);
-
-        cx.notify();
-    }
-
-    /// Handle split left action
-    fn handle_split_left(
-        &mut self,
-        _: &SplitLeft,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        debug!(
-            active_pane = self.active_pane,
-            direction = "Left",
-            "Splitting pane"
-        );
-
-        // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self
-            .pane_contents
-            .get(&self.active_pane)
-            .and_then(|content| content.as_editor())
-        {
-            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
-        } else {
-            cx.new(|cx| {
-                Stoat::new(
-                    crate::Config::default(),
-                    self.app_state.worktree.clone(),
-                    self.app_state.buffer_store.clone(),
-                    None,
-                    self.compiled_keymap.clone(),
-                    cx,
-                )
-            })
-        };
-        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
-        {
-            let stoat = new_editor.read(cx).stoat.clone();
-            self.subscribe_to_stoat(&stoat, cx);
-        }
-
-        // Set entity reference so EditorView can pass it to EditorElement
-        new_editor.update(cx, |view, _| {
-            view.set_entity(new_editor.clone());
-        });
-
-        self.split(SplitDirection::Left, new_editor.clone(), cx);
-
-        debug!(
-            new_pane = self.active_pane,
-            "Split complete, focusing new pane"
-        );
-
-        // Focus the newly created editor
-        window.focus(&new_editor.read(cx).focus_handle(cx));
-
-        // Update minimap to show new active pane's content
-        self.update_minimap_to_active_pane(cx);
-
-        // Exit Pane mode after command
-        self.exit_pane_mode(cx);
-
-        cx.notify();
-    }
-
-    /// Handle split right action
-    fn handle_split_right(
-        &mut self,
-        _: &SplitRight,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        debug!(
-            active_pane = self.active_pane,
-            direction = "Right",
-            "Splitting pane"
-        );
-
-        // Create new Stoat that shares the buffer but has independent cursor/scroll state
-        let new_stoat = if let Some(active_editor) = self
-            .pane_contents
-            .get(&self.active_pane)
-            .and_then(|content| content.as_editor())
-        {
-            cx.new(|cx| active_editor.read(cx).stoat.read(cx).clone_for_split())
-        } else {
-            cx.new(|cx| {
-                Stoat::new(
-                    crate::Config::default(),
-                    self.app_state.worktree.clone(),
-                    self.app_state.buffer_store.clone(),
-                    None,
-                    self.compiled_keymap.clone(),
-                    cx,
-                )
-            })
-        };
-        let new_editor = cx.new(|cx| EditorView::new(new_stoat, cx));
-        {
-            let stoat = new_editor.read(cx).stoat.clone();
-            self.subscribe_to_stoat(&stoat, cx);
-        }
-
-        // Set entity reference so EditorView can pass it to EditorElement
-        new_editor.update(cx, |view, _| {
-            view.set_entity(new_editor.clone());
-        });
-
-        self.split(SplitDirection::Right, new_editor.clone(), cx);
-
-        debug!(
-            new_pane = self.active_pane,
-            "Split complete, focusing new pane"
-        );
-
-        // Focus the newly created editor
-        window.focus(&new_editor.read(cx).focus_handle(cx));
-
-        // Update minimap to show new active pane's content
-        self.update_minimap_to_active_pane(cx);
-
-        // Exit Pane mode after command
-        self.exit_pane_mode(cx);
-
-        cx.notify();
-    }
-
     /// Get the pane in the given direction (simplified tree-order navigation)
-    fn get_pane_in_direction(&self, direction: SplitDirection) -> Option<PaneId> {
+    pub(crate) fn get_pane_in_direction(&self, direction: SplitDirection) -> Option<PaneId> {
         let all_panes = self.pane_group.panes();
         if all_panes.len() <= 1 {
             return None;
@@ -2258,214 +697,6 @@ impl PaneGroupView {
                 } else {
                     Some(all_panes[0])
                 }
-            },
-        }
-    }
-
-    /// Handle focus pane left action
-    fn handle_focus_pane_left(
-        &mut self,
-        _: &FocusPaneLeft,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Left) {
-            debug!(
-                from_pane = self.active_pane,
-                to_pane = new_pane,
-                direction = "Left",
-                "Focusing pane"
-            );
-            self.active_pane = new_pane;
-            if let Some(editor) = self
-                .pane_contents
-                .get(&new_pane)
-                .and_then(|content| content.as_editor())
-            {
-                window.focus(&editor.read(cx).focus_handle(cx));
-            }
-
-            // Update minimap to show new active pane's content
-            self.update_minimap_to_active_pane(cx);
-
-            // Exit Pane mode after command
-            self.exit_pane_mode(cx);
-
-            cx.notify();
-        } else {
-            debug!(
-                current_pane = self.active_pane,
-                direction = "Left",
-                "No pane in direction"
-            );
-        }
-    }
-
-    /// Handle focus pane right action
-    fn handle_focus_pane_right(
-        &mut self,
-        _: &FocusPaneRight,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Right) {
-            debug!(
-                from_pane = self.active_pane,
-                to_pane = new_pane,
-                direction = "Right",
-                "Focusing pane"
-            );
-            self.active_pane = new_pane;
-            if let Some(editor) = self
-                .pane_contents
-                .get(&new_pane)
-                .and_then(|content| content.as_editor())
-            {
-                window.focus(&editor.read(cx).focus_handle(cx));
-            }
-
-            // Update minimap to show new active pane's content
-            self.update_minimap_to_active_pane(cx);
-
-            // Exit Pane mode after command
-            self.exit_pane_mode(cx);
-
-            cx.notify();
-        } else {
-            debug!(
-                current_pane = self.active_pane,
-                direction = "Right",
-                "No pane in direction"
-            );
-        }
-    }
-
-    /// Handle focus pane up action
-    fn handle_focus_pane_up(
-        &mut self,
-        _: &FocusPaneUp,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Up) {
-            debug!(
-                from_pane = self.active_pane,
-                to_pane = new_pane,
-                direction = "Up",
-                "Focusing pane"
-            );
-            self.active_pane = new_pane;
-            if let Some(editor) = self
-                .pane_contents
-                .get(&new_pane)
-                .and_then(|content| content.as_editor())
-            {
-                window.focus(&editor.read(cx).focus_handle(cx));
-            }
-
-            // Update minimap to show new active pane's content
-            self.update_minimap_to_active_pane(cx);
-
-            // Exit Pane mode after command
-            self.exit_pane_mode(cx);
-
-            cx.notify();
-        } else {
-            debug!(
-                current_pane = self.active_pane,
-                direction = "Up",
-                "No pane in direction"
-            );
-        }
-    }
-
-    /// Handle focus pane down action
-    fn handle_focus_pane_down(
-        &mut self,
-        _: &FocusPaneDown,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if let Some(new_pane) = self.get_pane_in_direction(SplitDirection::Down) {
-            debug!(
-                from_pane = self.active_pane,
-                to_pane = new_pane,
-                direction = "Down",
-                "Focusing pane"
-            );
-            self.active_pane = new_pane;
-            if let Some(editor) = self
-                .pane_contents
-                .get(&new_pane)
-                .and_then(|content| content.as_editor())
-            {
-                window.focus(&editor.read(cx).focus_handle(cx));
-            }
-
-            // Update minimap to show new active pane's content
-            self.update_minimap_to_active_pane(cx);
-
-            // Exit Pane mode after command
-            self.exit_pane_mode(cx);
-
-            cx.notify();
-        } else {
-            debug!(
-                current_pane = self.active_pane,
-                direction = "Down",
-                "No pane in direction"
-            );
-        }
-    }
-
-    /// Handle quit action - close current view, or quit app if last view
-    fn handle_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let pane_to_close = self.active_pane;
-
-        debug!(pane_id = pane_to_close, "Attempting to quit/close pane");
-
-        // Try to remove the pane from the group
-        match self.pane_group.remove(pane_to_close) {
-            Ok(()) => {
-                // Successfully removed - clean up editor and switch focus
-                self.pane_contents.remove(&pane_to_close);
-
-                // Get remaining panes and focus the first one
-                let remaining_panes = self.pane_group.panes();
-                if let Some(&new_active_pane) = remaining_panes.first() {
-                    debug!(
-                        closed_pane = pane_to_close,
-                        new_active_pane,
-                        remaining_count = remaining_panes.len(),
-                        "Pane closed, switching focus"
-                    );
-
-                    self.active_pane = new_active_pane;
-                    if let Some(editor) = self
-                        .pane_contents
-                        .get(&new_active_pane)
-                        .and_then(|content| content.as_editor())
-                    {
-                        window.focus(&editor.read(cx).focus_handle(cx));
-                    }
-
-                    // Update minimap to show new active pane's content
-                    self.update_minimap_to_active_pane(cx);
-
-                    // Exit Pane mode after command
-                    self.exit_pane_mode(cx);
-
-                    cx.notify();
-                }
-            },
-            Err(e) => {
-                // Cannot close last pane - quit the application instead
-                debug!(
-                    pane_id = pane_to_close,
-                    error = %e,
-                    "Last pane - quitting application"
-                );
-                cx.quit();
             },
         }
     }
@@ -2511,54 +742,6 @@ impl PaneGroupView {
                 },
             },
         }
-    }
-
-    /// Handle toggle minimap action
-    ///
-    /// Toggles between AlwaysVisible and AlwaysHidden
-    fn handle_toggle_minimap(
-        &mut self,
-        _: &ToggleMinimap,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.minimap_visibility = match self.minimap_visibility {
-            MinimapVisibility::AlwaysVisible => MinimapVisibility::AlwaysHidden,
-            MinimapVisibility::AlwaysHidden | MinimapVisibility::ScrollHint { .. } => {
-                MinimapVisibility::AlwaysVisible
-            },
-        };
-
-        // Reset scroll tracking and fade state when changing modes
-        self.last_editor_scroll_y = None;
-        self.minimap_fade_state = MinimapFadeState::Hidden;
-
-        debug!(
-            minimap_visibility = ?self.minimap_visibility,
-            "Toggled minimap visibility"
-        );
-        cx.notify();
-    }
-
-    /// Handle show minimap on scroll action
-    ///
-    /// Enables ScrollHint mode where minimap appears on large scrolls
-    fn handle_show_minimap_on_scroll(
-        &mut self,
-        _: &ShowMinimapOnScroll,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.minimap_visibility = MinimapVisibility::ScrollHint {
-            threshold_lines: SCROLL_HINT_DEFAULT_THRESHOLD,
-        };
-
-        // Reset scroll tracking and fade state when changing modes
-        self.last_editor_scroll_y = None;
-        self.minimap_fade_state = MinimapFadeState::Hidden;
-
-        debug!("Enabled minimap scroll hint mode");
-        cx.notify();
     }
 
     /// Recursively render a member of the pane tree.

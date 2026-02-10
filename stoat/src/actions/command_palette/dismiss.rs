@@ -1,8 +1,31 @@
-//! Command palette dismiss action - now handled by PaneGroupView.
-//!
-//! The command palette state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `AppState::dismiss_command_palette()` for state cleanup
-//! - `PaneGroupView::handle_command_palette_dismiss()` for the action handler
+use crate::pane_group::view::PaneGroupView;
+use gpui::{Context, Window};
 
-// FIXME: This file can be removed once all command_palette actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_command_palette_dismiss(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            let (_prev_mode, prev_ctx) = self.app_state.dismiss_command_palette();
+
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.command_palette_input_ref = None;
+                });
+            });
+
+            if let Some(previous_context) = prev_ctx {
+                editor.update(cx, |editor, cx| {
+                    editor.stoat.update(cx, |stoat, cx| {
+                        stoat.handle_set_key_context(previous_context, cx);
+                    });
+                });
+            }
+
+            cx.notify();
+        }
+    }
+}

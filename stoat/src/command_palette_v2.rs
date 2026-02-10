@@ -4,13 +4,11 @@
 //! is a GPUI entity that owns its input field and manages its own state. It uses
 //! InlineEditor for text input and subscribes to buffer changes for live filtering.
 
-use crate::{
-    actions::DismissCommandPaletteV2, inline_editor::InlineEditor, stoat::KeyContext, CommandInfo,
-};
+use crate::{inline_editor::InlineEditor, stoat::KeyContext, CommandInfo};
 use gpui::{
     div, prelude::FluentBuilder, px, rgb, rgba, App, AppContext, Context, Entity, EventEmitter,
-    FontWeight, InteractiveElement, IntoElement, KeyContext as GpuiKeyContext, KeyDownEvent,
-    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
+    FontWeight, InteractiveElement, IntoElement, KeyContext as GpuiKeyContext, ParentElement,
+    Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
 };
 
 /// CommandPaletteV2 entity for fuzzy command search.
@@ -144,21 +142,6 @@ impl CommandPaletteV2 {
     pub fn input(&self) -> &Entity<InlineEditor> {
         &self.input
     }
-
-    /// Handle key down events on the overlay.
-    ///
-    /// Checks for Escape key and dispatches DismissCommandPaletteV2 action.
-    fn handle_overlay_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.keystroke.key == "escape" {
-            // Dispatch the dismiss action
-            window.dispatch_action(Box::new(DismissCommandPaletteV2), cx);
-        }
-    }
 }
 
 /// Simple fuzzy matching: check if all characters of needle appear in haystack in order.
@@ -175,7 +158,7 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
 impl EventEmitter<()> for CommandPaletteV2 {}
 
 impl Render for CommandPaletteV2 {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let commands = &self.filtered_commands;
         let selected = self.selected_index;
         let viewport_height = f32::from(window.viewport_size().height);
@@ -190,7 +173,6 @@ impl Render for CommandPaletteV2 {
             .flex()
             .items_center()
             .justify_center()
-            .on_key_down(cx.listener(Self::handle_overlay_key_down))
             .key_context({
                 let mut ctx = GpuiKeyContext::new_with_defaults();
                 ctx.add("CommandPaletteV2");

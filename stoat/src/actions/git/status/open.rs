@@ -1,7 +1,32 @@
-//! Git status open action - now handled by PaneGroupView.
-//!
-//! The git status state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `PaneGroupView::handle_open_git_status()` for the action handler
+use crate::{pane_group::view::PaneGroupView, stoat::KeyContext};
+use gpui::{Context, Window};
 
-// FIXME: This file can be removed once all git_status actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_open_git_status(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let editor_opt = self.active_editor().cloned();
+        if let Some(editor) = editor_opt {
+            let (current_mode, current_key_context) = {
+                let stoat = editor.read(cx).stoat.read(cx);
+                (stoat.mode().to_string(), stoat.key_context())
+            };
+
+            self.app_state
+                .open_git_status(current_mode, current_key_context);
+
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, _cx| {
+                    stoat.set_key_context(KeyContext::Git);
+                    stoat.set_mode("git_status");
+                });
+            });
+
+            self.load_git_status_preview(cx);
+
+            cx.notify();
+        }
+    }
+}

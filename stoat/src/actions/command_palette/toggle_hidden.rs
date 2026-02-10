@@ -1,8 +1,32 @@
-//! Command palette toggle hidden action - now handled by PaneGroupView.
-//!
-//! The command palette state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `PaneGroupView::handle_command_palette_toggle_hidden()` for the action handler
-//! - `PaneGroupView::filter_command_palette_commands()` for the filtering logic
+use crate::pane_group::view::PaneGroupView;
+use gpui::{Context, Window};
+use tracing::debug;
 
-// FIXME: This file can be removed once all command_palette actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_command_palette_toggle_hidden(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        debug!(
+            "Toggling command palette hidden commands: {} -> {}",
+            self.app_state.command_palette.show_hidden, !self.app_state.command_palette.show_hidden
+        );
+
+        self.app_state.command_palette.show_hidden = !self.app_state.command_palette.show_hidden;
+
+        let query = self
+            .app_state
+            .command_palette
+            .input
+            .as_ref()
+            .map(|buffer| buffer.read(cx).text())
+            .unwrap_or_default();
+
+        self.filter_command_palette_commands(&query);
+
+        self.app_state.command_palette.selected = 0;
+
+        cx.notify();
+    }
+}

@@ -63,6 +63,25 @@ impl Stoat {
     }
 }
 
+use crate::pane_group::view::PaneGroupView;
+
+impl PaneGroupView {
+    pub(crate) fn handle_help_modal_dismiss(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.help_modal_dismiss(cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

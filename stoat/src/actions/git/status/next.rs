@@ -1,7 +1,16 @@
-//! Git status next action - now handled by PaneGroupView.
-//!
-//! The git status state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `PaneGroupView::handle_git_status_next()` for the action handler
+use crate::pane_group::view::PaneGroupView;
+use gpui::{Context, Window};
 
-// FIXME: This file can be removed once all git_status actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_git_status_next(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.app_state.git_status.selected + 1 < self.app_state.git_status.filtered.len() {
+            self.app_state.git_status.selected += 1;
+            self.load_git_status_preview(cx);
+            cx.notify();
+        }
+    }
+}

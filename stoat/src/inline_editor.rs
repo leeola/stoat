@@ -3,7 +3,6 @@
 //! Provides a simplified API for creating single-line or multi-line text inputs
 //! with features like prefix, placeholder, and full editing capabilities.
 
-use crate::actions::{DeleteLeft, InsertText};
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Render,
     Window,
@@ -99,27 +98,19 @@ impl InlineEditor {
         self.single_line
     }
 
-    /// Handle text insertion when this editor is focused.
-    fn handle_insert_text(
-        &mut self,
-        action: &InsertText,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.buffer.update(cx, |buf, _| {
             let len = buf.len();
-            buf.edit([(len..len, action.0.as_str())]);
+            buf.edit([(len..len, text)]);
         });
         cx.notify();
         cx.emit(());
     }
 
-    /// Handle backspace when this editor is focused.
-    fn handle_delete_left(&mut self, _: &DeleteLeft, _window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_left(&mut self, cx: &mut Context<Self>) {
         self.buffer.update(cx, |buf, _| {
             let len = buf.len();
             if len > 0 {
-                // Find the previous character boundary
                 let text = buf.text();
                 let mut end = len;
                 while end > 0 {
@@ -135,30 +126,30 @@ impl InlineEditor {
         cx.emit(());
     }
 
-    /// Handle key down events and convert them to actions.
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Ignore special keys - let them propagate to keybinding system
-        if event.keystroke.key == "escape"
-            || event.keystroke.key == "enter"
-            || event.keystroke.key == "tab"
-            || event.keystroke.key == "up"
-            || event.keystroke.key == "down"
-        {
+        if matches!(
+            event.keystroke.key.as_str(),
+            "escape" | "enter" | "tab" | "up" | "down"
+        ) {
             return;
         }
 
-        // If there's a printable character, insert it
+        if event.keystroke.key == "backspace" {
+            self.delete_left(cx);
+            return;
+        }
+
         if let Some(key_char) = &event.keystroke.key_char {
             if !key_char.is_empty()
                 && !event.keystroke.modifiers.control
                 && !event.keystroke.modifiers.alt
             {
-                self.handle_insert_text(&InsertText(key_char.clone()), window, cx);
+                self.insert_text(key_char, cx);
             }
         }
     }
@@ -186,8 +177,6 @@ impl Render for InlineEditor {
         div()
             .track_focus(&self.focus_handle(cx))
             .on_key_down(cx.listener(Self::handle_key_down))
-            .on_action(cx.listener(Self::handle_insert_text))
-            .on_action(cx.listener(Self::handle_delete_left))
             .h(px(24.0))
             .bg(rgb(0x252526))
             .border_1()

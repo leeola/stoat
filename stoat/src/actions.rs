@@ -2137,13 +2137,19 @@ pub fn hidden(action: &dyn Action) -> bool {
 
 mod about_modal;
 mod buffer_finder;
+mod command_line;
 mod command_palette;
+mod command_palette_v2;
 mod edit;
+mod file_finder;
 mod git;
 mod help_modal;
+mod help_overlay;
+mod minimap;
 mod mode;
 #[allow(clippy::module_inception)]
 mod r#move;
+mod pane;
 mod scroll;
 mod select;
 mod set_key_context;

@@ -1,7 +1,22 @@
-//! Command palette next action - now handled by PaneGroupView.
-//!
-//! The command palette state has been moved to AppState and is managed by
-//! PaneGroupView. See:
-//! - `PaneGroupView::handle_command_palette_next()` for the action handler
+use crate::pane_group::view::PaneGroupView;
+use gpui::{Context, Window};
+use tracing::debug;
 
-// FIXME: This file can be removed once all command_palette actions are moved to PaneGroupView
+impl PaneGroupView {
+    pub(crate) fn handle_command_palette_next(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.app_state.command_palette.selected + 1
+            < self.app_state.command_palette.filtered.len()
+        {
+            self.app_state.command_palette.selected += 1;
+            debug!(
+                selected = self.app_state.command_palette.selected,
+                "Command palette: next"
+            );
+            cx.notify();
+        }
+    }
+}
