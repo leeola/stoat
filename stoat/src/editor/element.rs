@@ -4,6 +4,7 @@
 //! No gutter, no mouse handling, no complex layout - just get text visible.
 
 use crate::{
+    buffer::display::DisplayRow as BufferDisplayRow,
     editor::{style::EditorStyle, view::EditorView},
     git::diff::{BufferDiff, DiffHunkStatus},
     gutter::{DisplayRow, GutterLayout},
@@ -136,12 +137,19 @@ impl Element for EditorElement {
             self.calculate_gutter_width(max_point.row + 1, &gutter_font, window, cx)
         };
 
-        // Calculate visible display row range using DisplaySnapshot (handles wrapping/folding)
+        // Calculate visible display row range
         let scroll_offset = scroll_y.floor() as u32;
         let max_display_point = display_snapshot.max_point();
         let max_buffer_point = buffer_snapshot.max_point();
-        let start_display_row = scroll_offset.min(max_display_point.row);
-        let end_display_row = (start_display_row + max_lines).min(max_display_point.row + 1);
+
+        // In diff review, use display_buffer row count (includes phantom rows)
+        let max_row_count = if is_in_diff_review {
+            display_buffer.row_count() as u32
+        } else {
+            max_display_point.row + 1
+        };
+        let start_display_row = scroll_offset.min(max_row_count.saturating_sub(1));
+        let end_display_row = (start_display_row + max_lines).min(max_row_count);
 
         // DEBUG: Log visible range calculation
         tracing::trace!(
@@ -270,76 +278,140 @@ impl Element for EditorElement {
         let mut line_layouts = Vec::with_capacity((end_display_row - start_display_row) as usize);
         let mut y = bounds.origin.y + self.style.padding;
 
-        for display_row in start_display_row..end_display_row {
-            // Convert display row to buffer point
-            let display_point = stoat_text_transform::DisplayPoint {
-                row: display_row,
-                column: 0,
-            };
-            let buffer_point =
-                display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
-            let buffer_row = buffer_point.row;
+        if is_in_diff_review {
+            // Diff review path: iterate DisplayBuffer rows (includes phantom rows)
+            let range_start = BufferDisplayRow::new(start_display_row);
+            let range_end = BufferDisplayRow::new(end_display_row);
 
-            // Get git diff status from DisplayBuffer (if available)
-            // Note: DisplayBuffer uses different row numbering (includes phantom rows)
-            // We query by buffer row to get status for real buffer rows
-            let diff_display_row = display_buffer.buffer_row_to_display(buffer_row);
-            let diff_row_info = display_buffer.row_at(diff_display_row);
-
-            // Determine text styling for diff rows (backgrounds painted separately)
-            let text_color_override = match diff_row_info.as_ref().and_then(|r| r.diff_status) {
-                Some(DiffHunkStatus::Deleted) => Some(gpui::Hsla {
-                    h: 0.0,
-                    s: 0.3,
-                    l: 0.5,
-                    a: 0.6,
-                }),
-                _ => None,
+            let deleted_text_color = gpui::Hsla {
+                h: 0.0,
+                s: 0.3,
+                l: 0.5,
+                a: 0.6,
             };
 
-            // Build text runs for this display row
-            let mut runs = Vec::new();
+            for row_info in display_buffer.rows_in_range(range_start..range_end) {
+                let display_row = row_info.display_row.row();
 
-            // Get line text from buffer snapshot
-            // TODO: Handle wrapped lines (currently shows full buffer line)
-            let line_start = text::Point::new(buffer_row, 0);
-            let line_end = if buffer_row < max_point.row {
-                text::Point::new(buffer_row + 1, 0)
-            } else {
-                buffer_snapshot.max_point()
-            };
-            let line_text: String = buffer_snapshot
-                .text_for_range(line_start..line_end)
-                .collect();
-            // Strip trailing newline if present
-            let line_text = line_text.trim_end_matches('\n').to_string();
+                if let Some(buffer_row) = row_info.buffer_row {
+                    // Real buffer row: use syntax highlighting from Phase 1
+                    let line_text = &row_info.content;
+                    let mut runs = Vec::new();
 
-            // Add content text runs using buffer row for syntax highlighting lookup
-            {
-                // Use highlighted runs from phase 1
+                    if let Some(buffer_runs) = highlighted_lines.get(&buffer_row) {
+                        let mut processed_runs = buffer_runs.clone();
+
+                        if matches!(row_info.diff_status, Some(DiffHunkStatus::Modified))
+                            && !row_info.modified_ranges.is_empty()
+                        {
+                            processed_runs = apply_modified_range_backgrounds(
+                                processed_runs,
+                                &row_info.modified_ranges,
+                                &self.style,
+                            );
+                        }
+
+                        if let Some(row_diagnostics) = diagnostics_by_row.get(&buffer_row) {
+                            processed_runs = apply_diagnostic_underlines(
+                                processed_runs,
+                                buffer_row,
+                                row_diagnostics,
+                                &buffer_snapshot,
+                                &self.style,
+                            );
+                        }
+
+                        runs.extend(processed_runs);
+                    } else {
+                        runs.push(TextRun {
+                            len: line_text.len().max(1),
+                            font: font.clone(),
+                            color: self.style.text_color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        });
+                    }
+
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(line_text.clone()),
+                        font_size,
+                        &runs,
+                        None,
+                    );
+
+                    line_layouts.push(ShapedLineLayout {
+                        display_row,
+                        buffer_row: Some(buffer_row),
+                        shaped,
+                        y_position: y,
+                        diff_status: row_info.diff_status,
+                    });
+                } else {
+                    // Phantom row (deleted content): plain text with deleted color
+                    let line_text = &row_info.content;
+
+                    let runs = vec![TextRun {
+                        len: line_text.len().max(1),
+                        font: font.clone(),
+                        color: deleted_text_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }];
+
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(line_text.clone()),
+                        font_size,
+                        &runs,
+                        None,
+                    );
+
+                    line_layouts.push(ShapedLineLayout {
+                        display_row,
+                        buffer_row: None,
+                        shaped,
+                        y_position: y,
+                        diff_status: row_info.diff_status,
+                    });
+                }
+
+                y += line_height;
+
+                if y > bounds.origin.y + bounds.size.height {
+                    break;
+                }
+            }
+        } else {
+            // Normal path: iterate display snapshot rows (no phantom rows)
+            for display_row in start_display_row..end_display_row {
+                let display_point = stoat_text_transform::DisplayPoint {
+                    row: display_row,
+                    column: 0,
+                };
+                let buffer_point =
+                    display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
+                let buffer_row = buffer_point.row;
+
+                let diff_display_row = display_buffer.buffer_row_to_display(buffer_row);
+                let diff_row_info = display_buffer.row_at(diff_display_row);
+
+                let mut runs = Vec::new();
+
+                let line_start = text::Point::new(buffer_row, 0);
+                let line_end = if buffer_row < max_point.row {
+                    text::Point::new(buffer_row + 1, 0)
+                } else {
+                    buffer_snapshot.max_point()
+                };
+                let line_text: String = buffer_snapshot
+                    .text_for_range(line_start..line_end)
+                    .collect();
+                let line_text = line_text.trim_end_matches('\n').to_string();
+
                 if let Some(buffer_runs) = highlighted_lines.get(&buffer_row) {
                     let mut processed_runs = buffer_runs.clone();
 
-                    // Apply stronger background to modified ranges for Modified rows (only in
-                    // review mode)
-                    if is_in_diff_review
-                        && matches!(
-                            diff_row_info.as_ref().and_then(|r| r.diff_status),
-                            Some(DiffHunkStatus::Modified)
-                        )
-                    {
-                        if let Some(row_info) = &diff_row_info {
-                            if !row_info.modified_ranges.is_empty() {
-                                processed_runs = apply_modified_range_backgrounds(
-                                    processed_runs,
-                                    &row_info.modified_ranges,
-                                    &self.style,
-                                );
-                            }
-                        }
-                    }
-
-                    // Apply diagnostic underlines if there are diagnostics for this row
                     if let Some(row_diagnostics) = diagnostics_by_row.get(&buffer_row) {
                         processed_runs = apply_diagnostic_underlines(
                             processed_runs,
@@ -350,18 +422,10 @@ impl Element for EditorElement {
                         );
                     }
 
-                    for mut run in processed_runs {
-                        // Override text color for deleted rows (shouldn't happen since we don't
-                        // show phantom rows, but keep for consistency)
-                        if let Some(color) = text_color_override {
-                            run.color = color;
-                        }
-                        runs.push(run);
-                    }
+                    runs.extend(processed_runs);
                 } else {
-                    // No syntax highlighting available - use plain text
                     runs.push(TextRun {
-                        len: line_text.len().max(1), // At least 1 for empty lines
+                        len: line_text.len().max(1),
                         font: font.clone(),
                         color: self.style.text_color,
                         background_color: None,
@@ -369,29 +433,27 @@ impl Element for EditorElement {
                         strikethrough: None,
                     });
                 }
-            }
 
-            // Shape the line
-            let shaped = window.text_system().shape_line(
-                SharedString::from(line_text),
-                font_size,
-                &runs,
-                None,
-            );
+                let shaped = window.text_system().shape_line(
+                    SharedString::from(line_text),
+                    font_size,
+                    &runs,
+                    None,
+                );
 
-            line_layouts.push(ShapedLineLayout {
-                display_row,
-                buffer_row: Some(buffer_row),
-                shaped,
-                y_position: y,
-                diff_status: diff_row_info.and_then(|r| r.diff_status),
-            });
+                line_layouts.push(ShapedLineLayout {
+                    display_row,
+                    buffer_row: Some(buffer_row),
+                    shaped,
+                    y_position: y,
+                    diff_status: diff_row_info.and_then(|r| r.diff_status),
+                });
 
-            y += line_height;
+                y += line_height;
 
-            // Early exit if beyond visible area
-            if y > bounds.origin.y + bounds.size.height {
-                break;
+                if y > bounds.origin.y + bounds.size.height {
+                    break;
+                }
             }
         }
 
