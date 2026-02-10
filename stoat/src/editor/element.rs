@@ -682,6 +682,7 @@ impl Element for EditorElement {
             diff,
             buffer_snapshot,
             strip_width,
+            is_in_diff_review,
         }
     }
 
@@ -947,6 +948,7 @@ impl EditorElement {
             self.style.padding,
             self.style.line_height,
             prepaint.strip_width,
+            prepaint.is_in_diff_review,
         );
 
         // Paint diff indicators
@@ -1299,6 +1301,8 @@ pub struct EditorPrepaintState {
     pub buffer_snapshot: BufferSnapshot,
     /// Width of diff indicator strip (wider in diff review mode)
     pub strip_width: Pixels,
+    /// Whether editor is in diff review mode
+    pub is_in_diff_review: bool,
 }
 
 /// A single line that has been shaped and is ready to paint.

@@ -124,6 +124,8 @@ impl GutterLayout {
     /// * `right_padding` - Spacing between gutter content and editor text
     /// * `line_height` - Height of one line in pixels
     /// * `strip_width` - Width of diff indicator strip
+    /// * `is_in_diff_review` - When true, skips Phase 2 deletion pills (Phase 1 already covers
+    ///   them)
     ///
     /// # Returns
     ///
@@ -146,6 +148,7 @@ impl GutterLayout {
         right_padding: Pixels,
         line_height: Pixels,
         strip_width: Pixels,
+        is_in_diff_review: bool,
     ) -> Self {
         let dimensions = GutterDimensions {
             width: gutter_width,
@@ -214,36 +217,41 @@ impl GutterLayout {
             });
         }
 
-        // PHASE 2: Add special markers for zero-length deleted hunks at buffer positions
-        // These show as small rounded pills where content was deleted
-        if let Some(diff) = diff {
-            for hunk in &diff.hunks {
-                let hunk_start_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
-                let hunk_end_row = hunk.buffer_range.end.to_point(buffer_snapshot).row;
+        // PHASE 2: Add special markers for zero-length deleted hunks at buffer positions.
+        // Skipped in diff review mode where Phase 1 already creates deleted indicators
+        // from phantom display rows.
+        if !is_in_diff_review {
+            if let Some(diff) = diff {
+                for hunk in &diff.hunks {
+                    let hunk_start_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
+                    let hunk_end_row = hunk.buffer_range.end.to_point(buffer_snapshot).row;
 
-                // Only process zero-length deleted hunks
-                if hunk_start_row == hunk_end_row && matches!(hunk.status, DiffHunkStatus::Deleted)
-                {
-                    // Check if hunk is in visible range
-                    if hunk_start_row < visible_rows.start || hunk_start_row >= visible_rows.end {
-                        continue;
+                    if hunk_start_row == hunk_end_row
+                        && matches!(hunk.status, DiffHunkStatus::Deleted)
+                    {
+                        let display_row = hunk_start_row + 1;
+                        if display_row < visible_rows.start || display_row >= visible_rows.end {
+                            continue;
+                        }
+
+                        let pill_height = line_height;
+                        let y_offset =
+                            right_padding + line_height * (display_row - visible_rows.start) as f32;
+
+                        let bounds = Bounds {
+                            origin: point(
+                                gutter_bounds.origin.x,
+                                gutter_bounds.origin.y + y_offset,
+                            ),
+                            size: size(strip_width, pill_height),
+                        };
+
+                        diff_indicators.push(DiffIndicator {
+                            status: DiffHunkStatus::Deleted,
+                            bounds,
+                            corner_radii: Corners::all(px(0.0)),
+                        });
                     }
-
-                    // Create small rounded pill at deletion point
-                    let width = (0.35 * line_height).floor();
-                    let y_offset = line_height * ((hunk_start_row - visible_rows.start) as f32)
-                        - line_height / 2.0;
-
-                    let bounds = Bounds {
-                        origin: point(gutter_bounds.origin.x, gutter_bounds.origin.y + y_offset),
-                        size: size(width, line_height),
-                    };
-
-                    diff_indicators.push(DiffIndicator {
-                        status: DiffHunkStatus::Deleted,
-                        bounds,
-                        corner_radii: Corners::all(line_height),
-                    });
                 }
             }
         }
