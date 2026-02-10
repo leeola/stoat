@@ -181,7 +181,7 @@ impl PaneGroupView {
                 config.clone(),
                 app_state.worktree.clone(),
                 app_state.buffer_store.clone(),
-                None,
+                Some(app_state.lsp_manager.clone()),
                 compiled_keymap.clone(),
                 cx,
             );
@@ -258,12 +258,21 @@ impl PaneGroupView {
         };
 
         let initial_stoat_ref = initial_editor.read(cx).stoat.clone();
-        let initial_sub = cx.subscribe(&initial_stoat_ref, |this: &mut Self, _stoat, event, cx| {
-            if let StoatEvent::Action { name, args } = event {
-                this.pending_actions.push((name.clone(), args.clone()));
-                cx.notify();
-            }
-        });
+        let initial_sub =
+            cx.subscribe(
+                &initial_stoat_ref,
+                |this: &mut Self, _stoat, event, cx| match event {
+                    StoatEvent::Action { name, args } => {
+                        this.pending_actions.push((name.clone(), args.clone()));
+                        cx.notify();
+                    },
+                    StoatEvent::FileOpened { language } => {
+                        this.app_state
+                            .ensure_lsp_for_language(*language, cx.weak_entity(), cx);
+                    },
+                    _ => {},
+                },
+            );
 
         Self {
             app_state,
@@ -350,11 +359,16 @@ impl PaneGroupView {
     }
 
     pub(crate) fn subscribe_to_stoat(&mut self, stoat: &Entity<Stoat>, cx: &mut Context<'_, Self>) {
-        let sub = cx.subscribe(stoat, |this: &mut Self, _stoat, event, cx| {
-            if let StoatEvent::Action { name, args } = event {
+        let sub = cx.subscribe(stoat, |this: &mut Self, _stoat, event, cx| match event {
+            StoatEvent::Action { name, args } => {
                 this.pending_actions.push((name.clone(), args.clone()));
                 cx.notify();
-            }
+            },
+            StoatEvent::FileOpened { language } => {
+                this.app_state
+                    .ensure_lsp_for_language(*language, cx.weak_entity(), cx);
+            },
+            _ => {},
         });
         self.stoat_subscriptions.push(sub);
     }

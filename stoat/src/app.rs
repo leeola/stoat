@@ -72,6 +72,24 @@ fn run_with_paths_impl(
                 pane_group_view.update(cx, |this, cx| {
                     this.app_state
                         .setup_lsp_progress_tracking(pane_group_view.downgrade(), cx);
+
+                    // Trigger deferred LSP startup for the initially loaded file (if any).
+                    // The FileOpened event from load_file() fires before subscriptions exist,
+                    // so we check the active buffer's language here.
+                    if let Some(editor) = this.active_editor() {
+                        let language = editor
+                            .read(cx)
+                            .stoat
+                            .read(cx)
+                            .active_buffer(cx)
+                            .read(cx)
+                            .language();
+                        this.app_state.ensure_lsp_for_language(
+                            language,
+                            pane_group_view.downgrade(),
+                            cx,
+                        );
+                    }
                 });
 
                 // Focus the initial editor so input works immediately

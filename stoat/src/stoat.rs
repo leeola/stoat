@@ -183,6 +183,8 @@ pub enum StoatEvent {
     Changed,
     /// Pane-level action dispatched from the compiled keymap
     Action { name: String, args: Vec<String> },
+    /// A file was opened (used to trigger deferred LSP startup)
+    FileOpened { language: Language },
 }
 
 /// Main editor entity.
@@ -1300,7 +1302,7 @@ impl Stoat {
             let uri_str = format!("file://{}", path_buf.display());
             if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
                 let language_id = match language {
-                    stoat_text::Language::Rust => "rust",
+                    Language::Rust => "rust",
                     _ => "plaintext",
                 }
                 .to_string();
@@ -1325,6 +1327,8 @@ impl Stoat {
                 }
             }
         }
+
+        cx.emit(StoatEvent::FileOpened { language });
 
         Ok(())
     }

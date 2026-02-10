@@ -24,7 +24,7 @@ impl PaneGroupView {
                     crate::Config::default(),
                     self.app_state.worktree.clone(),
                     self.app_state.buffer_store.clone(),
-                    None,
+                    Some(self.app_state.lsp_manager.clone()),
                     self.compiled_keymap.clone(),
                     cx,
                 )

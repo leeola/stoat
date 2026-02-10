@@ -36,6 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_lsp::DiagnosticSet;
+use stoat_text::Language;
 use text::Buffer;
 
 /// Maximum UI notification rate for LSP progress updates (milliseconds).
@@ -46,6 +47,8 @@ const PROGRESS_DEBOUNCE_MS: u64 = 200;
 /// LSP server status.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LspStatus {
+    /// No LSP server requested yet
+    Idle,
     /// Server process starting
     Starting,
     /// Sending initialize request
@@ -62,6 +65,7 @@ impl LspStatus {
     /// Display string for status bar (empty when Ready).
     pub fn display_string(&self) -> String {
         match self {
+            LspStatus::Idle => String::new(),
             LspStatus::Starting => "LSP: Starting...".to_string(),
             LspStatus::Initializing => "LSP: Initializing...".to_string(),
             LspStatus::Indexing { operation } => format!("LSP: {}", operation),
@@ -90,7 +94,7 @@ pub struct LspState {
 impl Default for LspState {
     fn default() -> Self {
         Self {
-            status: Arc::new(RwLock::new(LspStatus::Starting)),
+            status: Arc::new(RwLock::new(LspStatus::Idle)),
             active_operations: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -557,84 +561,123 @@ impl AppState {
             })
             .detach();
         }
+    }
 
-        // Spawn rust-analyzer
-        {
-            let lsp_manager_clone = self.lsp_manager.clone();
-            let lsp_state_clone = self.lsp_state.clone();
-            let view_clone = view.clone();
+    /// Spawn the appropriate LSP server if `language` requires one and no server is running yet.
+    ///
+    /// After the server initializes, sends `didOpen` for all already-open buffers of the
+    /// matching language so the server is aware of them.
+    pub fn ensure_lsp_for_language<V: 'static>(
+        &self,
+        language: Language,
+        view: gpui::WeakEntity<V>,
+        cx: &mut gpui::App,
+    ) {
+        if !matches!(language, Language::Rust) {
+            return;
+        }
 
-            cx.spawn(async move |cx| {
-                *lsp_state_clone.status.write() = LspStatus::Initializing;
-                tracing::debug!("LSP initializing");
+        if !self.lsp_manager.active_servers().is_empty() {
+            return;
+        }
 
-                // Notify view
-                let _ = view_clone.update(cx, |_this, cx| {
-                    cx.notify();
-                });
+        let lsp_manager = self.lsp_manager.clone();
+        let lsp_state = self.lsp_state.clone();
+        let buffer_store = self.buffer_store.clone();
 
-                let rust_analyzer_path = which::which("rust-analyzer")?;
+        *lsp_state.status.write() = LspStatus::Starting;
 
-                tracing::info!("Spawning rust-analyzer from: {:?}", rust_analyzer_path);
+        cx.spawn(async move |cx| {
+            *lsp_state.status.write() = LspStatus::Initializing;
+            tracing::debug!("LSP initializing");
 
-                let transport = stoat_lsp::StdioTransport::spawn(
-                    rust_analyzer_path,
-                    vec![],
-                    cx.background_executor().clone(),
-                )?;
+            let _ = view.update(cx, |_this, cx| cx.notify());
 
-                let server_id = lsp_manager_clone.add_server("rust-analyzer", Arc::new(transport));
+            let rust_analyzer_path = which::which("rust-analyzer")?;
+            tracing::info!("Spawning rust-analyzer from: {:?}", rust_analyzer_path);
 
-                let initialize_request = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "initialize",
-                    "params": {
-                        "processId": std::process::id(),
-                        "rootUri": format!("file://{}", std::env::current_dir()?.display()),
-                        "capabilities": {
-                            "textDocument": {
-                                "publishDiagnostics": {
-                                    "relatedInformation": true,
-                                    "versionSupport": true,
-                                }
-                            },
-                            "window": {
-                                "workDoneProgress": true,
+            let transport = stoat_lsp::StdioTransport::spawn(
+                rust_analyzer_path,
+                vec![],
+                cx.background_executor().clone(),
+            )?;
+
+            let server_id = lsp_manager.add_server("rust-analyzer", Arc::new(transport));
+
+            let initialize_request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "processId": std::process::id(),
+                    "rootUri": format!("file://{}", std::env::current_dir()?.display()),
+                    "capabilities": {
+                        "textDocument": {
+                            "publishDiagnostics": {
+                                "relatedInformation": true,
+                                "versionSupport": true,
                             }
                         },
+                        "window": {
+                            "workDoneProgress": true,
+                        }
+                    },
+                }
+            });
+
+            let response = lsp_manager.request(server_id, initialize_request)?.await?;
+            tracing::info!("rust-analyzer initialized: {:?}", response);
+
+            let initialized_notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            });
+
+            lsp_manager
+                .notify(server_id, initialized_notification)
+                .await?;
+
+            lsp_manager.start_listener(server_id)?;
+
+            *lsp_state.status.write() = LspStatus::Ready;
+            tracing::debug!("LSP ready");
+
+            let _ = view.update(cx, |_this, cx| cx.notify());
+
+            // Send didOpen for all already-open buffers of matching language
+            let paths_and_texts: Vec<(PathBuf, String, String)> = cx.update(|cx| {
+                let store = buffer_store.read(cx);
+                store
+                    .buffer_paths()
+                    .into_iter()
+                    .filter_map(|path| {
+                        let item = store.get_buffer_by_path(&path)?;
+                        let item_read = item.read(cx);
+                        if item_read.language() != Language::Rust {
+                            return None;
+                        }
+                        let language_id = "rust".to_string();
+                        let text = item_read.buffer().read(cx).text();
+                        Some((path, language_id, text))
+                    })
+                    .collect()
+            })?;
+
+            for (path, language_id, text) in paths_and_texts {
+                let uri_str = format!("file://{}", path.display());
+                if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+                    if let Err(e) = lsp_manager
+                        .did_open(server_id, uri, language_id, 1, text)
+                        .await
+                    {
+                        tracing::warn!("Failed to send didOpen for {:?}: {}", path, e);
                     }
-                });
+                }
+            }
 
-                let response = lsp_manager_clone
-                    .request(server_id, initialize_request)?
-                    .await?;
-
-                tracing::info!("rust-analyzer initialized: {:?}", response);
-
-                let initialized_notification = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "initialized",
-                    "params": {}
-                });
-
-                lsp_manager_clone
-                    .notify(server_id, initialized_notification)
-                    .await?;
-
-                lsp_manager_clone.start_listener(server_id)?;
-
-                *lsp_state_clone.status.write() = LspStatus::Ready;
-                tracing::debug!("LSP ready");
-
-                // Notify view
-                let _ = view_clone.update(cx, |_this, cx| {
-                    cx.notify();
-                });
-
-                Ok::<_, anyhow::Error>(())
-            })
-            .detach();
-        }
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Open file finder modal.
