@@ -100,7 +100,7 @@ impl Stoat {
             }
 
             if hunk_count > 0 {
-                self.jump_to_current_hunk(cx);
+                self.jump_to_current_hunk(true, cx);
             } else {
                 // No hunks in new mode - reset cursor to file start
                 let target_pos = text::Point::new(0, 0);

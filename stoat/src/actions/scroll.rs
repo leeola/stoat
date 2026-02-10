@@ -70,10 +70,15 @@ impl Stoat {
         );
 
         // Apply bounds checking
-        let buffer_item = self.active_buffer(cx).read(cx);
-        let buffer = buffer_item.buffer().read(cx);
-        let max_point = buffer.max_point();
-        let max_scroll_y = (max_point.row as f32).max(0.0);
+        let buffer_item_entity = self.active_buffer(cx);
+        let max_scroll_y = if self.is_in_diff_review() {
+            let display_buffer = buffer_item_entity.read(cx).display_buffer(cx, true);
+            (display_buffer.row_count() as f32 - 1.0).max(0.0)
+        } else {
+            let buffer_item = buffer_item_entity.read(cx);
+            let max_point = buffer_item.buffer().read(cx).max_point();
+            max_point.row as f32
+        };
 
         let bounded_position = gpui::point(
             new_position.x.max(0.0),

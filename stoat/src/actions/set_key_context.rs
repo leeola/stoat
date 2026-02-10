@@ -4,7 +4,7 @@
 //! FileFinder, etc.) with automatic mode restoration. KeyContext determines which UI
 //! is rendered while mode determines interaction within that context.
 
-use crate::stoat::Stoat;
+use crate::stoat::{KeyContext, Stoat};
 use gpui::Context;
 use tracing::{debug, warn};
 
@@ -65,11 +65,9 @@ impl Stoat {
     /// - [`Self::set_mode`] - internal method to set mode without events
     /// - [`Self::get_key_context_meta`] - retrieves context metadata
     /// - [`crate::actions::SetMode`] - changes mode within current context
-    pub fn handle_set_key_context(
-        &mut self,
-        context: crate::stoat::KeyContext,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn handle_set_key_context(&mut self, context: KeyContext, cx: &mut Context<Self>) {
+        let was_diff_review = self.key_context == KeyContext::DiffReview;
+
         // Set the new context
         self.set_key_context(context);
 
@@ -80,6 +78,16 @@ impl Stoat {
             debug!(context = ?context, mode = %default_mode, "Set KeyContext with default mode");
         } else {
             warn!(context = ?context, "No metadata found for KeyContext, mode unchanged");
+        }
+
+        // When leaving diff review, phantom rows disappear. Snap scroll to cursor
+        // so the viewport doesn't end up past the end of the buffer.
+        if was_diff_review && context == KeyContext::TextEditor {
+            let cursor_row = self.cursor_position().row as f32;
+            let viewport = self.viewport_lines.unwrap_or(40.0);
+            let target_y = (cursor_row - viewport / 3.0).max(0.0);
+            self.scroll
+                .scroll_to(gpui::point(self.scroll.position.x, target_y));
         }
 
         cx.emit(crate::stoat::StoatEvent::Changed);

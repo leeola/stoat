@@ -67,7 +67,7 @@ impl Stoat {
                             self.diff_review_current_file_idx = idx;
                             self.diff_review_current_hunk_idx = 0;
 
-                            self.jump_to_current_hunk(cx);
+                            self.jump_to_current_hunk(true, cx);
                             cx.notify();
                             return;
                         }

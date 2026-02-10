@@ -1,0 +1,73 @@
+diff --git a/file.txt b/file.txt
+index 1234567..abcdef0 100644
+--- a/file.txt
++++ b/file.txt
+@@ -1,52 +1,2 @@
+ 1 header line
+-2 this section will be deleted
+-3 this section will be deleted
+-4 this section will be deleted
+-5 this section will be deleted
+-6 this section will be deleted
+-7 this section will be deleted
+-8 this section will be deleted
+-9 this section will be deleted
+-10 this section will be deleted
+-11 this section will be deleted
+-12 this section will be deleted
+-13 this section will be deleted
+-14 this section will be deleted
+-15 this section will be deleted
+-16 this section will be deleted
+-17 this section will be deleted
+-18 this section will be deleted
+-19 this section will be deleted
+-20 this section will be deleted
+-21 this section will be deleted
+-22 this section will be deleted
+-23 this section will be deleted
+-24 this section will be deleted
+-25 this section will be deleted
+-26 this section will be deleted
+-27 this section will be deleted
+-28 this section will be deleted
+-29 this section will be deleted
+-30 this section will be deleted
+-31 this section will be deleted
+-32 this section will be deleted
+-33 this section will be deleted
+-34 this section will be deleted
+-35 this section will be deleted
+-36 this section will be deleted
+-37 this section will be deleted
+-38 this section will be deleted
+-39 this section will be deleted
+-40 this section will be deleted
+-41 this section will be deleted
+-42 this section will be deleted
+-43 this section will be deleted
+-44 this section will be deleted
+-45 this section will be deleted
+-46 this section will be deleted
+-47 this section will be deleted
+-48 this section will be deleted
+-49 this section will be deleted
+-50 this section will be deleted
+-51 this section will be deleted
+ 52 begin kept section
+@@ -60,6 +10,9 @@
+ 60 kept line
+ 61 kept line
+ 62 middle marker
++ADDED alpha
++ADDED bravo
++ADDED charlie
+ 63 kept line
+ 64 kept line
+ 65 kept line
+@@ -79,2 +32,5 @@
+ 79 kept line
+ 80 end of file
++ADDED at end one
++ADDED at end two
++ADDED at end three

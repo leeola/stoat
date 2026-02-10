@@ -77,7 +77,7 @@ impl Stoat {
         if let Some(current_file_path) = self.diff_review_files.get(start_file) {
             if let Some(hunk_idx) = find_unreviewed_in_file(current_file_path, start_hunk) {
                 self.diff_review_current_hunk_idx = hunk_idx;
-                self.jump_to_current_hunk(cx);
+                self.jump_to_current_hunk(true, cx);
                 cx.notify();
                 return;
             }
@@ -118,7 +118,7 @@ impl Stoat {
                 {
                     self.diff_review_current_file_idx = file_idx;
                     self.diff_review_current_hunk_idx = hunk_idx;
-                    self.jump_to_current_hunk(cx);
+                    self.jump_to_current_hunk(true, cx);
                     cx.notify();
                     return;
                 }
@@ -134,7 +134,7 @@ impl Stoat {
 
             if let Some(hunk_idx) = (0..start_hunk).find(|idx| !approved_hunks.contains(idx)) {
                 self.diff_review_current_hunk_idx = hunk_idx;
-                self.jump_to_current_hunk(cx);
+                self.jump_to_current_hunk(true, cx);
                 cx.notify();
                 return;
             }

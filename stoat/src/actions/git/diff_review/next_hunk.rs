@@ -57,7 +57,7 @@ impl Stoat {
             // Move to next hunk in current file
             self.diff_review_current_hunk_idx += 1;
             tracing::debug!("Moving to next hunk: {}", self.diff_review_current_hunk_idx);
-            self.jump_to_current_hunk(cx);
+            self.jump_to_current_hunk(true, cx);
         } else {
             // At last hunk, try next file
             tracing::debug!("At last hunk, loading next file");

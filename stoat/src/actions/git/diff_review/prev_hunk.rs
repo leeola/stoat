@@ -40,7 +40,7 @@ impl Stoat {
         if self.diff_review_current_hunk_idx > 0 {
             // Go to previous hunk in current file
             self.diff_review_current_hunk_idx -= 1;
-            self.jump_to_current_hunk(cx);
+            self.jump_to_current_hunk(true, cx);
         } else {
             // Go to previous file's last hunk
             self.load_prev_file(cx);

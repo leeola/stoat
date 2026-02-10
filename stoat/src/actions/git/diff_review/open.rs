@@ -115,7 +115,7 @@ impl Stoat {
             self.mode = "diff_review".to_string();
 
             // Jump to saved hunk
-            self.jump_to_current_hunk(cx);
+            self.jump_to_current_hunk(false, cx);
 
             cx.emit(crate::stoat::StoatEvent::Changed);
             cx.notify();
@@ -220,7 +220,7 @@ impl Stoat {
         self.mode = "diff_review".to_string();
 
         // Jump to first hunk
-        self.jump_to_current_hunk(cx);
+        self.jump_to_current_hunk(false, cx);
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();

@@ -35,7 +35,7 @@ impl Stoat {
     /// Implements smart scrolling:
     /// - If hunk fits in viewport: centers the hunk
     /// - If hunk is too large: positions top of hunk at 1/3 from viewport top
-    pub fn jump_to_current_hunk(&mut self, cx: &mut Context<Self>) {
+    pub fn jump_to_current_hunk(&mut self, animate: bool, cx: &mut Context<Self>) {
         // Get the diff from the buffer item (has fresh anchors) instead of GitIndex (has stale
         // anchors)
         let buffer_item = self.active_buffer(cx);
@@ -62,29 +62,39 @@ impl Stoat {
         let hunk_idx = self.diff_review_current_hunk_idx;
         let start_row = hunk_start.row;
 
-        // Move cursor to hunk start
+        // Move cursor to hunk start (always in buffer coordinates)
         self.cursor.move_to(hunk_start);
 
         // Smart scrolling based on hunk size
         if let Some(viewport_lines) = self.viewport_lines {
-            let hunk_height = (hunk_end.row - hunk_start.row) as f32;
-
-            // Only center small hunks (less than ~40% of viewport)
-            // Larger hunks get positioned near top with padding
-            let target_scroll_y = if hunk_height < viewport_lines * 0.4 {
-                // Small hunk - center it
-                let hunk_middle = hunk_start.row as f32 + (hunk_height / 2.0);
-                (hunk_middle - (viewport_lines / 2.0)).max(0.0)
+            // In diff review, phantom rows shift display rows relative to buffer rows.
+            // Convert to display coordinates so the viewport targets the right position.
+            let (display_start_row, display_end_row) = if self.is_in_diff_review() {
+                let display_buffer = buffer_item.read(cx).display_buffer(cx, true);
+                let start = display_buffer.buffer_row_to_display(hunk_start.row).0;
+                let end = display_buffer.buffer_row_to_display(hunk_end.row).0;
+                (start as f32, end as f32)
             } else {
-                // Larger hunk - position near top with padding (like normal cursor)
-                const TOP_PADDING: f32 = 3.0;
-                (hunk_start.row as f32 - TOP_PADDING).max(0.0)
+                (hunk_start.row as f32, hunk_end.row as f32)
             };
 
-            self.scroll
-                .start_animation_to(gpui::point(self.scroll.position.x, target_scroll_y));
+            let hunk_height = display_end_row - display_start_row;
+
+            let target_scroll_y = if hunk_height < viewport_lines * 0.4 {
+                let hunk_middle = display_start_row + (hunk_height / 2.0);
+                (hunk_middle - (viewport_lines / 2.0)).max(0.0)
+            } else {
+                const TOP_PADDING: f32 = 3.0;
+                (display_start_row - TOP_PADDING).max(0.0)
+            };
+
+            let target = gpui::point(self.scroll.position.x, target_scroll_y);
+            if animate {
+                self.scroll.start_animation_to(target);
+            } else {
+                self.scroll.scroll_to(target);
+            }
         } else {
-            // No viewport info - fall back to basic visibility check
             self.ensure_cursor_visible(cx);
         }
 
@@ -155,7 +165,7 @@ impl Stoat {
 
                     self.diff_review_current_file_idx = next_idx;
                     self.diff_review_current_hunk_idx = 0;
-                    self.jump_to_current_hunk(cx);
+                    self.jump_to_current_hunk(true, cx);
                     return;
                 }
             }
@@ -242,7 +252,7 @@ impl Stoat {
                     let last_hunk_idx = diff.hunks.len().saturating_sub(1);
                     self.diff_review_current_file_idx = prev_idx;
                     self.diff_review_current_hunk_idx = last_hunk_idx;
-                    self.jump_to_current_hunk(cx);
+                    self.jump_to_current_hunk(true, cx);
                     return;
                 }
             }
