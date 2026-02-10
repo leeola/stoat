@@ -41,6 +41,9 @@ pub mod static_view;
 pub mod status_bar;
 pub mod syntax;
 
+#[cfg(feature = "dev-tools")]
+pub mod dev_tools;
+
 #[cfg(test)]
 pub mod test;
 

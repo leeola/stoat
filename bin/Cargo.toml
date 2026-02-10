@@ -16,8 +16,9 @@ name = "stoat_bin"
 path = "src/lib.rs"
 
 [features]
-default = ["gui"]
+default = ["gui", "dev-tools"]
 gui = ["stoat"]
+dev-tools = ["stoat/dev-tools"]
 
 [lints]
 workspace = true

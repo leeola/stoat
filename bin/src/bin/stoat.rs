@@ -34,6 +34,32 @@ pub enum Command {
         #[arg(help = "Files to open")]
         paths: Vec<std::path::PathBuf>,
     },
+
+    #[cfg(feature = "dev-tools")]
+    #[command(about = "Development tools", name = "dev-tools")]
+    DevTools {
+        #[command(subcommand)]
+        sub: DevToolsCommand,
+    },
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Parser)]
+pub enum DevToolsCommand {
+    #[command(about = "Git test fixtures")]
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
+    },
+}
+
+#[cfg(feature = "dev-tools")]
+#[derive(Parser)]
+pub enum GitAction {
+    #[command(about = "List available scenarios")]
+    List,
+    #[command(about = "Open a scenario in the editor")]
+    Open { scenario: String },
 }
 
 fn main() {
@@ -82,6 +108,21 @@ fn main() {
 
             if let Err(e) = result {
                 eprintln!("Error: Failed to launch GUI: {e}");
+                std::process::exit(1);
+            }
+        },
+        #[cfg(feature = "dev-tools")]
+        Some(Command::DevTools { sub }) => {
+            use DevToolsCommand::*;
+            use GitAction::*;
+            let result = match sub {
+                Git { action: List } => stoat_bin::commands::dev_tools::run_git_list(),
+                Git {
+                    action: Open { scenario },
+                } => stoat_bin::commands::dev_tools::run_git_open(&scenario),
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         },
