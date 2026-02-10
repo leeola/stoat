@@ -69,7 +69,7 @@ impl Stoat {
         if let Some(viewport_lines) = self.viewport_lines {
             // In diff review, phantom rows shift display rows relative to buffer rows.
             // Convert to display coordinates so the viewport targets the right position.
-            let (display_start_row, display_end_row) = if self.is_in_diff_review() {
+            let (display_start_row, display_end_row) = if self.is_in_diff_review(cx) {
                 let display_buffer = buffer_item.read(cx).display_buffer(cx, true);
                 let start = display_buffer.buffer_row_to_display(hunk_start.row).0;
                 let end = display_buffer.buffer_row_to_display(hunk_end.row).0;

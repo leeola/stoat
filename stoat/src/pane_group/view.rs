@@ -1011,7 +1011,7 @@ impl Render for PaneGroupView {
                                                                 * workspace below */
                     stoat.current_file_path().map(|p| p.display().to_string()),
                     stoat.diff_review_progress(),
-                    stoat.diff_review_file_progress(),
+                    stoat.diff_review_file_progress(cx),
                     stoat.diff_review_hunk_position(cx),
                     // Only show comparison mode when in diff_review mode
                     if mode_name == "diff_review" {

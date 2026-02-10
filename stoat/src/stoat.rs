@@ -856,7 +856,12 @@ impl Stoat {
     /// Returns `true` if diff review mode is active. Since we persist state when
     /// exiting review mode (for position restoration), we check both mode and files list.
     /// Used by GUI to adjust gutter width and show diff backgrounds.
-    pub fn is_in_diff_review(&self) -> bool {
+    pub fn is_in_diff_review(&self, cx: &App) -> bool {
+        if let Some(parent) = &self.parent_stoat {
+            if let Some(parent) = parent.upgrade() {
+                return parent.read(cx).is_in_diff_review(cx);
+            }
+        }
         self.mode == "diff_review" && !self.diff_review_files.is_empty()
     }
 
@@ -878,8 +883,8 @@ impl Stoat {
     /// # Returns
     ///
     /// `Some((current, total))` where both are 1-indexed for display
-    pub fn diff_review_file_progress(&self) -> Option<(usize, usize)> {
-        if !self.is_in_diff_review() {
+    pub fn diff_review_file_progress(&self, cx: &App) -> Option<(usize, usize)> {
+        if !self.is_in_diff_review(cx) {
             return None;
         }
 
@@ -917,8 +922,8 @@ impl Stoat {
     ///
     /// - [`crate::git::diff::count_hunks`] - fast hunk counting from text
     /// - [`diff_comparison_mode`](Self::diff_comparison_mode) - determines which refs to compare
-    pub fn diff_review_hunk_position(&self, _cx: &App) -> Option<(usize, usize)> {
-        if !self.is_in_diff_review() {
+    pub fn diff_review_hunk_position(&self, cx: &App) -> Option<(usize, usize)> {
+        if !self.is_in_diff_review(cx) {
             return None;
         }
 

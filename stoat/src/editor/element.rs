@@ -95,7 +95,7 @@ impl Element for EditorElement {
 
             let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot();
             let token_snapshot = buffer_item_read.token_snapshot();
-            let is_in_diff_review = stoat.is_in_diff_review();
+            let is_in_diff_review = stoat.is_in_diff_review(cx);
             let display_map_entity = stoat.display_map(cx).clone();
             let diff = buffer_item_read.diff().cloned();
 
@@ -875,7 +875,7 @@ impl EditorElement {
         // Layout: [diff strip with +/- overlaid][line numbers]
         // Strip width: wider during diff review for better visibility
         let stoat = self.view.read(cx).stoat.read(cx);
-        let strip_width = if stoat.is_in_diff_review() {
+        let strip_width = if stoat.is_in_diff_review(cx) {
             (0.6 * self.style.line_height).floor() // Wider in review mode
         } else {
             (0.275 * self.style.line_height).floor() // Normal width
@@ -1032,7 +1032,7 @@ impl EditorElement {
         cx: &mut App,
     ) {
         let stoat = self.view.read(cx).stoat.read(cx);
-        let is_in_diff_review = stoat.is_in_diff_review();
+        let is_in_diff_review = stoat.is_in_diff_review(cx);
 
         // Only paint backgrounds in review mode
         if !is_in_diff_review {
