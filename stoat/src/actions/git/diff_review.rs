@@ -6,7 +6,13 @@
 mod approve_hunk;
 mod cycle_comparison_mode;
 mod dismiss;
+mod enter_line_select;
 mod hunk_position;
+mod line_select_all;
+mod line_select_cancel;
+mod line_select_stage;
+mod line_select_toggle;
+mod line_select_unstage;
 mod next_hunk;
 mod next_unreviewed_hunk;
 mod open;

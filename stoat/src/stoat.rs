@@ -294,6 +294,9 @@ pub struct Stoat {
     /// Default is [`WorkingVsHead`](crate::git::diff_review::DiffComparisonMode::WorkingVsHead).
     pub(crate) diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode,
 
+    /// Line-level selection within a hunk for partial staging.
+    pub(crate) line_selection: Option<crate::git::line_selection::LineSelection>,
+
     /// Current file path (for status bar display)
     pub(crate) current_file_path: Option<PathBuf>,
 
@@ -483,6 +486,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
+            line_selection: None,
             current_file_path: None,
             buffer_versions: HashMap::new(),
             lsp_manager,
@@ -557,6 +561,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: self.diff_review_comparison_mode,
+            line_selection: None,
             current_file_path: self.current_file_path.clone(),
             buffer_versions: self.buffer_versions.clone(),
             lsp_manager: self.lsp_manager.clone(),
@@ -862,7 +867,8 @@ impl Stoat {
                 return parent.read(cx).is_in_diff_review(cx);
             }
         }
-        self.mode == "diff_review" && !self.diff_review_files.is_empty()
+        (self.mode == "diff_review" || self.mode == "line_select")
+            && !self.diff_review_files.is_empty()
     }
 
     /// Get diff review progress as (reviewed_count, total_count).
@@ -1523,6 +1529,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
+            line_selection: None,
             current_file_path: None,
             buffer_versions: self.buffer_versions.clone(),
             lsp_manager: self.lsp_manager.clone(),

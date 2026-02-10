@@ -68,35 +68,7 @@ impl Stoat {
         let patch =
             super::hunk_patch::generate_hunk_patch(diff, hunk, &buffer_snapshot, &file_path)?;
 
-        // Apply patch in reverse to unstage
-        let mut child = std::process::Command::new("git")
-            .args(["apply", "--cached", "--reverse", "--unidiff-zero", "-"])
-            .current_dir(repo_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to spawn git apply: {e}"))?;
-
-        {
-            use std::io::Write;
-            let stdin = child
-                .stdin
-                .as_mut()
-                .ok_or_else(|| "Failed to open stdin".to_string())?;
-            stdin
-                .write_all(patch.as_bytes())
-                .map_err(|e| format!("Failed to write patch to stdin: {e}"))?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("Failed to wait for git apply: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git apply --reverse failed: {stderr}"));
-        }
+        super::hunk_patch::apply_patch(&patch, repo_dir, true)?;
 
         tracing::info!("Unstaged hunk at row {} in {:?}", cursor_row, file_path);
 

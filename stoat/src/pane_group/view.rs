@@ -973,10 +973,17 @@ impl Render for PaneGroupView {
                 let stoat = stoat_entity.read(cx);
                 let key_context = stoat.key_context();
                 let mode_name = stoat.mode();
-                let display = stoat
+                let mut display = stoat
                     .get_mode(mode_name)
                     .map(|m| m.display_name.clone())
                     .unwrap_or_else(|| mode_name.to_uppercase());
+                if let Some(sel) = &stoat.line_selection {
+                    display = format!(
+                        "{display} ({}/{})",
+                        sel.selected_count(),
+                        sel.total_changeable_count()
+                    );
+                }
 
                 // File finder data is now extracted from workspace state below
                 let ff_data = None::<(
@@ -1014,7 +1021,7 @@ impl Render for PaneGroupView {
                     stoat.diff_review_file_progress(cx),
                     stoat.diff_review_hunk_position(cx),
                     // Only show comparison mode when in diff_review mode
-                    if mode_name == "diff_review" {
+                    if mode_name == "diff_review" || mode_name == "line_select" {
                         Some(stoat.diff_comparison_mode())
                     } else {
                         None

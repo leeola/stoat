@@ -270,6 +270,31 @@ actions!(
     ]
 );
 
+// Line selection actions (partial hunk staging)
+actions!(
+    stoat,
+    [
+        /// Enter line selection mode for partial hunk staging
+        DiffReviewEnterLineSelect,
+        /// Toggle selection of current line
+        DiffReviewLineSelectToggle,
+        /// Select all changeable lines
+        DiffReviewLineSelectAll,
+        /// Deselect all changeable lines
+        DiffReviewLineSelectNone,
+        /// Stage selected lines
+        DiffReviewLineSelectStage,
+        /// Unstage selected lines
+        DiffReviewLineSelectUnstage,
+        /// Cancel line selection and return to diff review
+        DiffReviewLineSelectCancel,
+        /// Move cursor down in line selection
+        DiffReviewLineSelectDown,
+        /// Move cursor up in line selection
+        DiffReviewLineSelectUp,
+    ]
+);
+
 // Selection actions
 actions!(
     stoat,
@@ -961,6 +986,62 @@ action_metadata!(
     ["unstage-hunk", "reset-hunk"]
 );
 
+// Line selection actions
+action_metadata!(
+    DiffReviewEnterLineSelect,
+    "line select",
+    "Enter line selection mode for partial hunk staging",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectToggle,
+    "toggle line",
+    "Toggle selection of current line in line selection mode",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectAll,
+    "select all lines",
+    "Select all changeable lines in line selection mode",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectNone,
+    "deselect all lines",
+    "Deselect all changeable lines in line selection mode",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectStage,
+    "stage lines",
+    "Stage selected lines from line selection",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectUnstage,
+    "unstage lines",
+    "Unstage selected lines from line selection",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectCancel,
+    "cancel line select",
+    "Cancel line selection and return to diff review",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectDown,
+    "line select down",
+    "Move cursor down in line selection mode",
+    hidden
+);
+action_metadata!(
+    DiffReviewLineSelectUp,
+    "line select up",
+    "Move cursor up in line selection mode",
+    hidden
+);
+
 // Pane management actions
 action_metadata!(
     SplitRight,
@@ -1348,6 +1429,44 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitUnstageHunk::action_name(),
     );
 
+    // Line selection actions
+    names.insert(
+        TypeId::of::<DiffReviewEnterLineSelect>(),
+        DiffReviewEnterLineSelect::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectToggle>(),
+        DiffReviewLineSelectToggle::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectAll>(),
+        DiffReviewLineSelectAll::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectNone>(),
+        DiffReviewLineSelectNone::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectStage>(),
+        DiffReviewLineSelectStage::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectUnstage>(),
+        DiffReviewLineSelectUnstage::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectCancel>(),
+        DiffReviewLineSelectCancel::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectDown>(),
+        DiffReviewLineSelectDown::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewLineSelectUp>(),
+        DiffReviewLineSelectUp::action_name(),
+    );
+
     // Buffer finder actions
     names.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1683,6 +1802,44 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitUnstageHunk::description(),
     );
 
+    // Line selection actions
+    descriptions.insert(
+        TypeId::of::<DiffReviewEnterLineSelect>(),
+        DiffReviewEnterLineSelect::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectToggle>(),
+        DiffReviewLineSelectToggle::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectAll>(),
+        DiffReviewLineSelectAll::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectNone>(),
+        DiffReviewLineSelectNone::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectStage>(),
+        DiffReviewLineSelectStage::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectUnstage>(),
+        DiffReviewLineSelectUnstage::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectCancel>(),
+        DiffReviewLineSelectCancel::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectDown>(),
+        DiffReviewLineSelectDown::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewLineSelectUp>(),
+        DiffReviewLineSelectUp::description(),
+    );
+
     // Buffer finder actions
     descriptions.insert(
         TypeId::of::<OpenBufferFinder>(),
@@ -1997,6 +2154,44 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::help_text());
     help.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::help_text());
     help.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::help_text());
+
+    // Line selection actions
+    help.insert(
+        TypeId::of::<DiffReviewEnterLineSelect>(),
+        DiffReviewEnterLineSelect::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectToggle>(),
+        DiffReviewLineSelectToggle::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectAll>(),
+        DiffReviewLineSelectAll::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectNone>(),
+        DiffReviewLineSelectNone::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectStage>(),
+        DiffReviewLineSelectStage::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectUnstage>(),
+        DiffReviewLineSelectUnstage::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectCancel>(),
+        DiffReviewLineSelectCancel::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectDown>(),
+        DiffReviewLineSelectDown::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewLineSelectUp>(),
+        DiffReviewLineSelectUp::help_text(),
+    );
 
     // Buffer finder actions
     help.insert(

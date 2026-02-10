@@ -241,22 +241,40 @@ on key {
 
     # DiffReview Context
     focus == "DiffReview" {
-        escape -> SetKeyContext(TextEditor);
-        j -> DiffReviewNextHunk();
-        k -> DiffReviewPrevHunk();
-        down -> DiffReviewNextHunk();
-        up -> DiffReviewPrevHunk();
-        ctrl-n -> DiffReviewNextHunk();
-        ctrl-p -> DiffReviewPrevHunk();
-        space -> DiffReviewApproveHunk();
-        a -> DiffReviewApproveHunk();
-        enter -> DiffReviewApproveHunk();
-        t -> DiffReviewToggleApproval();
-        n -> DiffReviewNextUnreviewedHunk();
-        R -> DiffReviewResetProgress();
-        ? -> OpenHelpOverlay();
-        q -> DiffReviewDismiss();
-        c -> DiffReviewCycleComparisonMode();
+        mode == "diff_review" {
+            escape -> SetKeyContext(TextEditor);
+            j -> DiffReviewNextHunk();
+            k -> DiffReviewPrevHunk();
+            down -> DiffReviewNextHunk();
+            up -> DiffReviewPrevHunk();
+            ctrl-n -> DiffReviewNextHunk();
+            ctrl-p -> DiffReviewPrevHunk();
+            space -> DiffReviewApproveHunk();
+            a -> DiffReviewApproveHunk();
+            enter -> DiffReviewApproveHunk();
+            t -> DiffReviewToggleApproval();
+            n -> DiffReviewNextUnreviewedHunk();
+            R -> DiffReviewResetProgress();
+            ? -> OpenHelpOverlay();
+            q -> DiffReviewDismiss();
+            c -> DiffReviewCycleComparisonMode();
+            s -> DiffReviewEnterLineSelect();
+        }
+
+        mode == "line_select" {
+            j -> DiffReviewLineSelectDown();
+            k -> DiffReviewLineSelectUp();
+            down -> DiffReviewLineSelectDown();
+            up -> DiffReviewLineSelectUp();
+            space -> DiffReviewLineSelectToggle();
+            x -> DiffReviewLineSelectToggle();
+            a -> DiffReviewLineSelectAll();
+            A -> DiffReviewLineSelectNone();
+            s -> DiffReviewLineSelectStage();
+            u -> DiffReviewLineSelectUnstage();
+            escape -> DiffReviewLineSelectCancel();
+            q -> DiffReviewLineSelectCancel();
+        }
     }
 
     # HelpModal Context

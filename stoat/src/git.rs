@@ -5,6 +5,7 @@
 
 pub mod diff;
 pub mod diff_review;
+pub mod line_selection;
 pub mod repository;
 pub mod status;
 

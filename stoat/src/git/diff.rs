@@ -60,6 +60,33 @@ use sum_tree::Bias;
 use text::{Anchor, BufferId, BufferSnapshot, ToPoint};
 use thiserror::Error;
 
+/// Origin of a line within a diff hunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HunkLineOrigin {
+    Context,
+    Addition,
+    Deletion,
+}
+
+/// A single line extracted from a diff hunk via `git2::Patch::line_in_hunk()`.
+#[derive(Debug, Clone)]
+pub struct HunkLine {
+    pub origin: HunkLineOrigin,
+    pub content: String,
+    pub old_lineno: Option<u32>,
+    pub new_lineno: Option<u32>,
+}
+
+/// All lines in a single hunk, extracted on-demand for line-level selection.
+#[derive(Debug, Clone)]
+pub struct HunkLines {
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+    pub lines: Vec<HunkLine>,
+}
+
 /// Errors that can occur during diff computation.
 #[derive(Debug, Error)]
 pub enum DiffError {
@@ -415,6 +442,68 @@ fn line_offset_to_byte_offset(text: &str, line: usize) -> usize {
         .sum()
 }
 
+/// Extract individual lines from a specific hunk, for line-level selection.
+///
+/// Recomputes the git2 patch from the two texts and calls
+/// `patch.line_in_hunk()` to extract each line with its origin.
+pub fn extract_hunk_lines(
+    base_text: &str,
+    buffer_text: &str,
+    hunk_index: usize,
+) -> Result<HunkLines, DiffError> {
+    let mut diff_options = git2::DiffOptions::new();
+    diff_options.context_lines(0);
+    diff_options.ignore_whitespace(false);
+
+    let patch = git2::Patch::from_buffers(
+        base_text.as_bytes(),
+        None,
+        buffer_text.as_bytes(),
+        None,
+        Some(&mut diff_options),
+    )
+    .map_err(|e| DiffError::PatchFailed(e.message().to_string()))?;
+
+    let (hunk_header, num_lines) = patch
+        .hunk(hunk_index)
+        .map_err(|e| DiffError::HunkParseFailed(e.message().to_string()))?;
+
+    let old_start = hunk_header.old_start();
+    let old_lines = hunk_header.old_lines();
+    let new_start = hunk_header.new_start();
+    let new_lines = hunk_header.new_lines();
+
+    let mut lines = Vec::with_capacity(num_lines);
+    for line_idx in 0..num_lines {
+        let line = patch
+            .line_in_hunk(hunk_index, line_idx)
+            .map_err(|e| DiffError::HunkParseFailed(e.message().to_string()))?;
+
+        let origin = match line.origin() {
+            '+' => HunkLineOrigin::Addition,
+            '-' => HunkLineOrigin::Deletion,
+            _ => HunkLineOrigin::Context,
+        };
+
+        let content = String::from_utf8_lossy(line.content()).to_string();
+
+        lines.push(HunkLine {
+            origin,
+            content,
+            old_lineno: line.old_lineno(),
+            new_lineno: line.new_lineno(),
+        });
+    }
+
+    Ok(HunkLines {
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        lines,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +582,57 @@ mod tests {
     fn line_offset_to_byte_offset_past_end() {
         let text = "line 1\nline 2\n";
         assert_eq!(line_offset_to_byte_offset(text, 10), 14); // End of text
+    }
+
+    #[test]
+    fn extract_hunk_lines_modified() {
+        let base = "line 1\nline 2\nline 3\n";
+        let modified = "line 1\nchanged\nline 3\n";
+        let hunk = extract_hunk_lines(base, modified, 0).unwrap();
+
+        assert_eq!(hunk.old_start, 2);
+        assert_eq!(hunk.old_lines, 1);
+        assert_eq!(hunk.new_start, 2);
+        assert_eq!(hunk.new_lines, 1);
+        assert_eq!(hunk.lines.len(), 2);
+        assert_eq!(hunk.lines[0].origin, HunkLineOrigin::Deletion);
+        assert_eq!(hunk.lines[0].content, "line 2\n");
+        assert_eq!(hunk.lines[1].origin, HunkLineOrigin::Addition);
+        assert_eq!(hunk.lines[1].content, "changed\n");
+    }
+
+    #[test]
+    fn extract_hunk_lines_added() {
+        let base = "line 1\nline 2\n";
+        let modified = "line 1\nline 2\nline 3\n";
+        let hunk = extract_hunk_lines(base, modified, 0).unwrap();
+
+        assert_eq!(hunk.lines.len(), 1);
+        assert_eq!(hunk.lines[0].origin, HunkLineOrigin::Addition);
+        assert_eq!(hunk.lines[0].content, "line 3\n");
+    }
+
+    #[test]
+    fn extract_hunk_lines_deleted() {
+        let base = "line 1\nline 2\nline 3\n";
+        let modified = "line 1\nline 3\n";
+        let hunk = extract_hunk_lines(base, modified, 0).unwrap();
+
+        assert_eq!(hunk.lines.len(), 1);
+        assert_eq!(hunk.lines[0].origin, HunkLineOrigin::Deletion);
+        assert_eq!(hunk.lines[0].content, "line 2\n");
+    }
+
+    #[test]
+    fn extract_hunk_lines_multi_line() {
+        let base = "a\nb\nc\nd\n";
+        let modified = "a\nx\ny\nd\n";
+        let hunk = extract_hunk_lines(base, modified, 0).unwrap();
+
+        assert_eq!(hunk.lines.len(), 4);
+        assert_eq!(hunk.lines[0].origin, HunkLineOrigin::Deletion);
+        assert_eq!(hunk.lines[1].origin, HunkLineOrigin::Deletion);
+        assert_eq!(hunk.lines[2].origin, HunkLineOrigin::Addition);
+        assert_eq!(hunk.lines[3].origin, HunkLineOrigin::Addition);
     }
 }

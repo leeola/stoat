@@ -553,6 +553,120 @@ impl Element for EditorElement {
                 Vec::new()
             };
 
+        // ===== PHASE 4b: Line selection indicators =====
+        let (line_select_indicators, line_select_cursor_y) = {
+            let stoat_ref = self.view.read(cx).stoat.read(cx);
+            let line_selection = stoat_ref.line_selection.as_ref();
+            if !is_minimap && is_in_diff_review && line_selection.is_some() {
+                let sel = line_selection.unwrap();
+                let selected_color = gpui::Hsla {
+                    h: 0.35,
+                    s: 0.8,
+                    l: 0.6,
+                    a: 1.0,
+                };
+                let unselected_color = gpui::Hsla {
+                    h: 0.0,
+                    s: 0.0,
+                    l: 0.5,
+                    a: 0.8,
+                };
+                let make_run = |s: &str, color: gpui::Hsla| TextRun {
+                    len: s.len(),
+                    font: gutter_font.clone(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped_selected = window.text_system().shape_line(
+                    SharedString::from("x"),
+                    font_size,
+                    &[make_run("x", selected_color)],
+                    None,
+                );
+                let shaped_unselected = window.text_system().shape_line(
+                    SharedString::from("."),
+                    font_size,
+                    &[make_run(".", unselected_color)],
+                    None,
+                );
+
+                // Additions have buffer_row = new_start-1 .. new_start-1+new_lines (0-indexed).
+                // Deletions are phantom rows (buffer_row=None) with diff_status=Deleted.
+                // We find the hunk by matching addition rows to new_start, then include
+                // adjacent deletion rows.
+                let new_start_0 = sel.hunk_lines.new_start.saturating_sub(1);
+                let new_end_0 = new_start_0 + sel.hunk_lines.new_lines;
+
+                let mut hunk_display_indices: Vec<usize> = Vec::new();
+                for (i, layout) in line_layouts.iter().enumerate() {
+                    match layout.diff_status {
+                        Some(DiffHunkStatus::Added | DiffHunkStatus::Modified) => {
+                            if let Some(br) = layout.buffer_row {
+                                if br >= new_start_0 && br < new_end_0 {
+                                    hunk_display_indices.push(i);
+                                }
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+                if let Some(&first_add_idx) = hunk_display_indices.first() {
+                    let mut j = first_add_idx;
+                    while j > 0 {
+                        j -= 1;
+                        if line_layouts[j].diff_status == Some(DiffHunkStatus::Deleted)
+                            && line_layouts[j].buffer_row.is_none()
+                        {
+                            hunk_display_indices.insert(0, j);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if let Some(&last_idx) = hunk_display_indices.last() {
+                    let mut j = last_idx + 1;
+                    while j < line_layouts.len() {
+                        if line_layouts[j].diff_status == Some(DiffHunkStatus::Deleted)
+                            && line_layouts[j].buffer_row.is_none()
+                        {
+                            hunk_display_indices.push(j);
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // Sequential mapping: LineSelection lines and display rows are in the same order
+                let mut indicators = Vec::new();
+                let mut cursor_y = None;
+
+                for (sel_idx, &disp_idx) in hunk_display_indices.iter().enumerate() {
+                    if sel_idx >= sel.selected.len() {
+                        break;
+                    }
+                    let layout = &line_layouts[disp_idx];
+                    let shaped = if sel.selected[sel_idx] {
+                        shaped_selected.clone()
+                    } else {
+                        shaped_unselected.clone()
+                    };
+                    let x = bounds.origin.x + (diff_strip_width - shaped.width) / 2.0;
+                    indicators.push((shaped, x, layout.y_position));
+
+                    if sel_idx == sel.cursor_line {
+                        cursor_y = Some(layout.y_position);
+                    }
+                }
+
+                (indicators, cursor_y)
+            } else {
+                (Vec::new(), None)
+            }
+        };
+
         // ===== PHASE 5: Pre-compute cursor layout =====
         let cursor_layout: Option<Bounds<Pixels>> = if !is_minimap {
             let stoat = self.view.read(cx).stoat.read(cx);
@@ -683,6 +797,8 @@ impl Element for EditorElement {
             buffer_snapshot,
             strip_width,
             is_in_diff_review,
+            line_select_indicators,
+            line_select_cursor_y,
         }
     }
 
@@ -733,6 +849,27 @@ impl Element for EditorElement {
             window,
             cx,
         );
+
+        // Paint line selection cursor highlight bar
+        if let Some(cursor_y) = prepaint.line_select_cursor_y {
+            let highlight_color = gpui::Hsla {
+                h: 0.55,
+                s: 0.6,
+                l: 0.5,
+                a: 0.25,
+            };
+            window.paint_quad(gpui::PaintQuad {
+                bounds: Bounds {
+                    origin: point(bounds.origin.x, cursor_y),
+                    size: size(bounds.size.width, line_height),
+                },
+                corner_radii: 0.0.into(),
+                background: highlight_color.into(),
+                border_color: gpui::transparent_black(),
+                border_widths: 0.0.into(),
+                border_style: gpui::BorderStyle::default(),
+            });
+        }
 
         // Paint selections (before text)
         if !is_minimap {
@@ -794,6 +931,11 @@ impl Element for EditorElement {
 
             // Paint diff symbols (+/-) in gutter
             self.paint_diff_symbols(prepaint, window, cx);
+
+            // Paint line selection indicators (overdraws diff symbols for the active hunk)
+            for (shaped, x, y) in &prepaint.line_select_indicators {
+                let _ = shaped.paint(point(*x, *y), line_height, window, cx);
+            }
 
             // Paint diagnostic icons in gutter
             self.paint_diagnostic_icons(
@@ -1303,6 +1445,10 @@ pub struct EditorPrepaintState {
     pub strip_width: Pixels,
     /// Whether editor is in diff review mode
     pub is_in_diff_review: bool,
+    /// Line selection checkbox indicators: (shaped_line, x_position, y_position)
+    pub line_select_indicators: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
+    /// Y position of the cursor line during line_select mode
+    pub line_select_cursor_y: Option<Pixels>,
 }
 
 /// A single line that has been shaped and is ready to paint.

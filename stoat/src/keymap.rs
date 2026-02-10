@@ -40,6 +40,10 @@ pub fn default_modes() -> HashMap<String, Mode> {
         Mode::with_previous("diff_review", "DIFF REVIEW", "normal", false),
     );
     modes.insert(
+        "line_select".into(),
+        Mode::with_previous("line_select", "LINE SELECT", "diff_review", false),
+    );
+    modes.insert(
         "help_modal".into(),
         Mode::with_previous("help_modal", "HELP", "normal", false),
     );

@@ -99,6 +99,34 @@ pub fn dispatch_editor_action<C: AppContext>(
             ed!(stoat, cx, |s, cx| s.diff_review_cycle_comparison_mode(cx))
         },
 
+        "DiffReviewEnterLineSelect" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_enter_line_select(cx))
+        },
+        "DiffReviewLineSelectToggle" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_toggle(cx))
+        },
+        "DiffReviewLineSelectAll" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_all(cx))
+        },
+        "DiffReviewLineSelectNone" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_none(cx))
+        },
+        "DiffReviewLineSelectStage" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_stage(cx))
+        },
+        "DiffReviewLineSelectUnstage" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_unstage(cx))
+        },
+        "DiffReviewLineSelectCancel" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_cancel(cx))
+        },
+        "DiffReviewLineSelectDown" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_down(cx))
+        },
+        "DiffReviewLineSelectUp" => {
+            ed!(stoat, cx, |s, cx| s.diff_review_line_select_up(cx))
+        },
+
         "WriteFile" | "Save" => {
             let _ = stoat.update(cx, |s, cx| {
                 if let Err(e) = s.write_file(cx) {
