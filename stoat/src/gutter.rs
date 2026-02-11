@@ -42,6 +42,7 @@ use text::{BufferSnapshot, ToPoint};
 pub trait DisplayRow {
     fn y_position(&self) -> Pixels;
     fn diff_status(&self) -> Option<DiffHunkStatus>;
+    fn is_staged(&self) -> bool;
 }
 
 /// Dimensions and position of the gutter area.
@@ -74,6 +75,8 @@ pub struct DiffIndicator {
     pub bounds: Bounds<Pixels>,
     /// Corner radii for rounded corners (used for deleted hunks)
     pub corner_radii: Corners<Pixels>,
+    /// Whether this indicator represents a staged change
+    pub is_staged: bool,
 }
 
 /// Complete gutter layout for rendering.
@@ -159,19 +162,24 @@ impl GutterLayout {
         let mut diff_indicators = Vec::new();
 
         // PHASE 1: Create indicators for display rows (includes phantom rows)
-        // Group consecutive rows with the same diff status into continuous strips
-        let mut current_group: Option<(DiffHunkStatus, Pixels, Pixels)> = None;
+        // Group consecutive rows with the same diff status and staging state
+        let mut current_group: Option<(DiffHunkStatus, bool, Pixels, Pixels)> = None;
 
         for row in display_rows {
             if let Some(status) = row.diff_status() {
+                let staged = row.is_staged();
                 match current_group {
-                    Some((group_status, start_y, _)) if group_status == status => {
-                        // Extend current group
-                        current_group =
-                            Some((group_status, start_y, row.y_position() + line_height));
+                    Some((group_status, group_staged, start_y, _))
+                        if group_status == status && group_staged == staged =>
+                    {
+                        current_group = Some((
+                            group_status,
+                            group_staged,
+                            start_y,
+                            row.y_position() + line_height,
+                        ));
                     },
-                    Some((group_status, start_y, end_y)) => {
-                        // Finish current group and start new one
+                    Some((group_status, group_staged, start_y, end_y)) => {
                         diff_indicators.push(DiffIndicator {
                             status: group_status,
                             bounds: Bounds {
@@ -179,19 +187,26 @@ impl GutterLayout {
                                 size: size(strip_width, end_y - start_y),
                             },
                             corner_radii: Corners::all(px(0.0)),
+                            is_staged: group_staged,
                         });
-                        current_group =
-                            Some((status, row.y_position(), row.y_position() + line_height));
+                        current_group = Some((
+                            status,
+                            staged,
+                            row.y_position(),
+                            row.y_position() + line_height,
+                        ));
                     },
                     None => {
-                        // Start new group
-                        current_group =
-                            Some((status, row.y_position(), row.y_position() + line_height));
+                        current_group = Some((
+                            status,
+                            staged,
+                            row.y_position(),
+                            row.y_position() + line_height,
+                        ));
                     },
                 }
             } else {
-                // No diff status - finish current group if any
-                if let Some((group_status, start_y, end_y)) = current_group {
+                if let Some((group_status, group_staged, start_y, end_y)) = current_group {
                     diff_indicators.push(DiffIndicator {
                         status: group_status,
                         bounds: Bounds {
@@ -199,14 +214,14 @@ impl GutterLayout {
                             size: size(strip_width, end_y - start_y),
                         },
                         corner_radii: Corners::all(px(0.0)),
+                        is_staged: group_staged,
                     });
                     current_group = None;
                 }
             }
         }
 
-        // Finish final group if any
-        if let Some((group_status, start_y, end_y)) = current_group {
+        if let Some((group_status, group_staged, start_y, end_y)) = current_group {
             diff_indicators.push(DiffIndicator {
                 status: group_status,
                 bounds: Bounds {
@@ -214,6 +229,7 @@ impl GutterLayout {
                     size: size(strip_width, end_y - start_y),
                 },
                 corner_radii: Corners::all(px(0.0)),
+                is_staged: group_staged,
             });
         }
 
@@ -250,6 +266,7 @@ impl GutterLayout {
                             status: DiffHunkStatus::Deleted,
                             bounds,
                             corner_radii: Corners::all(px(0.0)),
+                            is_staged: false,
                         });
                     }
                 }

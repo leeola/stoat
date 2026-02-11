@@ -1262,19 +1262,28 @@ impl Stoat {
             self.open_buffers.push(buffer_item_entity.clone());
         }
 
-        // Compute git diff
+        // Compute git diff and staged row ranges
         buffer_item_entity.update(cx, |item, cx| {
             if let Ok(repo) = Repository::discover(path) {
                 if let Ok(head_content) = repo.head_content(path) {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
                     let buffer_id = buffer_snapshot.remote_id();
-                    match BufferDiff::new(buffer_id, head_content, &buffer_snapshot) {
+                    match BufferDiff::new(buffer_id, head_content.clone(), &buffer_snapshot) {
                         Ok(diff) => {
                             item.set_diff(Some(diff));
                         },
                         Err(e) => {
                             tracing::error!("Failed to compute diff for {:?}: {}", path, e);
                         },
+                    }
+                    if let Ok(index_content) = repo.index_content(path) {
+                        let ranges =
+                            crate::git::diff::staged_row_ranges(&head_content, &index_content);
+                        item.set_staged_rows(if ranges.is_empty() {
+                            None
+                        } else {
+                            Some(ranges)
+                        });
                     }
                 }
             }
@@ -1432,7 +1441,7 @@ impl Stoat {
         &self,
         path: &std::path::Path,
         cx: &App,
-    ) -> Option<BufferDiff> {
+    ) -> Option<(BufferDiff, Option<Vec<std::ops::Range<u32>>>)> {
         use crate::git::diff_review::DiffComparisonMode;
 
         let repo = Repository::discover(path).ok()?;
@@ -1446,45 +1455,46 @@ impl Stoat {
             path
         );
 
-        let diff = match self.diff_review_comparison_mode {
+        let (diff, staged_rows) = match self.diff_review_comparison_mode {
             DiffComparisonMode::WorkingVsHead => {
-                // Compare working tree against HEAD (default)
                 let base_content = repo.head_content(path).ok()?;
                 tracing::debug!(
                     "WorkingVsHead: base_len={}, working_len={}",
                     base_content.len(),
                     buffer_snapshot.text().len()
                 );
-                BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?
+                let diff =
+                    BufferDiff::new(buffer_id, base_content.clone(), &buffer_snapshot).ok()?;
+                let staged = repo.index_content(path).ok().map(|index_content| {
+                    crate::git::diff::staged_row_ranges(&base_content, &index_content)
+                });
+                let staged = staged.and_then(|v| if v.is_empty() { None } else { Some(v) });
+                (diff, staged)
             },
             DiffComparisonMode::WorkingVsIndex => {
-                // Compare working tree against index (unstaged changes + untracked files)
-                // For untracked files, index_content() will fail, so use empty string as base
                 let base_content = repo.index_content(path).unwrap_or_else(|_| String::new());
                 tracing::debug!(
                     "WorkingVsIndex: base_len={}, working_len={}",
                     base_content.len(),
                     buffer_snapshot.text().len()
                 );
-                BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?
+                let diff = BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?;
+                (diff, None)
             },
             DiffComparisonMode::IndexVsHead => {
-                // Compare index against HEAD (staged changes only)
-                // The buffer should already contain index content (updated by caller),
-                // so we can use the real buffer snapshot directly.
                 let head_content = repo.head_content(path).ok()?;
                 tracing::debug!(
                     "IndexVsHead: head_len={}, buffer_len={}",
                     head_content.len(),
                     buffer_snapshot.text().len()
                 );
-
-                BufferDiff::new(buffer_id, head_content, &buffer_snapshot).ok()?
+                let diff = BufferDiff::new(buffer_id, head_content, &buffer_snapshot).ok()?;
+                (diff, Some(vec![0..u32::MAX]))
             },
         };
 
         tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
-        Some(diff)
+        Some((diff, staged_rows))
     }
 
     /// Create a minimap instance for this editor.

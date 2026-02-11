@@ -450,6 +450,42 @@ fn line_offset_to_byte_offset(text: &str, line: usize) -> usize {
         .sum()
 }
 
+/// Compute which buffer rows are staged (present in index but changed from HEAD).
+///
+/// Diffs HEAD against the index content to find staged regions, returning
+/// 0-indexed row ranges on the new (index) side. Pure deletions (new_lines==0)
+/// are excluded since they have no visible rows in the buffer.
+pub fn staged_row_ranges(head_content: &str, index_content: &str) -> Vec<Range<u32>> {
+    let mut diff_options = git2::DiffOptions::new();
+    diff_options.context_lines(0);
+    diff_options.ignore_whitespace(false);
+
+    let patch = match git2::Patch::from_buffers(
+        head_content.as_bytes(),
+        None,
+        index_content.as_bytes(),
+        None,
+        Some(&mut diff_options),
+    ) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut ranges = Vec::new();
+    for hunk_idx in 0..patch.num_hunks() {
+        let Ok((hunk, _)) = patch.hunk(hunk_idx) else {
+            continue;
+        };
+        let new_lines = hunk.new_lines();
+        if new_lines == 0 {
+            continue;
+        }
+        let start = hunk.new_start().saturating_sub(1);
+        ranges.push(start..start + new_lines);
+    }
+    ranges
+}
+
 /// Extract individual lines from a specific hunk, for line-level selection.
 ///
 /// Recomputes the git2 patch from the two texts and calls
@@ -642,5 +678,37 @@ mod tests {
         assert_eq!(hunk.lines[1].origin, HunkLineOrigin::Deletion);
         assert_eq!(hunk.lines[2].origin, HunkLineOrigin::Addition);
         assert_eq!(hunk.lines[3].origin, HunkLineOrigin::Addition);
+    }
+
+    #[test]
+    fn staged_row_ranges_added() {
+        let head = "line 1\nline 2\n";
+        let index = "line 1\nline 2\nline 3\n";
+        let ranges = staged_row_ranges(head, index);
+        assert_eq!(ranges, vec![2..3]);
+    }
+
+    #[test]
+    fn staged_row_ranges_modified() {
+        let head = "line 1\nline 2\nline 3\n";
+        let index = "line 1\nchanged\nline 3\n";
+        let ranges = staged_row_ranges(head, index);
+        assert_eq!(ranges, vec![1..2]);
+    }
+
+    #[test]
+    fn staged_row_ranges_deleted_excluded() {
+        let head = "line 1\nline 2\nline 3\n";
+        let index = "line 1\nline 3\n";
+        let ranges = staged_row_ranges(head, index);
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn staged_row_ranges_no_changes() {
+        let head = "line 1\nline 2\n";
+        let index = "line 1\nline 2\n";
+        let ranges = staged_row_ranges(head, index);
+        assert!(ranges.is_empty());
     }
 }

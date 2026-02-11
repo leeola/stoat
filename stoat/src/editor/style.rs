@@ -27,6 +27,12 @@ pub struct EditorStyle {
     pub diff_modified_color: Hsla,
     /// Color for deleted line indicators (red)
     pub diff_deleted_color: Hsla,
+    /// Desaturated color for staged added lines
+    pub diff_staged_added_color: Hsla,
+    /// Desaturated color for staged modified lines
+    pub diff_staged_modified_color: Hsla,
+    /// Desaturated color for staged deleted lines
+    pub diff_staged_deleted_color: Hsla,
     /// Color for error diagnostics (red)
     pub diagnostic_error_color: Hsla,
     /// Color for warning diagnostics (orange)
@@ -94,11 +100,15 @@ impl EditorStyle {
             diff_added_color: rgb(0x4ec9b0).into(), // Green (VS Code green)
             diff_modified_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diff_deleted_color: rgb(0xf44747).into(), // Red (VS Code red)
+            diff_staged_added_color: rgb(0xbbb529).into(), // Yellow-green
+            diff_staged_modified_color: rgb(0xd4aa32).into(), // Gold
+            diff_staged_deleted_color: rgb(0xd08840).into(), // Amber
             diagnostic_error_color: rgb(0xf44747).into(), // Red (VS Code red)
             diagnostic_warning_color: rgb(0xdcdcaa).into(), // Yellow (VS Code yellow)
             diagnostic_info_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diagnostic_hint_color: rgb(0x808080).into(), // Gray
-            show_minimap: true,                     /* Enabled: Now using persistent MinimapView
+            show_minimap: true,                     /* Enabled: Now using persistent
+                                                     * MinimapView
                                                      * entity */
             minimap_thumb_color: Hsla {
                 h: 0.0,

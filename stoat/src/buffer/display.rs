@@ -109,6 +109,10 @@ pub struct RowInfo {
     /// Used to highlight specific changed words/characters more strongly.
     /// Empty for non-Modified rows.
     pub modified_ranges: Vec<Range<usize>>,
+
+    /// Whether this row's change is staged in the git index.
+    /// Used to render staged hunks with desaturated colors.
+    pub is_staged: bool,
 }
 
 /// A view over a buffer that includes phantom rows for git diffs.
@@ -162,7 +166,14 @@ impl DisplayBuffer {
         buffer_snapshot: BufferSnapshot,
         diff: Option<BufferDiff>,
         show_phantom_rows: bool,
+        staged_rows: Option<&[Range<u32>]>,
     ) -> Self {
+        let row_is_staged = |buffer_row: u32| -> bool {
+            staged_rows
+                .map(|ranges| ranges.iter().any(|r| r.contains(&buffer_row)))
+                .unwrap_or(false)
+        };
+
         let max_buffer_row = buffer_snapshot.max_point().row;
         let mut rows = Vec::new();
         let mut buffer_to_display = vec![DisplayRow(0); (max_buffer_row + 1) as usize];
@@ -216,6 +227,7 @@ impl DisplayBuffer {
                             diff_status: None,
                             content,
                             modified_ranges: Vec::new(),
+                            is_staged: false,
                         });
 
                         display_row += 1;
@@ -227,10 +239,11 @@ impl DisplayBuffer {
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
                                     display_row: DisplayRow(display_row),
-                                    buffer_row: None, // Phantom row
+                                    buffer_row: None,
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
                                     modified_ranges: Vec::new(),
+                                    is_staged: false,
                                 });
                                 display_row += 1;
                             }
@@ -247,10 +260,11 @@ impl DisplayBuffer {
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
                                     display_row: DisplayRow(display_row),
-                                    buffer_row: None, // Phantom row
+                                    buffer_row: None,
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
                                     modified_ranges: Vec::new(),
+                                    is_staged: false,
                                 });
                                 display_row += 1;
                             }
@@ -300,6 +314,7 @@ impl DisplayBuffer {
                                 diff_status: Some(hunk.status),
                                 content,
                                 modified_ranges,
+                                is_staged: row_is_staged(row),
                             });
 
                             display_row += 1;
@@ -332,6 +347,7 @@ impl DisplayBuffer {
                         diff_status: None,
                         content,
                         modified_ranges: Vec::new(),
+                        is_staged: false,
                     });
 
                     display_row += 1;
@@ -361,6 +377,7 @@ impl DisplayBuffer {
                     diff_status: None,
                     content,
                     modified_ranges: Vec::new(),
+                    is_staged: false,
                 });
 
                 display_row += 1;
@@ -536,7 +553,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 2\nline 3");
         let snapshot = buffer.snapshot();
 
-        let display_buffer = DisplayBuffer::new(snapshot, None, true);
+        let display_buffer = DisplayBuffer::new(snapshot, None, true, None);
 
         assert_eq!(display_buffer.row_count(), 3);
 
@@ -560,7 +577,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Should have 4 rows (no phantom rows for Added hunks)
         assert_eq!(display_buffer.row_count(), 4);
@@ -586,7 +603,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Should have 3 rows: 1 normal, 1 phantom deleted, 1 normal
         assert_eq!(display_buffer.row_count(), 3);
@@ -616,7 +633,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Should have 4 rows: 1 normal, 1 phantom deleted ("line 2"), 1 modified ("modified"), 1
         // normal Modified hunks show both old content (phantom) and new content (with intra-line
@@ -650,7 +667,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Should have 4 rows: 1 normal, 1 phantom deleted, 1 modified, 1 normal
         assert_eq!(
@@ -709,7 +726,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Debug: print all rows
         eprintln!("All rows:");
@@ -740,7 +757,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None);
 
         // Display row 0 -> Buffer row 0
         assert_eq!(display_buffer.display_row_to_buffer(DisplayRow(0)), Some(0));

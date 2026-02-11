@@ -346,6 +346,7 @@ impl Element for EditorElement {
                         shaped,
                         y_position: y,
                         diff_status: row_info.diff_status,
+                        is_staged: row_info.is_staged,
                     });
                 } else {
                     // Phantom row (deleted content): plain text with deleted color
@@ -373,6 +374,7 @@ impl Element for EditorElement {
                         shaped,
                         y_position: y,
                         diff_status: row_info.diff_status,
+                        is_staged: row_info.is_staged,
                     });
                 }
 
@@ -447,6 +449,7 @@ impl Element for EditorElement {
                     shaped,
                     y_position: y,
                     diff_status: diff_row_info.and_then(|r| r.diff_status),
+                    is_staged: diff_row_info.map_or(false, |r| r.is_staged),
                 });
 
                 y += line_height;
@@ -1095,10 +1098,13 @@ impl EditorElement {
 
         // Paint diff indicators
         for indicator in &gutter_layout.diff_indicators {
-            let diff_color = match indicator.status {
-                DiffHunkStatus::Added => self.style.diff_added_color,
-                DiffHunkStatus::Modified => self.style.diff_modified_color,
-                DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+            let diff_color = match (indicator.status, indicator.is_staged) {
+                (DiffHunkStatus::Added, true) => self.style.diff_staged_added_color,
+                (DiffHunkStatus::Modified, true) => self.style.diff_staged_modified_color,
+                (DiffHunkStatus::Deleted, true) => self.style.diff_staged_deleted_color,
+                (DiffHunkStatus::Added, false) => self.style.diff_added_color,
+                (DiffHunkStatus::Modified, false) => self.style.diff_modified_color,
+                (DiffHunkStatus::Deleted, false) => self.style.diff_deleted_color,
             };
 
             // Blend with background for subtle appearance (60% opacity)
@@ -1185,11 +1191,13 @@ impl EditorElement {
 
         for layout in line_layouts {
             if let Some(status) = layout.diff_status {
-                // Get the base color for this diff type
-                let base_color = match status {
-                    DiffHunkStatus::Added => self.style.diff_added_color,
-                    DiffHunkStatus::Modified => self.style.diff_modified_color,
-                    DiffHunkStatus::Deleted => self.style.diff_deleted_color,
+                let base_color = match (status, layout.is_staged) {
+                    (DiffHunkStatus::Added, true) => self.style.diff_staged_added_color,
+                    (DiffHunkStatus::Modified, true) => self.style.diff_staged_modified_color,
+                    (DiffHunkStatus::Deleted, true) => self.style.diff_staged_deleted_color,
+                    (DiffHunkStatus::Added, false) => self.style.diff_added_color,
+                    (DiffHunkStatus::Modified, false) => self.style.diff_modified_color,
+                    (DiffHunkStatus::Deleted, false) => self.style.diff_deleted_color,
                 };
 
                 // Make it very subtle for full-width backgrounds (15% opacity in review mode)
@@ -1466,6 +1474,8 @@ pub struct ShapedLineLayout {
     pub y_position: Pixels,
     /// Diff status for gutter symbol rendering
     pub diff_status: Option<DiffHunkStatus>,
+    /// Whether this row's change is staged in the git index
+    pub is_staged: bool,
 }
 
 impl DisplayRow for ShapedLineLayout {
@@ -1475,6 +1485,10 @@ impl DisplayRow for ShapedLineLayout {
 
     fn diff_status(&self) -> Option<DiffHunkStatus> {
         self.diff_status
+    }
+
+    fn is_staged(&self) -> bool {
+        self.is_staged
     }
 }
 

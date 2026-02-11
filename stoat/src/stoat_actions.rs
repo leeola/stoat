@@ -149,12 +149,13 @@ impl Stoat {
             }
 
             // Compute diff and check if it has hunks
-            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+            if let Some((diff, staged_rows)) = self.compute_diff_for_review_mode(&abs_path, cx) {
                 if !diff.hunks.is_empty() {
                     // Found file with hunks - set it and jump to first hunk
                     let buffer_item = self.active_buffer(cx);
                     buffer_item.update(cx, |item, _| {
                         item.set_diff(Some(diff.clone()));
+                        item.set_staged_rows(staged_rows);
                     });
 
                     debug!(
@@ -234,12 +235,13 @@ impl Stoat {
             }
 
             // Compute diff and check if it has hunks
-            if let Some(diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
+            if let Some((diff, staged_rows)) = self.compute_diff_for_review_mode(&abs_path, cx) {
                 if !diff.hunks.is_empty() {
                     // Found file with hunks - set it and jump to last hunk
                     let buffer_item = self.active_buffer(cx);
                     buffer_item.update(cx, |item, _| {
                         item.set_diff(Some(diff.clone()));
+                        item.set_staged_rows(staged_rows);
                     });
 
                     debug!(

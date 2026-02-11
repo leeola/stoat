@@ -8,6 +8,7 @@ use gpui::{App, Context, Entity, EventEmitter};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Instant, SystemTime},
 };
@@ -39,6 +40,10 @@ pub struct BufferItem {
 
     /// Git diff state (None if not in git repo or diff disabled)
     diff: Option<BufferDiff>,
+
+    /// Row ranges that are staged (index differs from HEAD). Used to visually
+    /// distinguish staged vs unstaged hunks in all diff modes.
+    staged_rows: Option<Vec<Range<u32>>>,
 
     /// Saved text content for modification tracking (None for unnamed buffers never saved)
     saved_text: Option<String>,
@@ -73,6 +78,7 @@ impl BufferItem {
             parser,
             language,
             diff: None,
+            staged_rows: None,
             saved_text: None,
             saved_mtime: None,
             line_ending: LineEnding::default(),
@@ -116,6 +122,7 @@ impl BufferItem {
             self.buffer_snapshot(cx),
             self.diff.clone(),
             show_phantom_rows,
+            self.staged_rows.as_deref(),
         )
     }
 
@@ -251,6 +258,16 @@ impl BufferItem {
     /// All diff hunks are always visible as phantom rows in the display buffer.
     pub fn set_diff(&mut self, diff: Option<BufferDiff>) {
         self.diff = diff;
+    }
+
+    /// Get the staged row ranges for this buffer.
+    pub fn staged_rows(&self) -> Option<&[Range<u32>]> {
+        self.staged_rows.as_deref()
+    }
+
+    /// Set the staged row ranges for this buffer.
+    pub fn set_staged_rows(&mut self, staged_rows: Option<Vec<Range<u32>>>) {
+        self.staged_rows = staged_rows;
     }
 
     /// Check if the buffer has unsaved modifications.

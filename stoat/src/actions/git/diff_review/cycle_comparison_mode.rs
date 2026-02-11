@@ -1,7 +1,7 @@
 //! Diff review cycle comparison mode action implementation and tests.
 
 use crate::stoat::Stoat;
-use gpui::Context;
+use gpui::{AppContext, Context};
 use tracing::debug;
 
 impl Stoat {
@@ -76,9 +76,23 @@ impl Stoat {
                         let len = buffer.len();
                         buffer.edit([(0..len, index_content.as_str())]);
                     });
-                    // Reparse to update syntax highlighting tokens
                     let _ = item.reparse(cx);
                 });
+
+                // Recreate DisplayMap: the old one holds stale InlayMap anchors
+                // from the previous buffer content, causing subtract overflow on sync.
+                let buffer = buffer_item.read(cx).buffer().clone();
+                self.display_map = {
+                    let tab_width = 4;
+                    let font = self.display_map.read(cx).font().clone();
+                    let font_size = self.display_map.read(cx).font_size();
+                    let wrap_width = self.display_map.read(cx).wrap_width();
+                    cx.new(|cx| {
+                        stoat_text_transform::DisplayMap::new(
+                            buffer, tab_width, font, font_size, wrap_width, cx,
+                        )
+                    })
+                };
             }
         } else {
             // For other modes, reload file to get working tree content
@@ -86,11 +100,11 @@ impl Stoat {
         }
 
         // Recompute diff for new comparison mode
-        if let Some(new_diff) = self.compute_diff_for_review_mode(&abs_path, cx) {
-            // Update the buffer item diff
+        if let Some((new_diff, staged_rows)) = self.compute_diff_for_review_mode(&abs_path, cx) {
             let buffer_item = self.active_buffer(cx);
             buffer_item.update(cx, |item, _cx| {
                 item.set_diff(Some(new_diff.clone()));
+                item.set_staged_rows(staged_rows);
             });
 
             // Reset hunk index if it's now out of range
