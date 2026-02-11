@@ -64,6 +64,10 @@ impl Stoat {
 
         super::hunk_patch::apply_patch(&patch, &repo_dir, true)?;
 
+        if let Some(new_diff) = self.compute_diff_for_review_mode(&file_path, cx) {
+            buffer_item.update(cx, |item, _| item.set_diff(Some(new_diff)));
+        }
+
         tracing::info!("Unstaged hunk at row {} in {:?}", cursor_row, file_path);
 
         Ok(())
