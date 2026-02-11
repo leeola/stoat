@@ -1126,6 +1126,11 @@ impl Stoat {
     /// # Returns
     ///
     /// Normalized path relative to worktree root without `./` prefix
+    pub(crate) fn worktree_root_abs(&self) -> PathBuf {
+        let root = self.worktree.lock().root().to_path_buf();
+        root.canonicalize().unwrap_or(root)
+    }
+
     pub(crate) fn normalize_file_path(&self, path: &std::path::Path) -> PathBuf {
         let root = self.worktree.lock().root().to_path_buf();
 

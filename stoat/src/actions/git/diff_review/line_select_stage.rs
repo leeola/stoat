@@ -7,7 +7,7 @@ impl Stoat {
     /// Stage only the selected lines from the current hunk.
     ///
     /// Generates a partial patch from the [`LineSelection`], applies it via
-    /// `git apply --cached`, then clears line selection and returns to diff review.
+    /// libgit2, then clears line selection and returns to diff review.
     pub fn diff_review_line_select_stage(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.apply_line_selection(false, cx) {
             tracing::error!("DiffReviewLineSelectStage failed: {e}");
@@ -34,13 +34,11 @@ impl Stoat {
             .ok_or_else(|| "No file path set".to_string())?
             .clone();
 
-        let repo_dir = file_path
-            .parent()
-            .ok_or_else(|| "File path has no parent directory".to_string())?;
+        let repo_dir = self.worktree_root_abs();
 
         let patch = super::super::hunk_patch::generate_partial_hunk_patch(selection, &file_path)?;
 
-        super::super::hunk_patch::apply_patch(&patch, repo_dir, reverse)?;
+        super::super::hunk_patch::apply_patch(&patch, &repo_dir, reverse)?;
 
         let action = if reverse { "Unstaged" } else { "Staged" };
         tracing::info!(

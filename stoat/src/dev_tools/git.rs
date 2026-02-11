@@ -4,11 +4,18 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use tempfile::TempDir;
-
 pub struct TestRepo {
-    pub dir: TempDir,
+    pub dir: PathBuf,
     pub changed_files: Vec<PathBuf>,
+    persist: bool,
+}
+
+impl Drop for TestRepo {
+    fn drop(&mut self) {
+        if !self.persist {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
 }
 
 pub fn list_scenarios(fixtures_dir: &Path) -> Vec<String> {
@@ -29,13 +36,27 @@ pub fn list_scenarios(fixtures_dir: &Path) -> Vec<String> {
     names
 }
 
-pub fn create_test_repo(fixture_dir: &Path) -> Result<TestRepo> {
-    let tmp = TempDir::new().context("creating temp dir")?;
-    let repo = tmp.path();
+pub fn create_test_repo(
+    fixture_dir: &Path,
+    base_temp_dir: Option<&Path>,
+    persist: bool,
+) -> Result<TestRepo> {
+    let scenario = fixture_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+    let base = base_temp_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    let repo = base.join("stoat-dev").join(&scenario);
+    if repo.exists() {
+        fs::remove_dir_all(&repo).context("cleaning previous fixture")?;
+    }
+    fs::create_dir_all(&repo).context("creating fixture dir")?;
 
-    run_git(repo, &["init"])?;
-    run_git(repo, &["config", "user.name", "Test"])?;
-    run_git(repo, &["config", "user.email", "test@test.com"])?;
+    run_git(&repo, &["init"])?;
+    run_git(&repo, &["config", "user.name", "Test"])?;
+    run_git(&repo, &["config", "user.email", "test@test.com"])?;
 
     let mut patches: Vec<_> = fs::read_dir(fixture_dir)
         .with_context(|| format!("reading fixture dir: {}", fixture_dir.display()))?
@@ -56,21 +77,22 @@ pub fn create_test_repo(fixture_dir: &Path) -> Result<TestRepo> {
             .with_context(|| format!("canonicalizing patch: {}", path.display()))?;
 
         if name.starts_with("c-") {
-            run_git(repo, &["am", &abs_patch.to_string_lossy()])?;
+            run_git(&repo, &["am", &abs_patch.to_string_lossy()])?;
         } else if name.starts_with("s-") {
-            run_git(repo, &["apply", "--cached", &abs_patch.to_string_lossy()])?;
+            run_git(&repo, &["apply", "--cached", &abs_patch.to_string_lossy()])?;
         } else if name.starts_with("w-") {
-            run_git(repo, &["apply", &abs_patch.to_string_lossy()])?;
+            run_git(&repo, &["apply", &abs_patch.to_string_lossy()])?;
         } else {
             bail!("unknown patch prefix in '{name}', expected c-/s-/w-");
         }
     }
 
-    let changed_files = collect_changed_files(repo)?;
+    let changed_files = collect_changed_files(&repo)?;
 
     Ok(TestRepo {
-        dir: tmp,
+        dir: repo,
         changed_files,
+        persist,
     })
 }
 
@@ -132,8 +154,8 @@ mod tests {
     #[test]
     fn create_basic_diff() {
         let fixture = fixtures_dir().join("basic-diff");
-        let tmp = create_test_repo(&fixture).unwrap();
-        let repo = tmp.dir.path();
+        let tmp = create_test_repo(&fixture, None, false).unwrap();
+        let repo = &tmp.dir;
 
         let file = repo.join("file.txt");
         assert!(file.exists(), "file.txt should exist");

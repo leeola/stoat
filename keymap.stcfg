@@ -259,6 +259,8 @@ on key {
             q -> DiffReviewDismiss();
             c -> DiffReviewCycleComparisonMode();
             s -> DiffReviewEnterLineSelect();
+            S -> GitStageHunk();
+            u -> GitUnstageHunk();
         }
 
         mode == "line_select" {

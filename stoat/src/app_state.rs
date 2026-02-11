@@ -330,6 +330,8 @@ pub struct AppState {
     /// All inline editors (command palette, file finder inputs, etc.) share this mode state.
     /// Separate from text_editor_mode so opening a modal doesn't affect text editing mode.
     pub inline_editor_mode: String,
+    /// Temporary flash message displayed in the status bar (replaces file path for ~3 seconds).
+    pub flash_message: Option<String>,
 }
 
 impl AppState {
@@ -429,6 +431,7 @@ impl AppState {
             lsp_state,
             text_editor_mode: "normal".to_string(),
             inline_editor_mode: "normal".to_string(),
+            flash_message: None,
         }
     }
 

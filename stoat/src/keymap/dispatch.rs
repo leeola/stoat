@@ -127,6 +127,21 @@ pub fn dispatch_editor_action<C: AppContext>(
             ed!(stoat, cx, |s, cx| s.diff_review_line_select_up(cx))
         },
 
+        "GitStageHunk" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.git_stage_hunk(cx) {
+                    tracing::error!("GitStageHunk failed: {e}");
+                }
+            });
+        },
+        "GitUnstageHunk" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.git_unstage_hunk(cx) {
+                    tracing::error!("GitUnstageHunk failed: {e}");
+                }
+            });
+        },
+
         "WriteFile" | "Save" => {
             let _ = stoat.update(cx, |s, cx| {
                 if let Err(e) = s.write_file(cx) {
@@ -223,6 +238,7 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "ShowCommandLine"
             | "CommandLineDismiss"
             | "ChangeDirectory"
+            | "PrintWorkingDirectory"
             // Application
             | "QuitAll"
     );

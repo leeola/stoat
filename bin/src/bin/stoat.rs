@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "stoat")]
@@ -59,7 +60,17 @@ pub enum GitAction {
     #[command(about = "List available scenarios")]
     List,
     #[command(about = "Open a scenario in the editor")]
-    Open { scenario: String },
+    Open {
+        scenario: String,
+        #[arg(
+            long,
+            env = "STOAT_DEV_TEMP_DIR",
+            help = "Base directory for fixture repos"
+        )]
+        base_temp_dir: Option<PathBuf>,
+        #[arg(long, help = "Keep the fixture directory after exit")]
+        persist: bool,
+    },
 }
 
 fn main() {
@@ -118,8 +129,17 @@ fn main() {
             let result = match sub {
                 Git { action: List } => stoat_bin::commands::dev_tools::run_git_list(),
                 Git {
-                    action: Open { scenario },
-                } => stoat_bin::commands::dev_tools::run_git_open(&scenario),
+                    action:
+                        Open {
+                            scenario,
+                            base_temp_dir,
+                            persist,
+                        },
+                } => stoat_bin::commands::dev_tools::run_git_open(
+                    &scenario,
+                    base_temp_dir.as_deref(),
+                    persist,
+                ),
             };
             if let Err(e) = result {
                 eprintln!("Error: {e}");

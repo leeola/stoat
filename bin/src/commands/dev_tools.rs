@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 use stoat::dev_tools::git;
 
 pub fn run_git_list() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,16 +18,25 @@ pub fn run_git_list() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn run_git_open(scenario: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_git_open(
+    scenario: &str,
+    base_temp_dir: Option<&Path>,
+    persist: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let fixture_dir = fixtures_dir().join(scenario);
     if !fixture_dir.is_dir() {
         return Err(format!("scenario not found: {}", fixture_dir.display()).into());
     }
 
-    let repo = git::create_test_repo(&fixture_dir)?;
-    let canonical_dir = fs::canonicalize(repo.dir.path())?;
+    let repo = git::create_test_repo(&fixture_dir, base_temp_dir, persist)?;
+
+    if persist {
+        let _ = writeln!(std::io::stderr(), "Fixture dir: {}", repo.dir.display());
+    }
+
+    let canonical_dir = fs::canonicalize(&repo.dir)?;
     std::env::set_current_dir(&canonical_dir)?;
-    let paths = repo.changed_files;
+    let paths = repo.changed_files.clone();
 
     #[cfg(debug_assertions)]
     {

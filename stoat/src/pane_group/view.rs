@@ -475,6 +475,9 @@ impl PaneGroupView {
                         self.handle_change_directory(&std::path::PathBuf::from(path), window, cx);
                     }
                 },
+                "PrintWorkingDirectory" => {
+                    self.handle_print_working_directory(window, cx);
+                },
                 "QuitAll" => cx.quit(),
                 _ => {
                     tracing::warn!("Unknown pane action: {}", name);
@@ -1372,6 +1375,7 @@ impl Render for PaneGroupView {
                     comparison_mode,
                     lsp_status,
                 )| {
+                    let flash_message = self.app_state.flash_message.clone();
                     div.child(StatusBar::new(
                         mode,
                         branch,
@@ -1382,6 +1386,7 @@ impl Render for PaneGroupView {
                         hunk_position,
                         comparison_mode,
                         lsp_status,
+                        flash_message,
                     ))
                 },
             )

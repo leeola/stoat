@@ -38,6 +38,8 @@ pub struct StatusBar {
     comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
     /// LSP status string for display
     lsp_status: String,
+    /// Temporary flash message (replaces file path when present)
+    flash_message: Option<String>,
 }
 
 impl StatusBar {
@@ -53,6 +55,7 @@ impl StatusBar {
         hunk_position: Option<(usize, usize)>,
         comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
         lsp_status: String,
+        flash_message: Option<String>,
     ) -> Self {
         Self {
             mode_display,
@@ -63,6 +66,7 @@ impl StatusBar {
             hunk_position,
             comparison_mode,
             lsp_status,
+            flash_message,
         }
     }
 
@@ -175,10 +179,13 @@ impl RenderOnce for StatusBar {
         // Apply path truncation based on available space
         // Review mode has center section, so less space for path
         let max_path_chars = if in_review_mode { 40 } else { 80 };
-        let file_display = self
-            .file_path
-            .map(|p| Self::truncate_path_from_start(&p, max_path_chars))
-            .unwrap_or_else(|| "[No file]".to_string());
+        let file_display = if let Some(flash) = self.flash_message {
+            flash
+        } else {
+            self.file_path
+                .map(|p| Self::truncate_path_from_start(&p, max_path_chars))
+                .unwrap_or_else(|| "[No file]".to_string())
+        };
 
         // Build center section for review info
         let center_div = if in_review_mode {

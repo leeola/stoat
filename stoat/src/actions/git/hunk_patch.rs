@@ -1,54 +1,23 @@
-//! Utilities for generating git patch files from diff hunks.
+//! Utilities for generating and applying git patch files from diff hunks.
 //!
 //! This module provides functionality to convert [`DiffHunk`](crate::git::diff::DiffHunk)
-//! instances into unified diff format patches that can be applied with `git apply`.
-//! Used by [`git_stage_hunk`](crate::Stoat::git_stage_hunk) and
+//! instances into unified diff format patches, and to apply them to the git index
+//! via libgit2. Used by [`git_stage_hunk`](crate::Stoat::git_stage_hunk) and
 //! [`git_unstage_hunk`](crate::Stoat::git_unstage_hunk) actions.
 
 use crate::git::{
     diff::{BufferDiff, DiffHunk, DiffHunkStatus, HunkLineOrigin},
     line_selection::LineSelection,
 };
+use git2::{ApplyLocation, Diff, Repository};
 use std::path::Path;
 use text::{BufferSnapshot, ToPoint};
 
 /// Generates a unified diff format patch for a single hunk.
 ///
-/// Creates a patch in unified diff format that can be applied to the git staging area
-/// using `git apply --cached --unidiff-zero`. The patch includes file headers, hunk
-/// header with line numbers, and the diff content based on hunk status (added, deleted,
-/// or modified).
-///
-/// # Arguments
-///
-/// * `diff` - The [`BufferDiff`] containing the base text for comparison
-/// * `hunk` - The [`DiffHunk`] to generate a patch for
-/// * `buffer_snapshot` - The current buffer state to extract new content from
-/// * `file_path` - Path to the file being patched, used for patch headers
-///
-/// # Returns
-///
-/// A string containing the complete unified diff patch, or an error if the file name
-/// is invalid.
-///
-/// # Patch Format
-///
-/// The generated patch follows the unified diff format:
-/// ```text
-/// --- a/filename
-/// +++ b/filename
-/// @@ -old_start,old_lines +new_start,new_lines @@
-/// -deleted line
-/// +added line
-/// ```
-///
-/// # Example
-///
-/// This function is used internally by git staging actions:
-/// ```ignore
-/// let patch = generate_hunk_patch(&diff, &hunk, &buffer_snapshot, &file_path)?;
-/// // Apply patch with: git apply --cached --unidiff-zero
-/// ```
+/// Creates a zero-context patch suitable for [`apply_patch`] via libgit2. For Added
+/// hunks (old_lines == 0), `new_start` is set to `old_start + 1` so that insertions
+/// land after the anchor line rather than before it.
 pub(super) fn generate_hunk_patch(
     diff: &BufferDiff,
     hunk: &DiffHunk,
@@ -62,30 +31,21 @@ pub(super) fn generate_hunk_patch(
 
     let mut patch = String::new();
 
-    // File headers
+    patch.push_str(&format!("diff --git a/{file_name} b/{file_name}\n"));
     patch.push_str(&format!("--- a/{file_name}\n"));
     patch.push_str(&format!("+++ b/{file_name}\n"));
 
-    // Get hunk line numbers
     let buffer_start = hunk.buffer_range.start.to_point(buffer_snapshot);
     let buffer_end = hunk.buffer_range.end.to_point(buffer_snapshot);
 
-    let new_start = buffer_start.row + 1; // git uses 1-indexed
-    let new_lines = buffer_end.row.saturating_sub(buffer_start.row);
-
-    // Calculate old (HEAD) line numbers from base text
     let base_content = &diff.base_text[hunk.diff_base_byte_range.clone()];
-    let old_lines = base_content.lines().count() as u32;
-
-    // For added hunks, old_start should point to the line where insertion happened
-    // For other hunks, calculate from the hunk's position
-    let old_start = if old_lines == 0 {
-        new_start
+    let old_start = hunk.old_start;
+    let old_lines = hunk.old_lines;
+    let new_lines = buffer_end.row.saturating_sub(buffer_start.row);
+    let new_start = if old_lines == 0 {
+        old_start + 1
     } else {
-        // Count lines before this hunk in base text
-        let bytes_before = hunk.diff_base_byte_range.start;
-        let lines_before = diff.base_text[..bytes_before].lines().count() as u32;
-        lines_before + 1
+        old_start
     };
 
     // Hunk header
@@ -180,6 +140,7 @@ pub(super) fn generate_partial_hunk_patch(
     let new_start = selection.hunk_lines.new_start;
 
     let mut patch = String::new();
+    patch.push_str(&format!("diff --git a/{file_name} b/{file_name}\n"));
     patch.push_str(&format!("--- a/{file_name}\n"));
     patch.push_str(&format!("+++ b/{file_name}\n"));
     patch.push_str(&format!(
@@ -342,45 +303,88 @@ mod tests {
     }
 }
 
-/// Apply a unified diff patch to the git staging area.
+/// Apply a unified diff patch to the git index via libgit2.
 ///
-/// Pipes the patch to `git apply --cached --unidiff-zero`. When `reverse` is true,
-/// adds `--reverse` to unstage instead.
+/// When `reverse` is true, the patch is reversed (swapping additions/deletions
+/// and header fields) before application, used for unstaging.
 pub(super) fn apply_patch(patch: &str, repo_dir: &Path, reverse: bool) -> Result<(), String> {
-    let mut args = vec!["apply", "--cached", "--unidiff-zero"];
-    if reverse {
-        args.push("--reverse");
-    }
-    args.push("-");
+    let repo = Repository::open(repo_dir).map_err(|e| format!("Failed to open repository: {e}"))?;
 
-    let mut child = std::process::Command::new("git")
-        .args(&args)
-        .current_dir(repo_dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn git apply: {e}"))?;
+    let patch_bytes = if reverse {
+        reverse_patch(patch)
+    } else {
+        patch.to_string()
+    };
 
-    {
-        use std::io::Write;
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "Failed to open stdin".to_string())?;
-        stdin
-            .write_all(patch.as_bytes())
-            .map_err(|e| format!("Failed to write patch to stdin: {e}"))?;
-    }
+    let diff = Diff::from_buffer(patch_bytes.as_bytes())
+        .map_err(|e| format!("Failed to parse patch: {e}"))?;
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait for git apply: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git apply failed: {stderr}"));
-    }
+    repo.apply(&diff, ApplyLocation::Index, None)
+        .map_err(|e| format!("Failed to apply patch: {e}"))?;
 
     Ok(())
+}
+
+/// Reverse a unified diff patch by swapping additions/deletions and the `@@` header ranges.
+///
+/// The `diff --git`, `---`, and `+++` header lines are kept unchanged so that
+/// libgit2 can match the path names consistently.
+fn reverse_patch(patch: &str) -> String {
+    let mut result = String::with_capacity(patch.len());
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") || line.starts_with("--- ") || line.starts_with("+++ ") {
+            result.push_str(line);
+            result.push('\n');
+        } else if let Some(rest) = line.strip_prefix("@@ ") {
+            if let Some(reversed) = reverse_hunk_header(rest) {
+                result.push_str(&format!("@@ {reversed}\n"));
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else if let Some(rest) = line.strip_prefix('-') {
+            result.push('+');
+            result.push_str(rest);
+            result.push('\n');
+        } else if let Some(rest) = line.strip_prefix('+') {
+            result.push('-');
+            result.push_str(rest);
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+/// Swap old/new ranges in a hunk header: `-A,B +C,D @@` becomes `-C,D +A,B @@`.
+///
+/// For zero-count ranges, the start position is set to match the other side's
+/// start, since libgit2 requires positional consistency for empty ranges.
+fn reverse_hunk_header(header: &str) -> Option<String> {
+    let at_end = header.find(" @@")?;
+    let ranges = &header[..at_end];
+    let after = &header[at_end..];
+
+    let plus_idx = ranges.find(" +")?;
+    let old_range = &ranges[1..plus_idx];
+    let new_range = &ranges[plus_idx + 2..];
+
+    fn parse_range(r: &str) -> Option<(u32, u32)> {
+        let (start, count) = r.split_once(',')?;
+        Some((start.parse().ok()?, count.parse().ok()?))
+    }
+
+    let (old_start, old_count) = parse_range(old_range)?;
+    let (new_start, new_count) = parse_range(new_range)?;
+
+    let rev_old_start = new_start;
+    let rev_old_count = new_count;
+    let rev_new_start = if old_count == 0 { new_start } else { old_start };
+    let rev_new_count = old_count;
+
+    Some(format!(
+        "-{rev_old_start},{rev_old_count} +{rev_new_start},{rev_new_count}{after}"
+    ))
 }

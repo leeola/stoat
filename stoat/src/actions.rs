@@ -181,6 +181,8 @@ actions!(
         ShowCommandLine,
         /// Dismiss command line prompt
         CommandLineDismiss,
+        /// Print the current working directory
+        PrintWorkingDirectory,
     ]
 );
 
@@ -1154,6 +1156,14 @@ action_metadata!(
     hidden
 );
 
+// Command line actions
+action_metadata!(
+    PrintWorkingDirectory,
+    "print working directory",
+    "Print the current working directory",
+    ["cwd", "pwd"]
+);
+
 // KeyContext and Mode actions
 action_metadata!(
     SetKeyContext,
@@ -1534,6 +1544,12 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         AboutModalDismiss::action_name(),
     );
 
+    // Command line actions
+    names.insert(
+        TypeId::of::<PrintWorkingDirectory>(),
+        PrintWorkingDirectory::action_name(),
+    );
+
     // KeyContext and Mode actions
     names.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::action_name());
     names.insert(TypeId::of::<SetMode>(), SetMode::action_name());
@@ -1907,6 +1923,12 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         AboutModalDismiss::description(),
     );
 
+    // Command line actions
+    descriptions.insert(
+        TypeId::of::<PrintWorkingDirectory>(),
+        PrintWorkingDirectory::description(),
+    );
+
     // KeyContext and Mode actions
     descriptions.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::description());
     descriptions.insert(TypeId::of::<SetMode>(), SetMode::description());
@@ -2254,6 +2276,12 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         AboutModalDismiss::help_text(),
     );
 
+    // Command line actions
+    help.insert(
+        TypeId::of::<PrintWorkingDirectory>(),
+        PrintWorkingDirectory::help_text(),
+    );
+
     // KeyContext and Mode actions
     help.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::help_text());
     help.insert(TypeId::of::<SetMode>(), SetMode::help_text());
@@ -2307,7 +2335,11 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     aliases.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::aliases());
     aliases.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::aliases());
 
-    // Add more aliases here as needed
+    // Command line actions
+    aliases.insert(
+        TypeId::of::<PrintWorkingDirectory>(),
+        PrintWorkingDirectory::aliases(),
+    );
 
     aliases
 });

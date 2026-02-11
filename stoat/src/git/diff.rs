@@ -160,6 +160,12 @@ pub struct DiffHunk {
 
     /// Type of change this hunk represents
     pub status: DiffHunkStatus,
+
+    /// 1-indexed start line in HEAD, from libgit2.
+    pub old_start: u32,
+
+    /// Number of lines in HEAD covered by this hunk, from libgit2.
+    pub old_lines: u32,
 }
 
 /// Container for all diff hunks in a buffer, plus the base text they compare against.
@@ -379,6 +385,8 @@ fn compute_diff(
             buffer_range,
             diff_base_byte_range: base_start_offset..base_end_offset,
             status,
+            old_start,
+            old_lines,
         });
     }
 
