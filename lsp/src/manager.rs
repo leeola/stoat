@@ -176,8 +176,9 @@ impl std::future::Future for RequestHandle {
 const DIAGNOSTIC_CHANNEL_CAPACITY: usize = 1000;
 
 /// Channel capacity for progress update notifications.
-/// Progress updates are less frequent than diagnostics, so smaller capacity.
-const PROGRESS_CHANNEL_CAPACITY: usize = 100;
+/// rust-analyzer sends large bursts during initial indexing (thousands of
+/// Roots Scanned updates in sub-millisecond windows), so this needs headroom.
+const PROGRESS_CHANNEL_CAPACITY: usize = 4096;
 
 /// Manages language server lifecycle and diagnostic routing.
 ///
