@@ -449,7 +449,7 @@ impl Element for EditorElement {
                     shaped,
                     y_position: y,
                     diff_status: diff_row_info.and_then(|r| r.diff_status),
-                    is_staged: diff_row_info.map_or(false, |r| r.is_staged),
+                    is_staged: diff_row_info.is_some_and(|r| r.is_staged),
                 });
 
                 y += line_height;
@@ -604,15 +604,14 @@ impl Element for EditorElement {
 
                 let mut hunk_display_indices: Vec<usize> = Vec::new();
                 for (i, layout) in line_layouts.iter().enumerate() {
-                    match layout.diff_status {
-                        Some(DiffHunkStatus::Added | DiffHunkStatus::Modified) => {
-                            if let Some(br) = layout.buffer_row {
-                                if br >= new_start_0 && br < new_end_0 {
-                                    hunk_display_indices.push(i);
-                                }
+                    if let Some(DiffHunkStatus::Added | DiffHunkStatus::Modified) =
+                        layout.diff_status
+                    {
+                        if let Some(br) = layout.buffer_row {
+                            if br >= new_start_0 && br < new_end_0 {
+                                hunk_display_indices.push(i);
                             }
-                        },
-                        _ => {},
+                        }
                     }
                 }
                 if let Some(&first_add_idx) = hunk_display_indices.first() {
@@ -1338,8 +1337,8 @@ fn apply_diagnostic_underlines(
     let mut diagnostic_ranges: Vec<(std::ops::Range<u32>, gpui::Hsla)> = Vec::new();
     for diag in diagnostics {
         use text::ToPoint;
-        let start_point = diag.range.start.to_point(&snapshot);
-        let end_point = diag.range.end.to_point(&snapshot);
+        let start_point = diag.range.start.to_point(snapshot);
+        let end_point = diag.range.end.to_point(snapshot);
 
         // Only include diagnostics that overlap this row
         if start_point.row <= buffer_row && end_point.row >= buffer_row {

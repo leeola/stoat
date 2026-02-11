@@ -96,7 +96,7 @@ pub struct StdioTransport {
     pending_requests: Arc<Mutex<HashMap<u64, Sender<String>>>>,
 
     /// Broadcasts server-initiated notifications
-    notification_tx: Sender<String>,
+    _notification_tx: Sender<String>,
     notification_rx: Receiver<String>,
 
     /// Background task reading stdout
@@ -158,7 +158,7 @@ impl StdioTransport {
             stdin,
             next_request_id: AtomicU64::new(1),
             pending_requests,
-            notification_tx,
+            _notification_tx: notification_tx,
             notification_rx,
             _reader_task: reader_task,
             process: Arc::new(Mutex::new(Some(process))),
@@ -207,13 +207,13 @@ impl StdioTransport {
         stdout.read_line(&mut header).await?;
 
         if !header.starts_with("Content-Length: ") {
-            anyhow::bail!("Invalid message header: {}", header);
+            anyhow::bail!("Invalid message header: {header}");
         }
 
         let content_length: usize = header["Content-Length: ".len()..]
             .trim()
             .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid Content-Length: {e}"))?;
 
         let mut empty = String::new();
         stdout.read_line(&mut empty).await?;

@@ -26,9 +26,9 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyCommand => write!(f, "Empty command"),
-            Self::UnknownCommand(cmd) => write!(f, "Unknown command: :{}", cmd),
+            Self::UnknownCommand(cmd) => write!(f, "Unknown command: :{cmd}"),
             Self::MissingArgument { command, expected } => {
-                write!(f, ":{} requires {}", command, expected)
+                write!(f, ":{command} requires {expected}")
             },
         }
     }
@@ -68,11 +68,10 @@ pub fn parse_command(input: &str) -> Result<Command, ParseError> {
             let path_str = parts[1..].join(" ");
 
             // Expand tilde if present
-            let path = if path_str.starts_with('~') {
+            let path = if let Some(remainder) = path_str.strip_prefix('~') {
                 if let Some(home) = dirs::home_dir() {
-                    let remainder = &path_str[1..];
                     if remainder.is_empty() || remainder.starts_with('/') {
-                        home.join(&remainder[1..])
+                        home.join(remainder.strip_prefix('/').unwrap_or(""))
                     } else {
                         PathBuf::from(path_str)
                     }

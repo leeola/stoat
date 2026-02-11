@@ -14,10 +14,10 @@ pub enum Command {
     #[command(about = "Launch GUI with v4 architecture", name = "gui")]
     Gui {
         #[arg(short, long, env = "STOAT_CONFIG", help = "Path to config file")]
-        config: Option<std::path::PathBuf>,
+        config: Option<PathBuf>,
 
         #[arg(long, help = "Set working directory at startup")]
-        cwd: Option<std::path::PathBuf>,
+        cwd: Option<PathBuf>,
 
         #[arg(
             long,
@@ -33,7 +33,7 @@ pub enum Command {
         timeout: Option<u64>,
 
         #[arg(help = "Files to open")]
-        paths: Vec<std::path::PathBuf>,
+        paths: Vec<PathBuf>,
     },
 
     #[cfg(feature = "dev-tools")]

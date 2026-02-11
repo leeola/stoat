@@ -100,7 +100,7 @@ impl BufferDiagnostic {
     /// Get the most severe diagnostic from a set.
     ///
     /// Used when merging diagnostics from multiple sources at the same location.
-    pub fn most_severe<'a>(diagnostics: &'a [BufferDiagnostic]) -> Option<&'a BufferDiagnostic> {
+    pub fn most_severe(diagnostics: &[BufferDiagnostic]) -> Option<&BufferDiagnostic> {
         diagnostics.iter().min_by_key(|d| d.severity)
     }
 }

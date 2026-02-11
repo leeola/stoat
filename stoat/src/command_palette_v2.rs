@@ -38,7 +38,7 @@ impl CommandPaletteV2 {
     /// Initializes with all commands visible (no filter) and first command selected.
     /// Subscribes to InlineEditor changes to automatically trigger filtering.
     pub fn new(commands: Vec<CommandInfo>, cx: &mut Context<Self>) -> Self {
-        let input = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let input = cx.new(InlineEditor::new_single_line);
 
         // Subscribe to InlineEditor events for automatic filtering when text changes
         let input_subscription = cx.subscribe(&input, |this, _input, _event, cx| {

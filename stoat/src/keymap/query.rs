@@ -51,7 +51,7 @@ pub fn bindings_for_mode(keymap: &CompiledKeymap, mode: &str) -> Vec<(String, St
 }
 
 fn has_mode_predicate(predicates: &[stoat_config::Predicate]) -> bool {
-    predicates.iter().any(|p| is_mode_predicate(p))
+    predicates.iter().any(is_mode_predicate)
 }
 
 fn matches_mode_predicate(predicates: &[stoat_config::Predicate], mode: &str) -> bool {

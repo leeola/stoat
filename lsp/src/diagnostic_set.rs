@@ -45,8 +45,8 @@ impl DiagnosticSet {
         snapshot: &'a BufferSnapshot,
     ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
         self.diagnostics.iter().filter(move |diag| {
-            let start = diag.range.start.to_point(&snapshot);
-            let end = diag.range.end.to_point(&snapshot);
+            let start = diag.range.start.to_point(snapshot);
+            let end = diag.range.end.to_point(snapshot);
             start.row <= row && row <= end.row
         })
     }
@@ -60,8 +60,8 @@ impl DiagnosticSet {
         snapshot: &'a BufferSnapshot,
     ) -> impl Iterator<Item = &'a BufferDiagnostic> + 'a {
         self.diagnostics.iter().filter(move |diag| {
-            let diag_start = diag.range.start.to_point(&snapshot);
-            let diag_end = diag.range.end.to_point(&snapshot);
+            let diag_start = diag.range.start.to_point(snapshot);
+            let diag_end = diag.range.end.to_point(snapshot);
 
             // Check if ranges overlap
             ranges_overlap(diag_start..diag_end, range.clone())
@@ -89,13 +89,13 @@ impl DiagnosticSet {
     /// When diagnostics from different servers overlap, keeps the most severe one.
     pub fn merge_with(&mut self, other: &DiagnosticSet, snapshot: &BufferSnapshot) {
         for new_diag in other.diagnostics.iter() {
-            let new_start = new_diag.range.start.to_point(&snapshot);
-            let new_end = new_diag.range.end.to_point(&snapshot);
+            let new_start = new_diag.range.start.to_point(snapshot);
+            let new_end = new_diag.range.end.to_point(snapshot);
 
             // Remove any overlapping diagnostics that are less severe or from same server
             self.diagnostics.retain(|existing| {
-                let existing_start = existing.range.start.to_point(&snapshot);
-                let existing_end = existing.range.end.to_point(&snapshot);
+                let existing_start = existing.range.start.to_point(snapshot);
+                let existing_end = existing.range.end.to_point(snapshot);
 
                 // Same server: always replace
                 if existing.server_id == new_diag.server_id {

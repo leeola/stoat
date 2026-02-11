@@ -22,12 +22,10 @@ impl PaneGroupView {
                     palette
                 });
                 self.app_state.command_palette_v2 = Some(palette);
-            } else {
-                if let Some(palette) = &self.app_state.command_palette_v2 {
-                    palette.update(cx, |p, _| {
-                        p.set_previous_key_context(previous_key_context);
-                    });
-                }
+            } else if let Some(palette) = &self.app_state.command_palette_v2 {
+                palette.update(cx, |p, _| {
+                    p.set_previous_key_context(previous_key_context);
+                });
             }
 
             editor.update(cx, |editor, cx| {

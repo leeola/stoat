@@ -68,9 +68,9 @@ impl LspStatus {
             LspStatus::Idle => String::new(),
             LspStatus::Starting => "LSP: Starting...".to_string(),
             LspStatus::Initializing => "LSP: Initializing...".to_string(),
-            LspStatus::Indexing { operation } => format!("LSP: {}", operation),
+            LspStatus::Indexing { operation } => format!("LSP: {operation}"),
             LspStatus::Ready => String::new(),
-            LspStatus::Error(msg) => format!("LSP: Error: {}", msg),
+            LspStatus::Error(msg) => format!("LSP: Error: {msg}"),
         }
     }
 }
@@ -505,9 +505,9 @@ impl AppState {
                                 .checked_div(count as u32);
 
                             if let Some(avg_pct) = total_pct {
-                                format!("Indexing ({} tasks, {}%)", count, avg_pct)
+                                format!("Indexing ({count} tasks, {avg_pct}%)")
                             } else {
-                                format!("Indexing ({} tasks)", count)
+                                format!("Indexing ({count} tasks)")
                             }
                         };
                         LspStatus::Indexing { operation }

@@ -1437,6 +1437,7 @@ impl Stoat {
     ///     buffer_item.update(cx, |item, _| item.set_diff(Some(diff)));
     /// }
     /// ```
+    #[allow(clippy::single_range_in_vec_init)]
     pub(crate) fn compute_diff_for_review_mode(
         &self,
         path: &std::path::Path,

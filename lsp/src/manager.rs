@@ -55,11 +55,11 @@ enum ProgressToken {
     Number(i64),
 }
 
-impl ProgressToken {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for ProgressToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProgressToken::String(s) => s.clone(),
-            ProgressToken::Number(n) => n.to_string(),
+            ProgressToken::String(s) => f.write_str(s),
+            ProgressToken::Number(n) => write!(f, "{n}"),
         }
     }
 }
@@ -226,13 +226,13 @@ struct LspManagerInner {
 
 struct ServerState {
     /// Server identifier
-    id: ServerId,
+    _id: ServerId,
 
     /// Transport for communication
     transport: Arc<dyn LspTransport>,
 
     /// Server name (e.g., "rust-analyzer")
-    name: String,
+    _name: String,
 
     /// Text document sync kind (None, Full, or Incremental)
     text_document_sync_kind: Option<lsp_types::TextDocumentSyncKind>,
@@ -332,9 +332,9 @@ impl LspManager {
         inner.servers.insert(
             server_id,
             ServerState {
-                id: server_id,
+                _id: server_id,
                 transport,
-                name,
+                _name: name,
                 text_document_sync_kind: None,
             },
         );
@@ -472,8 +472,7 @@ impl LspManager {
                 let timeout_future = executor_clone.spawn(async move {
                     smol::Timer::after(timeout_duration).await;
                     Err::<String, anyhow::Error>(anyhow::anyhow!(
-                        "LSP request timed out after {:?} (server may be unresponsive)",
-                        timeout_duration
+                        "LSP request timed out after {timeout_duration:?} (server may be unresponsive)"
                     ))
                 });
 
@@ -595,7 +594,7 @@ impl LspManager {
         let path = if let Some(path_str) = uri_str.strip_prefix("file://") {
             PathBuf::from(path_str)
         } else {
-            anyhow::bail!("Invalid file URI (not file://): {}", uri_str);
+            anyhow::bail!("Invalid file URI (not file://): {uri_str}");
         };
 
         let (changed, subscribers) = {
@@ -612,10 +611,7 @@ impl LspManager {
                 id
             };
 
-            let diagnostics_for_file = inner_guard
-                .lsp_diagnostics
-                .entry(buffer_id)
-                .or_insert_with(Vec::new);
+            let diagnostics_for_file = inner_guard.lsp_diagnostics.entry(buffer_id).or_default();
 
             // Compute hash before update
             let old_hash = Self::compute_diagnostic_hash(diagnostics_for_file);

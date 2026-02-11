@@ -100,6 +100,7 @@ impl Parser {
     /// Uses the stored old tree to perform incremental parsing. Call this after
     /// buffer edits for faster reparsing. Falls back to full parse if no old tree
     /// is available.
+    #[allow(clippy::single_range_in_vec_init)]
     pub fn parse_incremental(
         &mut self,
         text: &str,

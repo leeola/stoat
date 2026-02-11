@@ -205,19 +205,17 @@ impl GutterLayout {
                         ));
                     },
                 }
-            } else {
-                if let Some((group_status, group_staged, start_y, end_y)) = current_group {
-                    diff_indicators.push(DiffIndicator {
-                        status: group_status,
-                        bounds: Bounds {
-                            origin: point(gutter_bounds.origin.x, start_y),
-                            size: size(strip_width, end_y - start_y),
-                        },
-                        corner_radii: Corners::all(px(0.0)),
-                        is_staged: group_staged,
-                    });
-                    current_group = None;
-                }
+            } else if let Some((group_status, group_staged, start_y, end_y)) = current_group {
+                diff_indicators.push(DiffIndicator {
+                    status: group_status,
+                    bounds: Bounds {
+                        origin: point(gutter_bounds.origin.x, start_y),
+                        size: size(strip_width, end_y - start_y),
+                    },
+                    corner_radii: Corners::all(px(0.0)),
+                    is_staged: group_staged,
+                });
+                current_group = None;
             }
         }
 
