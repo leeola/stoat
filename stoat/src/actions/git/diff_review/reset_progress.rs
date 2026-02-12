@@ -55,7 +55,7 @@ impl Stoat {
                     }
 
                     // Compute diff
-                    if let Some((diff, staged_rows)) =
+                    if let Some((diff, staged_rows, staged_hunk_indices)) =
                         self.compute_diff_for_review_mode(&abs_path, cx)
                     {
                         if !diff.hunks.is_empty() {
@@ -64,6 +64,7 @@ impl Stoat {
                             buffer_item.update(cx, |item, _| {
                                 item.set_diff(Some(diff.clone()));
                                 item.set_staged_rows(staged_rows);
+                                item.set_staged_hunk_indices(staged_hunk_indices);
                             });
 
                             // Reset to start

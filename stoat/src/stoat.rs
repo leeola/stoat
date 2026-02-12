@@ -1284,6 +1284,16 @@ impl Stoat {
                                 } else {
                                     Some(ranges)
                                 });
+                                let hunk_indices = crate::git::diff::compute_staged_hunk_indices(
+                                    diff,
+                                    wi_diff.as_ref(),
+                                    &buffer_snapshot,
+                                );
+                                item.set_staged_hunk_indices(if hunk_indices.is_empty() {
+                                    None
+                                } else {
+                                    Some(hunk_indices)
+                                });
                             }
                             item.set_diff(Some(diff.clone()));
                         },
@@ -1443,12 +1453,16 @@ impl Stoat {
     ///     buffer_item.update(cx, |item, _| item.set_diff(Some(diff)));
     /// }
     /// ```
-    #[allow(clippy::single_range_in_vec_init)]
+    #[allow(clippy::single_range_in_vec_init, clippy::type_complexity)]
     pub(crate) fn compute_diff_for_review_mode(
         &self,
         path: &std::path::Path,
         cx: &App,
-    ) -> Option<(BufferDiff, Option<Vec<std::ops::Range<u32>>>)> {
+    ) -> Option<(
+        BufferDiff,
+        Option<Vec<std::ops::Range<u32>>>,
+        Option<Vec<usize>>,
+    )> {
         use crate::git::diff_review::DiffComparisonMode;
 
         let repo = Repository::discover(path).ok()?;
@@ -1462,7 +1476,7 @@ impl Stoat {
             path
         );
 
-        let (diff, staged_rows) = match self.diff_review_comparison_mode {
+        let (diff, staged_rows, staged_hunk_indices) = match self.diff_review_comparison_mode {
             DiffComparisonMode::WorkingVsHead => {
                 let base_content = repo.head_content(path).ok()?;
                 tracing::debug!(
@@ -1472,16 +1486,30 @@ impl Stoat {
                 );
                 let diff =
                     BufferDiff::new(buffer_id, base_content.clone(), &buffer_snapshot).ok()?;
-                let staged = repo.index_content(path).ok().map(|index_content| {
-                    let wi_diff = BufferDiff::new(buffer_id, index_content, &buffer_snapshot).ok();
-                    crate::git::diff::compute_staged_buffer_rows(
-                        &diff,
-                        wi_diff.as_ref(),
-                        &buffer_snapshot,
-                    )
-                });
-                let staged = staged.and_then(|v| if v.is_empty() { None } else { Some(v) });
-                (diff, staged)
+                let (staged_rows, staged_hunks) = repo
+                    .index_content(path)
+                    .ok()
+                    .map(|index_content| {
+                        let wi_diff =
+                            BufferDiff::new(buffer_id, index_content, &buffer_snapshot).ok();
+                        let rows = crate::git::diff::compute_staged_buffer_rows(
+                            &diff,
+                            wi_diff.as_ref(),
+                            &buffer_snapshot,
+                        );
+                        let hunks = crate::git::diff::compute_staged_hunk_indices(
+                            &diff,
+                            wi_diff.as_ref(),
+                            &buffer_snapshot,
+                        );
+                        (rows, hunks)
+                    })
+                    .unzip();
+                let staged_rows =
+                    staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+                let staged_hunks =
+                    staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+                (diff, staged_rows, staged_hunks)
             },
             DiffComparisonMode::WorkingVsIndex => {
                 let base_content = repo.index_content(path).unwrap_or_else(|_| String::new());
@@ -1491,7 +1519,7 @@ impl Stoat {
                     buffer_snapshot.text().len()
                 );
                 let diff = BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?;
-                (diff, None)
+                (diff, None, None)
             },
             DiffComparisonMode::IndexVsHead => {
                 let head_content = repo.head_content(path).ok()?;
@@ -1501,12 +1529,13 @@ impl Stoat {
                     buffer_snapshot.text().len()
                 );
                 let diff = BufferDiff::new(buffer_id, head_content, &buffer_snapshot).ok()?;
-                (diff, Some(vec![0..u32::MAX]))
+                let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
+                (diff, Some(vec![0..u32::MAX]), Some(all_indices))
             },
         };
 
         tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
-        Some((diff, staged_rows))
+        Some((diff, staged_rows, staged_hunk_indices))
     }
 
     /// Recompute the diff display for the current file and push results into
@@ -1516,11 +1545,14 @@ impl Stoat {
         let Some(file_path) = self.current_file_path.clone() else {
             return;
         };
-        if let Some((new_diff, staged_rows)) = self.compute_diff_for_review_mode(&file_path, cx) {
+        if let Some((new_diff, staged_rows, staged_hunk_indices)) =
+            self.compute_diff_for_review_mode(&file_path, cx)
+        {
             let buffer_item = self.active_buffer(cx);
             buffer_item.update(cx, |item, _| {
                 item.set_diff(Some(new_diff));
                 item.set_staged_rows(staged_rows);
+                item.set_staged_hunk_indices(staged_hunk_indices);
             });
         }
     }

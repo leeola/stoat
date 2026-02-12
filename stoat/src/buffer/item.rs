@@ -45,6 +45,10 @@ pub struct BufferItem {
     /// distinguish staged vs unstaged hunks in all diff modes.
     staged_rows: Option<Vec<Range<u32>>>,
 
+    /// Hunk indices (into the diff's hunks vec) that are staged.
+    /// Used to set `is_staged` on phantom rows for deleted content.
+    staged_hunk_indices: Option<Vec<usize>>,
+
     /// Saved text content for modification tracking (None for unnamed buffers never saved)
     saved_text: Option<String>,
 
@@ -79,6 +83,7 @@ impl BufferItem {
             language,
             diff: None,
             staged_rows: None,
+            staged_hunk_indices: None,
             saved_text: None,
             saved_mtime: None,
             line_ending: LineEnding::default(),
@@ -123,6 +128,7 @@ impl BufferItem {
             self.diff.clone(),
             show_phantom_rows,
             self.staged_rows.as_deref(),
+            self.staged_hunk_indices.as_deref(),
         )
     }
 
@@ -268,6 +274,16 @@ impl BufferItem {
     /// Set the staged row ranges for this buffer.
     pub fn set_staged_rows(&mut self, staged_rows: Option<Vec<Range<u32>>>) {
         self.staged_rows = staged_rows;
+    }
+
+    /// Get the staged hunk indices for this buffer.
+    pub fn staged_hunk_indices(&self) -> Option<&[usize]> {
+        self.staged_hunk_indices.as_deref()
+    }
+
+    /// Set the staged hunk indices for this buffer.
+    pub fn set_staged_hunk_indices(&mut self, indices: Option<Vec<usize>>) {
+        self.staged_hunk_indices = indices;
     }
 
     /// Check if the buffer has unsaved modifications.

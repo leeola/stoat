@@ -495,6 +495,56 @@ pub fn compute_staged_buffer_rows(
     staged
 }
 
+/// Compute which display_diff hunk indices are staged.
+///
+/// Same overlap logic as [`compute_staged_buffer_rows`] but returns hunk indices
+/// instead of buffer row ranges, and includes pure deletions (`start == end`).
+///
+/// A display_diff hunk is staged when it has no overlapping hunk in `wi_diff`
+/// (working tree matches index in that region).
+pub fn compute_staged_hunk_indices(
+    display_diff: &BufferDiff,
+    wi_diff: Option<&BufferDiff>,
+    buffer_snapshot: &BufferSnapshot,
+) -> Vec<usize> {
+    let Some(wi) = wi_diff else {
+        return Vec::new();
+    };
+
+    let wi_ranges: Vec<(u32, u32)> = wi
+        .hunks
+        .iter()
+        .map(|h| {
+            let s = h.buffer_range.start.to_point(buffer_snapshot).row;
+            let e = h.buffer_range.end.to_point(buffer_snapshot).row;
+            (s, e)
+        })
+        .collect();
+
+    let mut staged = Vec::new();
+    for (idx, hunk) in display_diff.hunks.iter().enumerate() {
+        let start = hunk.buffer_range.start.to_point(buffer_snapshot).row;
+        let end = hunk.buffer_range.end.to_point(buffer_snapshot).row;
+        let overlaps = if start == end {
+            // Pure deletion at row R: overlaps if wi has a pure deletion at same
+            // row, or a non-pure hunk covering that row
+            wi_ranges.iter().any(|&(ws, we)| {
+                if ws == we {
+                    ws == start
+                } else {
+                    ws <= start && we > start
+                }
+            })
+        } else {
+            wi_ranges.iter().any(|&(ws, we)| ws < end && we > start)
+        };
+        if !overlaps {
+            staged.push(idx);
+        }
+    }
+    staged
+}
+
 /// Extract individual lines from a specific hunk, for line-level selection.
 ///
 /// Recomputes the git2 patch from the two texts and calls
@@ -740,5 +790,63 @@ mod tests {
         let (wi_diff, _) = make_diff(index, working);
         let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn staged_hunk_indices_fully_staged_addition() {
+        let head = "line 1\nline 2\n";
+        let working = "line 1\nline 2\nline 3\n";
+        let index = working;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let indices = compute_staged_hunk_indices(&display_diff, Some(&wi_diff), &snap);
+        assert_eq!(indices, vec![0]);
+    }
+
+    #[test]
+    fn staged_hunk_indices_nothing_staged() {
+        let head = "line 1\nline 2\n";
+        let working = "line 1\nline 2\nline 3\n";
+        let index = head;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let indices = compute_staged_hunk_indices(&display_diff, Some(&wi_diff), &snap);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn staged_hunk_indices_no_index() {
+        let head = "line 1\nline 2\n";
+        let working = "line 1\nline 2\nline 3\n";
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let indices = compute_staged_hunk_indices(&display_diff, None, &snap);
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn staged_hunk_indices_pure_deletion_staged() {
+        let head = "line 1\nline 2\nline 3\n";
+        let working = "line 1\nline 3\n";
+        let index = working;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let indices = compute_staged_hunk_indices(&display_diff, Some(&wi_diff), &snap);
+        assert_eq!(indices, vec![0]);
+    }
+
+    #[test]
+    fn staged_hunk_indices_pure_deletion_unstaged() {
+        let head = "line 1\nline 2\nline 3\n";
+        let working = "line 1\nline 3\n";
+        let index = head;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let indices = compute_staged_hunk_indices(&display_diff, Some(&wi_diff), &snap);
+        assert!(indices.is_empty());
     }
 }

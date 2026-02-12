@@ -101,11 +101,14 @@ impl Stoat {
             }
 
             // Compute diff
-            if let Some((diff, staged_rows)) = self.compute_diff_for_review_mode(&abs_path, cx) {
+            if let Some((diff, staged_rows, staged_hunk_indices)) =
+                self.compute_diff_for_review_mode(&abs_path, cx)
+            {
                 let buffer_item = self.active_buffer(cx);
                 buffer_item.update(cx, |item, _| {
                     item.set_diff(Some(diff.clone()));
                     item.set_staged_rows(staged_rows);
+                    item.set_staged_hunk_indices(staged_hunk_indices);
                 });
 
                 // Check for unreviewed hunks in this file

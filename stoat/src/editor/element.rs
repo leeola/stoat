@@ -283,13 +283,6 @@ impl Element for EditorElement {
             let range_start = BufferDisplayRow::new(start_display_row);
             let range_end = BufferDisplayRow::new(end_display_row);
 
-            let deleted_text_color = gpui::Hsla {
-                h: 0.0,
-                s: 0.3,
-                l: 0.5,
-                a: 0.6,
-            };
-
             for row_info in display_buffer.rows_in_range(range_start..range_end) {
                 let display_row = row_info.display_row.row();
 
@@ -351,6 +344,18 @@ impl Element for EditorElement {
                 } else {
                     // Phantom row (deleted content): plain text with deleted color
                     let line_text = &row_info.content;
+
+                    let base_color = if row_info.is_staged {
+                        self.style.diff_staged_deleted_color
+                    } else {
+                        self.style.diff_deleted_color
+                    };
+                    let deleted_text_color = gpui::Hsla {
+                        h: base_color.h,
+                        s: base_color.s,
+                        l: base_color.l,
+                        a: base_color.a * 0.6,
+                    };
 
                     let runs = vec![TextRun {
                         len: line_text.len().max(1),

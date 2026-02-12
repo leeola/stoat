@@ -128,10 +128,13 @@ impl Stoat {
             super::hunk_patch::apply_patch(&patch_str, &repo_dir, true)?;
         }
 
-        if let Some((new_diff, staged_rows)) = self.compute_diff_for_review_mode(&file_path, cx) {
+        if let Some((new_diff, staged_rows, staged_hunk_indices)) =
+            self.compute_diff_for_review_mode(&file_path, cx)
+        {
             buffer_item.update(cx, |item, _| {
                 item.set_diff(Some(new_diff));
                 item.set_staged_rows(staged_rows);
+                item.set_staged_hunk_indices(staged_hunk_indices);
             });
         }
 
