@@ -23,7 +23,10 @@
 //!
 //! See [`MULTI_VIEW_ARCHITECTURE.md`](../../MULTI_VIEW_ARCHITECTURE.md) for details.
 
-use crate::{buffer::store::BufferStore, stoat::KeyContext, worktree::Worktree, BufferItem};
+use crate::{
+    buffer::store::BufferStore, environment::ProjectEnvironment, stoat::KeyContext,
+    worktree::Worktree, BufferItem,
+};
 use gpui::{AppContext, Entity, Task};
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -89,6 +92,9 @@ pub struct LspState {
     pub status: Arc<RwLock<LspStatus>>,
     /// Active operations (token -> progress info)
     active_operations: Arc<RwLock<HashMap<String, OperationProgress>>>,
+    /// Root directory the LSP was initialized with.
+    /// Used to skip restarts when `:cd`-ing within the same workspace.
+    root_dir: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl Default for LspState {
@@ -96,6 +102,7 @@ impl Default for LspState {
         Self {
             status: Arc::new(RwLock::new(LspStatus::Idle)),
             active_operations: Arc::new(RwLock::new(HashMap::new())),
+            root_dir: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -330,6 +337,11 @@ pub struct AppState {
     /// All inline editors (command palette, file finder inputs, etc.) share this mode state.
     /// Separate from text_editor_mode so opening a modal doesn't affect text editing mode.
     pub inline_editor_mode: String,
+    /// Captured shell environment for the project directory.
+    ///
+    /// Used to spawn LSP processes with the user's full PATH and tool
+    /// configuration. `None` until background capture completes.
+    pub project_env: Arc<RwLock<Option<ProjectEnvironment>>>,
     /// Temporary flash message displayed in the status bar (replaces file path for ~3 seconds).
     pub flash_message: Option<String>,
 }
@@ -364,6 +376,17 @@ impl AppState {
             } else {
                 (None, Vec::new(), 0)
             };
+
+        let project_env: Arc<RwLock<Option<ProjectEnvironment>>> = Arc::new(RwLock::new(None));
+        {
+            let project_env = project_env.clone();
+            let project_dir = std::env::current_dir().unwrap_or_default();
+            cx.spawn(async move |_cx| {
+                let env = ProjectEnvironment::capture(&project_dir).await;
+                *project_env.write() = Some(env);
+            })
+            .detach();
+        }
 
         let lsp_manager = Arc::new(stoat_lsp::LspManager::new(
             cx.background_executor().clone(),
@@ -429,6 +452,7 @@ impl AppState {
             diff_review: DiffReview::default(),
             lsp_manager,
             lsp_state,
+            project_env,
             text_editor_mode: "normal".to_string(),
             inline_editor_mode: "normal".to_string(),
             flash_message: None,
@@ -587,6 +611,7 @@ impl AppState {
         let lsp_manager = self.lsp_manager.clone();
         let lsp_state = self.lsp_state.clone();
         let buffer_store = self.buffer_store.clone();
+        let project_env = self.project_env.clone();
 
         *lsp_state.status.write() = LspStatus::Starting;
 
@@ -596,12 +621,24 @@ impl AppState {
 
             let _ = view.update(cx, |_this, cx| cx.notify());
 
-            let rust_analyzer_path = which::which("rust-analyzer")?;
+            // Wait for environment capture to complete
+            let env = loop {
+                if let Some(env) = project_env.read().clone() {
+                    break env;
+                }
+                smol::Timer::after(std::time::Duration::from_millis(50)).await;
+            };
+
+            let rust_analyzer_path = match env.path() {
+                Some(path) => which::which_in("rust-analyzer", Some(path), ".")?,
+                None => which::which("rust-analyzer")?,
+            };
             tracing::info!("Spawning rust-analyzer from: {:?}", rust_analyzer_path);
 
             let transport = stoat_lsp::StdioTransport::spawn(
                 rust_analyzer_path,
                 vec![],
+                Some(env.vars().clone()),
                 cx.background_executor().clone(),
             )?;
 
@@ -642,6 +679,7 @@ impl AppState {
 
             lsp_manager.start_listener(server_id)?;
 
+            *lsp_state.root_dir.write() = std::env::current_dir().ok();
             *lsp_state.status.write() = LspStatus::Ready;
             tracing::debug!("LSP ready");
 
@@ -1023,7 +1061,11 @@ impl AppState {
     /// - Path doesn't exist
     /// - Path is not a directory
     /// - Unable to access the directory
-    pub fn change_directory(&mut self, path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn change_directory(
+        &mut self,
+        path: PathBuf,
+        cx: &mut gpui::App,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Resolve relative paths against current worktree root
         let current_root = self.worktree.lock().root().to_path_buf();
         let target_path = if path.is_absolute() {
@@ -1063,14 +1105,32 @@ impl AppState {
             self.git_status.dirty_count = 0;
         }
 
-        // FIXME: Restart LSP server with new root directory
-        // Currently LSP keeps running with the old root. To properly restart:
-        // 1. Shutdown active servers via notification/request
-        // 2. Spawn new rust-analyzer process
-        // 3. Add server via lsp_manager.add_server()
-        // 4. Send initialize request with new rootUri
-        // 5. Set capabilities and start listener
-        // See setup_lsp_progress_tracking for reference implementation
+        let needs_lsp_restart = self
+            .lsp_state
+            .root_dir
+            .read()
+            .as_ref()
+            .is_some_and(|root| !canonical_path.starts_with(root));
+
+        if needs_lsp_restart {
+            self.lsp_manager.shutdown_all();
+            self.lsp_manager.clear_diagnostics();
+            *self.lsp_state.root_dir.write() = None;
+            *self.lsp_state.status.write() = LspStatus::Idle;
+            self.lsp_state.active_operations.write().clear();
+        }
+
+        // Re-capture environment for the new directory
+        {
+            let project_env = self.project_env.clone();
+            let dir = canonical_path.clone();
+            *project_env.write() = None;
+            cx.spawn(async move |_cx| {
+                let env = ProjectEnvironment::capture(&dir).await;
+                *project_env.write() = Some(env);
+            })
+            .detach();
+        }
 
         // Update file finder with new worktree
         self.file_finder = FileFinder::default();

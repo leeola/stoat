@@ -14,6 +14,7 @@ pub mod command_palette_v2;
 pub mod config;
 pub mod cursor;
 pub mod editor;
+pub mod environment;
 pub mod file_finder;
 pub mod git;
 pub mod inline_editor;

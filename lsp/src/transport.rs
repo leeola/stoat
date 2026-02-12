@@ -121,14 +121,18 @@ impl StdioTransport {
     pub fn spawn(
         command: PathBuf,
         args: Vec<String>,
+        env: Option<HashMap<String, String>>,
         executor: gpui::BackgroundExecutor,
     ) -> Result<Self> {
-        let mut process = Command::new(command)
-            .args(args)
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(env) = env {
+            cmd.env_clear().envs(env);
+        }
+        let mut process = cmd.spawn()?;
 
         let stdin = Arc::new(AsyncMutex::new(BufWriter::new(
             process

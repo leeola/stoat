@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Parser)]
 #[command(name = "stoat")]
@@ -36,12 +36,24 @@ pub enum Command {
         paths: Vec<PathBuf>,
     },
 
+    #[command(about = "Run a stoat command and exit")]
+    Cmd {
+        #[command(subcommand)]
+        action: CmdAction,
+    },
+
     #[cfg(feature = "dev-tools")]
     #[command(about = "Development tools", name = "dev-tools")]
     DevTools {
         #[command(subcommand)]
         sub: DevToolsCommand,
     },
+}
+
+#[derive(Parser)]
+pub enum CmdAction {
+    #[command(name = "printenv", about = "Output environment variables as JSON")]
+    PrintEnv,
 }
 
 #[cfg(feature = "dev-tools")]
@@ -75,6 +87,20 @@ pub enum GitAction {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Handle cmd subcommands before logging init to keep stdout clean
+    if let Some(Command::Cmd { action }) = &cli.command {
+        match action {
+            CmdAction::PrintEnv => {
+                let env: HashMap<String, String> = std::env::vars().collect();
+                println!(
+                    "{}",
+                    serde_json::to_string(&env).expect("env vars are always serializable")
+                );
+            },
+        }
+        return;
+    }
 
     // Set STOAT_LOG env var if --log flag was provided
     if let Some(Command::Gui {
@@ -146,6 +172,7 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Some(Command::Cmd { .. }) => unreachable!("handled above"),
         None => {
             eprintln!("Stoat editor. Use 'stoat gui' to launch the graphical interface.");
         },

@@ -419,9 +419,18 @@ impl LspManager {
     /// # Errors
     ///
     /// Returns error if rust-analyzer process fails to spawn.
-    pub async fn spawn_rust_analyzer(&self, command_path: Option<PathBuf>) -> Result<ServerId> {
+    pub async fn spawn_rust_analyzer(
+        &self,
+        command_path: Option<PathBuf>,
+        env: Option<HashMap<String, String>>,
+    ) -> Result<ServerId> {
         let path = command_path.unwrap_or_else(|| PathBuf::from("rust-analyzer"));
-        let transport = Arc::new(StdioTransport::spawn(path, vec![], self.executor.clone())?);
+        let transport = Arc::new(StdioTransport::spawn(
+            path,
+            vec![],
+            env,
+            self.executor.clone(),
+        )?);
         self.spawn_server("rust-analyzer", transport).await
     }
 
@@ -947,6 +956,38 @@ impl LspManager {
             .await?;
 
         Ok(())
+    }
+
+    /// Shut down all active servers and clear pending requests.
+    ///
+    /// Drains servers synchronously so [`active_servers`] returns empty immediately,
+    /// then spawns fire-and-forget shutdown tasks for each transport.
+    pub fn shutdown_all(&self) {
+        let servers: Vec<Arc<dyn LspTransport>> = {
+            let mut inner = self.inner.lock();
+            let servers: Vec<_> = inner.servers.drain().map(|(_, s)| s.transport).collect();
+            inner.pending_requests.clear();
+            servers
+        };
+
+        for transport in servers {
+            self.executor
+                .spawn(async move {
+                    if let Err(e) = transport.shutdown().await {
+                        tracing::warn!("LSP shutdown error: {e}");
+                    }
+                })
+                .detach();
+        }
+    }
+
+    /// Clear all stored diagnostics and buffer mappings.
+    pub fn clear_diagnostics(&self) {
+        let mut inner = self.inner.lock();
+        inner.lsp_diagnostics.clear();
+        inner.buffer_paths.clear();
+        inner.path_to_buffer.clear();
+        inner.next_buffer_id = 0;
     }
 
     /// Drain and process all buffered notifications for a server.
