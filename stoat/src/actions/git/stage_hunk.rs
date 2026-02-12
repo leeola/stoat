@@ -16,9 +16,10 @@ use text::ToPoint;
 impl Stoat {
     /// Toggle the staging state of the current hunk.
     ///
-    /// If the hunk at the cursor overlaps any `staged_rows` range, it is unstaged;
-    /// otherwise it is staged. Delegates to [`git_stage_hunk`](Self::git_stage_hunk)
-    /// or [`git_unstage_hunk`](Self::git_unstage_hunk).
+    /// Uses [`staged_hunk_indices`](crate::buffer::BufferItem::staged_hunk_indices)
+    /// to detect staged state, which works for all hunk types including pure
+    /// deletions. Delegates to [`git_stage_hunk`](Self::git_stage_hunk) or
+    /// [`git_unstage_hunk`](Self::git_unstage_hunk).
     pub fn git_toggle_stage_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
@@ -33,15 +34,10 @@ impl Stoat {
             .hunk_for_row(cursor_row, &buffer_snapshot)
             .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
 
-        let hunk = &diff.hunks[hunk_index];
-        let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
-        let hunk_end = hunk.buffer_range.end.to_point(&buffer_snapshot).row;
-
-        let is_staged = buffer_item.read(cx).staged_rows().is_some_and(|ranges| {
-            ranges
-                .iter()
-                .any(|r| r.start <= hunk_end && r.end >= hunk_start)
-        });
+        let is_staged = buffer_item
+            .read(cx)
+            .staged_hunk_indices()
+            .is_some_and(|indices| indices.contains(&hunk_index));
 
         if is_staged {
             self.git_unstage_hunk(cx)
@@ -244,6 +240,82 @@ mod tests {
         assert_eq!(
             first_staged, second_staged,
             "Index should not change on double-stage"
+        );
+    }
+
+    #[gpui::test]
+    fn toggle_unstages_deletion_hunk(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = stoat.repo_path().unwrap().join("test.txt");
+        std::fs::write(&file_path, "line 1\nline 2\nline 3\n").expect("write");
+
+        std::process::Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(stoat.repo_path().unwrap())
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(stoat.repo_path().unwrap())
+            .output()
+            .expect("git commit");
+
+        std::fs::write(&file_path, "line 1\nline 3\n").expect("write deletion");
+
+        stoat.set_file_path(file_path.clone());
+        stoat.update(|s, cx| {
+            let buffer_item = s.active_buffer(cx);
+            buffer_item.update(cx, |item, cx| {
+                let content = std::fs::read_to_string(&file_path).unwrap();
+                item.buffer().update(cx, |buffer, _| {
+                    let len = buffer.len();
+                    buffer.edit([(0..len, content.as_str())]);
+                });
+
+                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
+                let head_content = repo.head_content(&file_path).unwrap();
+                let snapshot = item.buffer().read(cx).snapshot();
+                let diff = crate::git::diff::BufferDiff::new(
+                    item.buffer().read(cx).remote_id(),
+                    head_content,
+                    &snapshot,
+                )
+                .unwrap();
+                item.set_diff(Some(diff));
+            });
+            s.set_cursor_position(text::Point::new(0, 0));
+        });
+
+        stoat.dispatch(GitStageHunk);
+
+        let cached = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["diff", "--cached"])
+                .current_dir(stoat.repo_path().unwrap())
+                .output()
+                .expect("git diff --cached")
+                .stdout,
+        )
+        .to_string();
+        assert!(
+            cached.contains("-line 2"),
+            "Deletion should be staged: {cached}"
+        );
+
+        stoat.dispatch(GitToggleStageHunk);
+
+        let cached_after = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["diff", "--cached"])
+                .current_dir(stoat.repo_path().unwrap())
+                .output()
+                .expect("git diff --cached")
+                .stdout,
+        )
+        .to_string();
+        assert!(
+            cached_after.is_empty(),
+            "Toggle should unstage the deletion: {cached_after}"
         );
     }
 
