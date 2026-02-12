@@ -258,24 +258,8 @@ on key {
             ? -> OpenHelpOverlay();
             q -> DiffReviewDismiss();
             c -> DiffReviewCycleComparisonMode();
-            s -> DiffReviewEnterLineSelect();
-            S -> GitStageHunk();
+            s -> GitStageHunk();
             u -> GitUnstageHunk();
-        }
-
-        mode == "line_select" {
-            j -> DiffReviewLineSelectDown();
-            k -> DiffReviewLineSelectUp();
-            down -> DiffReviewLineSelectDown();
-            up -> DiffReviewLineSelectUp();
-            space -> DiffReviewLineSelectToggle();
-            x -> DiffReviewLineSelectToggle();
-            a -> DiffReviewLineSelectAll();
-            A -> DiffReviewLineSelectNone();
-            s -> DiffReviewLineSelectStage();
-            u -> DiffReviewLineSelectUnstage();
-            escape -> DiffReviewLineSelectCancel();
-            q -> DiffReviewLineSelectCancel();
         }
     }
 
