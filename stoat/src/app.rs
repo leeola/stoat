@@ -1,6 +1,6 @@
 use crate::{keymap::compiled::CompiledKeymap, pane_group::PaneGroupView};
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 #[cfg(debug_assertions)]
 pub fn run_with_paths(
@@ -28,23 +28,15 @@ fn run_with_paths_impl(
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
-        // Load configuration with optional override from CLI --config or STOAT_CONFIG env var
-        let config = crate::Config::load_with_overrides(config_path.as_deref()).unwrap_or_default();
+        let discovered = crate::paths::discover(&std::env::current_dir().unwrap_or_default());
 
-        // Build compiled keymap from stcfg
-        let stcfg_source = include_str!("../../keymap.stcfg");
-        let (stcfg_config, errors) = stoat_config::parse(stcfg_source);
-        if !errors.is_empty() {
-            tracing::warn!(
-                "keymap.stcfg parse errors:\n{}",
-                stoat_config::format_errors(stcfg_source, &errors)
-            );
-        }
-        let compiled_keymap = Arc::new(
-            stcfg_config
-                .map(|c| CompiledKeymap::compile(&c))
-                .unwrap_or_else(|| CompiledKeymap { bindings: vec![] }),
-        );
+        let config = crate::Config::load_with_overrides(
+            config_path.as_deref(),
+            discovered.config_path.as_deref(),
+        )
+        .unwrap_or_default();
+
+        let compiled_keymap = load_keymap(discovered.keymap_path.as_deref());
 
         // Size window to 80% of screen size
         let window_size = cx
@@ -159,4 +151,45 @@ fn run_with_paths_impl(
     });
 
     Ok(())
+}
+
+fn load_keymap(discovered_path: Option<&Path>) -> Arc<CompiledKeymap> {
+    if let Some(path) = discovered_path {
+        match std::fs::read_to_string(path) {
+            Ok(source) => {
+                let (config, errors) = stoat_config::parse(&source);
+                if !errors.is_empty() {
+                    tracing::warn!(
+                        "keymap.stcfg parse errors:\n{}",
+                        stoat_config::format_errors(&source, &errors)
+                    );
+                }
+                if let Some(c) = config {
+                    tracing::info!("loaded keymap from {}", path.display());
+                    return Arc::new(CompiledKeymap::compile(&c));
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read {}: {}, falling back to embedded keymap",
+                    path.display(),
+                    e
+                );
+            },
+        }
+    }
+
+    let source = include_str!("../../keymap.stcfg");
+    let (config, errors) = stoat_config::parse(source);
+    if !errors.is_empty() {
+        tracing::warn!(
+            "embedded keymap.stcfg parse errors:\n{}",
+            stoat_config::format_errors(source, &errors)
+        );
+    }
+    Arc::new(
+        config
+            .map(|c| CompiledKeymap::compile(&c))
+            .unwrap_or_else(|| CompiledKeymap { bindings: vec![] }),
+    )
 }
