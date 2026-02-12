@@ -450,40 +450,49 @@ fn line_offset_to_byte_offset(text: &str, line: usize) -> usize {
         .sum()
 }
 
-/// Compute which buffer rows are staged (present in index but changed from HEAD).
+/// Compute which buffer rows are staged by comparing two diffs that share the
+/// same buffer snapshot.
 ///
-/// Diffs HEAD against the index content to find staged regions, returning
-/// 0-indexed row ranges on the new (index) side. Pure deletions (new_lines==0)
-/// are excluded since they have no visible rows in the buffer.
-pub fn staged_row_ranges(head_content: &str, index_content: &str) -> Vec<Range<u32>> {
-    let mut diff_options = git2::DiffOptions::new();
-    diff_options.context_lines(0);
-    diff_options.ignore_whitespace(false);
-
-    let patch = match git2::Patch::from_buffers(
-        head_content.as_bytes(),
-        None,
-        index_content.as_bytes(),
-        None,
-        Some(&mut diff_options),
-    ) {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
+/// `display_diff` is the working-vs-HEAD diff shown in the editor. `wi_diff`
+/// is the working-vs-index diff. Both use anchors into the same working-tree
+/// buffer, so their buffer coordinates are directly comparable.
+///
+/// A display hunk whose buffer rows do NOT overlap any `wi_diff` hunk is fully
+/// staged (working matches index in that region, so the HEAD difference comes
+/// entirely from the index). Pure deletions (start == end) are skipped since
+/// they have no visible buffer rows.
+pub fn compute_staged_buffer_rows(
+    display_diff: &BufferDiff,
+    wi_diff: Option<&BufferDiff>,
+    buffer_snapshot: &BufferSnapshot,
+) -> Vec<Range<u32>> {
+    let Some(wi) = wi_diff else {
+        return Vec::new();
     };
 
-    let mut ranges = Vec::new();
-    for hunk_idx in 0..patch.num_hunks() {
-        let Ok((hunk, _)) = patch.hunk(hunk_idx) else {
-            continue;
-        };
-        let new_lines = hunk.new_lines();
-        if new_lines == 0 {
+    let wi_ranges: Vec<(u32, u32)> = wi
+        .hunks
+        .iter()
+        .map(|h| {
+            let s = h.buffer_range.start.to_point(buffer_snapshot).row;
+            let e = h.buffer_range.end.to_point(buffer_snapshot).row;
+            (s, e)
+        })
+        .collect();
+
+    let mut staged = Vec::new();
+    for hunk in &display_diff.hunks {
+        let start = hunk.buffer_range.start.to_point(buffer_snapshot).row;
+        let end = hunk.buffer_range.end.to_point(buffer_snapshot).row;
+        if start == end {
             continue;
         }
-        let start = hunk.new_start().saturating_sub(1);
-        ranges.push(start..start + new_lines);
+        let overlaps = wi_ranges.iter().any(|&(ws, we)| ws < end && we > start);
+        if !overlaps {
+            staged.push(start..end);
+        }
     }
-    ranges
+    staged
 }
 
 /// Extract individual lines from a specific hunk, for line-level selection.
@@ -680,35 +689,56 @@ mod tests {
         assert_eq!(hunk.lines[3].origin, HunkLineOrigin::Addition);
     }
 
+    fn make_diff(base: &str, working: &str) -> (BufferDiff, Buffer) {
+        let buf = create_buffer(working);
+        let snap = buf.snapshot();
+        let diff = BufferDiff::new(snap.remote_id(), base.to_string(), &snap).unwrap();
+        (diff, buf)
+    }
+
     #[test]
-    fn staged_row_ranges_added() {
+    fn staged_buffer_rows_fully_staged() {
         let head = "line 1\nline 2\n";
-        let index = "line 1\nline 2\nline 3\n";
-        let ranges = staged_row_ranges(head, index);
-        assert_eq!(ranges, vec![2..3]);
+        let working = "line 1\nline 2\nline 3\n";
+        let index = working;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
+        assert_eq!(rows, vec![2..3]);
     }
 
     #[test]
-    fn staged_row_ranges_modified() {
-        let head = "line 1\nline 2\nline 3\n";
-        let index = "line 1\nchanged\nline 3\n";
-        let ranges = staged_row_ranges(head, index);
-        assert_eq!(ranges, vec![1..2]);
-    }
-
-    #[test]
-    fn staged_row_ranges_deleted_excluded() {
-        let head = "line 1\nline 2\nline 3\n";
-        let index = "line 1\nline 3\n";
-        let ranges = staged_row_ranges(head, index);
-        assert!(ranges.is_empty());
-    }
-
-    #[test]
-    fn staged_row_ranges_no_changes() {
+    fn staged_buffer_rows_nothing_staged() {
         let head = "line 1\nline 2\n";
-        let index = "line 1\nline 2\n";
-        let ranges = staged_row_ranges(head, index);
-        assert!(ranges.is_empty());
+        let working = "line 1\nline 2\nline 3\n";
+        let index = head;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn staged_buffer_rows_no_index() {
+        let head = "line 1\nline 2\n";
+        let working = "line 1\nline 2\nline 3\n";
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let rows = compute_staged_buffer_rows(&display_diff, None, &snap);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn staged_buffer_rows_pure_deletion_skipped() {
+        let head = "line 1\nline 2\nline 3\n";
+        let working = "line 1\nline 3\n";
+        let index = working;
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
+        assert!(rows.is_empty());
     }
 }

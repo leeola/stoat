@@ -1269,21 +1269,27 @@ impl Stoat {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
                     let buffer_id = buffer_snapshot.remote_id();
                     match BufferDiff::new(buffer_id, head_content.clone(), &buffer_snapshot) {
-                        Ok(diff) => {
-                            item.set_diff(Some(diff));
+                        Ok(ref diff) => {
+                            if let Ok(index_content) = repo.index_content(path) {
+                                let wi_diff =
+                                    BufferDiff::new(buffer_id, index_content, &buffer_snapshot)
+                                        .ok();
+                                let ranges = crate::git::diff::compute_staged_buffer_rows(
+                                    diff,
+                                    wi_diff.as_ref(),
+                                    &buffer_snapshot,
+                                );
+                                item.set_staged_rows(if ranges.is_empty() {
+                                    None
+                                } else {
+                                    Some(ranges)
+                                });
+                            }
+                            item.set_diff(Some(diff.clone()));
                         },
                         Err(e) => {
                             tracing::error!("Failed to compute diff for {:?}: {}", path, e);
                         },
-                    }
-                    if let Ok(index_content) = repo.index_content(path) {
-                        let ranges =
-                            crate::git::diff::staged_row_ranges(&head_content, &index_content);
-                        item.set_staged_rows(if ranges.is_empty() {
-                            None
-                        } else {
-                            Some(ranges)
-                        });
                     }
                 }
             }
@@ -1467,7 +1473,12 @@ impl Stoat {
                 let diff =
                     BufferDiff::new(buffer_id, base_content.clone(), &buffer_snapshot).ok()?;
                 let staged = repo.index_content(path).ok().map(|index_content| {
-                    crate::git::diff::staged_row_ranges(&base_content, &index_content)
+                    let wi_diff = BufferDiff::new(buffer_id, index_content, &buffer_snapshot).ok();
+                    crate::git::diff::compute_staged_buffer_rows(
+                        &diff,
+                        wi_diff.as_ref(),
+                        &buffer_snapshot,
+                    )
                 });
                 let staged = staged.and_then(|v| if v.is_empty() { None } else { Some(v) });
                 (diff, staged)
@@ -1496,6 +1507,22 @@ impl Stoat {
 
         tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
         Some((diff, staged_rows))
+    }
+
+    /// Recompute the diff display for the current file and push results into
+    /// the active [`BufferItem`]. Called on window re-activation so that
+    /// external git operations (e.g. `git add` in a terminal) are reflected.
+    pub(crate) fn refresh_git_diff(&mut self, cx: &mut Context<Self>) {
+        let Some(file_path) = self.current_file_path.clone() else {
+            return;
+        };
+        if let Some((new_diff, staged_rows)) = self.compute_diff_for_review_mode(&file_path, cx) {
+            let buffer_item = self.active_buffer(cx);
+            buffer_item.update(cx, |item, _| {
+                item.set_diff(Some(new_diff));
+                item.set_staged_rows(staged_rows);
+            });
+        }
     }
 
     /// Create a minimap instance for this editor.

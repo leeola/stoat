@@ -152,6 +152,7 @@ pub struct PaneGroupView {
     /// Pending actions queued from StoatEvent::Action, processed in render() (which has window
     /// access)
     pub(crate) pending_actions: Vec<(String, Vec<String>)>,
+    activation_observer_set: bool,
 }
 
 impl PaneGroupView {
@@ -293,6 +294,7 @@ impl PaneGroupView {
             help_overlay_visible: false,
             stoat_subscriptions: vec![initial_sub],
             pending_actions: Vec::new(),
+            activation_observer_set: false,
         }
     }
 
@@ -815,6 +817,23 @@ impl Focusable for PaneGroupView {
 
 impl Render for PaneGroupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if !self.activation_observer_set {
+            self.activation_observer_set = true;
+            let sub = cx.observe_window_activation(window, |this, window, cx| {
+                if !window.is_window_active() {
+                    return;
+                }
+                if let Some(editor) = this.active_editor().cloned() {
+                    editor.update(cx, |editor, cx| {
+                        editor.stoat.update(cx, |stoat, cx| {
+                            stoat.refresh_git_diff(cx);
+                        });
+                    });
+                }
+            });
+            self.stoat_subscriptions.push(sub);
+        }
+
         // Process any pending actions from StoatEvent::Action subscriptions
         if !self.pending_actions.is_empty() {
             self.process_pending_actions(window, cx);
