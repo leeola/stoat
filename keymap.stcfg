@@ -258,8 +258,7 @@ on key {
             ? -> OpenHelpOverlay();
             q -> DiffReviewDismiss();
             c -> DiffReviewCycleComparisonMode();
-            s -> GitStageHunk();
-            u -> GitUnstageHunk();
+            s -> GitToggleStageHunk();
         }
     }
 

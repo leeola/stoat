@@ -294,6 +294,7 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     registry.register::<crate::actions::GitUnstageAll>();
     registry.register::<crate::actions::GitStageHunk>();
     registry.register::<crate::actions::GitUnstageHunk>();
+    registry.register::<crate::actions::GitToggleStageHunk>();
 
     // Command line actions (1)
     registry.register::<crate::actions::PrintWorkingDirectory>();
@@ -744,6 +745,7 @@ mod tests {
             TypeId::of::<crate::actions::GitUnstageAll>(),
             TypeId::of::<crate::actions::GitStageHunk>(),
             TypeId::of::<crate::actions::GitUnstageHunk>(),
+            TypeId::of::<crate::actions::GitToggleStageHunk>(),
         ];
 
         for type_id in &actions {

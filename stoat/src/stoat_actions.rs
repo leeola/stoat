@@ -733,6 +733,7 @@ mod tests {
             "GitUnstageAll",
             "GitStageHunk",
             "GitUnstageHunk",
+            "GitToggleStageHunk",
         ];
 
         for name in &names {

@@ -141,6 +141,13 @@ pub fn dispatch_editor_action<C: AppContext>(
                 }
             });
         },
+        "GitToggleStageHunk" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.git_toggle_stage_hunk(cx) {
+                    tracing::error!("GitToggleStageHunk failed: {e}");
+                }
+            });
+        },
 
         "WriteFile" | "Save" => {
             let _ = stoat.update(cx, |s, cx| {

@@ -14,6 +14,42 @@ use gpui::Context;
 use text::ToPoint;
 
 impl Stoat {
+    /// Toggle the staging state of the current hunk.
+    ///
+    /// If the hunk at the cursor overlaps any `staged_rows` range, it is unstaged;
+    /// otherwise it is staged. Delegates to [`git_stage_hunk`](Self::git_stage_hunk)
+    /// or [`git_unstage_hunk`](Self::git_unstage_hunk).
+    pub fn git_toggle_stage_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let buffer_item = self.active_buffer(cx);
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+
+        let cursor_row = self.cursor.position().row;
+        let diff = buffer_item
+            .read(cx)
+            .diff()
+            .ok_or_else(|| "No diff information available".to_string())?;
+
+        let hunk_index = diff
+            .hunk_for_row(cursor_row, &buffer_snapshot)
+            .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
+
+        let hunk = &diff.hunks[hunk_index];
+        let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+        let hunk_end = hunk.buffer_range.end.to_point(&buffer_snapshot).row;
+
+        let is_staged = buffer_item.read(cx).staged_rows().is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|r| r.start <= hunk_end && r.end >= hunk_start)
+        });
+
+        if is_staged {
+            self.git_unstage_hunk(cx)
+        } else {
+            self.git_stage_hunk(cx)
+        }
+    }
+
     /// Stage the current hunk for commit.
     ///
     /// Uses the display diff to locate the hunk at the cursor, then computes a

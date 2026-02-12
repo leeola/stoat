@@ -269,6 +269,8 @@ actions!(
         GitStageHunk,
         /// Unstage the current hunk
         GitUnstageHunk,
+        /// Toggle stage/unstage for the current hunk
+        GitToggleStageHunk,
     ]
 );
 
@@ -987,6 +989,12 @@ action_metadata!(
     "Unstage the current hunk",
     ["unstage-hunk", "reset-hunk"]
 );
+action_metadata!(
+    GitToggleStageHunk,
+    "toggle stage hunk",
+    "Toggle stage/unstage for the current hunk",
+    ["toggle-stage-hunk"]
+);
 
 // Line selection actions
 action_metadata!(
@@ -1438,6 +1446,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitUnstageHunk>(),
         GitUnstageHunk::action_name(),
     );
+    names.insert(
+        TypeId::of::<GitToggleStageHunk>(),
+        GitToggleStageHunk::action_name(),
+    );
 
     // Line selection actions
     names.insert(
@@ -1817,6 +1829,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitUnstageHunk>(),
         GitUnstageHunk::description(),
     );
+    descriptions.insert(
+        TypeId::of::<GitToggleStageHunk>(),
+        GitToggleStageHunk::description(),
+    );
 
     // Line selection actions
     descriptions.insert(
@@ -2176,6 +2192,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::help_text());
     help.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::help_text());
     help.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::help_text());
+    help.insert(
+        TypeId::of::<GitToggleStageHunk>(),
+        GitToggleStageHunk::help_text(),
+    );
 
     // Line selection actions
     help.insert(
@@ -2334,6 +2354,10 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     aliases.insert(TypeId::of::<GitUnstageAll>(), GitUnstageAll::aliases());
     aliases.insert(TypeId::of::<GitStageHunk>(), GitStageHunk::aliases());
     aliases.insert(TypeId::of::<GitUnstageHunk>(), GitUnstageHunk::aliases());
+    aliases.insert(
+        TypeId::of::<GitToggleStageHunk>(),
+        GitToggleStageHunk::aliases(),
+    );
 
     // Command line actions
     aliases.insert(
