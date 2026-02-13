@@ -293,6 +293,9 @@ pub struct Stoat {
     /// Determines which git refs are compared when computing diffs in review mode.
     /// Default is [`WorkingVsHead`](crate::git::diff_review::DiffComparisonMode::WorkingVsHead).
     pub(crate) diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode,
+    /// Saved comparison mode when entering HeadVsParent, restored on exit.
+    pub(crate) diff_review_saved_comparison_mode:
+        Option<crate::git::diff_review::DiffComparisonMode>,
 
     /// Line-level selection within a hunk for partial staging.
     pub(crate) line_selection: Option<crate::git::line_selection::LineSelection>,
@@ -486,6 +489,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
+            diff_review_saved_comparison_mode: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: HashMap::new(),
@@ -561,6 +565,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: self.diff_review_comparison_mode,
+            diff_review_saved_comparison_mode: None,
             line_selection: None,
             current_file_path: self.current_file_path.clone(),
             buffer_versions: self.buffer_versions.clone(),
@@ -1088,7 +1093,11 @@ impl Stoat {
         let cursor_buffer_pos = self.cursor.position();
 
         let cursor_display_row = if self.is_in_diff_review(cx) {
-            let display_buffer = self.active_buffer(cx).read(cx).display_buffer(cx, true);
+            let mode = Some(self.diff_review_comparison_mode);
+            let display_buffer = self
+                .active_buffer(cx)
+                .read(cx)
+                .display_buffer(cx, true, mode);
             display_buffer
                 .buffer_row_to_display(cursor_buffer_pos.row)
                 .0 as f32
@@ -1539,6 +1548,39 @@ impl Stoat {
                 let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
                 (diff, Some(vec![0..u32::MAX]), Some(all_indices))
             },
+            DiffComparisonMode::HeadVsParent => {
+                let parent_content = repo.parent_content(path).unwrap_or_default();
+                tracing::debug!(
+                    "HeadVsParent: parent_len={}, buffer_len={}",
+                    parent_content.len(),
+                    buffer_snapshot.text().len()
+                );
+                let diff = BufferDiff::new(buffer_id, parent_content, &buffer_snapshot).ok()?;
+
+                // Detect reverted hunks: rows where working tree differs from HEAD
+                let working_content = std::fs::read_to_string(path).ok();
+                let (staged_rows, staged_hunks) = working_content
+                    .map(|wc| {
+                        let wh_diff = BufferDiff::new(buffer_id, wc, &buffer_snapshot).ok();
+                        let rows = crate::git::diff::compute_staged_buffer_rows(
+                            &diff,
+                            wh_diff.as_ref(),
+                            &buffer_snapshot,
+                        );
+                        let hunks = crate::git::diff::compute_staged_hunk_indices(
+                            &diff,
+                            wh_diff.as_ref(),
+                            &buffer_snapshot,
+                        );
+                        (rows, hunks)
+                    })
+                    .unzip();
+                let staged_rows =
+                    staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+                let staged_hunks =
+                    staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+                (diff, staged_rows, staged_hunks)
+            },
         };
 
         tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
@@ -1611,6 +1653,7 @@ impl Stoat {
             diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
             diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
+            diff_review_saved_comparison_mode: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: self.buffer_versions.clone(),

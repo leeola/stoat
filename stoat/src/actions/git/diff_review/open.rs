@@ -82,22 +82,33 @@ impl Stoat {
                     return;
                 }
 
-                // For IndexVsHead mode, update buffer with index content so anchors resolve
-                // correctly
-                if self.diff_comparison_mode()
-                    == crate::git::diff_review::DiffComparisonMode::IndexVsHead
-                {
-                    if let Ok(index_content) = repo.index_content(&abs_path) {
-                        let buffer_item = self.active_buffer(cx);
-                        buffer_item.update(cx, |item, cx| {
-                            item.buffer().update(cx, |buffer, _| {
-                                let len = buffer.len();
-                                buffer.edit([(0..len, index_content.as_str())]);
+                // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
+                match self.diff_comparison_mode() {
+                    crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                        if let Ok(index_content) = repo.index_content(&abs_path) {
+                            let buffer_item = self.active_buffer(cx);
+                            buffer_item.update(cx, |item, cx| {
+                                item.buffer().update(cx, |buffer, _| {
+                                    let len = buffer.len();
+                                    buffer.edit([(0..len, index_content.as_str())]);
+                                });
+                                let _ = item.reparse(cx);
                             });
-                            // Reparse to update syntax highlighting tokens
-                            let _ = item.reparse(cx);
-                        });
-                    }
+                        }
+                    },
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                        if let Ok(head_content) = repo.head_content(&abs_path) {
+                            let buffer_item = self.active_buffer(cx);
+                            buffer_item.update(cx, |item, cx| {
+                                item.buffer().update(cx, |buffer, _| {
+                                    let len = buffer.len();
+                                    buffer.edit([(0..len, head_content.as_str())]);
+                                });
+                                let _ = item.reparse(cx);
+                            });
+                        }
+                    },
+                    _ => {},
                 }
 
                 // Compute diff respecting the comparison mode
@@ -167,21 +178,33 @@ impl Stoat {
                 continue;
             }
 
-            // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode()
-                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
-            {
-                if let Ok(index_content) = repo.index_content(&abs_path) {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, cx| {
-                        item.buffer().update(cx, |buffer, _| {
-                            let len = buffer.len();
-                            buffer.edit([(0..len, index_content.as_str())]);
+            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
+            match self.diff_comparison_mode() {
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                    if let Ok(index_content) = repo.index_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, index_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
                         });
-                        // Reparse to update syntax highlighting tokens
-                        let _ = item.reparse(cx);
-                    });
-                }
+                    }
+                },
+                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                    if let Ok(head_content) = repo.head_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, head_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
+                        });
+                    }
+                },
+                _ => {},
             }
 
             // Compute diff

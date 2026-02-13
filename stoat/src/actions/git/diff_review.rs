@@ -17,5 +17,7 @@ mod next_hunk;
 mod next_unreviewed_hunk;
 mod open;
 mod prev_hunk;
+mod previous_commit;
 mod reset_progress;
+mod revert_hunk;
 mod toggle_approval;

@@ -72,7 +72,8 @@ impl Stoat {
         // Apply bounds checking
         let buffer_item_entity = self.active_buffer(cx);
         let max_scroll_y = if self.is_in_diff_review(cx) {
-            let display_buffer = buffer_item_entity.read(cx).display_buffer(cx, true);
+            let mode = Some(self.diff_review_comparison_mode);
+            let display_buffer = buffer_item_entity.read(cx).display_buffer(cx, true, mode);
             (display_buffer.row_count() as f32 - 1.0).max(0.0)
         } else {
             let buffer_item = buffer_item_entity.read(cx);

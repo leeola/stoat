@@ -149,6 +149,10 @@ mod tests {
             scenarios.contains(&"basic-diff".to_string()),
             "expected basic-diff in {scenarios:?}"
         );
+        assert!(
+            scenarios.contains(&"head-vs-parent".to_string()),
+            "expected head-vs-parent in {scenarios:?}"
+        );
     }
 
     #[test]
@@ -167,5 +171,38 @@ mod tests {
         );
         assert!(content.contains("9 this is line nine"));
         assert!(content.contains("21 this is line twenty-one"));
+    }
+
+    #[test]
+    fn create_head_vs_parent() {
+        let fixture = fixtures_dir().join("head-vs-parent");
+        let tmp = create_test_repo(&fixture, None, false).unwrap();
+        let repo = &tmp.dir;
+
+        let file = repo.join("main.rs");
+        assert!(file.exists(), "main.rs should exist");
+
+        let content = fs::read_to_string(&file).unwrap();
+
+        // HEAD commit changed variable names and greeting text
+        assert!(content.contains("hello stoat editor"));
+        assert!(content.contains("let first = 1;"));
+        assert!(content.contains("let name = \"stoat editor\";"));
+
+        // Two commits: initial + modification
+        let log = std::process::Command::new("git")
+            .args(["log", "--oneline"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let log_text = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(log_text.lines().count(), 2, "should have 2 commits");
+
+        // Clean working tree, no staged or unstaged changes
+        assert!(
+            tmp.changed_files.is_empty(),
+            "should have no changed files: {:#?}",
+            tmp.changed_files
+        );
     }
 }

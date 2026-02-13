@@ -78,6 +78,12 @@ pub enum DiffComparisonMode {
     /// Diffs show only changes that are staged in the index but not yet committed.
     /// Useful for reviewing what will be included in the next commit.
     IndexVsHead,
+
+    /// Compare HEAD vs its parent commit (shows what the last commit changed).
+    ///
+    /// Activated by a dedicated keybind, not part of the `c` cycle.
+    /// Allows reverting individual hunks from the last commit to the working tree.
+    HeadVsParent,
 }
 
 impl Default for DiffComparisonMode {
@@ -99,6 +105,7 @@ impl DiffComparisonMode {
             Self::WorkingVsHead => "All Changes",
             Self::WorkingVsIndex => "Unstaged",
             Self::IndexVsHead => "Staged",
+            Self::HeadVsParent => "Previous Commit",
         }
     }
 
@@ -114,6 +121,7 @@ impl DiffComparisonMode {
             Self::WorkingVsHead => Self::WorkingVsIndex,
             Self::WorkingVsIndex => Self::IndexVsHead,
             Self::IndexVsHead => Self::WorkingVsHead,
+            Self::HeadVsParent => Self::WorkingVsHead,
         }
     }
 }

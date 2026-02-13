@@ -116,7 +116,7 @@ impl Stoat {
                 &buffer_snapshot,
                 &file_path,
             )?;
-            super::hunk_patch::apply_patch(&patch, &repo_dir, false)?;
+            super::hunk_patch::apply_patch(&patch, &repo_dir, false, git2::ApplyLocation::Index)?;
         }
 
         if let Some((new_diff, staged_rows, staged_hunk_indices)) =

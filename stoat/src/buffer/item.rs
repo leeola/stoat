@@ -122,13 +122,19 @@ impl BufferItem {
     ///
     /// - [`DisplayBuffer`](crate::DisplayBuffer) - The display buffer abstraction
     /// - [`diff`](#method.diff) - Get the current git diff state
-    pub fn display_buffer(&self, cx: &App, show_phantom_rows: bool) -> crate::DisplayBuffer {
+    pub fn display_buffer(
+        &self,
+        cx: &App,
+        show_phantom_rows: bool,
+        comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
+    ) -> crate::DisplayBuffer {
         crate::DisplayBuffer::new(
             self.buffer_snapshot(cx),
             self.diff.clone(),
             show_phantom_rows,
             self.staged_rows.as_deref(),
             self.staged_hunk_indices.as_deref(),
+            comparison_mode,
         )
     }
 

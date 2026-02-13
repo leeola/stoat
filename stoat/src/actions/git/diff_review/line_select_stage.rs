@@ -38,7 +38,15 @@ impl Stoat {
 
         let patch = super::super::hunk_patch::generate_partial_hunk_patch(selection, &file_path)?;
 
-        super::super::hunk_patch::apply_patch(&patch, &repo_dir, reverse)?;
+        let (location, actual_reverse) = if self.diff_review_comparison_mode
+            == crate::git::diff_review::DiffComparisonMode::HeadVsParent
+        {
+            (git2::ApplyLocation::WorkDir, true)
+        } else {
+            (git2::ApplyLocation::Index, reverse)
+        };
+
+        super::super::hunk_patch::apply_patch(&patch, &repo_dir, actual_reverse, location)?;
 
         let action = if reverse { "Unstaged" } else { "Staged" };
         tracing::info!(

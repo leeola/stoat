@@ -70,7 +70,8 @@ impl Stoat {
             // In diff review, phantom rows shift display rows relative to buffer rows.
             // Convert to display coordinates so the viewport targets the right position.
             let (display_start_row, display_end_row) = if self.is_in_diff_review(cx) {
-                let display_buffer = buffer_item.read(cx).display_buffer(cx, true);
+                let mode = Some(self.diff_review_comparison_mode);
+                let display_buffer = buffer_item.read(cx).display_buffer(cx, true, mode);
                 let start = display_buffer.buffer_row_to_display(hunk_start.row).0;
                 let end = display_buffer.buffer_row_to_display(hunk_end.row).0;
                 (start as f32, end as f32)
@@ -131,21 +132,33 @@ impl Stoat {
                 continue;
             }
 
-            // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode()
-                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
-            {
-                if let Ok(index_content) = repo.index_content(&abs_path) {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, cx| {
-                        item.buffer().update(cx, |buffer, _| {
-                            let len = buffer.len();
-                            buffer.edit([(0..len, index_content.as_str())]);
+            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
+            match self.diff_comparison_mode() {
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                    if let Ok(index_content) = repo.index_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, index_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
                         });
-                        // Reparse to update syntax highlighting tokens
-                        let _ = item.reparse(cx);
-                    });
-                }
+                    }
+                },
+                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                    if let Ok(head_content) = repo.head_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, head_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
+                        });
+                    }
+                },
+                _ => {},
             }
 
             // Compute diff and check if it has hunks
@@ -220,21 +233,33 @@ impl Stoat {
                 continue;
             }
 
-            // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-            if self.diff_comparison_mode()
-                == crate::git::diff_review::DiffComparisonMode::IndexVsHead
-            {
-                if let Ok(index_content) = repo.index_content(&abs_path) {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, cx| {
-                        item.buffer().update(cx, |buffer, _| {
-                            let len = buffer.len();
-                            buffer.edit([(0..len, index_content.as_str())]);
+            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
+            match self.diff_comparison_mode() {
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                    if let Ok(index_content) = repo.index_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, index_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
                         });
-                        // Reparse to update syntax highlighting tokens
-                        let _ = item.reparse(cx);
-                    });
-                }
+                    }
+                },
+                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                    if let Ok(head_content) = repo.head_content(&abs_path) {
+                        let buffer_item = self.active_buffer(cx);
+                        buffer_item.update(cx, |item, cx| {
+                            item.buffer().update(cx, |buffer, _| {
+                                let len = buffer.len();
+                                buffer.edit([(0..len, head_content.as_str())]);
+                            });
+                            let _ = item.reparse(cx);
+                        });
+                    }
+                },
+                _ => {},
             }
 
             // Compute diff and check if it has hunks
@@ -718,6 +743,8 @@ mod tests {
             "DiffReviewResetProgress",
             "DiffReviewDismiss",
             "DiffReviewCycleComparisonMode",
+            "DiffReviewPreviousCommit",
+            "DiffReviewRevertHunk",
         ];
 
         for name in &names {

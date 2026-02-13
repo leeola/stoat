@@ -260,6 +260,8 @@ on key {
             c -> DiffReviewCycleComparisonMode();
             s -> GitToggleStageHunk();
             S -> GitToggleStageLine();
+            p -> DiffReviewPreviousCommit();
+            u -> DiffReviewRevertHunk();
             J -> MoveDown();
             K -> MoveUp();
         }

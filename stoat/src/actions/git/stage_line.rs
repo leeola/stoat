@@ -176,7 +176,7 @@ impl Stoat {
         }
 
         let patch = super::hunk_patch::generate_partial_hunk_patch(&selection, file_path)?;
-        super::hunk_patch::apply_patch(&patch, repo_dir, false)?;
+        super::hunk_patch::apply_patch(&patch, repo_dir, false, git2::ApplyLocation::Index)?;
         Ok(())
     }
 
@@ -242,7 +242,7 @@ impl Stoat {
         }
 
         let patch_str = super::hunk_patch::generate_partial_hunk_patch(&selection, file_path)?;
-        super::hunk_patch::apply_patch(&patch_str, repo_dir, true)?;
+        super::hunk_patch::apply_patch(&patch_str, repo_dir, true, git2::ApplyLocation::Index)?;
         Ok(())
     }
 }

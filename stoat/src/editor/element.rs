@@ -4,7 +4,7 @@
 //! No gutter, no mouse handling, no complex layout - just get text visible.
 
 use crate::{
-    buffer::display::DisplayRow as BufferDisplayRow,
+    buffer::display::{DiffOrigin, DisplayRow as BufferDisplayRow},
     editor::{style::EditorStyle, view::EditorView},
     git::diff::{BufferDiff, DiffHunkStatus},
     gutter::{DisplayRow, GutterLayout},
@@ -113,7 +113,14 @@ impl Element for EditorElement {
         let display_buffer = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
-            buffer_item.read(cx).display_buffer(cx, is_in_diff_review)
+            let mode = if is_in_diff_review {
+                Some(stoat.diff_review_comparison_mode)
+            } else {
+                None
+            };
+            buffer_item
+                .read(cx)
+                .display_buffer(cx, is_in_diff_review, mode)
         };
         let snapshot_time = snapshot_start.elapsed();
 
@@ -339,16 +346,16 @@ impl Element for EditorElement {
                         shaped,
                         y_position: y,
                         diff_status: row_info.diff_status,
-                        is_staged: row_info.is_staged,
+                        diff_origin: row_info.diff_origin,
                     });
                 } else {
                     // Phantom row (deleted content): plain text with deleted color
                     let line_text = &row_info.content;
 
-                    let base_color = if row_info.is_staged {
-                        self.style.diff_staged_deleted_color
-                    } else {
-                        self.style.diff_deleted_color
+                    let base_color = match row_info.diff_origin {
+                        DiffOrigin::Committed => self.style.diff_committed_deleted_color,
+                        DiffOrigin::Staged => self.style.diff_staged_deleted_color,
+                        DiffOrigin::Unstaged => self.style.diff_deleted_color,
                     };
                     let deleted_text_color = gpui::Hsla {
                         h: base_color.h,
@@ -379,7 +386,7 @@ impl Element for EditorElement {
                         shaped,
                         y_position: y,
                         diff_status: row_info.diff_status,
-                        is_staged: row_info.is_staged,
+                        diff_origin: row_info.diff_origin,
                     });
                 }
 
@@ -454,7 +461,7 @@ impl Element for EditorElement {
                     shaped,
                     y_position: y,
                     diff_status: diff_row_info.and_then(|r| r.diff_status),
-                    is_staged: diff_row_info.is_some_and(|r| r.is_staged),
+                    diff_origin: diff_row_info.map(|r| r.diff_origin).unwrap_or_default(),
                 });
 
                 y += line_height;
@@ -992,13 +999,26 @@ impl EditorElement {
 
         // Paint diff indicators
         for indicator in &gutter_layout.diff_indicators {
-            let diff_color = match (indicator.status, indicator.is_staged) {
-                (DiffHunkStatus::Added, true) => self.style.diff_staged_added_color,
-                (DiffHunkStatus::Modified, true) => self.style.diff_staged_modified_color,
-                (DiffHunkStatus::Deleted, true) => self.style.diff_staged_deleted_color,
-                (DiffHunkStatus::Added, false) => self.style.diff_added_color,
-                (DiffHunkStatus::Modified, false) => self.style.diff_modified_color,
-                (DiffHunkStatus::Deleted, false) => self.style.diff_deleted_color,
+            let diff_color = match (indicator.status, indicator.origin) {
+                (DiffHunkStatus::Added, DiffOrigin::Committed) => {
+                    self.style.diff_committed_added_color
+                },
+                (DiffHunkStatus::Modified, DiffOrigin::Committed) => {
+                    self.style.diff_committed_modified_color
+                },
+                (DiffHunkStatus::Deleted, DiffOrigin::Committed) => {
+                    self.style.diff_committed_deleted_color
+                },
+                (DiffHunkStatus::Added, DiffOrigin::Staged) => self.style.diff_staged_added_color,
+                (DiffHunkStatus::Modified, DiffOrigin::Staged) => {
+                    self.style.diff_staged_modified_color
+                },
+                (DiffHunkStatus::Deleted, DiffOrigin::Staged) => {
+                    self.style.diff_staged_deleted_color
+                },
+                (DiffHunkStatus::Added, DiffOrigin::Unstaged) => self.style.diff_added_color,
+                (DiffHunkStatus::Modified, DiffOrigin::Unstaged) => self.style.diff_modified_color,
+                (DiffHunkStatus::Deleted, DiffOrigin::Unstaged) => self.style.diff_deleted_color,
             };
 
             // Blend with background for subtle appearance (60% opacity)
@@ -1085,13 +1105,32 @@ impl EditorElement {
 
         for layout in line_layouts {
             if let Some(status) = layout.diff_status {
-                let base_color = match (status, layout.is_staged) {
-                    (DiffHunkStatus::Added, true) => self.style.diff_staged_added_color,
-                    (DiffHunkStatus::Modified, true) => self.style.diff_staged_modified_color,
-                    (DiffHunkStatus::Deleted, true) => self.style.diff_staged_deleted_color,
-                    (DiffHunkStatus::Added, false) => self.style.diff_added_color,
-                    (DiffHunkStatus::Modified, false) => self.style.diff_modified_color,
-                    (DiffHunkStatus::Deleted, false) => self.style.diff_deleted_color,
+                let base_color = match (status, layout.diff_origin) {
+                    (DiffHunkStatus::Added, DiffOrigin::Committed) => {
+                        self.style.diff_committed_added_color
+                    },
+                    (DiffHunkStatus::Modified, DiffOrigin::Committed) => {
+                        self.style.diff_committed_modified_color
+                    },
+                    (DiffHunkStatus::Deleted, DiffOrigin::Committed) => {
+                        self.style.diff_committed_deleted_color
+                    },
+                    (DiffHunkStatus::Added, DiffOrigin::Staged) => {
+                        self.style.diff_staged_added_color
+                    },
+                    (DiffHunkStatus::Modified, DiffOrigin::Staged) => {
+                        self.style.diff_staged_modified_color
+                    },
+                    (DiffHunkStatus::Deleted, DiffOrigin::Staged) => {
+                        self.style.diff_staged_deleted_color
+                    },
+                    (DiffHunkStatus::Added, DiffOrigin::Unstaged) => self.style.diff_added_color,
+                    (DiffHunkStatus::Modified, DiffOrigin::Unstaged) => {
+                        self.style.diff_modified_color
+                    },
+                    (DiffHunkStatus::Deleted, DiffOrigin::Unstaged) => {
+                        self.style.diff_deleted_color
+                    },
                 };
 
                 // Make it very subtle for full-width backgrounds (15% opacity in review mode)
@@ -1368,8 +1407,8 @@ pub struct ShapedLineLayout {
     pub y_position: Pixels,
     /// Diff status for gutter symbol rendering
     pub diff_status: Option<DiffHunkStatus>,
-    /// Whether this row's change is staged in the git index
-    pub is_staged: bool,
+    /// Origin of this row's diff change (unstaged, staged, or committed)
+    pub diff_origin: DiffOrigin,
 }
 
 impl DisplayRow for ShapedLineLayout {
@@ -1381,8 +1420,8 @@ impl DisplayRow for ShapedLineLayout {
         self.diff_status
     }
 
-    fn is_staged(&self) -> bool {
-        self.is_staged
+    fn diff_origin(&self) -> DiffOrigin {
+        self.diff_origin
     }
 }
 

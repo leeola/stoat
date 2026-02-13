@@ -33,6 +33,12 @@ pub struct EditorStyle {
     pub diff_staged_modified_color: Hsla,
     /// Desaturated color for staged deleted lines
     pub diff_staged_deleted_color: Hsla,
+    /// Purple color for committed added lines (HeadVsParent mode)
+    pub diff_committed_added_color: Hsla,
+    /// Purple color for committed modified lines (HeadVsParent mode)
+    pub diff_committed_modified_color: Hsla,
+    /// Purple color for committed deleted lines (HeadVsParent mode)
+    pub diff_committed_deleted_color: Hsla,
     /// Color for error diagnostics (red)
     pub diagnostic_error_color: Hsla,
     /// Color for warning diagnostics (orange)
@@ -103,6 +109,9 @@ impl EditorStyle {
             diff_staged_added_color: rgb(0xbbb529).into(), // Yellow-green
             diff_staged_modified_color: rgb(0xd4aa32).into(), // Gold
             diff_staged_deleted_color: rgb(0xd08840).into(), // Amber
+            diff_committed_added_color: rgb(0x9b7ed8).into(), // Light purple
+            diff_committed_modified_color: rgb(0x8470c4).into(), // Medium purple
+            diff_committed_deleted_color: rgb(0xb07cc0).into(), // Mauve
             diagnostic_error_color: rgb(0xf44747).into(), // Red (VS Code red)
             diagnostic_warning_color: rgb(0xdcdcaa).into(), // Yellow (VS Code yellow)
             diagnostic_info_color: rgb(0x569cd6).into(), // Blue (VS Code blue)

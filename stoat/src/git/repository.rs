@@ -246,6 +246,89 @@ impl Repository {
         &self.workdir
     }
 
+    /// Read file content from the parent of HEAD (HEAD~1).
+    ///
+    /// Returns empty string if there's no parent commit (initial commit) or
+    /// the file doesn't exist in the parent tree.
+    pub fn parent_content(&self, path: &Path) -> Result<String, GitError> {
+        let relative_path = self.make_relative(path)?;
+
+        let head = self
+            .repo
+            .head()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD: {e}")))?;
+
+        let commit = head
+            .peel_to_commit()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get commit: {e}")))?;
+
+        let parent = match commit.parent(0) {
+            Ok(p) => p,
+            Err(_) => return Ok(String::new()),
+        };
+
+        let tree = parent
+            .tree()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get parent tree: {e}")))?;
+
+        let entry = match tree.get_path(&relative_path) {
+            Ok(e) => e,
+            Err(_) => return Ok(String::new()),
+        };
+
+        let object = entry
+            .to_object(&self.repo)
+            .map_err(|e| GitError::ReadFailed(format!("Failed to get object: {e}")))?;
+
+        let blob = object
+            .as_blob()
+            .ok_or_else(|| GitError::ReadFailed("Object is not a blob".to_string()))?;
+
+        String::from_utf8(blob.content().to_vec())
+            .map_err(|e| GitError::ReadFailed(format!("Invalid UTF-8: {e}")))
+    }
+
+    /// List files changed between HEAD and its parent commit.
+    ///
+    /// Returns empty vec if HEAD has no parent (initial commit shows all HEAD files).
+    pub fn commit_changed_files(&self) -> Result<Vec<PathBuf>, GitError> {
+        let head = self
+            .repo
+            .head()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD: {e}")))?;
+
+        let head_commit = head
+            .peel_to_commit()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get commit: {e}")))?;
+
+        let head_tree = head_commit
+            .tree()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD tree: {e}")))?;
+
+        let parent_tree = match head_commit.parent(0) {
+            Ok(parent) => Some(parent.tree().map_err(|e| {
+                GitError::GitOperationFailed(format!("Failed to get parent tree: {e}"))
+            })?),
+            Err(_) => None,
+        };
+
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&head_tree), None)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create diff: {e}")))?;
+
+        let mut paths = Vec::new();
+        for delta_idx in 0..diff.deltas().len() {
+            if let Some(delta) = diff.get_delta(delta_idx) {
+                if let Some(path) = delta.new_file().path() {
+                    paths.push(path.to_path_buf());
+                }
+            }
+        }
+
+        Ok(paths)
+    }
+
     /// Get a reference to the inner git2 repository.
     ///
     /// Provides access to the underlying [`git2::Repository`] for operations
@@ -325,6 +408,32 @@ impl Repository {
                 // IndexVsHead doesn't need untracked files (they're not in the index)
                 self.repo
                     .diff_tree_to_index(Some(&tree), None, Some(&mut opts))
+                    .map_err(|e| {
+                        GitError::GitOperationFailed(format!("Failed to create diff: {e}"))
+                    })?
+            },
+            DiffComparisonMode::HeadVsParent => {
+                let head_commit =
+                    self.repo
+                        .head()
+                        .and_then(|h| h.peel_to_commit())
+                        .map_err(|e| {
+                            GitError::GitOperationFailed(format!("Failed to get HEAD commit: {e}"))
+                        })?;
+
+                let head_tree = head_commit.tree().map_err(|e| {
+                    GitError::GitOperationFailed(format!("Failed to get HEAD tree: {e}"))
+                })?;
+
+                let parent_tree = match head_commit.parent(0) {
+                    Ok(parent) => Some(parent.tree().map_err(|e| {
+                        GitError::GitOperationFailed(format!("Failed to get parent tree: {e}"))
+                    })?),
+                    Err(_) => None,
+                };
+
+                self.repo
+                    .diff_tree_to_tree(parent_tree.as_ref(), Some(&head_tree), Some(&mut opts))
                     .map_err(|e| {
                         GitError::GitOperationFailed(format!("Failed to create diff: {e}"))
                     })?
@@ -521,5 +630,82 @@ mod tests {
         let result = repo.head_content(&missing_path);
 
         assert!(matches!(result, Err(GitError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn parent_content_returns_prior_version() {
+        let (_dir, path) = create_test_repo();
+
+        let file_path = path.join("test.txt");
+        fs::write(&file_path, "version 1\n").expect("Failed to write file");
+
+        Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git add");
+        Command::new("git")
+            .args(["commit", "-m", "First commit"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git commit");
+
+        fs::write(&file_path, "version 2\n").expect("Failed to write file");
+        Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git add");
+        Command::new("git")
+            .args(["commit", "-m", "Second commit"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git commit");
+
+        let repo = Repository::open(&path).expect("Should open repository");
+        let content = repo
+            .parent_content(&file_path)
+            .expect("Should read parent content");
+        assert_eq!(content, "version 1\n");
+    }
+
+    #[test]
+    fn commit_changed_files_lists_modified() {
+        let (_dir, path) = create_test_repo();
+
+        let file1 = path.join("a.txt");
+        let file2 = path.join("b.txt");
+        fs::write(&file1, "hello\n").expect("Failed to write file");
+        fs::write(&file2, "world\n").expect("Failed to write file");
+
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git add");
+        Command::new("git")
+            .args(["commit", "-m", "First commit"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git commit");
+
+        fs::write(&file1, "changed\n").expect("Failed to write file");
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git add");
+        Command::new("git")
+            .args(["commit", "-m", "Second commit"])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to git commit");
+
+        let repo = Repository::open(&path).expect("Should open repository");
+        let files = repo
+            .commit_changed_files()
+            .expect("Should list changed files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], PathBuf::from("a.txt"));
     }
 }

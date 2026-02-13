@@ -125,7 +125,12 @@ impl Stoat {
                 }
             }
 
-            super::hunk_patch::apply_patch(&patch_str, &repo_dir, true)?;
+            super::hunk_patch::apply_patch(
+                &patch_str,
+                &repo_dir,
+                true,
+                git2::ApplyLocation::Index,
+            )?;
         }
 
         if let Some((new_diff, staged_rows, staged_hunk_indices)) =

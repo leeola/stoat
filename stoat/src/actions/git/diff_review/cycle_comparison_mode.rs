@@ -67,14 +67,30 @@ impl Stoat {
         };
         let abs_path = repo.workdir().join(&current_file_path);
 
-        // For IndexVsHead mode, update buffer with index content so anchors resolve correctly
-        if new_mode == crate::git::diff_review::DiffComparisonMode::IndexVsHead {
-            if let Ok(index_content) = repo.index_content(&abs_path) {
+        // For IndexVsHead/HeadVsParent, replace buffer; otherwise reload working tree
+        let needs_buffer_replace = matches!(
+            new_mode,
+            crate::git::diff_review::DiffComparisonMode::IndexVsHead
+                | crate::git::diff_review::DiffComparisonMode::HeadVsParent
+        );
+
+        if needs_buffer_replace {
+            let content = match new_mode {
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                    repo.index_content(&abs_path).ok()
+                },
+                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                    repo.head_content(&abs_path).ok()
+                },
+                _ => None,
+            };
+
+            if let Some(content) = content {
                 let buffer_item = self.active_buffer(cx);
                 buffer_item.update(cx, |item, cx| {
                     item.buffer().update(cx, |buffer, _| {
                         let len = buffer.len();
-                        buffer.edit([(0..len, index_content.as_str())]);
+                        buffer.edit([(0..len, content.as_str())]);
                     });
                     let _ = item.reparse(cx);
                 });

@@ -33,7 +33,10 @@
 //! - [`EditorStyle`](super::editor::style::EditorStyle) - Configures gutter appearance
 //! - [`BufferDiff`](crate::git::diff::BufferDiff) - Source of diff data
 
-use crate::git::diff::{BufferDiff, DiffHunkStatus};
+use crate::{
+    buffer::display::DiffOrigin,
+    git::diff::{BufferDiff, DiffHunkStatus},
+};
 use gpui::{point, px, size, Bounds, Corners, Pixels, Point};
 use std::ops::Range;
 use text::{BufferSnapshot, ToPoint};
@@ -42,7 +45,7 @@ use text::{BufferSnapshot, ToPoint};
 pub trait DisplayRow {
     fn y_position(&self) -> Pixels;
     fn diff_status(&self) -> Option<DiffHunkStatus>;
-    fn is_staged(&self) -> bool;
+    fn diff_origin(&self) -> DiffOrigin;
 }
 
 /// Dimensions and position of the gutter area.
@@ -75,8 +78,8 @@ pub struct DiffIndicator {
     pub bounds: Bounds<Pixels>,
     /// Corner radii for rounded corners (used for deleted hunks)
     pub corner_radii: Corners<Pixels>,
-    /// Whether this indicator represents a staged change
-    pub is_staged: bool,
+    /// Origin of this indicator (unstaged, staged, or committed)
+    pub origin: DiffOrigin,
 }
 
 /// Complete gutter layout for rendering.
@@ -162,24 +165,24 @@ impl GutterLayout {
         let mut diff_indicators = Vec::new();
 
         // PHASE 1: Create indicators for display rows (includes phantom rows)
-        // Group consecutive rows with the same diff status and staging state
-        let mut current_group: Option<(DiffHunkStatus, bool, Pixels, Pixels)> = None;
+        // Group consecutive rows with the same diff status and origin
+        let mut current_group: Option<(DiffHunkStatus, DiffOrigin, Pixels, Pixels)> = None;
 
         for row in display_rows {
             if let Some(status) = row.diff_status() {
-                let staged = row.is_staged();
+                let origin = row.diff_origin();
                 match current_group {
-                    Some((group_status, group_staged, start_y, _))
-                        if group_status == status && group_staged == staged =>
+                    Some((group_status, group_origin, start_y, _))
+                        if group_status == status && group_origin == origin =>
                     {
                         current_group = Some((
                             group_status,
-                            group_staged,
+                            group_origin,
                             start_y,
                             row.y_position() + line_height,
                         ));
                     },
-                    Some((group_status, group_staged, start_y, end_y)) => {
+                    Some((group_status, group_origin, start_y, end_y)) => {
                         diff_indicators.push(DiffIndicator {
                             status: group_status,
                             bounds: Bounds {
@@ -187,11 +190,11 @@ impl GutterLayout {
                                 size: size(strip_width, end_y - start_y),
                             },
                             corner_radii: Corners::all(px(0.0)),
-                            is_staged: group_staged,
+                            origin: group_origin,
                         });
                         current_group = Some((
                             status,
-                            staged,
+                            origin,
                             row.y_position(),
                             row.y_position() + line_height,
                         ));
@@ -199,13 +202,13 @@ impl GutterLayout {
                     None => {
                         current_group = Some((
                             status,
-                            staged,
+                            origin,
                             row.y_position(),
                             row.y_position() + line_height,
                         ));
                     },
                 }
-            } else if let Some((group_status, group_staged, start_y, end_y)) = current_group {
+            } else if let Some((group_status, group_origin, start_y, end_y)) = current_group {
                 diff_indicators.push(DiffIndicator {
                     status: group_status,
                     bounds: Bounds {
@@ -213,13 +216,13 @@ impl GutterLayout {
                         size: size(strip_width, end_y - start_y),
                     },
                     corner_radii: Corners::all(px(0.0)),
-                    is_staged: group_staged,
+                    origin: group_origin,
                 });
                 current_group = None;
             }
         }
 
-        if let Some((group_status, group_staged, start_y, end_y)) = current_group {
+        if let Some((group_status, group_origin, start_y, end_y)) = current_group {
             diff_indicators.push(DiffIndicator {
                 status: group_status,
                 bounds: Bounds {
@@ -227,7 +230,7 @@ impl GutterLayout {
                     size: size(strip_width, end_y - start_y),
                 },
                 corner_radii: Corners::all(px(0.0)),
-                is_staged: group_staged,
+                origin: group_origin,
             });
         }
 
@@ -264,7 +267,7 @@ impl GutterLayout {
                             status: DiffHunkStatus::Deleted,
                             bounds,
                             corner_radii: Corners::all(px(0.0)),
-                            is_staged: false,
+                            origin: DiffOrigin::Unstaged,
                         });
                     }
                 }

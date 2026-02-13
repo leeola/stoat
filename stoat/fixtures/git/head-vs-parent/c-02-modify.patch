@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:01:00 +0000
+Subject: [PATCH] refactor: improve variable names and add error handling
+
+---
+ main.rs | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/main.rs b/main.rs
+index 1234567..abcdef0 100644
+--- a/main.rs
++++ b/main.rs
+@@ -1,13 +1,13 @@
+ fn main() {
+-    println!("hello world");
+-    let x = 1;
+-    let y = 2;
+-    let z = x + y;
+-    println!("sum: {z}");
++    println!("hello stoat editor");
++    let first = 1;
++    let second = 2;
++    let total = first + second;
++    println!("total: {total}");
+
+     for i in 0..10 {
+         println!("{i}");
+     }
+
+-    let name = "stoat";
++    let name = "stoat editor";
+     let greeting = format!("hello {name}");
+--
+2.39.0
+

@@ -250,6 +250,10 @@ actions!(
         DiffReviewDismiss,
         /// Cycle through comparison modes (All/Unstaged/Staged)
         DiffReviewCycleComparisonMode,
+        /// Review previous commit (HEAD vs HEAD~1)
+        DiffReviewPreviousCommit,
+        /// Revert current hunk in HeadVsParent mode
+        DiffReviewRevertHunk,
     ]
 );
 
@@ -953,6 +957,16 @@ action_metadata!(
     "cycle mode",
     "Cycle through diff comparison modes: All Changes, Unstaged, and Staged"
 );
+action_metadata!(
+    DiffReviewPreviousCommit,
+    "previous commit",
+    "Toggle review of previous commit changes (HEAD vs HEAD~1)"
+);
+action_metadata!(
+    DiffReviewRevertHunk,
+    "revert hunk",
+    "Revert the current hunk from the previous commit to the working tree"
+);
 
 // Git repository actions
 action_metadata!(
@@ -1440,6 +1454,14 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewCycleComparisonMode>(),
         DiffReviewCycleComparisonMode::action_name(),
     );
+    names.insert(
+        TypeId::of::<DiffReviewPreviousCommit>(),
+        DiffReviewPreviousCommit::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DiffReviewRevertHunk>(),
+        DiffReviewRevertHunk::action_name(),
+    );
 
     // Git repository actions
     names.insert(TypeId::of::<GitStageFile>(), GitStageFile::action_name());
@@ -1827,6 +1849,14 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewCycleComparisonMode>(),
         DiffReviewCycleComparisonMode::description(),
     );
+    descriptions.insert(
+        TypeId::of::<DiffReviewPreviousCommit>(),
+        DiffReviewPreviousCommit::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DiffReviewRevertHunk>(),
+        DiffReviewRevertHunk::description(),
+    );
 
     // Git repository actions
     descriptions.insert(TypeId::of::<GitStageFile>(), GitStageFile::description());
@@ -2199,6 +2229,14 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewCycleComparisonMode>(),
         DiffReviewCycleComparisonMode::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewPreviousCommit>(),
+        DiffReviewPreviousCommit::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewRevertHunk>(),
+        DiffReviewRevertHunk::help_text(),
     );
 
     // Git repository actions

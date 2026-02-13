@@ -303,11 +303,17 @@ mod tests {
     }
 }
 
-/// Apply a unified diff patch to the git index via libgit2.
+/// Apply a unified diff patch via libgit2.
 ///
 /// When `reverse` is true, the patch is reversed (swapping additions/deletions
-/// and header fields) before application, used for unstaging.
-pub(super) fn apply_patch(patch: &str, repo_dir: &Path, reverse: bool) -> Result<(), String> {
+/// and header fields) before application, used for unstaging or reverting.
+/// The `location` parameter controls where the patch is applied (Index or WorkDir).
+pub(super) fn apply_patch(
+    patch: &str,
+    repo_dir: &Path,
+    reverse: bool,
+    location: ApplyLocation,
+) -> Result<(), String> {
     let repo = Repository::open(repo_dir).map_err(|e| format!("Failed to open repository: {e}"))?;
 
     let patch_bytes = if reverse {
@@ -319,7 +325,7 @@ pub(super) fn apply_patch(patch: &str, repo_dir: &Path, reverse: bool) -> Result
     let diff = Diff::from_buffer(patch_bytes.as_bytes())
         .map_err(|e| format!("Failed to parse patch: {e}"))?;
 
-    repo.apply(&diff, ApplyLocation::Index, None)
+    repo.apply(&diff, location, None)
         .map_err(|e| format!("Failed to apply patch: {e}"))?;
 
     Ok(())

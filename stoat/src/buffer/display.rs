@@ -55,6 +55,15 @@ use crate::git::diff::{BufferDiff, DiffHunkStatus};
 use std::ops::Range;
 use text::{BufferSnapshot, ToPoint};
 
+/// Whether a diff row originates from unstaged, staged, or committed changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffOrigin {
+    #[default]
+    Unstaged,
+    Staged,
+    Committed,
+}
+
 /// A display row index (includes phantom rows).
 ///
 /// Display rows are numbered sequentially including both real buffer rows and
@@ -110,9 +119,8 @@ pub struct RowInfo {
     /// Empty for non-Modified rows.
     pub modified_ranges: Vec<Range<usize>>,
 
-    /// Whether this row's change is staged in the git index.
-    /// Used to render staged hunks with desaturated colors.
-    pub is_staged: bool,
+    /// Origin of this diff row (unstaged, staged, or committed).
+    pub diff_origin: DiffOrigin,
 }
 
 /// A view over a buffer that includes phantom rows for git diffs.
@@ -168,16 +176,43 @@ impl DisplayBuffer {
         show_phantom_rows: bool,
         staged_rows: Option<&[Range<u32>]>,
         staged_hunk_indices: Option<&[usize]>,
+        comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
     ) -> Self {
-        let row_is_staged = |buffer_row: u32| -> bool {
-            staged_rows
+        use crate::git::diff_review::DiffComparisonMode;
+
+        let is_head_vs_parent = comparison_mode == Some(DiffComparisonMode::HeadVsParent);
+
+        let row_origin = |buffer_row: u32| -> DiffOrigin {
+            let in_staged = staged_rows
                 .map(|ranges| ranges.iter().any(|r| r.contains(&buffer_row)))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if is_head_vs_parent {
+                if in_staged {
+                    DiffOrigin::Committed
+                } else {
+                    DiffOrigin::Unstaged
+                }
+            } else if in_staged {
+                DiffOrigin::Staged
+            } else {
+                DiffOrigin::Unstaged
+            }
         };
-        let hunk_is_staged = |hunk_idx: usize| -> bool {
-            staged_hunk_indices
+        let hunk_origin = |hunk_idx: usize| -> DiffOrigin {
+            let in_staged = staged_hunk_indices
                 .map(|indices| indices.contains(&hunk_idx))
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if is_head_vs_parent {
+                if in_staged {
+                    DiffOrigin::Committed
+                } else {
+                    DiffOrigin::Unstaged
+                }
+            } else if in_staged {
+                DiffOrigin::Staged
+            } else {
+                DiffOrigin::Unstaged
+            }
         };
 
         let max_buffer_row = buffer_snapshot.max_point().row;
@@ -233,7 +268,7 @@ impl DisplayBuffer {
                             diff_status: None,
                             content,
                             modified_ranges: Vec::new(),
-                            is_staged: false,
+                            diff_origin: DiffOrigin::Unstaged,
                         });
 
                         display_row += 1;
@@ -241,7 +276,7 @@ impl DisplayBuffer {
 
                         // Now insert phantom rows for deleted content (only in review mode)
                         if show_phantom_rows && has_deleted_content {
-                            let staged = hunk_is_staged(idx);
+                            let origin = hunk_origin(idx);
                             let deleted_text = diff.base_text_for_hunk(idx);
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
@@ -250,7 +285,7 @@ impl DisplayBuffer {
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
                                     modified_ranges: Vec::new(),
-                                    is_staged: staged,
+                                    diff_origin: origin,
                                 });
                                 display_row += 1;
                             }
@@ -263,7 +298,7 @@ impl DisplayBuffer {
                         let is_modified = matches!(hunk.status, DiffHunkStatus::Modified);
 
                         if show_phantom_rows && has_deleted_content {
-                            let staged = hunk_is_staged(idx);
+                            let origin = hunk_origin(idx);
                             let deleted_text = diff.base_text_for_hunk(idx);
                             for deleted_line in deleted_text.lines() {
                                 rows.push(RowInfo {
@@ -272,7 +307,7 @@ impl DisplayBuffer {
                                     diff_status: Some(DiffHunkStatus::Deleted),
                                     content: deleted_line.to_string(),
                                     modified_ranges: Vec::new(),
-                                    is_staged: staged,
+                                    diff_origin: origin,
                                 });
                                 display_row += 1;
                             }
@@ -322,7 +357,7 @@ impl DisplayBuffer {
                                 diff_status: Some(hunk.status),
                                 content,
                                 modified_ranges,
-                                is_staged: row_is_staged(row),
+                                diff_origin: row_origin(row),
                             });
 
                             display_row += 1;
@@ -355,7 +390,7 @@ impl DisplayBuffer {
                         diff_status: None,
                         content,
                         modified_ranges: Vec::new(),
-                        is_staged: false,
+                        diff_origin: DiffOrigin::Unstaged,
                     });
 
                     display_row += 1;
@@ -385,7 +420,7 @@ impl DisplayBuffer {
                     diff_status: None,
                     content,
                     modified_ranges: Vec::new(),
-                    is_staged: false,
+                    diff_origin: DiffOrigin::Unstaged,
                 });
 
                 display_row += 1;
@@ -561,7 +596,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 2\nline 3");
         let snapshot = buffer.snapshot();
 
-        let display_buffer = DisplayBuffer::new(snapshot, None, true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, None, true, None, None, None);
 
         assert_eq!(display_buffer.row_count(), 3);
 
@@ -585,7 +620,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Should have 4 rows (no phantom rows for Added hunks)
         assert_eq!(display_buffer.row_count(), 4);
@@ -611,7 +646,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Should have 3 rows: 1 normal, 1 phantom deleted, 1 normal
         assert_eq!(display_buffer.row_count(), 3);
@@ -641,7 +676,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Should have 4 rows: 1 normal, 1 phantom deleted ("line 2"), 1 modified ("modified"), 1
         // normal Modified hunks show both old content (phantom) and new content (with intra-line
@@ -675,7 +710,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Should have 4 rows: 1 normal, 1 phantom deleted, 1 modified, 1 normal
         assert_eq!(
@@ -734,7 +769,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Debug: print all rows
         eprintln!("All rows:");
@@ -765,7 +800,7 @@ mod tests {
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
             .expect("Failed to create diff");
 
-        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None);
+        let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
 
         // Display row 0 -> Buffer row 0
         assert_eq!(display_buffer.display_row_to_buffer(DisplayRow(0)), Some(0));
