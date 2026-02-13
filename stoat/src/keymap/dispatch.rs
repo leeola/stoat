@@ -148,6 +148,13 @@ pub fn dispatch_editor_action<C: AppContext>(
                 }
             });
         },
+        "GitToggleStageLine" => {
+            let _ = stoat.update(cx, |s, cx| {
+                if let Err(e) = s.git_toggle_stage_line(cx) {
+                    tracing::error!("GitToggleStageLine failed: {e}");
+                }
+            });
+        },
 
         "WriteFile" | "Save" => {
             let _ = stoat.update(cx, |s, cx| {

@@ -271,6 +271,8 @@ actions!(
         GitUnstageHunk,
         /// Toggle stage/unstage for the current hunk
         GitToggleStageHunk,
+        /// Toggle stage/unstage for the current line
+        GitToggleStageLine,
     ]
 );
 
@@ -995,6 +997,12 @@ action_metadata!(
     "Toggle stage/unstage for the current hunk",
     ["toggle-stage-hunk"]
 );
+action_metadata!(
+    GitToggleStageLine,
+    "toggle stage line",
+    "Toggle stage/unstage for the current line",
+    ["toggle-stage-line"]
+);
 
 // Line selection actions
 action_metadata!(
@@ -1450,6 +1458,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitToggleStageHunk>(),
         GitToggleStageHunk::action_name(),
     );
+    names.insert(
+        TypeId::of::<GitToggleStageLine>(),
+        GitToggleStageLine::action_name(),
+    );
 
     // Line selection actions
     names.insert(
@@ -1833,6 +1845,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitToggleStageHunk>(),
         GitToggleStageHunk::description(),
     );
+    descriptions.insert(
+        TypeId::of::<GitToggleStageLine>(),
+        GitToggleStageLine::description(),
+    );
 
     // Line selection actions
     descriptions.insert(
@@ -2196,6 +2212,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<GitToggleStageHunk>(),
         GitToggleStageHunk::help_text(),
     );
+    help.insert(
+        TypeId::of::<GitToggleStageLine>(),
+        GitToggleStageLine::help_text(),
+    );
 
     // Line selection actions
     help.insert(
@@ -2357,6 +2377,10 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     aliases.insert(
         TypeId::of::<GitToggleStageHunk>(),
         GitToggleStageHunk::aliases(),
+    );
+    aliases.insert(
+        TypeId::of::<GitToggleStageLine>(),
+        GitToggleStageLine::aliases(),
     );
 
     // Command line actions

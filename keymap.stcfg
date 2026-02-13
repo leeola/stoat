@@ -259,6 +259,9 @@ on key {
             q -> DiffReviewDismiss();
             c -> DiffReviewCycleComparisonMode();
             s -> GitToggleStageHunk();
+            S -> GitToggleStageLine();
+            J -> MoveDown();
+            K -> MoveUp();
         }
     }
 

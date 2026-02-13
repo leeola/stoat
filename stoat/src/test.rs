@@ -378,6 +378,11 @@ impl<'a> TestStoat<'a> {
                 s.git_toggle_stage_hunk(cx)
                     .unwrap_or_else(|e| panic!("GitToggleStageHunk action failed: {e}"))
             });
+        } else if type_id == TypeId::of::<GitToggleStageLine>() {
+            self.update(|s, cx| {
+                s.git_toggle_stage_line(cx)
+                    .unwrap_or_else(|e| panic!("GitToggleStageLine action failed: {e}"))
+            });
         } else {
             panic!("Unsupported action type: {}", std::any::type_name::<A>());
         }
