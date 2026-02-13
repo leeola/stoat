@@ -457,10 +457,13 @@ fn line_offset_to_byte_offset(text: &str, line: usize) -> usize {
 /// is the working-vs-index diff. Both use anchors into the same working-tree
 /// buffer, so their buffer coordinates are directly comparable.
 ///
-/// A display hunk whose buffer rows do NOT overlap any `wi_diff` hunk is fully
-/// staged (working matches index in that region, so the HEAD difference comes
-/// entirely from the index). Pure deletions (start == end) are skipped since
-/// they have no visible buffer rows.
+/// A row within a display hunk is staged when it does NOT fall inside any
+/// `wi_diff` hunk (working matches index at that row, so the HEAD difference
+/// comes entirely from the index). Pure deletions (start == end) are skipped
+/// since they have no visible buffer rows.
+///
+/// Rows are checked individually so that partially-staged hunks produce correct
+/// per-row ranges.
 pub fn compute_staged_buffer_rows(
     display_diff: &BufferDiff,
     wi_diff: Option<&BufferDiff>,
@@ -487,9 +490,19 @@ pub fn compute_staged_buffer_rows(
         if start == end {
             continue;
         }
-        let overlaps = wi_ranges.iter().any(|&(ws, we)| ws < end && we > start);
-        if !overlaps {
-            staged.push(start..end);
+        let mut range_start: Option<u32> = None;
+        for row in start..end {
+            let in_wi = wi_ranges.iter().any(|&(ws, we)| row >= ws && row < we);
+            if in_wi {
+                if let Some(rs) = range_start.take() {
+                    staged.push(rs..row);
+                }
+            } else if range_start.is_none() {
+                range_start = Some(row);
+            }
+        }
+        if let Some(rs) = range_start {
+            staged.push(rs..end);
         }
     }
     staged
@@ -790,6 +803,19 @@ mod tests {
         let (wi_diff, _) = make_diff(index, working);
         let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn staged_buffer_rows_partial_hunk() {
+        let head = "A\nB\nC\n";
+        let working = "A\nB\nC\nD\nE\n";
+        // D is staged (index has it), E is not
+        let index = "A\nB\nC\nD\n";
+        let (display_diff, buf) = make_diff(head, working);
+        let snap = buf.snapshot();
+        let (wi_diff, _) = make_diff(index, working);
+        let rows = compute_staged_buffer_rows(&display_diff, Some(&wi_diff), &snap);
+        assert_eq!(rows, vec![3..4]);
     }
 
     #[test]

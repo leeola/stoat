@@ -1085,12 +1085,19 @@ impl Stoat {
             return;
         };
 
-        // Convert cursor buffer position to display position (handles wrapping, folding, etc.)
         let cursor_buffer_pos = self.cursor.position();
-        let display_snapshot = self.display_map.update(cx, |dm, cx| dm.snapshot(cx));
-        let cursor_display_point =
-            display_snapshot.point_to_display_point(cursor_buffer_pos, sum_tree::Bias::Left);
-        let cursor_display_row = cursor_display_point.row as f32;
+
+        let cursor_display_row = if self.is_in_diff_review(cx) {
+            let display_buffer = self.active_buffer(cx).read(cx).display_buffer(cx, true);
+            display_buffer
+                .buffer_row_to_display(cursor_buffer_pos.row)
+                .0 as f32
+        } else {
+            let display_snapshot = self.display_map.update(cx, |dm, cx| dm.snapshot(cx));
+            let cursor_display_point =
+                display_snapshot.point_to_display_point(cursor_buffer_pos, sum_tree::Bias::Left);
+            cursor_display_point.row as f32
+        };
 
         let scroll_y = self.scroll.position.y;
         let last_visible_line = scroll_y + viewport_lines;

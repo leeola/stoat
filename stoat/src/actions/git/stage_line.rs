@@ -149,10 +149,13 @@ impl Stoat {
         let mut hunk_lines = extract_hunk_lines(index_content, buffer_text, wi_hunk_index)
             .map_err(|e| format!("Failed to extract hunk lines: {e}"))?;
 
-        // For pure deletions, libgit2 apply expects new_start == old_start
-        if is_deletion && hunk_lines.new_lines == 0 {
-            hunk_lines.new_start = hunk_lines.old_start;
-        }
+        // new_start from wi_diff is relative to the working tree, but the patch
+        // is applied to the index. Recompute from old_start (which is index-relative).
+        hunk_lines.new_start = if hunk_lines.old_lines == 0 {
+            hunk_lines.old_start + 1
+        } else {
+            hunk_lines.old_start
+        };
 
         let mut selection = LineSelection::new(hunk_lines);
         selection.deselect_all();
@@ -458,6 +461,35 @@ mod tests {
         assert!(
             !cached.contains("+new B"),
             "Second new line should NOT be staged: {cached}"
+        );
+    }
+
+    #[gpui::test]
+    fn stages_addition_with_preceding_deletion(cx: &mut TestAppContext) {
+        let fifty_lines: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        let initial = format!("{fifty_lines}middle marker\nend\n");
+        // Delete the first 50 lines, add "charlie" after "middle marker"
+        let modified = "middle marker\ncharlie\nend\n";
+
+        let mut stoat = Stoat::test(cx).init_git();
+        let file_path = setup_repo(&mut stoat, &initial, modified);
+
+        // cursor_row 1 = "charlie" (row 0 = "middle marker")
+        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(1, 0)));
+
+        stoat.dispatch(GitToggleStageLine);
+
+        let cached = git_cached_diff(stoat.repo_path().unwrap());
+        assert!(
+            cached.contains("+charlie"),
+            "Addition should be staged: {cached}"
+        );
+
+        let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
+        let staged = repo.index_content(&file_path).unwrap();
+        assert!(
+            staged.contains("middle marker\ncharlie\n"),
+            "charlie should appear right after 'middle marker' in index, got:\n{staged}"
         );
     }
 }
