@@ -25,9 +25,10 @@
 //! ```
 
 pub mod cursor_notation;
+pub mod git_fixture;
 
-use crate::{actions::*, Stoat};
-use gpui::{Action, AppContext, Context, Entity, TestAppContext};
+use crate::{actions::*, buffer::item::BufferItem, Stoat};
+use gpui::{Action, App, AppContext, Context, Entity, TestAppContext};
 use std::{any::TypeId, path::PathBuf, sync::Arc};
 use text::Point;
 
@@ -477,6 +478,27 @@ impl<'a> TestStoat<'a> {
         self
     }
 
+    /// Set the worktree to a [`GitFixture`]'s directory.
+    ///
+    /// Required for operations that resolve paths against the worktree root
+    /// (e.g. stage/unstage). Chainable like [`init_git`](Self::init_git).
+    pub fn use_fixture(mut self, fixture: &git_fixture::GitFixture) -> Self {
+        self.update(|s, _cx| {
+            s.worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
+                fixture.dir().to_path_buf(),
+            )));
+        });
+        self
+    }
+
+    /// Read from the active [`BufferItem`] without needing nested entity access.
+    pub fn read_buffer<R>(&self, f: impl FnOnce(&BufferItem, &App) -> R) -> R {
+        self.cx.read_entity(&self.entity, |s, cx| {
+            let item = s.active_buffer(cx);
+            cx.read_entity(&item, |item, cx| f(item, cx))
+        })
+    }
+
     /// Create a TestStoat with cursor and selection from marked notation.
     ///
     /// Uses the cursor notation DSL to specify initial cursor/selection positions.
@@ -828,5 +850,17 @@ mod tests {
             let back = point_to_offset(text, point);
             assert_eq!(offset, back, "Round trip failed for offset {offset}");
         }
+    }
+
+    #[gpui::test]
+    fn fixture_load_file_read_buffer(cx: &mut TestAppContext) {
+        let fixture = git_fixture::GitFixture::load("basic-diff");
+        let mut stoat = Stoat::test(cx).use_fixture(&fixture);
+        stoat.update(|s, cx| {
+            s.load_file(&fixture.changed_files()[0], cx).unwrap();
+        });
+
+        let hunk_count = stoat.read_buffer(|item, _cx| item.diff().map(|d| d.hunks.len()));
+        assert!(hunk_count.is_some_and(|n| n > 0));
     }
 }

@@ -1,9 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
+
 pub struct TestRepo {
     pub dir: PathBuf,
     pub changed_files: Vec<PathBuf>,
@@ -19,21 +19,7 @@ impl Drop for TestRepo {
 }
 
 pub fn list_scenarios(fixtures_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(fixtures_dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|e| {
-            let e = e.ok()?;
-            if e.file_type().ok()?.is_dir() {
-                Some(e.file_name().to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .collect();
-    names.sort();
-    names
+    git_fixture::list_scenarios(fixtures_dir)
 }
 
 pub fn create_test_repo(
@@ -54,83 +40,13 @@ pub fn create_test_repo(
     }
     fs::create_dir_all(&repo).context("creating fixture dir")?;
 
-    run_git(&repo, &["init"])?;
-    run_git(&repo, &["config", "user.name", "Test"])?;
-    run_git(&repo, &["config", "user.email", "test@test.com"])?;
-
-    let mut patches: Vec<_> = fs::read_dir(fixture_dir)
-        .with_context(|| format!("reading fixture dir: {}", fixture_dir.display()))?
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".patch") {
-                Some((name, e.path()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    patches.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (name, path) in &patches {
-        let abs_patch = fs::canonicalize(path)
-            .with_context(|| format!("canonicalizing patch: {}", path.display()))?;
-
-        if name.starts_with("c-") {
-            run_git(&repo, &["am", &abs_patch.to_string_lossy()])?;
-        } else if name.starts_with("s-") {
-            run_git(&repo, &["apply", "--cached", &abs_patch.to_string_lossy()])?;
-        } else if name.starts_with("w-") {
-            run_git(&repo, &["apply", &abs_patch.to_string_lossy()])?;
-        } else {
-            bail!("unknown patch prefix in '{name}', expected c-/s-/w-");
-        }
-    }
-
-    let changed_files = collect_changed_files(&repo)?;
+    let changed_files = git_fixture::init_and_apply(fixture_dir, &repo)?;
 
     Ok(TestRepo {
         dir: repo,
         changed_files,
         persist,
     })
-}
-
-fn collect_changed_files(repo: &Path) -> Result<Vec<PathBuf>> {
-    let canonical_repo = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
-    let mut files = Vec::new();
-    for args in [
-        &["diff", "--name-only"][..],
-        &["diff", "--cached", "--name-only"],
-    ] {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .context("running git diff --name-only")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let path = canonical_repo.join(line);
-            if !files.contains(&path) {
-                files.push(path);
-            }
-        }
-    }
-    Ok(files)
-}
-
-fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("running git {}", args.join(" ")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {} failed: {stderr}", args.join(" "));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -184,21 +100,13 @@ mod tests {
 
         let content = fs::read_to_string(&file).unwrap();
 
-        // HEAD commit changed variable names and greeting text
         assert!(content.contains("hello stoat editor"));
         assert!(content.contains("let first = 1;"));
         assert!(content.contains("let name = \"stoat editor\";"));
 
-        // Two commits: initial + modification
-        let log = std::process::Command::new("git")
-            .args(["log", "--oneline"])
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        let log_text = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(log_text.lines().count(), 2, "should have 2 commits");
+        let log = git_fixture::run_git(repo, &["log", "--oneline"]).unwrap();
+        assert_eq!(log.lines().count(), 2, "should have 2 commits");
 
-        // Clean working tree, no staged or unstaged changes
         assert!(
             tmp.changed_files.is_empty(),
             "should have no changed files: {:#?}",

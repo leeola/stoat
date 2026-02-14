@@ -2553,6 +2553,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "git_fixture"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6540,6 +6548,7 @@ dependencies = [
  "enum_dispatch",
  "futures",
  "git2",
+ "git_fixture",
  "glob",
  "gpui",
  "ignore",

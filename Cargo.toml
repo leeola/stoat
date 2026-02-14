@@ -11,6 +11,7 @@ members = [
   "log",
   "lsp",
   "config",
+  "git_fixture",
 ]
 
 [workspace.package]
