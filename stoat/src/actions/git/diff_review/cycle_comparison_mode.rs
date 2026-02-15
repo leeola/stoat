@@ -1,7 +1,7 @@
 //! Diff review cycle comparison mode action implementation and tests.
 
 use crate::stoat::Stoat;
-use gpui::{AppContext, Context};
+use gpui::Context;
 use tracing::debug;
 
 impl Stoat {
@@ -88,28 +88,7 @@ impl Stoat {
 
             if let Some(content) = content {
                 let buffer_item = self.active_buffer(cx);
-                buffer_item.update(cx, |item, cx| {
-                    item.buffer().update(cx, |buffer, _| {
-                        let len = buffer.len();
-                        buffer.edit([(0..len, content.as_str())]);
-                    });
-                    let _ = item.reparse(cx);
-                });
-
-                // Recreate DisplayMap: the old one holds stale InlayMap anchors
-                // from the previous buffer content, causing subtract overflow on sync.
-                let buffer = buffer_item.read(cx).buffer().clone();
-                self.display_map = {
-                    let tab_width = 4;
-                    let font = self.display_map.read(cx).font().clone();
-                    let font_size = self.display_map.read(cx).font_size();
-                    let wrap_width = self.display_map.read(cx).wrap_width();
-                    cx.new(|cx| {
-                        stoat_text_transform::DisplayMap::new(
-                            buffer, tab_width, font, font_size, wrap_width, cx,
-                        )
-                    })
-                };
+                self.replace_buffer_content(&content, &buffer_item, cx);
             }
         } else {
             // For other modes, reload file to get working tree content

@@ -7,7 +7,7 @@
 //! changes.
 
 use crate::{
-    git::{diff::BufferDiff, repository::Repository},
+    git::{diff::BufferDiff, diff_review::ReviewScope, repository::Repository},
     stoat::Stoat,
 };
 use gpui::Context;
@@ -21,6 +21,10 @@ impl Stoat {
     /// deletions. Delegates to [`git_stage_hunk`](Self::git_stage_hunk) or
     /// [`git_unstage_hunk`](Self::git_unstage_hunk).
     pub fn git_toggle_stage_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.review_scope == ReviewScope::Commit {
+            return Ok(());
+        }
+
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 
@@ -67,6 +71,10 @@ impl Stoat {
     /// - [`git_stage_file`](crate::Stoat::git_stage_file) - Stage the entire file
     /// - [`git_stage_all`](crate::Stoat::git_stage_all) - Stage all changes
     pub fn git_stage_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.review_scope == ReviewScope::Commit {
+            return Ok(());
+        }
+
         let file_path = self
             .current_file_path
             .as_ref()

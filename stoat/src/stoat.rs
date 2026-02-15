@@ -1192,14 +1192,8 @@ impl Stoat {
         // Detect line ending from file contents
         let line_ending = text::LineEnding::detect(&contents);
 
-        // Update the buffer content
-        buffer_item_entity.update(cx, |item, cx| {
-            item.buffer().update(cx, |buffer, _| {
-                let len = buffer.len();
-                buffer.edit([(0..len, contents.as_str())]);
-            });
-            let _ = item.reparse(cx);
-            // Set saved text baseline, mtime, and line ending for modification tracking
+        self.replace_buffer_content(&contents, &buffer_item_entity, cx);
+        buffer_item_entity.update(cx, |item, _cx| {
             item.set_saved_text(contents.clone());
             if let Some(mtime) = mtime {
                 item.set_saved_mtime(mtime);
@@ -1264,20 +1258,6 @@ impl Stoat {
 
         // Update current file path for status bar (normalized)
         self.current_file_path = Some(self.normalize_file_path(&path_buf));
-
-        // Recreate DisplayMap with new buffer to ensure proper subscription
-        let buffer = buffer_item_entity.read(cx).buffer().clone();
-        self.display_map = {
-            let tab_width = 4;
-            let font = self.display_map.read(cx).font().clone();
-            let font_size = self.display_map.read(cx).font_size();
-            let wrap_width = self.display_map.read(cx).wrap_width();
-            cx.new(|cx| {
-                stoat_text_transform::DisplayMap::new(
-                    buffer, tab_width, font, font_size, wrap_width, cx,
-                )
-            })
-        };
 
         // Reset cursor and selections to origin
         self.cursor.move_to(text::Point::new(0, 0));
@@ -1543,6 +1523,37 @@ impl Stoat {
                 item.set_staged_hunk_indices(staged_hunk_indices);
             });
         }
+    }
+
+    /// Replace the buffer content, reparse for syntax highlighting, and recreate
+    /// the [`DisplayMap`](stoat_text_transform::DisplayMap) so that stale InlayMap
+    /// anchors from the previous content don't cause subtract-overflow panics.
+    pub(crate) fn replace_buffer_content(
+        &mut self,
+        content: &str,
+        buffer_item: &Entity<BufferItem>,
+        cx: &mut Context<Self>,
+    ) {
+        buffer_item.update(cx, |item, cx| {
+            item.buffer().update(cx, |buffer, _| {
+                let len = buffer.len();
+                buffer.edit([(0..len, content)]);
+            });
+            let _ = item.reparse(cx);
+        });
+
+        let buffer = buffer_item.read(cx).buffer().clone();
+        self.display_map = {
+            let tab_width = 4;
+            let font = self.display_map.read(cx).font().clone();
+            let font_size = self.display_map.read(cx).font_size();
+            let wrap_width = self.display_map.read(cx).wrap_width();
+            cx.new(|cx| {
+                stoat_text_transform::DisplayMap::new(
+                    buffer, tab_width, font, font_size, wrap_width, cx,
+                )
+            })
+        };
     }
 
     /// Reload the active buffer from disk if the file changed externally and the buffer is clean.

@@ -6,7 +6,10 @@
 //! [`git_unstage_file`](crate::Stoat::git_unstage_file) for unstaging entire files and
 //! [`git_unstage_all`](crate::Stoat::git_unstage_all) for unstaging all changes.
 
-use crate::{git::repository::Repository, stoat::Stoat};
+use crate::{
+    git::{diff_review::ReviewScope, repository::Repository},
+    stoat::Stoat,
+};
 use git2::DiffOptions;
 use gpui::Context;
 
@@ -32,6 +35,10 @@ impl Stoat {
     /// - [`git_unstage_file`](crate::Stoat::git_unstage_file) - Unstage the entire file
     /// - [`git_unstage_all`](crate::Stoat::git_unstage_all) - Unstage all changes
     pub fn git_unstage_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.review_scope == ReviewScope::Commit {
+            return Ok(());
+        }
+
         let file_path = self
             .current_file_path
             .as_ref()

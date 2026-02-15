@@ -82,27 +82,25 @@ impl Stoat {
                 // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
                 match self.review_comparison_mode() {
                     crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                        if let Ok(index_content) = repo.index_content(&abs_path) {
-                            let buffer_item = self.active_buffer(cx);
-                            buffer_item.update(cx, |item, cx| {
-                                item.buffer().update(cx, |buffer, _| {
-                                    let len = buffer.len();
-                                    buffer.edit([(0..len, index_content.as_str())]);
-                                });
-                                let _ = item.reparse(cx);
-                            });
+                        match repo.index_content(&abs_path) {
+                            Ok(content) => {
+                                let buffer_item = self.active_buffer(cx);
+                                self.replace_buffer_content(&content, &buffer_item, cx);
+                            },
+                            Err(e) => {
+                                tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
+                            },
                         }
                     },
                     crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                        if let Ok(head_content) = repo.head_content(&abs_path) {
-                            let buffer_item = self.active_buffer(cx);
-                            buffer_item.update(cx, |item, cx| {
-                                item.buffer().update(cx, |buffer, _| {
-                                    let len = buffer.len();
-                                    buffer.edit([(0..len, head_content.as_str())]);
-                                });
-                                let _ = item.reparse(cx);
-                            });
+                        match repo.head_content(&abs_path) {
+                            Ok(content) => {
+                                let buffer_item = self.active_buffer(cx);
+                                self.replace_buffer_content(&content, &buffer_item, cx);
+                            },
+                            Err(e) => {
+                                tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
+                            },
                         }
                     },
                     _ => {},
@@ -186,27 +184,25 @@ impl Stoat {
             // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
             match self.review_comparison_mode() {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                    if let Ok(index_content) = repo.index_content(&abs_path) {
-                        let buffer_item = self.active_buffer(cx);
-                        buffer_item.update(cx, |item, cx| {
-                            item.buffer().update(cx, |buffer, _| {
-                                let len = buffer.len();
-                                buffer.edit([(0..len, index_content.as_str())]);
-                            });
-                            let _ = item.reparse(cx);
-                        });
+                    match repo.index_content(&abs_path) {
+                        Ok(content) => {
+                            let buffer_item = self.active_buffer(cx);
+                            self.replace_buffer_content(&content, &buffer_item, cx);
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
+                        },
                     }
                 },
                 crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                    if let Ok(head_content) = repo.head_content(&abs_path) {
-                        let buffer_item = self.active_buffer(cx);
-                        buffer_item.update(cx, |item, cx| {
-                            item.buffer().update(cx, |buffer, _| {
-                                let len = buffer.len();
-                                buffer.edit([(0..len, head_content.as_str())]);
-                            });
-                            let _ = item.reparse(cx);
-                        });
+                    match repo.head_content(&abs_path) {
+                        Ok(content) => {
+                            let buffer_item = self.active_buffer(cx);
+                            self.replace_buffer_content(&content, &buffer_item, cx);
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
+                        },
                     }
                 },
                 _ => {},
