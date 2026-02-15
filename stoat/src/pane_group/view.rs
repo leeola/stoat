@@ -1265,6 +1265,18 @@ impl Render for PaneGroupView {
             },
         );
 
+        let file_display = status_bar_data
+            .as_ref()
+            .and_then(|sb| sb.3.as_deref())
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str());
+
+        let title = match file_display {
+            Some(name) => format!("{name} \u{2014} {mode_display} \u{2014} Stoat"),
+            None => format!("{mode_display} \u{2014} Stoat"),
+        };
+        window.set_window_title(&title);
+
         // Update minimap scroll position to match calculated value
         // This must happen after data extraction (to avoid borrow conflicts) but before thumb
         // calculation
