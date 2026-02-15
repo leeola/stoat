@@ -2,7 +2,7 @@ use crate::{
     command::{overlay::CommandOverlay, palette::CommandPalette},
     editor::view::EditorView,
     file_finder::Finder,
-    git::status::GitStatus,
+    git::{status::GitStatus, watcher::GitChangeKind},
     modal::{about::AboutModal, help::HelpModal},
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     pane_group::element::pane_axis,
@@ -21,7 +21,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Pixel offset to adjust the minimap thumb's Y position.
@@ -153,6 +153,7 @@ pub struct PaneGroupView {
     /// access)
     pub(crate) pending_actions: Vec<(String, Vec<String>)>,
     activation_observer_set: bool,
+    _git_watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl PaneGroupView {
@@ -295,6 +296,7 @@ impl PaneGroupView {
             stoat_subscriptions: vec![initial_sub],
             pending_actions: Vec::new(),
             activation_observer_set: false,
+            _git_watcher: None,
         }
     }
 
@@ -815,6 +817,18 @@ impl Focusable for PaneGroupView {
     }
 }
 
+fn git_index_changed(root: &std::path::Path, last_mtime: &mut Option<SystemTime>) -> bool {
+    let Ok(metadata) = std::fs::metadata(root.join(".git/index")) else {
+        return false;
+    };
+    let Ok(mtime) = metadata.modified() else {
+        return false;
+    };
+    let changed = last_mtime.map_or(true, |last| mtime > last);
+    *last_mtime = Some(mtime);
+    changed
+}
+
 impl Render for PaneGroupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if !self.activation_observer_set {
@@ -823,15 +837,63 @@ impl Render for PaneGroupView {
                 if !window.is_window_active() {
                     return;
                 }
+                this.app_state.refresh_git_status();
                 if let Some(editor) = this.active_editor().cloned() {
                     editor.update(cx, |editor, cx| {
                         editor.stoat.update(cx, |stoat, cx| {
+                            stoat.reload_if_changed_on_disk(cx);
                             stoat.refresh_git_diff(cx);
                         });
                     });
                 }
+                cx.notify();
             });
             self.stoat_subscriptions.push(sub);
+
+            // Start git filesystem watcher + polling debounce task
+            let (sender, receiver) = smol::channel::bounded::<GitChangeKind>(64);
+            let root = self.app_state.worktree.lock().root().to_path_buf();
+            self._git_watcher = crate::git::watcher::start_watching(&root, sender);
+
+            cx.spawn(async move |this, cx| {
+                let mut last_index_mtime: Option<SystemTime> = None;
+                let poll_interval = Duration::from_secs(2);
+                let debounce = Duration::from_millis(300);
+
+                loop {
+                    let event = futures::future::select(
+                        Box::pin(receiver.recv()),
+                        Box::pin(smol::Timer::after(poll_interval)),
+                    )
+                    .await;
+
+                    let is_poll = matches!(event, futures::future::Either::Right(_));
+
+                    if is_poll && !git_index_changed(&root, &mut last_index_mtime) {
+                        continue;
+                    }
+
+                    smol::Timer::after(debounce).await;
+                    while receiver.try_recv().is_ok() {}
+
+                    let ok = this.update(cx, |this, cx| {
+                        this.app_state.refresh_git_status();
+                        if let Some(editor) = this.active_editor().cloned() {
+                            editor.update(cx, |editor, cx| {
+                                editor.stoat.update(cx, |stoat, cx| {
+                                    stoat.reload_if_changed_on_disk(cx);
+                                    stoat.refresh_git_diff(cx);
+                                });
+                            });
+                        }
+                        cx.notify();
+                    });
+                    if ok.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
         }
 
         // Process any pending actions from StoatEvent::Action subscriptions

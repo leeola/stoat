@@ -8,6 +8,7 @@ pub mod diff_review;
 pub mod line_selection;
 pub mod repository;
 pub mod status;
+pub mod watcher;
 
 // Re-export commonly used items from submodules
 pub use diff::{BufferDiff, DiffHunk, DiffHunkStatus};

@@ -38,6 +38,8 @@ git2 = { version = "0.20", default-features = false, features = [
   "vendored-libgit2",
   "vendored-openssl",
 ] }
+futures = "0.3"
+notify = "7"
 tempfile = "3.12"
 git_fixture = { path = "../git_fixture" }
 

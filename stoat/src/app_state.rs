@@ -950,6 +950,28 @@ impl AppState {
         (prev_mode, prev_ctx)
     }
 
+    /// Refresh git status (branch info, dirty count, file list) from the repository.
+    ///
+    /// Used by the window activation handler, filesystem watcher, and modals to keep
+    /// the status bar and git state current after external git operations.
+    pub fn refresh_git_status(&mut self) {
+        let root_path = self.worktree.lock().root().to_path_buf();
+        if let Ok(repo) = crate::git::repository::Repository::discover(&root_path) {
+            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
+            let status_files =
+                crate::git::status::gather_git_status(repo.inner()).unwrap_or_default();
+            self.git_status.dirty_count = status_files.len();
+            self.git_status.branch_info = branch_info;
+            self.git_status.files = status_files;
+            self.git_status.filtered = self.git_status.filter_files(&self.git_status.files);
+        } else {
+            self.git_status.files.clear();
+            self.git_status.filtered.clear();
+            self.git_status.branch_info = None;
+            self.git_status.dirty_count = 0;
+        }
+    }
+
     /// Open git status modal.
     ///
     /// Refreshes git status from the repository and applies the current filter.
@@ -959,25 +981,6 @@ impl AppState {
     /// is responsible for:
     /// - Setting the active view's key_context to [`KeyContext::Git`]
     /// - Setting the active view's mode to "git_status"
-    ///
-    /// # Arguments
-    ///
-    /// * `current_mode` - Current mode to save for restoration
-    /// * `current_key_context` - Current key context to save for restoration
-    ///
-    /// # Returns
-    ///
-    /// `(previous_mode, previous_key_context)` tuple for restoration
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let (prev_mode, prev_ctx) = self.app_state.open_git_status(mode, key_context);
-    /// editor.stoat.update(cx, |stoat, cx| {
-    ///     stoat.set_key_context(KeyContext::Git);
-    ///     stoat.set_mode("git_status");
-    /// });
-    /// ```
     pub fn open_git_status(
         &mut self,
         current_mode: String,
@@ -987,24 +990,7 @@ impl AppState {
         self.git_status.previous_mode = Some(current_mode);
         self.git_status.previous_key_context = Some(current_key_context);
 
-        // Refresh git status from repository
-        if let Ok(repo) = crate::git::repository::Repository::open(std::path::Path::new(".")) {
-            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
-            let status_files =
-                crate::git::status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
-            let dirty_count = status_files.len();
-
-            self.git_status.files = status_files.clone();
-            self.git_status.branch_info = branch_info;
-            self.git_status.dirty_count = dirty_count;
-        } else {
-            self.git_status.files.clear();
-            self.git_status.branch_info = None;
-            self.git_status.dirty_count = 0;
-        }
-
-        // Apply current filter
-        self.git_status.filtered = self.git_status.filter_files(&self.git_status.files);
+        self.refresh_git_status();
         self.git_status.selected = 0;
 
         // Clear any existing preview (caller will load new preview)
@@ -1084,22 +1070,7 @@ impl AppState {
         *self.worktree.lock() = Worktree::new(canonical_path.clone());
 
         // Update git repository
-        if let Ok(repo) = crate::git::repository::Repository::open(&canonical_path) {
-            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
-            let status_files =
-                crate::git::status::gather_git_status(repo.inner()).unwrap_or_else(|_| Vec::new());
-            let dirty_count = status_files.len();
-
-            self.git_status.branch_info = branch_info;
-            self.git_status.files = status_files.clone();
-            self.git_status.filtered = status_files;
-            self.git_status.dirty_count = dirty_count;
-        } else {
-            self.git_status.branch_info = None;
-            self.git_status.files.clear();
-            self.git_status.filtered.clear();
-            self.git_status.dirty_count = 0;
-        }
+        self.refresh_git_status();
 
         let needs_lsp_restart = self
             .lsp_state

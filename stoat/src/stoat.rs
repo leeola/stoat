@@ -1545,6 +1545,34 @@ impl Stoat {
         }
     }
 
+    /// Reload the active buffer from disk if the file changed externally and the buffer is clean.
+    ///
+    /// Compares the file's current mtime to the saved mtime. If the file is newer and
+    /// the buffer has no unsaved edits, reloads via [`load_file`](Self::load_file).
+    pub(crate) fn reload_if_changed_on_disk(&mut self, cx: &mut Context<Self>) {
+        let Some(rel_path) = self.current_file_path.clone() else {
+            return;
+        };
+        let abs_path = self.worktree_root_abs().join(&rel_path);
+        let buffer_item = self.active_buffer(cx);
+        if buffer_item.read(cx).is_modified(cx) {
+            return;
+        }
+        let Some(saved_mtime) = buffer_item.read(cx).saved_mtime() else {
+            return;
+        };
+        let Ok(metadata) = std::fs::metadata(&abs_path) else {
+            return;
+        };
+        let Ok(current_mtime) = metadata.modified() else {
+            return;
+        };
+        if current_mtime <= saved_mtime {
+            return;
+        }
+        let _ = self.load_file(&abs_path, cx);
+    }
+
     /// Create a minimap instance for this editor.
     ///
     /// Following Zed's architecture, the minimap is just another [`Stoat`] instance

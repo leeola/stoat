@@ -327,6 +327,11 @@ impl BufferItem {
         self.saved_mtime = Some(mtime);
     }
 
+    /// Get the modification time from when the file was last loaded or saved.
+    pub fn saved_mtime(&self) -> Option<SystemTime> {
+        self.saved_mtime
+    }
+
     /// Get the line ending style for this buffer.
     ///
     /// Returns the detected line ending from when the file was loaded,
