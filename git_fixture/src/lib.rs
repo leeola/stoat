@@ -66,6 +66,19 @@ pub fn collect_changed_files(repo: &Path) -> Result<Vec<PathBuf>> {
             }
         }
     }
+
+    if let Ok(stdout) = run_git(repo, &["diff", "HEAD~1", "--name-only"]) {
+        for line in stdout.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                let path = canonical_repo.join(line);
+                if !files.contains(&path) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
     Ok(files)
 }
 
@@ -209,8 +222,11 @@ mod tests {
         assert_eq!(log.lines().count(), 2, "should have 2 commits");
 
         assert!(
-            fixture.changed_files().is_empty(),
-            "should have no changed files: {:#?}",
+            fixture
+                .changed_files()
+                .iter()
+                .any(|p| p.ends_with("main.rs")),
+            "should contain main.rs from HEAD~1 diff: {:#?}",
             fixture.changed_files()
         );
     }

@@ -108,8 +108,8 @@ mod tests {
         assert_eq!(log.lines().count(), 2, "should have 2 commits");
 
         assert!(
-            tmp.changed_files.is_empty(),
-            "should have no changed files: {:#?}",
+            tmp.changed_files.iter().any(|p| p.ends_with("main.rs")),
+            "should contain main.rs from HEAD~1 diff: {:#?}",
             tmp.changed_files
         );
     }
