@@ -4,7 +4,10 @@
 //! FileFinder, etc.) with automatic mode restoration. KeyContext determines which UI
 //! is rendered while mode determines interaction within that context.
 
-use crate::stoat::{KeyContext, Stoat};
+use crate::{
+    git::diff_review::ReviewScope,
+    stoat::{KeyContext, Stoat},
+};
 use gpui::Context;
 use tracing::{debug, warn};
 
@@ -83,6 +86,11 @@ impl Stoat {
         // When leaving diff review, phantom rows disappear. Snap scroll to cursor
         // so the viewport doesn't end up past the end of the buffer.
         if was_diff_review && context == KeyContext::TextEditor {
+            self.review_scope = ReviewScope::WorkingTree;
+            self.review_saved = None;
+
+            self.refresh_git_diff(cx);
+
             let cursor_row = self.cursor_position().row as f32;
             let viewport = self.viewport_lines.unwrap_or(40.0);
             let target_y = (cursor_row - viewport / 3.0).max(0.0);

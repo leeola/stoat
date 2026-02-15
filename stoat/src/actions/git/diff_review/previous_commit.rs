@@ -23,6 +23,7 @@ impl Stoat {
 
         if self.review_scope == ReviewScope::Commit {
             self.exit_commit_scope(&repo, cx);
+            self.refresh_git_diff(cx);
         } else {
             self.enter_commit_scope(&repo, cx);
         }
