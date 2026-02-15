@@ -114,7 +114,7 @@ impl Element for EditorElement {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
             let mode = if is_in_diff_review {
-                Some(stoat.diff_review_comparison_mode)
+                Some(stoat.review_comparison_mode())
             } else {
                 None
             };

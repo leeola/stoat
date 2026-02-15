@@ -36,14 +36,14 @@ impl Stoat {
         debug!("Resetting diff review progress");
 
         // Clear all approved hunks
-        self.diff_review_approved_hunks.clear();
+        self.review_state.approved_hunks.clear();
 
         // If in review mode, load first file and jump to first hunk
-        if self.mode == "diff_review" && !self.diff_review_files.is_empty() {
+        if self.mode == "diff_review" && !self.review_state.files.is_empty() {
             let root_path = self.worktree.lock().root().to_path_buf();
             if let Ok(repo) = crate::git::repository::Repository::discover(&root_path) {
                 // Clone file list to avoid borrow conflicts
-                let files = self.diff_review_files.clone();
+                let files = self.review_state.files.clone();
                 // Find first file with hunks by loading files on-demand
                 for (idx, file_path) in files.iter().enumerate() {
                     let abs_path = repo.workdir().join(file_path);
@@ -68,8 +68,8 @@ impl Stoat {
                             });
 
                             // Reset to start
-                            self.diff_review_current_file_idx = idx;
-                            self.diff_review_current_hunk_idx = 0;
+                            self.review_state.file_idx = idx;
+                            self.review_state.hunk_idx = 0;
 
                             self.jump_to_current_hunk(true, cx);
                             cx.notify();
@@ -94,13 +94,13 @@ mod tests {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.open_diff_review(cx);
-            if s.mode() == "diff_review" && !s.diff_review_files.is_empty() {
+            if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
                 // Approve a hunk
                 s.diff_review_approve_hunk(cx);
                 // Reset progress
                 s.diff_review_reset_progress(cx);
                 // Approvals cleared
-                assert!(s.diff_review_approved_hunks.is_empty());
+                assert!(s.review_state.approved_hunks.is_empty());
             }
         });
     }

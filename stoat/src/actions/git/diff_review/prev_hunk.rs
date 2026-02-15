@@ -33,13 +33,13 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
+        if self.review_state.files.is_empty() {
             return;
         }
 
-        if self.diff_review_current_hunk_idx > 0 {
+        if self.review_state.hunk_idx > 0 {
             // Go to previous hunk in current file
-            self.diff_review_current_hunk_idx -= 1;
+            self.review_state.hunk_idx -= 1;
             self.jump_to_current_hunk(true, cx);
         } else {
             // Go to previous file's last hunk

@@ -261,7 +261,8 @@ on key {
             s -> GitToggleStageHunk();
             S -> GitToggleStageLine();
             p -> DiffReviewPreviousCommit();
-            u -> DiffReviewRevertHunk();
+            u -> GitUnstageHunk();
+            r -> DiffReviewRevertHunk();
             J -> MoveDown();
             K -> MoveUp();
         }

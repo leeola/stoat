@@ -246,18 +246,14 @@ impl GitStatus {
 /// approving git diff hunks across multiple files.
 #[derive(Default)]
 pub struct DiffReview {
-    /// List of files with changes to review
-    pub files: Vec<PathBuf>,
-    /// Current file index being reviewed
-    pub current_file_idx: usize,
-    /// Current hunk index within file being reviewed
-    pub current_hunk_idx: usize,
-    /// Approved hunks by file (used for selective staging)
-    pub approved_hunks: HashMap<PathBuf, std::collections::HashSet<usize>>,
     /// Previous mode to restore when exiting review
     pub previous_mode: Option<String>,
-    /// Comparison mode (working vs HEAD, working vs index, index vs HEAD)
-    pub comparison_mode: crate::git::diff_review::DiffComparisonMode,
+    pub scope: crate::git::diff_review::ReviewScope,
+    pub state: crate::git::diff_review::ScopeState,
+    pub saved: Option<(
+        crate::git::diff_review::ReviewScope,
+        crate::git::diff_review::ScopeState,
+    )>,
 }
 
 /// Application-level state shared across all panes and view types.

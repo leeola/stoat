@@ -100,7 +100,7 @@ mod tests {
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsHead
             );
 
@@ -115,7 +115,7 @@ mod tests {
             // Cycle to WorkingVsIndex (unstaged only) - should see 1 hunk
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
@@ -128,7 +128,7 @@ mod tests {
             // Cycle to IndexVsHead (staged only) - should see 1 hunk
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
@@ -276,7 +276,7 @@ mod tests {
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsHead
             );
 
@@ -288,7 +288,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 

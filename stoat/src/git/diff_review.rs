@@ -34,7 +34,10 @@
 //! - Zed's `ProjectDiff` - Inspiration for multi-file diff navigation
 
 use crate::git::diff::BufferDiff;
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// Mode for comparing different git states during diff review.
 ///
@@ -109,21 +112,71 @@ impl DiffComparisonMode {
         }
     }
 
-    /// Cycle to the next comparison mode.
-    ///
-    /// Rotates through modes: WorkingVsHead -> WorkingVsIndex -> IndexVsHead -> WorkingVsHead.
-    ///
-    /// # Returns
-    ///
-    /// The next mode in the cycle
-    pub fn next(&self) -> Self {
-        match self {
-            Self::WorkingVsHead => Self::WorkingVsIndex,
-            Self::WorkingVsIndex => Self::IndexVsHead,
-            Self::IndexVsHead => Self::WorkingVsHead,
-            Self::HeadVsParent => Self::WorkingVsHead,
+    /// Derive the comparison mode from a scope and filter combination.
+    pub fn from_scope_and_filter(scope: ReviewScope, filter: ViewFilter) -> Self {
+        match scope {
+            ReviewScope::WorkingTree => match filter {
+                ViewFilter::All => Self::WorkingVsHead,
+                ViewFilter::Unstaged => Self::WorkingVsIndex,
+                ViewFilter::Staged => Self::IndexVsHead,
+            },
+            ReviewScope::Commit => Self::HeadVsParent,
         }
     }
+}
+
+/// What set of changes we're reviewing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ReviewScope {
+    #[default]
+    WorkingTree,
+    Commit,
+}
+
+impl ReviewScope {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::WorkingTree => "Working Tree",
+            Self::Commit => "Commit",
+        }
+    }
+}
+
+/// Within WorkingTree scope, which subset of changes to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ViewFilter {
+    #[default]
+    All,
+    Unstaged,
+    Staged,
+}
+
+impl ViewFilter {
+    pub fn next(&self) -> Self {
+        match self {
+            Self::All => Self::Unstaged,
+            Self::Unstaged => Self::Staged,
+            Self::Staged => Self::All,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::All => "All Changes",
+            Self::Unstaged => "Unstaged",
+            Self::Staged => "Staged",
+        }
+    }
+}
+
+/// Saved state for a review scope, enabling save/restore across scope transitions.
+#[derive(Clone, Debug, Default)]
+pub struct ScopeState {
+    pub files: Vec<PathBuf>,
+    pub file_idx: usize,
+    pub hunk_idx: usize,
+    pub approved_hunks: HashMap<PathBuf, HashSet<usize>>,
+    pub filter: ViewFilter,
 }
 
 /// Information about a file in diff review mode.

@@ -43,18 +43,19 @@ impl Stoat {
             return;
         }
 
+        if self.review_scope == crate::git::diff_review::ReviewScope::Commit {
+            return;
+        }
+
         debug!("Cycling diff comparison mode");
 
-        // Cycle to next mode
-        self.cycle_diff_comparison_mode();
-        let new_mode = self.diff_comparison_mode();
+        // Cycle to next filter
+        self.review_state.filter = self.review_state.filter.next();
+        let new_mode = self.review_comparison_mode();
         debug!("New comparison mode: {:?}", new_mode);
 
         // Get current file path
-        let current_file_path = match self
-            .diff_review_files
-            .get(self.diff_review_current_file_idx)
-        {
+        let current_file_path = match self.review_state.files.get(self.review_state.file_idx) {
             Some(path) => path.clone(),
             None => return,
         };
@@ -128,8 +129,8 @@ impl Stoat {
 
             // Reset hunk index if it's now out of range
             let hunk_count = new_diff.hunks.len();
-            if self.diff_review_current_hunk_idx >= hunk_count {
-                self.diff_review_current_hunk_idx = 0;
+            if self.review_state.hunk_idx >= hunk_count {
+                self.review_state.hunk_idx = 0;
             }
 
             if hunk_count > 0 {
@@ -192,11 +193,11 @@ mod tests {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.open_diff_review(cx);
-            if s.mode() == "diff_review" && !s.diff_review_files.is_empty() {
-                let initial_mode = s.diff_comparison_mode();
+            if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
+                let initial_mode = s.review_comparison_mode();
                 s.diff_review_cycle_comparison_mode(cx);
                 // Mode should change
-                assert_ne!(s.diff_comparison_mode(), initial_mode);
+                assert_ne!(s.review_comparison_mode(), initial_mode);
             }
         });
     }

@@ -37,33 +37,29 @@ impl Stoat {
         }
 
         // Get current file path
-        let current_file_path = match self
-            .diff_review_files
-            .get(self.diff_review_current_file_idx)
-        {
+        let current_file_path = match self.review_state.files.get(self.review_state.file_idx) {
             Some(path) => path.clone(),
             None => return,
         };
 
         let approved_hunks = self
-            .diff_review_approved_hunks
+            .review_state
+            .approved_hunks
             .entry(current_file_path.clone())
             .or_default();
 
-        if approved_hunks.contains(&self.diff_review_current_hunk_idx) {
-            // Currently approved - unapprove it
-            approved_hunks.remove(&self.diff_review_current_hunk_idx);
+        if approved_hunks.contains(&self.review_state.hunk_idx) {
+            approved_hunks.remove(&self.review_state.hunk_idx);
             debug!(
                 file = ?current_file_path,
-                hunk = self.diff_review_current_hunk_idx,
+                hunk = self.review_state.hunk_idx,
                 "Unapproved hunk"
             );
         } else {
-            // Not approved - approve it
-            approved_hunks.insert(self.diff_review_current_hunk_idx);
+            approved_hunks.insert(self.review_state.hunk_idx);
             debug!(
                 file = ?current_file_path,
-                hunk = self.diff_review_current_hunk_idx,
+                hunk = self.review_state.hunk_idx,
                 "Approved hunk"
             );
         }
@@ -80,14 +76,15 @@ mod tests {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.open_diff_review(cx);
-            if s.mode() == "diff_review" && !s.diff_review_files.is_empty() {
-                let file_path = &s.diff_review_files[s.diff_review_current_file_idx].clone();
-                let hunk_idx = s.diff_review_current_hunk_idx;
+            if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
+                let file_path = &s.review_state.files[s.review_state.file_idx].clone();
+                let hunk_idx = s.review_state.hunk_idx;
 
                 // Toggle on
                 s.diff_review_toggle_approval(cx);
                 assert!(s
-                    .diff_review_approved_hunks
+                    .review_state
+                    .approved_hunks
                     .get(file_path)
                     .map(|set| set.contains(&hunk_idx))
                     .unwrap_or(false));
@@ -95,7 +92,8 @@ mod tests {
                 // Toggle off
                 s.diff_review_toggle_approval(cx);
                 assert!(!s
-                    .diff_review_approved_hunks
+                    .review_state
+                    .approved_hunks
                     .get(file_path)
                     .map(|set| set.contains(&hunk_idx))
                     .unwrap_or(false));

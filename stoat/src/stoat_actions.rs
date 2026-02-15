@@ -49,17 +49,17 @@ impl Stoat {
             (diff, buffer_snapshot)
         };
 
-        if self.diff_review_current_hunk_idx >= diff.hunks.len() {
+        if self.review_state.hunk_idx >= diff.hunks.len() {
             return;
         }
 
-        let hunk = &diff.hunks[self.diff_review_current_hunk_idx];
+        let hunk = &diff.hunks[self.review_state.hunk_idx];
 
         // Convert hunk anchors to points
         let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot);
         let hunk_end = hunk.buffer_range.end.to_point(&buffer_snapshot);
 
-        let hunk_idx = self.diff_review_current_hunk_idx;
+        let hunk_idx = self.review_state.hunk_idx;
         let start_row = hunk_start.row;
 
         // Move cursor to hunk start (always in buffer coordinates)
@@ -70,7 +70,7 @@ impl Stoat {
             // In diff review, phantom rows shift display rows relative to buffer rows.
             // Convert to display coordinates so the viewport targets the right position.
             let (display_start_row, display_end_row) = if self.is_in_diff_review(cx) {
-                let mode = Some(self.diff_review_comparison_mode);
+                let mode = Some(self.review_comparison_mode());
                 let display_buffer = buffer_item.read(cx).display_buffer(cx, true, mode);
                 let start = display_buffer.buffer_row_to_display(hunk_start.row).0;
                 let end = display_buffer.buffer_row_to_display(hunk_end.row).0;
@@ -107,7 +107,7 @@ impl Stoat {
     /// Uses pre-computed indices from GitIndex for O(1) navigation to the next file with hunks.
     /// Wraps to first file if at the end.
     pub fn load_next_file(&mut self, cx: &mut Context<Self>) {
-        if self.diff_review_files.is_empty() {
+        if self.review_state.files.is_empty() {
             return;
         }
 
@@ -117,13 +117,13 @@ impl Stoat {
             Err(_) => return,
         };
 
-        let file_count = self.diff_review_files.len();
-        let current_idx = self.diff_review_current_file_idx;
+        let file_count = self.review_state.files.len();
+        let current_idx = self.review_state.file_idx;
 
         // Loop through files starting from next one, looking for one with hunks
         for offset in 1..=file_count {
             let next_idx = (current_idx + offset) % file_count;
-            let file_path = &self.diff_review_files[next_idx];
+            let file_path = &self.review_state.files[next_idx];
             let abs_path = repo.workdir().join(file_path);
 
             // Load file
@@ -133,7 +133,7 @@ impl Stoat {
             }
 
             // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.diff_comparison_mode() {
+            match self.review_comparison_mode() {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                     if let Ok(index_content) = repo.index_content(&abs_path) {
                         let buffer_item = self.active_buffer(cx);
@@ -180,8 +180,8 @@ impl Stoat {
                         next_idx
                     );
 
-                    self.diff_review_current_file_idx = next_idx;
-                    self.diff_review_current_hunk_idx = 0;
+                    self.review_state.file_idx = next_idx;
+                    self.review_state.hunk_idx = 0;
                     self.jump_to_current_hunk(true, cx);
                     return;
                 }
@@ -203,7 +203,7 @@ impl Stoat {
     /// Uses pre-computed indices from GitIndex for O(1) navigation to the previous file with hunks.
     /// Wraps to last file if at the beginning.
     pub fn load_prev_file(&mut self, cx: &mut Context<Self>) {
-        if self.diff_review_files.is_empty() {
+        if self.review_state.files.is_empty() {
             return;
         }
 
@@ -213,8 +213,8 @@ impl Stoat {
             Err(_) => return,
         };
 
-        let file_count = self.diff_review_files.len();
-        let current_idx = self.diff_review_current_file_idx;
+        let file_count = self.review_state.files.len();
+        let current_idx = self.review_state.file_idx;
 
         // Loop through files backwards starting from previous one, looking for one with hunks
         for offset in 1..=file_count {
@@ -224,7 +224,7 @@ impl Stoat {
                 file_count - (offset - current_idx)
             };
 
-            let file_path = &self.diff_review_files[prev_idx];
+            let file_path = &self.review_state.files[prev_idx];
             let abs_path = repo.workdir().join(file_path);
 
             // Load file
@@ -234,7 +234,7 @@ impl Stoat {
             }
 
             // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.diff_comparison_mode() {
+            match self.review_comparison_mode() {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                     if let Ok(index_content) = repo.index_content(&abs_path) {
                         let buffer_item = self.active_buffer(cx);
@@ -283,8 +283,8 @@ impl Stoat {
 
                     // Jump to last hunk in previous file
                     let last_hunk_idx = diff.hunks.len().saturating_sub(1);
-                    self.diff_review_current_file_idx = prev_idx;
-                    self.diff_review_current_hunk_idx = last_hunk_idx;
+                    self.review_state.file_idx = prev_idx;
+                    self.review_state.hunk_idx = last_hunk_idx;
                     self.jump_to_current_hunk(true, cx);
                     return;
                 }

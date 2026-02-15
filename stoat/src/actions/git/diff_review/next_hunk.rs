@@ -35,7 +35,7 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
+        if self.review_state.files.is_empty() {
             return;
         }
 
@@ -51,16 +51,16 @@ impl Stoat {
 
         tracing::debug!(
             "diff_review_next_hunk: file_idx={}, hunk_idx={}, hunk_count={}",
-            self.diff_review_current_file_idx,
-            self.diff_review_current_hunk_idx,
+            self.review_state.file_idx,
+            self.review_state.hunk_idx,
             hunk_count
         );
 
         // Try to move to next hunk in current file
-        if self.diff_review_current_hunk_idx + 1 < hunk_count {
+        if self.review_state.hunk_idx + 1 < hunk_count {
             // Move to next hunk in current file
-            self.diff_review_current_hunk_idx += 1;
-            tracing::debug!("Moving to next hunk: {}", self.diff_review_current_hunk_idx);
+            self.review_state.hunk_idx += 1;
+            tracing::debug!("Moving to next hunk: {}", self.review_state.hunk_idx);
             self.jump_to_current_hunk(true, cx);
         } else {
             // At last hunk, try next file

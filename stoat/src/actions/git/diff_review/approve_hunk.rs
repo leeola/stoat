@@ -35,23 +35,21 @@ impl Stoat {
         }
 
         // Get current file path
-        let current_file_path = match self
-            .diff_review_files
-            .get(self.diff_review_current_file_idx)
-        {
+        let current_file_path = match self.review_state.files.get(self.review_state.file_idx) {
             Some(path) => path.clone(),
             None => return,
         };
 
         // Mark current hunk as approved
-        self.diff_review_approved_hunks
+        self.review_state
+            .approved_hunks
             .entry(current_file_path.clone())
             .or_default()
-            .insert(self.diff_review_current_hunk_idx);
+            .insert(self.review_state.hunk_idx);
 
         debug!(
             file = ?current_file_path,
-            hunk = self.diff_review_current_hunk_idx,
+            hunk = self.review_state.hunk_idx,
             "Approved hunk"
         );
 
@@ -70,11 +68,11 @@ mod tests {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.open_diff_review(cx);
-            if s.mode() == "diff_review" && !s.diff_review_files.is_empty() {
+            if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
                 s.diff_review_approve_hunk(cx);
                 // Verify hunk was marked as approved
-                let file_path = &s.diff_review_files[s.diff_review_current_file_idx];
-                if let Some(approved) = s.diff_review_approved_hunks.get(file_path) {
+                let file_path = &s.review_state.files[s.review_state.file_idx];
+                if let Some(approved) = s.review_state.approved_hunks.get(file_path) {
                     assert!(!approved.is_empty());
                 }
             }

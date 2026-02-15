@@ -39,7 +39,7 @@ impl Stoat {
             return;
         }
 
-        if self.diff_review_files.is_empty() {
+        if self.review_state.files.is_empty() {
             return;
         }
 
@@ -49,9 +49,9 @@ impl Stoat {
             Err(_) => return,
         };
 
-        let start_file = self.diff_review_current_file_idx;
-        let start_hunk = self.diff_review_current_hunk_idx + 1; // Start from next hunk
-        let file_count = self.diff_review_files.len();
+        let start_file = self.review_state.file_idx;
+        let start_hunk = self.review_state.hunk_idx + 1; // Start from next hunk
+        let file_count = self.review_state.files.len();
 
         let empty_set = std::collections::HashSet::new();
 
@@ -59,7 +59,8 @@ impl Stoat {
         let find_unreviewed_in_file =
             |file_path: &std::path::PathBuf, start_hunk_idx: usize| -> Option<usize> {
                 let approved_hunks = self
-                    .diff_review_approved_hunks
+                    .review_state
+                    .approved_hunks
                     .get(file_path)
                     .unwrap_or(&empty_set);
 
@@ -74,9 +75,9 @@ impl Stoat {
             };
 
         // Search in current file first (from start_hunk onward)
-        if let Some(current_file_path) = self.diff_review_files.get(start_file) {
+        if let Some(current_file_path) = self.review_state.files.get(start_file) {
             if let Some(hunk_idx) = find_unreviewed_in_file(current_file_path, start_hunk) {
-                self.diff_review_current_hunk_idx = hunk_idx;
+                self.review_state.hunk_idx = hunk_idx;
                 self.jump_to_current_hunk(true, cx);
                 cx.notify();
                 return;
@@ -91,7 +92,7 @@ impl Stoat {
             }
 
             // Clone file path to avoid borrow conflicts
-            let file_path = self.diff_review_files[file_idx].clone();
+            let file_path = self.review_state.files[file_idx].clone();
             let abs_path = repo.workdir().join(&file_path);
 
             // Load file
@@ -113,15 +114,16 @@ impl Stoat {
 
                 // Check for unreviewed hunks in this file
                 let approved_hunks = self
-                    .diff_review_approved_hunks
+                    .review_state
+                    .approved_hunks
                     .get(&file_path)
                     .unwrap_or(&empty_set);
 
                 if let Some(hunk_idx) =
                     (0..diff.hunks.len()).find(|idx| !approved_hunks.contains(idx))
                 {
-                    self.diff_review_current_file_idx = file_idx;
-                    self.diff_review_current_hunk_idx = hunk_idx;
+                    self.review_state.file_idx = file_idx;
+                    self.review_state.hunk_idx = hunk_idx;
                     self.jump_to_current_hunk(true, cx);
                     cx.notify();
                     return;
@@ -130,14 +132,15 @@ impl Stoat {
         }
 
         // Search current file from beginning up to start_hunk
-        if let Some(current_file_path) = self.diff_review_files.get(start_file) {
+        if let Some(current_file_path) = self.review_state.files.get(start_file) {
             let approved_hunks = self
-                .diff_review_approved_hunks
+                .review_state
+                .approved_hunks
                 .get(current_file_path)
                 .unwrap_or(&empty_set);
 
             if let Some(hunk_idx) = (0..start_hunk).find(|idx| !approved_hunks.contains(idx)) {
-                self.diff_review_current_hunk_idx = hunk_idx;
+                self.review_state.hunk_idx = hunk_idx;
                 self.jump_to_current_hunk(true, cx);
                 cx.notify();
                 return;

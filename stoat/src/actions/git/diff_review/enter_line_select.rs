@@ -16,7 +16,7 @@ impl Stoat {
             return;
         }
 
-        let hunk_index = self.diff_review_current_hunk_idx;
+        let hunk_index = self.review_state.hunk_idx;
 
         let (base_text, buffer_text) = {
             let buffer_item = self.active_buffer(cx);

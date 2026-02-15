@@ -1042,9 +1042,8 @@ impl Render for PaneGroupView {
                     stoat.diff_review_progress(),
                     stoat.diff_review_file_progress(cx),
                     stoat.diff_review_hunk_position(cx),
-                    // Only show comparison mode when in diff_review mode
                     if mode_name == "diff_review" || mode_name == "line_select" {
-                        Some(stoat.diff_comparison_mode())
+                        Some((stoat.review_scope, stoat.review_state.filter))
                     } else {
                         None
                     },
@@ -1187,7 +1186,7 @@ impl Render for PaneGroupView {
                 review_progress,
                 review_file_progress,
                 hunk_position,
-                comparison_mode,
+                scope_filter,
                 lsp_status,
             )| {
                 (
@@ -1198,7 +1197,7 @@ impl Render for PaneGroupView {
                     review_progress,
                     review_file_progress,
                     hunk_position,
-                    comparison_mode,
+                    scope_filter,
                     lsp_status,
                 )
             },
@@ -1391,7 +1390,7 @@ impl Render for PaneGroupView {
                     review_progress,
                     review_file_progress,
                     hunk_position,
-                    comparison_mode,
+                    scope_filter,
                     lsp_status,
                 )| {
                     let flash_message = self.app_state.flash_message.clone();
@@ -1403,7 +1402,7 @@ impl Render for PaneGroupView {
                         review_progress,
                         review_file_progress,
                         hunk_position,
-                        comparison_mode,
+                        scope_filter,
                         lsp_status,
                         flash_message,
                     ))

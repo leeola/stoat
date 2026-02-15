@@ -3,7 +3,7 @@
 //! Displays essential context information in a 3-section layout:
 //! - Active file path (left, with overflow truncation)
 //! - Diff review info (center, only when in review mode)
-//!   - Comparison mode: [WorkingVsHead], [WorkingVsIndex], or [IndexVsHead]
+//!   - Scope and filter: [Working Tree · All Changes], [Commit · HEAD], etc.
 //!   - Patch position: Patch X/Y (current hunk across all files)
 //!   - File progress: File X/Y
 //! - Git branch name and dirty status (right)
@@ -11,6 +11,7 @@
 //!
 //! Renders as a small fixed-height bar at the bottom of the window.
 
+use crate::git::diff_review::{ReviewScope, ViewFilter};
 use gpui::{div, px, rgb, IntoElement, ParentElement, RenderOnce, Styled};
 
 /// Status bar component showing file path, git status, and mode.
@@ -34,8 +35,8 @@ pub struct StatusBar {
     review_file_progress: Option<(usize, usize)>,
     /// Hunk position: (current_hunk, total_hunks) across all files
     hunk_position: Option<(usize, usize)>,
-    /// Diff comparison mode (only shown in diff_review mode)
-    comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
+    /// Scope and filter (only shown in diff_review mode)
+    scope_filter: Option<(ReviewScope, ViewFilter)>,
     /// LSP status string for display
     lsp_status: String,
     /// Temporary flash message (replaces file path when present)
@@ -53,7 +54,7 @@ impl StatusBar {
         _review_progress: Option<(usize, usize)>,
         review_file_progress: Option<(usize, usize)>,
         hunk_position: Option<(usize, usize)>,
-        comparison_mode: Option<crate::git::diff_review::DiffComparisonMode>,
+        scope_filter: Option<(ReviewScope, ViewFilter)>,
         lsp_status: String,
         flash_message: Option<String>,
     ) -> Self {
@@ -64,7 +65,7 @@ impl StatusBar {
             file_path,
             review_file_progress,
             hunk_position,
-            comparison_mode,
+            scope_filter,
             lsp_status,
             flash_message,
         }
@@ -171,8 +172,7 @@ impl RenderOnce for StatusBar {
         let git_branch = self.git_branch_display();
         let git_wt_status = self.working_tree_status_display();
 
-        // Check if we're in review mode (any review info present)
-        let in_review_mode = self.comparison_mode.is_some()
+        let in_review_mode = self.scope_filter.is_some()
             || self.hunk_position.is_some()
             || self.review_file_progress.is_some();
 
@@ -191,9 +191,13 @@ impl RenderOnce for StatusBar {
         let center_div = if in_review_mode {
             let mut center = div().flex().items_center().gap_2();
 
-            // Add comparison mode
-            if let Some(mode) = self.comparison_mode {
-                let mode_text = format!("[{}]", mode.display_name());
+            if let Some((scope, filter)) = self.scope_filter {
+                let mode_text = match scope {
+                    ReviewScope::Commit => "[Commit \u{00b7} HEAD]".to_string(),
+                    ReviewScope::WorkingTree => {
+                        format!("[Working Tree \u{00b7} {}]", filter.display_name())
+                    },
+                };
                 center = center
                     .child(div().text_color(rgb(0x4ec9b0)).child(mode_text))
                     .child(div().text_color(rgb(0x808080)).child("|"));

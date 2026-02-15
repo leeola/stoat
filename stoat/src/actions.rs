@@ -248,11 +248,11 @@ actions!(
         DiffReviewResetProgress,
         /// Exit diff review mode
         DiffReviewDismiss,
-        /// Cycle through comparison modes (All/Unstaged/Staged)
+        /// Cycle view filter (All/Unstaged/Staged) within WorkingTree scope
         DiffReviewCycleComparisonMode,
-        /// Review previous commit (HEAD vs HEAD~1)
+        /// Toggle between WorkingTree and Commit scope
         DiffReviewPreviousCommit,
-        /// Revert current hunk in HeadVsParent mode
+        /// Revert current hunk in Commit scope
         DiffReviewRevertHunk,
     ]
 );
@@ -954,18 +954,18 @@ action_metadata!(
 );
 action_metadata!(
     DiffReviewCycleComparisonMode,
-    "cycle mode",
-    "Cycle through diff comparison modes: All Changes, Unstaged, and Staged"
+    "cycle filter",
+    "Cycle view filter: All Changes, Unstaged, Staged (WorkingTree scope only)"
 );
 action_metadata!(
     DiffReviewPreviousCommit,
-    "previous commit",
-    "Toggle review of previous commit changes (HEAD vs HEAD~1)"
+    "toggle commit",
+    "Toggle between WorkingTree and Commit scope (saves/restores position)"
 );
 action_metadata!(
     DiffReviewRevertHunk,
     "revert hunk",
-    "Revert the current hunk from the previous commit to the working tree"
+    "Revert the current hunk to the working tree (Commit scope only)"
 );
 
 // Git repository actions

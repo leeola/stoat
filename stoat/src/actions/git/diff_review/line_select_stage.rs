@@ -1,6 +1,6 @@
 //! Stage selected lines from line selection mode.
 
-use crate::stoat::Stoat;
+use crate::{git::diff_review::ReviewScope, stoat::Stoat};
 use gpui::Context;
 
 impl Stoat {
@@ -38,9 +38,7 @@ impl Stoat {
 
         let patch = super::super::hunk_patch::generate_partial_hunk_patch(selection, &file_path)?;
 
-        let (location, actual_reverse) = if self.diff_review_comparison_mode
-            == crate::git::diff_review::DiffComparisonMode::HeadVsParent
-        {
+        let (location, actual_reverse) = if self.review_scope == ReviewScope::Commit {
             (git2::ApplyLocation::WorkDir, true)
         } else {
             (git2::ApplyLocation::Index, reverse)

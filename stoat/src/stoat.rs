@@ -277,25 +277,13 @@ pub struct Stoat {
     pub(crate) about_modal_previous_key_context: Option<KeyContext>,
 
     // Diff review state
-    /// List of modified files for diff review.
-    ///
-    /// Populated when entering diff review mode. Diffs are computed on-demand when
-    /// loading each file, using
-    /// [`compute_diff_for_review_mode`](Self::compute_diff_for_review_mode).
-    pub(crate) diff_review_files: Vec<PathBuf>,
-    pub(crate) diff_review_current_file_idx: usize,
-    pub(crate) diff_review_current_hunk_idx: usize,
-    pub(crate) diff_review_approved_hunks:
-        std::collections::HashMap<PathBuf, std::collections::HashSet<usize>>,
     pub(crate) diff_review_previous_mode: Option<String>,
-    /// Comparison mode for diff review (working vs HEAD, working vs index, or index vs HEAD).
-    ///
-    /// Determines which git refs are compared when computing diffs in review mode.
-    /// Default is [`WorkingVsHead`](crate::git::diff_review::DiffComparisonMode::WorkingVsHead).
-    pub(crate) diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode,
-    /// Saved comparison mode when entering HeadVsParent, restored on exit.
-    pub(crate) diff_review_saved_comparison_mode:
-        Option<crate::git::diff_review::DiffComparisonMode>,
+    pub(crate) review_scope: crate::git::diff_review::ReviewScope,
+    pub(crate) review_state: crate::git::diff_review::ScopeState,
+    pub(crate) review_saved: Option<(
+        crate::git::diff_review::ReviewScope,
+        crate::git::diff_review::ScopeState,
+    )>,
 
     /// Line-level selection within a hunk for partial staging.
     pub(crate) line_selection: Option<crate::git::line_selection::LineSelection>,
@@ -483,13 +471,10 @@ impl Stoat {
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            diff_review_files: Vec::new(),
-            diff_review_current_file_idx: 0,
-            diff_review_current_hunk_idx: 0,
-            diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
-            diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
-            diff_review_saved_comparison_mode: None,
+            review_scope: crate::git::diff_review::ReviewScope::default(),
+            review_state: crate::git::diff_review::ScopeState::default(),
+            review_saved: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: HashMap::new(),
@@ -559,13 +544,13 @@ impl Stoat {
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            diff_review_files: Vec::new(),
-            diff_review_current_file_idx: 0,
-            diff_review_current_hunk_idx: 0,
-            diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
-            diff_review_comparison_mode: self.diff_review_comparison_mode,
-            diff_review_saved_comparison_mode: None,
+            review_scope: self.review_scope,
+            review_state: crate::git::diff_review::ScopeState {
+                filter: self.review_state.filter,
+                ..Default::default()
+            },
+            review_saved: None,
             line_selection: None,
             current_file_path: self.current_file_path.clone(),
             buffer_versions: self.buffer_versions.clone(),
@@ -873,7 +858,7 @@ impl Stoat {
             }
         }
         (self.mode == "diff_review" || self.mode == "line_select")
-            && !self.diff_review_files.is_empty()
+            && !self.review_state.files.is_empty()
     }
 
     /// Get diff review progress as (reviewed_count, total_count).
@@ -900,8 +885,8 @@ impl Stoat {
         }
 
         Some((
-            self.diff_review_current_file_idx + 1, // 1-indexed for display
-            self.diff_review_files.len(),
+            self.review_state.file_idx + 1, // 1-indexed for display
+            self.review_state.files.len(),
         ))
     }
 
@@ -952,7 +937,7 @@ impl Stoat {
         };
 
         // Use git2's diff API to count hunks efficiently
-        let hunk_counts = match repo.count_hunks_by_file(self.diff_review_comparison_mode) {
+        let hunk_counts = match repo.count_hunks_by_file(self.review_comparison_mode()) {
             Ok(counts) => counts,
             Err(e) => {
                 tracing::error!("diff_review_hunk_position: failed to count hunks: {}", e);
@@ -963,11 +948,11 @@ impl Stoat {
         let mut total_hunks = 0;
         let mut hunks_before_current = 0;
 
-        for (file_idx, file_path) in self.diff_review_files.iter().enumerate() {
+        for (file_idx, file_path) in self.review_state.files.iter().enumerate() {
             // Look up hunk count for this file (0 if not in the map)
             let hunk_count = hunk_counts.get(file_path).copied().unwrap_or(0);
 
-            if file_idx < self.diff_review_current_file_idx {
+            if file_idx < self.review_state.file_idx {
                 hunks_before_current += hunk_count;
             }
 
@@ -977,21 +962,21 @@ impl Stoat {
         if total_hunks == 0 {
             tracing::debug!(
                 "diff_review_hunk_position: no hunks found across {} files in {:?} mode",
-                self.diff_review_files.len(),
-                self.diff_review_comparison_mode
+                self.review_state.files.len(),
+                self.review_comparison_mode()
             );
             return Some((0, 0));
         }
 
-        let current_position = hunks_before_current + self.diff_review_current_hunk_idx + 1;
+        let current_position = hunks_before_current + self.review_state.hunk_idx + 1;
 
         tracing::debug!(
             "diff_review_hunk_position: position {}/{} (current_file={}, current_hunk={}, mode={:?})",
             current_position,
             total_hunks,
-            self.diff_review_current_file_idx,
-            self.diff_review_current_hunk_idx,
-            self.diff_review_comparison_mode
+            self.review_state.file_idx,
+            self.review_state.hunk_idx,
+            self.review_comparison_mode()
         );
 
         Some((current_position, total_hunks))
@@ -1007,59 +992,12 @@ impl Stoat {
     /// Get the current diff comparison mode.
     ///
     /// Returns the active comparison mode used in diff review for determining which
-    /// git refs are compared (working vs HEAD, working vs index, or index vs HEAD).
-    ///
-    /// # Returns
-    ///
-    /// The current [`DiffComparisonMode`](crate::git::diff_review::DiffComparisonMode)
-    pub fn diff_comparison_mode(&self) -> crate::git::diff_review::DiffComparisonMode {
-        self.diff_review_comparison_mode
-    }
-
-    /// Set the diff comparison mode.
-    ///
-    /// Changes which git refs are compared in diff review mode. This affects which hunks
-    /// are visible when reviewing files.
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - The new comparison mode to use
-    ///
-    /// # Usage
-    ///
-    /// This method can be called from an action to switch between reviewing all changes,
-    /// only unstaged changes, or only staged changes. Future PRs will add keybindings
-    /// to cycle through modes.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Switch to viewing only unstaged changes
-    /// stoat.set_diff_comparison_mode(DiffComparisonMode::WorkingVsIndex);
-    /// ```
-    pub fn set_diff_comparison_mode(&mut self, mode: crate::git::diff_review::DiffComparisonMode) {
-        self.diff_review_comparison_mode = mode;
-    }
-
-    /// Cycle to the next diff comparison mode.
-    ///
-    /// Rotates through comparison modes in order: WorkingVsHead -> WorkingVsIndex ->
-    /// IndexVsHead -> WorkingVsHead. This is a convenience method for toggling between
-    /// modes via a single keybinding.
-    ///
-    /// # Usage
-    ///
-    /// This method is designed to be called from an action bound to a key. Future PRs
-    /// will add the action and keybinding.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // User presses keybinding to cycle comparison mode
-    /// stoat.cycle_diff_comparison_mode();
-    /// ```
-    pub fn cycle_diff_comparison_mode(&mut self) {
-        self.diff_review_comparison_mode = self.diff_review_comparison_mode.next();
+    /// Derive the current [`DiffComparisonMode`] from scope and filter.
+    pub fn review_comparison_mode(&self) -> crate::git::diff_review::DiffComparisonMode {
+        crate::git::diff_review::DiffComparisonMode::from_scope_and_filter(
+            self.review_scope,
+            self.review_state.filter,
+        )
     }
 
     /// Get viewport height in lines
@@ -1093,7 +1031,7 @@ impl Stoat {
         let cursor_buffer_pos = self.cursor.position();
 
         let cursor_display_row = if self.is_in_diff_review(cx) {
-            let mode = Some(self.diff_review_comparison_mode);
+            let mode = Some(self.review_comparison_mode());
             let display_buffer = self
                 .active_buffer(cx)
                 .read(cx)
@@ -1486,13 +1424,14 @@ impl Stoat {
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         let buffer_id = buffer_snapshot.remote_id();
 
+        let comparison_mode = self.review_comparison_mode();
         tracing::debug!(
             "compute_diff_for_review_mode: mode={:?}, path={:?}",
-            self.diff_review_comparison_mode,
+            comparison_mode,
             path
         );
 
-        let (diff, staged_rows, staged_hunk_indices) = match self.diff_review_comparison_mode {
+        let (diff, staged_rows, staged_hunk_indices) = match comparison_mode {
             DiffComparisonMode::WorkingVsHead => {
                 let base_content = repo.head_content(path).ok()?;
                 tracing::debug!(
@@ -1647,13 +1586,10 @@ impl Stoat {
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
-            diff_review_files: Vec::new(),
-            diff_review_current_file_idx: 0,
-            diff_review_current_hunk_idx: 0,
-            diff_review_approved_hunks: std::collections::HashMap::new(),
             diff_review_previous_mode: None,
-            diff_review_comparison_mode: crate::git::diff_review::DiffComparisonMode::default(),
-            diff_review_saved_comparison_mode: None,
+            review_scope: crate::git::diff_review::ReviewScope::default(),
+            review_state: crate::git::diff_review::ScopeState::default(),
+            review_saved: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: self.buffer_versions.clone(),

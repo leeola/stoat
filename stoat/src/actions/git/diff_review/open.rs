@@ -63,18 +63,15 @@ impl Stoat {
         };
 
         // Check if we have existing review state to restore
-        if !self.diff_review_files.is_empty() {
+        if !self.review_state.files.is_empty() {
             // Restore previous review session
             debug!(
                 "Restoring review session at file {}, hunk {}",
-                self.diff_review_current_file_idx, self.diff_review_current_hunk_idx
+                self.review_state.file_idx, self.review_state.hunk_idx
             );
 
             // Load the saved file
-            if let Some(saved_file_path) = self
-                .diff_review_files
-                .get(self.diff_review_current_file_idx)
-            {
+            if let Some(saved_file_path) = self.review_state.files.get(self.review_state.file_idx) {
                 let abs_path = repo.workdir().join(saved_file_path);
 
                 if let Err(e) = self.load_file(&abs_path, cx) {
@@ -83,7 +80,7 @@ impl Stoat {
                 }
 
                 // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-                match self.diff_comparison_mode() {
+                match self.review_comparison_mode() {
                     crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                         if let Ok(index_content) = repo.index_content(&abs_path) {
                             let buffer_item = self.active_buffer(cx);
@@ -148,10 +145,10 @@ impl Stoat {
 
         if entries.is_empty() {
             debug!("No modified files to review, entering empty diff review mode");
-            self.diff_review_files = Vec::new();
-            self.diff_review_current_file_idx = 0;
-            self.diff_review_current_hunk_idx = 0;
-            self.diff_review_approved_hunks.clear();
+            self.review_state.files = Vec::new();
+            self.review_state.file_idx = 0;
+            self.review_state.hunk_idx = 0;
+            self.review_state.approved_hunks.clear();
             self.key_context = crate::stoat::KeyContext::DiffReview;
             self.mode = "diff_review".to_string();
             cx.emit(crate::stoat::StoatEvent::Changed);
@@ -173,7 +170,7 @@ impl Stoat {
         }
 
         // Store file list
-        self.diff_review_files = file_paths.clone();
+        self.review_state.files = file_paths.clone();
 
         // Find first file with hunks by loading and checking on-demand
         let mut first_file_idx = None;
@@ -187,7 +184,7 @@ impl Stoat {
             }
 
             // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.diff_comparison_mode() {
+            match self.review_comparison_mode() {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                     if let Ok(index_content) = repo.index_content(&abs_path) {
                         let buffer_item = self.active_buffer(cx);
@@ -232,7 +229,7 @@ impl Stoat {
                     tracing::info!(
                         "Diff review: found first file with {} hunks in {} mode",
                         diff.hunks.len(),
-                        self.diff_review_comparison_mode.display_name()
+                        self.review_comparison_mode().display_name()
                     );
                     break;
                 }
@@ -243,9 +240,9 @@ impl Stoat {
             Some(idx) => idx,
             None => {
                 debug!("No files with hunks in current comparison mode, entering empty diff review mode");
-                self.diff_review_current_file_idx = 0;
-                self.diff_review_current_hunk_idx = 0;
-                self.diff_review_approved_hunks.clear();
+                self.review_state.file_idx = 0;
+                self.review_state.hunk_idx = 0;
+                self.review_state.approved_hunks.clear();
                 self.key_context = crate::stoat::KeyContext::DiffReview;
                 self.mode = "diff_review".to_string();
                 cx.emit(crate::stoat::StoatEvent::Changed);
@@ -255,9 +252,9 @@ impl Stoat {
         };
 
         // Initialize state to start at first file with hunks
-        self.diff_review_current_file_idx = first_idx;
-        self.diff_review_current_hunk_idx = 0;
-        self.diff_review_approved_hunks.clear();
+        self.review_state.file_idx = first_idx;
+        self.review_state.hunk_idx = 0;
+        self.review_state.approved_hunks.clear();
 
         // Enter diff_review mode
         self.key_context = crate::stoat::KeyContext::DiffReview;
@@ -304,15 +301,15 @@ mod tests {
         let buffer_item = stoat.active_buffer(cx);
         let diff = buffer_item.read(cx).diff().expect("Diff should be loaded");
 
-        if stoat.diff_review_current_hunk_idx >= diff.hunks.len() {
+        if stoat.review_state.hunk_idx >= diff.hunks.len() {
             panic!(
                 "Hunk index {} out of range (only {} hunks)",
-                stoat.diff_review_current_hunk_idx,
+                stoat.review_state.hunk_idx,
                 diff.hunks.len()
             );
         }
 
-        let hunk = &diff.hunks[stoat.diff_review_current_hunk_idx];
+        let hunk = &diff.hunks[stoat.review_state.hunk_idx];
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot);
 
@@ -320,7 +317,7 @@ mod tests {
         assert_eq!(
             cursor.row, hunk_start.row,
             "Cursor should be at hunk {} start (row {}), but is at row {}",
-            stoat.diff_review_current_hunk_idx, hunk_start.row, cursor.row
+            stoat.review_state.hunk_idx, hunk_start.row, cursor.row
         );
     }
 
@@ -364,9 +361,10 @@ mod tests {
             assert_eq!(s.key_context, crate::stoat::KeyContext::DiffReview);
 
             // Verify file list contains both files
-            assert_eq!(s.diff_review_files.len(), 2);
+            assert_eq!(s.review_state.files.len(), 2);
             let file_names: Vec<String> = s
-                .diff_review_files
+                .review_state
+                .files
                 .iter()
                 .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
                 .collect();
@@ -374,8 +372,8 @@ mod tests {
             assert!(file_names.contains(&"file2.txt".to_string()));
 
             // Verify current position (first file, first hunk)
-            assert_eq!(s.diff_review_current_file_idx, 0);
-            assert_eq!(s.diff_review_current_hunk_idx, 0);
+            assert_eq!(s.review_state.file_idx, 0);
+            assert_eq!(s.review_state.hunk_idx, 0);
 
             // Verify active buffer loaded correctly
             let buffer_item = s.active_buffer(cx);
@@ -399,7 +397,7 @@ mod tests {
 
             // Verify no approvals yet
             assert!(
-                s.diff_review_approved_hunks.is_empty(),
+                s.review_state.approved_hunks.is_empty(),
                 "No hunks should be approved initially"
             );
         });
@@ -441,7 +439,7 @@ mod tests {
             s.open_diff_review(cx);
 
             assert_eq!(s.mode(), "diff_review");
-            assert_eq!(s.diff_review_files.len(), 1);
+            assert_eq!(s.review_state.files.len(), 1);
 
             // Verify initial state in WorkingVsHead mode
             let buffer_item = s.active_buffer(cx);
@@ -465,14 +463,14 @@ mod tests {
             // Switch to IndexVsHead mode (staged changes only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
             // Cycle again to IndexVsHead
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
@@ -556,13 +554,13 @@ mod tests {
             // Open diff review in default mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
-            assert_eq!(s.diff_review_files.len(), 1);
+            assert_eq!(s.review_state.files.len(), 1);
 
             // Cycle to IndexVsHead mode
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
@@ -576,8 +574,8 @@ mod tests {
             assert_cursor_at_hunk(s, cx);
 
             // Verify we're still at file 0, hunk 0 (wrapped around)
-            assert_eq!(s.diff_review_current_file_idx, 0);
-            assert_eq!(s.diff_review_current_hunk_idx, 0);
+            assert_eq!(s.review_state.file_idx, 0);
+            assert_eq!(s.review_state.hunk_idx, 0);
         });
     }
 
@@ -631,7 +629,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
@@ -701,7 +699,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
@@ -802,7 +800,7 @@ mod tests {
             // Cycle to WorkingVsIndex mode (unstaged only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
@@ -874,7 +872,7 @@ mod tests {
             // Cycle to WorkingVsIndex mode (unstaged only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
@@ -978,7 +976,7 @@ mod tests {
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
-                s.diff_comparison_mode(),
+                s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 

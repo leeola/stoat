@@ -178,7 +178,7 @@ impl<'a> TestStoat<'a> {
     /// Empty if not in diff review mode.
     pub fn diff_review_files(&self) -> Vec<PathBuf> {
         self.cx
-            .read_entity(&self.entity, |s, _| s.diff_review_files.clone())
+            .read_entity(&self.entity, |s, _| s.review_state.files.clone())
     }
 
     /// Get current file/hunk position in diff review.
@@ -186,10 +186,7 @@ impl<'a> TestStoat<'a> {
     /// Returns `(file_idx, hunk_idx)` tuple representing current position.
     pub fn diff_review_position(&self) -> (usize, usize) {
         self.cx.read_entity(&self.entity, |s, _| {
-            (
-                s.diff_review_current_file_idx,
-                s.diff_review_current_hunk_idx,
-            )
+            (s.review_state.file_idx, s.review_state.hunk_idx)
         })
     }
 
