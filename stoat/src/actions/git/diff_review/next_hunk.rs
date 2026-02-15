@@ -35,6 +35,10 @@ impl Stoat {
             return;
         }
 
+        if self.diff_review_files.is_empty() {
+            return;
+        }
+
         // Get hunk count from buffer diff
         let hunk_count = {
             let buffer_item = self.active_buffer(cx);

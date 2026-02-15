@@ -115,6 +115,16 @@ impl Stoat {
                 crate::git::diff_review::DiffComparisonMode::default();
         }
 
+        // Restore current buffer from working tree to clear HeadVsParent data
+        if let Some(file_path) = self
+            .diff_review_files
+            .get(self.diff_review_current_file_idx)
+            .cloned()
+        {
+            let abs_path = repo.workdir().join(&file_path);
+            let _ = self.load_file(&abs_path, cx);
+        }
+
         // Reload file list from git status
         let entries = match crate::git::status::gather_git_status(repo.inner()) {
             Ok(entries) => entries,

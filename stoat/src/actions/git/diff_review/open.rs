@@ -147,7 +147,15 @@ impl Stoat {
         };
 
         if entries.is_empty() {
-            debug!("No modified files to review");
+            debug!("No modified files to review, entering empty diff review mode");
+            self.diff_review_files = Vec::new();
+            self.diff_review_current_file_idx = 0;
+            self.diff_review_current_hunk_idx = 0;
+            self.diff_review_approved_hunks.clear();
+            self.key_context = crate::stoat::KeyContext::DiffReview;
+            self.mode = "diff_review".to_string();
+            cx.emit(crate::stoat::StoatEvent::Changed);
+            cx.notify();
             return;
         }
 
@@ -234,8 +242,14 @@ impl Stoat {
         let first_idx = match first_file_idx {
             Some(idx) => idx,
             None => {
-                debug!("No files with hunks in current comparison mode");
-                self.diff_review_files.clear();
+                debug!("No files with hunks in current comparison mode, entering empty diff review mode");
+                self.diff_review_current_file_idx = 0;
+                self.diff_review_current_hunk_idx = 0;
+                self.diff_review_approved_hunks.clear();
+                self.key_context = crate::stoat::KeyContext::DiffReview;
+                self.mode = "diff_review".to_string();
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
                 return;
             },
         };
