@@ -3,7 +3,15 @@
 //! Wraps [`text::Buffer`] with syntax highlighting tokens from tree-sitter and optional git diff
 //! state.
 
-use crate::git::diff::BufferDiff;
+use crate::{
+    git::diff::BufferDiff,
+    index::{
+        bracket::{BracketIndex, BracketSnapshot},
+        scope::{ScopeIndex, ScopeSnapshot},
+        symbol::{SymbolIndex, SymbolSnapshot},
+        SyntaxIndex,
+    },
+};
 use gpui::{App, Context, Entity, EventEmitter};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -58,6 +66,10 @@ pub struct BufferItem {
     /// Line ending style for the buffer (detected on load, preserved on save)
     line_ending: LineEnding,
 
+    symbol_index: Option<SymbolIndex>,
+    scope_index: Option<ScopeIndex>,
+    bracket_index: Option<BracketIndex>,
+
     /// LSP diagnostics per language server (inline storage for <=2 servers)
     diagnostics: SmallVec<[(ServerId, DiagnosticSet); 2]>,
 
@@ -87,6 +99,9 @@ impl BufferItem {
             saved_text: None,
             saved_mtime: None,
             line_ending: LineEnding::default(),
+            symbol_index: None,
+            scope_index: None,
+            bracket_index: None,
             diagnostics: SmallVec::new(),
             diagnostics_version: 0,
         }
@@ -143,9 +158,29 @@ impl BufferItem {
         self.token_map.lock().snapshot()
     }
 
+    pub fn symbol_snapshot(&self) -> Option<SymbolSnapshot> {
+        self.symbol_index.as_ref().map(|i| i.snapshot())
+    }
+
+    pub fn scope_snapshot(&self) -> Option<ScopeSnapshot> {
+        self.scope_index.as_ref().map(|i| i.snapshot())
+    }
+
+    pub fn bracket_snapshot(&self) -> Option<BracketSnapshot> {
+        self.bracket_index.as_ref().map(|i| i.snapshot())
+    }
+
     /// Get current language.
     pub fn language(&self) -> Language {
         self.language
+    }
+
+    fn rebuild_indices(&mut self, source: &str, buffer: &BufferSnapshot) {
+        if let Some(tree) = self.parser.tree() {
+            self.symbol_index = Some(SymbolIndex::rebuild(tree, source, buffer, self.language));
+            self.scope_index = Some(ScopeIndex::rebuild(tree, source, buffer, self.language));
+            self.bracket_index = Some(BracketIndex::rebuild(tree, source, buffer, self.language));
+        }
     }
 
     /// Reparse buffer content and update syntax highlighting tokens.
@@ -171,6 +206,8 @@ impl BufferItem {
                     .lock()
                     .replace_tokens(tokens, &buffer_snapshot);
                 let replace_time = replace_start.elapsed();
+
+                self.rebuild_indices(&contents, &buffer_snapshot);
 
                 let total = start.elapsed();
                 tracing::debug!(
@@ -222,6 +259,8 @@ impl BufferItem {
                     );
                 }
                 let replace_time = replace_start.elapsed();
+
+                self.rebuild_indices(&contents, &buffer_snapshot);
 
                 tracing::debug!(
                     "reparse_incremental: total={:?} (parse={:?}, replace={:?}) tokens={} ranges={:?}",

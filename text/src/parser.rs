@@ -156,6 +156,13 @@ impl Parser {
         }
     }
 
+    /// Get the most recent parse tree, if available.
+    ///
+    /// Returns [`None`] for plain text (no tree-sitter grammar) or before any parse.
+    pub fn tree(&self) -> Option<&tree_sitter::Tree> {
+        self.old_tree.as_ref()
+    }
+
     /// Reset the incremental parsing state
     pub fn reset(&mut self) {
         self.old_tree = None;

@@ -528,9 +528,9 @@ fn select_prev_token_brackets(cx: &mut TestAppContext) {
         s.select_prev_token(cx);
     });
 
-    // Should select closing paren (reversed)
+    // Adjacent punctuation chars form one group: "()"
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 4));
+    assert_eq!(selection.start, Point::new(0, 3));
     assert_eq!(selection.end, Point::new(0, 5));
     assert!(selection.reversed);
 }

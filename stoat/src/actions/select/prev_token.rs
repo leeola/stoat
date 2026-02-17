@@ -1,40 +1,24 @@
-//! Select previous token action implementation and tests.
-//!
-//! Demonstrates multi-cursor selection extension to previous token.
-
-use crate::stoat::Stoat;
+use crate::{char_classifier::CharClassifier, stoat::Stoat};
 use gpui::Context;
-use std::ops::Range;
-use text::{Point, ToOffset};
+use text::Point;
 
 impl Stoat {
-    /// Extend all selections to the previous token.
+    /// Extend all selections to the previous token (any non-whitespace group).
     ///
-    /// Each selection extends independently by finding the previous token from its head position
-    /// and extending to it while keeping the tail (anchor) fixed.
-    ///
-    /// Updates both the new selections field and legacy cursor field for backward compatibility.
+    /// Unlike [`select_prev_symbol`](Self::select_prev_symbol) which skips punctuation,
+    /// this selects any contiguous run of same-class non-whitespace characters.
     pub fn select_prev_token(&mut self, cx: &mut Context<Self>) {
-        let (snapshot, token_snapshot) = {
+        let snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
-            let snapshot = buffer_item.buffer().read(cx).snapshot();
-            let token_snapshot = buffer_item.token_snapshot();
-            (snapshot, token_snapshot)
+            buffer_item.buffer().read(cx).snapshot()
         };
 
-        // Auto-sync from cursor if single selection (backward compat)
-        // In non-anchored mode, replace existing non-empty selections with empty selection at
-        // cursor so each 'B' creates a new selection instead of extending the old one
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&snapshot);
             let should_reset = if self.is_mode_anchored() {
-                // In anchored selection mode, only reset if head doesn't match cursor
                 newest_sel.head() != cursor_pos
             } else {
-                // In non-anchored mode, reset if:
-                // 1. There's a non-empty selection (for BB behavior), OR
-                // 2. Head doesn't match cursor (for cursor/selection sync)
                 !newest_sel.is_empty() || newest_sel.head() != cursor_pos
             };
 
@@ -53,10 +37,8 @@ impl Stoat {
             }
         }
 
-        // Operate on all selections
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
-            // Handle non-reversed selection: flip it to reversed
             if !selection.is_empty() && !selection.reversed {
                 let start = selection.start;
                 let end = selection.end;
@@ -66,55 +48,22 @@ impl Stoat {
                 continue;
             }
 
-            let head = selection.head();
-            let cursor_offset = snapshot.point_to_offset(head);
+            let cursor_offset = snapshot.point_to_offset(selection.head());
 
-            let mut token_cursor = token_snapshot.cursor(&snapshot);
-            token_cursor.next();
-
-            let mut prev_token: Option<(usize, usize)> = None;
-
-            while let Some(token) = token_cursor.item() {
-                let token_start = token.range.start.to_offset(&snapshot);
-                let token_end = token.range.end.to_offset(&snapshot);
-
-                if token_start >= cursor_offset {
-                    break;
-                }
-
-                if token.kind.is_token() {
-                    // Remember tokens that start before cursor
-                    if token_start < cursor_offset {
-                        prev_token = Some((token_start, token_end));
-                    } else {
-                        // Token starts at or after cursor, we've found all previous tokens
-                        break;
-                    }
-                }
-
-                token_cursor.next();
-            }
-
-            let found_token: Option<Range<usize>> = prev_token.map(|(start, end)| start..end);
-
-            if let Some(range) = found_token {
+            if let Some(range) = CharClassifier::prev_group_range(&snapshot, cursor_offset) {
                 if self.is_mode_anchored() {
-                    // In anchored selection mode: extend from current tail to token start
                     let selection_start = snapshot.offset_to_point(range.start);
                     selection.set_head(selection_start, text::SelectionGoal::None);
                 } else {
-                    // In non-anchored mode: select just the token itself
                     let selection_start = snapshot.offset_to_point(range.start);
                     let selection_end = snapshot.offset_to_point(range.end);
-                    // For reversed selection: start=head, end=tail
-                    selection.start = selection_start; // head (where cursor moves to)
-                    selection.end = selection_end; // tail (where we came from)
+                    selection.start = selection_start;
+                    selection.end = selection_end;
                     selection.reversed = true;
                 }
             }
         }
 
-        // Store back and sync cursor
         self.selections.select(selections.clone(), &snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
@@ -137,10 +86,9 @@ mod tests {
             s.set_cursor_position(text::Point::new(0, 4));
             s.select_prev_token(cx);
 
-            // Verify using new multi-cursor API
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            assert_eq!(selections[0].head(), text::Point::new(0, 3)); // Selects the "."
+            assert_eq!(selections[0].head(), text::Point::new(0, 3));
             assert_eq!(selections[0].tail(), text::Point::new(0, 4));
         });
     }
@@ -151,21 +99,20 @@ mod tests {
         stoat.update(|s, cx| {
             s.insert_text("foo.bar\nbaz.qux", cx);
 
-            // Create two cursors
             let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let id = s.selections.next_id();
             s.selections.select(
                 vec![
                     text::Selection {
                         id,
-                        start: text::Point::new(0, 4), // After "."
+                        start: text::Point::new(0, 4),
                         end: text::Point::new(0, 4),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
                     text::Selection {
                         id: id + 1,
-                        start: text::Point::new(1, 4), // After "."
+                        start: text::Point::new(1, 4),
                         end: text::Point::new(1, 4),
                         reversed: false,
                         goal: text::SelectionGoal::None,
@@ -174,15 +121,13 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            // Extend both selections to previous token
             s.select_prev_token(cx);
 
-            // Verify both extended independently
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 3)); // Selects "."
+            assert_eq!(selections[0].head(), text::Point::new(0, 3));
             assert_eq!(selections[0].tail(), text::Point::new(0, 4));
-            assert_eq!(selections[1].head(), text::Point::new(1, 3)); // Selects "."
+            assert_eq!(selections[1].head(), text::Point::new(1, 3));
             assert_eq!(selections[1].tail(), text::Point::new(1, 4));
         });
     }

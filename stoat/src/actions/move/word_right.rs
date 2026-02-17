@@ -1,32 +1,19 @@
-//! Move word right action implementation and tests.
-//!
-//! Demonstrates multi-cursor word-based movement using token analysis.
-
-use crate::stoat::Stoat;
+use crate::{char_classifier::CharClassifier, stoat::Stoat};
 use gpui::Context;
-use text::{Point, ToOffset};
+use text::Point;
 
 impl Stoat {
-    /// Move all cursors right by one word (symbol).
+    /// Move all cursors right by one word.
     ///
-    /// Each cursor moves independently to the end of the next word/symbol and collapses
-    /// any existing selections. Uses token analysis to identify word boundaries.
-    ///
-    /// Updates both the new selections field and legacy cursor field for backward compatibility.
-    ///
-    /// # Related Actions
-    ///
-    /// - [`select_next_symbol`](crate::Stoat::select_next_symbol) - Extend selection to next word
-    ///   (used in visual mode)
+    /// Each cursor moves independently to the end of the current/next word group and collapses
+    /// any existing selections. Uses character classification for word boundary detection,
+    /// working on both code and plain text files.
     pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
-        let (buffer_snapshot, token_snapshot) = {
+        let buffer_snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
-            let token_snapshot = buffer_item.token_snapshot();
-            (buffer_snapshot, token_snapshot)
+            buffer_item.buffer().read(cx).snapshot()
         };
 
-        // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&buffer_snapshot);
@@ -45,37 +32,13 @@ impl Stoat {
             }
         }
 
-        // Operate on all selections
         let mut selections = self.selections.all::<Point>(&buffer_snapshot);
         for selection in &mut selections {
-            let head = selection.head();
-            let cursor_offset = buffer_snapshot.point_to_offset(head);
+            let cursor_offset = buffer_snapshot.point_to_offset(selection.head());
+            let new_offset = CharClassifier::next_word_end(&buffer_snapshot, cursor_offset);
 
-            let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
-            token_cursor.next();
-
-            let mut found_symbol_end: Option<usize> = None;
-
-            while let Some(token) = token_cursor.item() {
-                let token_end = token.range.end.to_offset(&buffer_snapshot);
-
-                if token_end <= cursor_offset {
-                    token_cursor.next();
-                    continue;
-                }
-
-                if token.kind.is_symbol() {
-                    found_symbol_end = Some(token_end);
-                    break;
-                }
-
-                token_cursor.next();
-            }
-
-            if let Some(offset) = found_symbol_end {
-                let new_pos = buffer_snapshot.offset_to_point(offset);
-
-                // Collapse selection to new cursor position
+            if new_offset != cursor_offset {
+                let new_pos = buffer_snapshot.offset_to_point(new_offset);
                 selection.start = new_pos;
                 selection.end = new_pos;
                 selection.reversed = false;
@@ -83,7 +46,6 @@ impl Stoat {
             }
         }
 
-        // Store back and sync cursor
         self.selections.select(selections.clone(), &buffer_snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
@@ -106,7 +68,6 @@ mod tests {
             s.set_cursor_position(text::Point::new(0, 0));
             s.move_word_right(cx);
 
-            // Verify using new multi-cursor API
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
             assert_eq!(selections[0].head(), text::Point::new(0, 5));
@@ -119,21 +80,20 @@ mod tests {
         stoat.update(|s, cx| {
             s.insert_text("hello world\nfoo bar", cx);
 
-            // Create two cursors
             let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let id = s.selections.next_id();
             s.selections.select(
                 vec![
                     text::Selection {
                         id,
-                        start: text::Point::new(0, 0), // Start of "hello world"
+                        start: text::Point::new(0, 0),
                         end: text::Point::new(0, 0),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
                     text::Selection {
                         id: id + 1,
-                        start: text::Point::new(1, 0), // Start of "foo bar"
+                        start: text::Point::new(1, 0),
                         end: text::Point::new(1, 0),
                         reversed: false,
                         goal: text::SelectionGoal::None,
@@ -142,14 +102,30 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            // Move both cursors right by word
             s.move_word_right(cx);
 
-            // Verify both moved independently
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 5)); // End of "hello"
-            assert_eq!(selections[1].head(), text::Point::new(1, 3)); // End of "foo"
+            assert_eq!(selections[0].head(), text::Point::new(0, 5));
+            assert_eq!(selections[1].head(), text::Point::new(1, 3));
+        });
+    }
+
+    #[gpui::test]
+    fn moves_across_punctuation(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("hello, world", cx);
+            s.set_cursor_position(text::Point::new(0, 0));
+
+            s.move_word_right(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 5));
+
+            s.move_word_right(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 6));
+
+            s.move_word_right(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 12));
         });
     }
 }

@@ -1,32 +1,19 @@
-//! Move word left action implementation and tests.
-//!
-//! Demonstrates multi-cursor word-based movement using token analysis.
-
-use crate::stoat::Stoat;
+use crate::{char_classifier::CharClassifier, stoat::Stoat};
 use gpui::Context;
-use text::{Point, ToOffset};
+use text::Point;
 
 impl Stoat {
-    /// Move all cursors left by one word (symbol).
+    /// Move all cursors left by one word.
     ///
-    /// Each cursor moves independently to the start of the previous word/symbol and collapses
-    /// any existing selections. Uses token analysis to identify word boundaries.
-    ///
-    /// Updates both the new selections field and legacy cursor field for backward compatibility.
-    ///
-    /// # Related Actions
-    ///
-    /// - [`select_prev_symbol`](crate::Stoat::select_prev_symbol) - Extend selection to previous
-    ///   word (used in visual mode)
+    /// Each cursor moves independently to the start of the current/previous word group and
+    /// collapses any existing selections. Uses character classification for word boundary
+    /// detection, working on both code and plain text files.
     pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
-        let (buffer_snapshot, token_snapshot) = {
+        let buffer_snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
-            let buffer_snapshot = buffer_item.buffer().read(cx).snapshot();
-            let token_snapshot = buffer_item.token_snapshot();
-            (buffer_snapshot, token_snapshot)
+            buffer_item.buffer().read(cx).snapshot()
         };
 
-        // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<Point>(&buffer_snapshot);
@@ -45,43 +32,13 @@ impl Stoat {
             }
         }
 
-        // Operate on all selections
         let mut selections = self.selections.all::<Point>(&buffer_snapshot);
         for selection in &mut selections {
-            let head = selection.head();
-            let cursor_offset = buffer_snapshot.point_to_offset(head);
+            let cursor_offset = buffer_snapshot.point_to_offset(selection.head());
+            let new_offset = CharClassifier::previous_word_start(&buffer_snapshot, cursor_offset);
 
-            let mut token_cursor = token_snapshot.cursor(&buffer_snapshot);
-            token_cursor.next();
-
-            let mut prev_symbol_start: Option<usize> = None;
-
-            while let Some(token) = token_cursor.item() {
-                let token_start = token.range.start.to_offset(&buffer_snapshot);
-                let token_end = token.range.end.to_offset(&buffer_snapshot);
-
-                if token_start >= cursor_offset {
-                    break;
-                }
-
-                if token.kind.is_symbol() {
-                    if token_start < cursor_offset && cursor_offset <= token_end {
-                        prev_symbol_start = Some(token_start);
-                        break;
-                    }
-
-                    if token_end < cursor_offset {
-                        prev_symbol_start = Some(token_start);
-                    }
-                }
-
-                token_cursor.next();
-            }
-
-            if let Some(offset) = prev_symbol_start {
-                let new_pos = buffer_snapshot.offset_to_point(offset);
-
-                // Collapse selection to new cursor position
+            if new_offset != cursor_offset {
+                let new_pos = buffer_snapshot.offset_to_point(new_offset);
                 selection.start = new_pos;
                 selection.end = new_pos;
                 selection.reversed = false;
@@ -89,7 +46,6 @@ impl Stoat {
             }
         }
 
-        // Store back and sync cursor
         self.selections.select(selections.clone(), &buffer_snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
@@ -111,7 +67,6 @@ mod tests {
             s.insert_text("hello world", cx);
             s.move_word_left(cx);
 
-            // Verify using new multi-cursor API
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
             assert_eq!(selections[0].head(), text::Point::new(0, 6));
@@ -124,21 +79,20 @@ mod tests {
         stoat.update(|s, cx| {
             s.insert_text("hello world\nfoo bar", cx);
 
-            // Create two cursors
             let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let id = s.selections.next_id();
             s.selections.select(
                 vec![
                     text::Selection {
                         id,
-                        start: text::Point::new(0, 11), // End of "hello world"
+                        start: text::Point::new(0, 11),
                         end: text::Point::new(0, 11),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
                     text::Selection {
                         id: id + 1,
-                        start: text::Point::new(1, 7), // End of "foo bar"
+                        start: text::Point::new(1, 7),
                         end: text::Point::new(1, 7),
                         reversed: false,
                         goal: text::SelectionGoal::None,
@@ -147,14 +101,29 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            // Move both cursors left by word
             s.move_word_left(cx);
 
-            // Verify both moved independently
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 6)); // Start of "world"
-            assert_eq!(selections[1].head(), text::Point::new(1, 4)); // Start of "bar"
+            assert_eq!(selections[0].head(), text::Point::new(0, 6));
+            assert_eq!(selections[1].head(), text::Point::new(1, 4));
+        });
+    }
+
+    #[gpui::test]
+    fn moves_across_punctuation(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| {
+            s.insert_text("hello, world", cx);
+
+            s.move_word_left(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 7));
+
+            s.move_word_left(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 5));
+
+            s.move_word_left(cx);
+            assert_eq!(s.active_selections(cx)[0].head(), text::Point::new(0, 0));
         });
     }
 }

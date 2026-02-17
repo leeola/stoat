@@ -11,6 +11,7 @@ pub mod parser;
 pub use language::Language;
 pub use parser::{ParseResult, Parser};
 pub use stoat_rope::TokenEntry;
+pub use tree_sitter;
 
 /// Parse text into tokens using tree-sitter
 ///
