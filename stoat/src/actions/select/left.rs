@@ -14,6 +14,7 @@ impl Stoat {
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_left(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

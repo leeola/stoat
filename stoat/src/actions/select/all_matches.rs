@@ -43,6 +43,7 @@ impl Stoat {
     /// - Complements [`select_next`](Self::select_next) which adds one at a time
     /// - Uses [`find_all_occurrences`] for search logic
     pub fn select_all_matches(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().read(cx);
         let snapshot = buffer.snapshot();

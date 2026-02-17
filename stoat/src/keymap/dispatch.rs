@@ -44,6 +44,12 @@ pub fn dispatch_editor_action<C: AppContext>(
         "NewLine" => ed!(stoat, cx, |s, cx| s.new_line(cx)),
         "DeleteLine" => ed!(stoat, cx, |s, cx| s.delete_line(cx)),
         "DeleteToEndOfLine" => ed!(stoat, cx, |s, cx| s.delete_to_end_of_line(cx)),
+        "Undo" => ed!(stoat, cx, |s, cx| s.undo(cx)),
+        "Redo" => ed!(stoat, cx, |s, cx| s.redo(cx)),
+        "UndoSelection" => ed!(stoat, cx, |s, cx| s.undo_selection(cx)),
+        "RedoSelection" => ed!(stoat, cx, |s, cx| s.redo_selection(cx)),
+        "UndoState" => ed!(stoat, cx, |s, cx| s.undo_state(cx)),
+        "RedoState" => ed!(stoat, cx, |s, cx| s.redo_state(cx)),
 
         "SelectNextSymbol" => ed!(stoat, cx, |s, cx| s.select_next_symbol(cx)),
         "SelectPrevSymbol" => ed!(stoat, cx, |s, cx| s.select_prev_symbol(cx)),

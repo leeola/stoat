@@ -12,6 +12,7 @@ impl Stoat {
     /// Transitions to pane mode which enables window management commands like splitting,
     /// focusing, and closing panes.
     pub fn enter_pane_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.mode = "pane".to_string();
         debug!("Entering pane mode");
         cx.emit(crate::stoat::StoatEvent::Changed);

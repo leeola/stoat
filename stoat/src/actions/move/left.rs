@@ -20,6 +20,7 @@ impl Stoat {
     /// - [`move_word_left`](crate::Stoat::move_word_left) - Move left one word
     /// - [`select_left`](crate::Stoat::select_left) - Extend selection left (used in visual mode)
     pub fn move_left(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

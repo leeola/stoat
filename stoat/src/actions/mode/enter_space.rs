@@ -11,6 +11,7 @@ impl Stoat {
     /// Transitions to space mode which acts as a leader key for additional command sequences.
     /// This mode is typically accessed by pressing space in normal mode.
     pub fn enter_space_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.mode = "space".to_string();
         tracing::info!("Entering space mode");
         cx.emit(crate::stoat::StoatEvent::Changed);

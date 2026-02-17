@@ -15,6 +15,7 @@ impl Stoat {
     ///
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn page_down(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
         if lines_per_page == 0 {

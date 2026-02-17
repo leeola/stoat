@@ -344,6 +344,28 @@ impl SelectionsCollection {
         id
     }
 
+    /// Get the disjoint selections as a cheap [`Arc`] clone.
+    ///
+    /// Used by the undo system to snapshot selection state before/after edits.
+    pub fn disjoint_anchors_arc(&self) -> Arc<[Selection<Anchor>]> {
+        if let Some(pending) = &self.pending {
+            let mut all = self.disjoint.to_vec();
+            all.push(pending.clone());
+            Arc::from(all)
+        } else {
+            self.disjoint.clone()
+        }
+    }
+
+    /// Restore selections from a saved set of anchor-based selections.
+    ///
+    /// Replaces the disjoint set and clears any pending selection.
+    /// Used by the undo system to restore selection state.
+    pub fn select_anchors(&mut self, anchors: Arc<[Selection<Anchor>]>) {
+        self.disjoint = anchors;
+        self.pending = None;
+    }
+
     /// Try to cancel/reduce selections.
     ///
     /// Implements vim-style selection cancellation:

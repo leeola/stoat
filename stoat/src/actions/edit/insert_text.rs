@@ -100,7 +100,12 @@ impl Stoat {
         // Main buffer insertion with multi-cursor support
         // Note: Mode gating (insert vs normal) happens at the action handler level in EditorView
         let buffer_item = self.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer();
+        let buffer = buffer_item.read(cx).buffer().clone();
+
+        let before_selections = self.selections.disjoint_anchors_arc();
+        buffer.update(cx, |buf, _| {
+            buf.start_transaction();
+        });
         let snapshot = buffer.read(cx).snapshot();
 
         // Auto-sync from cursor if single selection (backward compat)
@@ -141,7 +146,6 @@ impl Stoat {
             .collect();
 
         // Apply all insertions at once
-        let buffer = buffer.clone();
         let text_byte_len = text.len();
         buffer.update(cx, |buffer, _| {
             buffer.edit(edits);
@@ -174,6 +178,14 @@ impl Stoat {
         // Sync cursor to last selection
         if let Some(last) = new_selections.last() {
             self.cursor.move_to(last.head());
+        }
+
+        let tx = buffer.update(cx, |buf, _| buf.end_transaction());
+        if let Some((tx_id, _)) = tx {
+            self.selection_history
+                .insert_transaction(tx_id, before_selections);
+            self.selection_history
+                .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
         }
 
         // Reparse for syntax highlighting

@@ -22,6 +22,7 @@ impl Stoat {
     /// - [`move_down`](crate::Stoat::move_down) - Move down one line
     /// - [`page_up`](crate::Stoat::page_up) - Move up one page
     pub fn move_up(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

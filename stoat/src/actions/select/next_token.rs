@@ -8,6 +8,7 @@ impl Stoat {
     /// Unlike [`select_next_symbol`](Self::select_next_symbol) which skips punctuation,
     /// this selects any contiguous run of same-class non-whitespace characters.
     pub fn select_next_token(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()

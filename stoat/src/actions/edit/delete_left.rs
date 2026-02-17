@@ -119,7 +119,12 @@ impl Stoat {
 
         // Main buffer deletion with multi-cursor support
         let buffer_item = self.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer();
+        let buffer = buffer_item.read(cx).buffer().clone();
+
+        let before_selections = self.selections.disjoint_anchors_arc();
+        buffer.update(cx, |buf, _| {
+            buf.start_transaction();
+        });
         let snapshot = buffer.read(cx).snapshot();
 
         // Auto-sync from cursor if single selection (backward compat)
@@ -175,7 +180,6 @@ impl Stoat {
                 "delete_left: About to call buffer.edit() with {} edits",
                 edits.len()
             );
-            let buffer = buffer.clone();
             buffer.update(cx, |buffer, _| {
                 tracing::debug!("delete_left: Inside buffer.update, calling buffer.edit()");
                 buffer.edit(edits);
@@ -206,6 +210,14 @@ impl Stoat {
                 );
             }
 
+            let tx = buffer.update(cx, |buf, _| buf.end_transaction());
+            if let Some((tx_id, _)) = tx {
+                self.selection_history
+                    .insert_transaction(tx_id, before_selections);
+                self.selection_history
+                    .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
+            }
+
             // Reparse
             buffer_item.update(cx, |item, cx| {
                 let _ = item.reparse(cx);
@@ -215,6 +227,10 @@ impl Stoat {
             self.send_did_change_notification(cx);
 
             cx.emit(crate::stoat::StoatEvent::Changed);
+        } else {
+            buffer.update(cx, |buf, _| {
+                buf.end_transaction();
+            });
         }
 
         cx.notify();

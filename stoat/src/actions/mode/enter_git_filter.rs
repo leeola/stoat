@@ -12,6 +12,7 @@ impl Stoat {
     /// Transitions to git_filter mode which allows selecting a filter type for the git status view.
     /// This mode is typically accessed from the git status modal.
     pub fn enter_git_filter_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.mode = "git_filter".to_string();
         debug!("Entering git_filter mode");
         cx.emit(crate::stoat::StoatEvent::Changed);

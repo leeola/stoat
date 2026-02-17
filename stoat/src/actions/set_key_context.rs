@@ -69,6 +69,7 @@ impl Stoat {
     /// - [`Self::get_key_context_meta`] - retrieves context metadata
     /// - [`crate::actions::SetMode`] - changes mode within current context
     pub fn handle_set_key_context(&mut self, context: KeyContext, cx: &mut Context<Self>) {
+        self.record_app_state();
         let was_diff_review = self.key_context == KeyContext::DiffReview;
 
         // Set the new context

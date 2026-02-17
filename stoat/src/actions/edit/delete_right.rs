@@ -28,7 +28,12 @@ impl Stoat {
     /// - [`delete_word_right`](crate::Stoat::delete_word_right) - Delete next word
     pub fn delete_right(&mut self, cx: &mut Context<Self>) {
         let buffer_item = self.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer();
+        let buffer = buffer_item.read(cx).buffer().clone();
+
+        let before_selections = self.selections.disjoint_anchors_arc();
+        buffer.update(cx, |buf, _| {
+            buf.start_transaction();
+        });
         let snapshot = buffer.read(cx).snapshot();
 
         // Auto-sync from cursor if single selection (backward compat)
@@ -74,7 +79,6 @@ impl Stoat {
 
         // Apply all deletions at once
         if !edits.is_empty() {
-            let buffer = buffer.clone();
             buffer.update(cx, |buffer, _| {
                 buffer.edit(edits);
             });
@@ -88,6 +92,14 @@ impl Stoat {
                 self.cursor.move_to(last.head());
             }
 
+            let tx = buffer.update(cx, |buf, _| buf.end_transaction());
+            if let Some((tx_id, _)) = tx {
+                self.selection_history
+                    .insert_transaction(tx_id, before_selections);
+                self.selection_history
+                    .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
+            }
+
             // Reparse
             buffer_item.update(cx, |item, cx| {
                 let _ = item.reparse(cx);
@@ -97,6 +109,10 @@ impl Stoat {
             self.send_did_change_notification(cx);
 
             cx.emit(crate::stoat::StoatEvent::Changed);
+        } else {
+            buffer.update(cx, |buf, _| {
+                buf.end_transaction();
+            });
         }
 
         cx.notify();

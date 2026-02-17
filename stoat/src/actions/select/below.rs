@@ -42,6 +42,7 @@ impl Stoat {
     /// - Complements [`add_selection_above`](Self::add_selection_above)
     /// - Based on Zed's approach at `editor.rs:14203-14263`
     pub fn add_selection_below(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().read(cx).snapshot();
         let snapshot = buffer;

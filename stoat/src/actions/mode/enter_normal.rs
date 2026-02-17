@@ -11,6 +11,7 @@ impl Stoat {
     /// Transitions to normal mode where keys trigger movement and command actions instead
     /// of inserting text. This is the default mode for navigation and manipulation.
     pub fn enter_normal_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.mode = "normal".to_string();
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();

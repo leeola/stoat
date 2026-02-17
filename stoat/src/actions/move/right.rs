@@ -24,6 +24,7 @@ impl Stoat {
     /// - Positions stored as anchors (survive buffer edits)
     /// - Selections automatically merged if they overlap after move
     pub fn move_right(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

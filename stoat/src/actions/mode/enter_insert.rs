@@ -11,6 +11,7 @@ impl Stoat {
     /// Transitions to insert mode where text input is directly inserted into the buffer.
     /// This is the primary mode for editing text content.
     pub fn enter_insert_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.mode = "insert".to_string();
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();

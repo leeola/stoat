@@ -23,6 +23,7 @@ impl Stoat {
     ///
     /// See also [`Self::enter_normal_mode`] for returning to command mode.
     pub fn enter_visual_mode(&mut self, cx: &mut Context<Self>) {
+        self.record_app_state();
         self.set_mode_by_name("visual", cx);
     }
 }

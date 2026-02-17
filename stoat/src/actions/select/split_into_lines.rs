@@ -38,6 +38,7 @@ impl Stoat {
     /// [`AddSelectionAbove`]: crate::actions::AddSelectionAbove
     /// [`AddSelectionBelow`]: crate::actions::AddSelectionBelow
     pub fn split_selection_into_lines(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().read(cx);
         let snapshot = buffer.snapshot();

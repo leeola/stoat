@@ -9,7 +9,12 @@ impl Stoat {
     /// syntax highlighting.
     pub fn delete_word_left(&mut self, cx: &mut Context<Self>) {
         let buffer_item = self.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer();
+        let buffer = buffer_item.read(cx).buffer().clone();
+
+        let before_selections = self.selections.disjoint_anchors_arc();
+        buffer.update(cx, |buf, _| {
+            buf.start_transaction();
+        });
         let buffer_snapshot = buffer.read(cx).snapshot();
 
         let cursor_pos = self.cursor.position();
@@ -43,7 +48,6 @@ impl Stoat {
         }
 
         if !edits.is_empty() {
-            let buffer = buffer.clone();
             buffer.update(cx, |buffer, _| {
                 buffer.edit(edits);
             });
@@ -55,11 +59,23 @@ impl Stoat {
                 self.cursor.move_to(last.head());
             }
 
+            let tx = buffer.update(cx, |buf, _| buf.end_transaction());
+            if let Some((tx_id, _)) = tx {
+                self.selection_history
+                    .insert_transaction(tx_id, before_selections);
+                self.selection_history
+                    .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
+            }
+
             buffer_item.update(cx, |item, cx| {
                 let _ = item.reparse(cx);
             });
 
             cx.emit(crate::stoat::StoatEvent::Changed);
+        } else {
+            buffer.update(cx, |buf, _| {
+                buf.end_transaction();
+            });
         }
 
         cx.notify();

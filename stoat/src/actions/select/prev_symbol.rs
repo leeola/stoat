@@ -8,6 +8,7 @@ impl Stoat {
     /// Each selection extends independently by finding the previous word from its head position.
     /// In anchored mode, extends the selection. In non-anchored mode, selects just the word.
     pub fn select_prev_symbol(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()

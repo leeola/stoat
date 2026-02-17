@@ -9,6 +9,7 @@ impl Stoat {
     /// any existing selections. Uses character classification for word boundary detection,
     /// working on both code and plain text files.
     pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()

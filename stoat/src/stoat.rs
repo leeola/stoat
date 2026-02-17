@@ -7,6 +7,7 @@ use crate::{
     buffer::{item::BufferItem, store::BufferStore},
     cursor::CursorManager,
     git::{diff::BufferDiff, repository::Repository},
+    history::{AppStateHistory, AppStateSnapshot, SelectionHistory, SelectionHistoryEntry},
     scroll::ScrollPosition,
     selections::SelectionsCollection,
     worktree::Worktree,
@@ -336,6 +337,12 @@ pub struct Stoat {
 
     /// Compiled keymap from stcfg configuration, shared across all views.
     pub(crate) compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
+
+    /// Tracks selections associated with text transactions and standalone selection history.
+    pub(crate) selection_history: SelectionHistory,
+
+    /// App-state undo/redo history (mode, context, scroll, selections).
+    pub(crate) app_state_history: AppStateHistory,
 }
 
 impl EventEmitter<StoatEvent> for Stoat {}
@@ -485,6 +492,8 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap,
+            selection_history: SelectionHistory::default(),
+            app_state_history: AppStateHistory::default(),
         }
     }
 
@@ -561,6 +570,8 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            selection_history: SelectionHistory::default(),
+            app_state_history: AppStateHistory::default(),
         }
     }
 
@@ -1639,7 +1650,48 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            selection_history: SelectionHistory::default(),
+            app_state_history: AppStateHistory::default(),
         })
+    }
+
+    /// Record the current selection state for selection undo.
+    ///
+    /// Pushes the current selections, select_next_state, and select_prev_state
+    /// onto the selection undo stack. Deduplicates if the top of stack is identical.
+    pub(crate) fn record_selection_change(&mut self) {
+        let current = self.selections.disjoint_anchors_arc();
+        if let Some(top) = self.selection_history.pop_selection_undo() {
+            if std::sync::Arc::ptr_eq(&top.selections, &current) {
+                self.selection_history.push_selection_undo(top);
+                return;
+            }
+            self.selection_history.push_selection_undo(top);
+        }
+        self.selection_history
+            .push_selection_undo(SelectionHistoryEntry {
+                selections: current,
+                select_next_state: self.select_next_state.clone(),
+                select_prev_state: self.select_prev_state.clone(),
+            });
+    }
+
+    /// Capture the current app state as a snapshot.
+    pub(crate) fn capture_app_state(&self) -> AppStateSnapshot {
+        AppStateSnapshot {
+            mode: self.mode.clone(),
+            key_context: self.key_context,
+            selections: self.selections.disjoint_anchors_arc(),
+            select_next_state: self.select_next_state.clone(),
+            select_prev_state: self.select_prev_state.clone(),
+            scroll: self.scroll.clone(),
+        }
+    }
+
+    /// Record the current app state for app-state undo.
+    pub(crate) fn record_app_state(&mut self) {
+        let snapshot = self.capture_app_state();
+        self.app_state_history.push_undo(snapshot);
     }
 
     /// Create a Stoat instance for testing with an empty buffer.

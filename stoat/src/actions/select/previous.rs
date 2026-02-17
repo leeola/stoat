@@ -47,6 +47,7 @@ impl Stoat {
     /// - Complements [`select_next`](Self::select_next)
     /// - Uses [`find_prev_occurrence`] for search logic
     pub fn select_previous(&mut self, cx: &mut Context<Self>) {
+        self.record_selection_change();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().read(cx);
         let snapshot = buffer.snapshot();
