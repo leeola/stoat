@@ -23,6 +23,7 @@ impl Stoat {
     /// - [`page_down`](crate::Stoat::page_down) - Move down one page
     pub fn move_down(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
@@ -63,39 +64,37 @@ impl Stoat {
             let head = selection.head();
 
             // Convert to display coordinates
-            let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
+            let mut display_point =
+                display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
             let max_display_point = display_snapshot.max_point();
 
-            // Move down in display space
-            let new_pos = if display_point.row < max_display_point.row {
-                // Determine goal column from selection's goal or current column
-                let goal_column = match selection.goal {
-                    text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
-                    _ => display_point.column,
-                };
-
-                let target_display_point = stoat_text_transform::DisplayPoint {
-                    row: display_point.row + 1,
-                    column: goal_column,
-                };
-
-                // Convert back to buffer coordinates
-                let new_buffer_pos = display_snapshot
-                    .display_point_to_point(target_display_point, sum_tree::Bias::Left);
-
-                // Preserve goal column
-                selection.goal = text::SelectionGoal::HorizontalPosition(goal_column as f64);
-
-                Some(new_buffer_pos)
-            } else {
-                None // Already at bottom
+            let goal_column = match selection.goal {
+                text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
+                _ => display_point.column,
             };
 
-            // Apply the new position if we moved
-            if let Some(new_pos) = new_pos {
-                selection.start = new_pos;
-                selection.end = new_pos;
+            let mut moved = false;
+            for _ in 0..count {
+                if display_point.row < max_display_point.row {
+                    let target_display_point = stoat_text_transform::DisplayPoint {
+                        row: display_point.row + 1,
+                        column: goal_column,
+                    };
+                    let new_buffer_pos = display_snapshot
+                        .display_point_to_point(target_display_point, sum_tree::Bias::Left);
+                    display_point = display_snapshot
+                        .point_to_display_point(new_buffer_pos, sum_tree::Bias::Left);
+                    moved = true;
+                }
+            }
+
+            if moved {
+                let final_pos =
+                    display_snapshot.display_point_to_point(display_point, sum_tree::Bias::Left);
+                selection.start = final_pos;
+                selection.end = final_pos;
                 selection.reversed = false;
+                selection.goal = text::SelectionGoal::HorizontalPosition(goal_column as f64);
             }
         }
 

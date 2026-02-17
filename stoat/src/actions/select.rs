@@ -27,6 +27,7 @@
 //! - Visual mode for interactive selection extension
 
 mod above;
+mod all;
 mod all_matches;
 mod below;
 mod down;

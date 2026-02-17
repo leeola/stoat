@@ -15,6 +15,7 @@ impl Stoat {
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_right(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
@@ -41,15 +42,14 @@ impl Stoat {
         // Operate on all selections
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
-            let head = selection.head();
-            let line_len = snapshot.line_len(head.row);
-
-            if head.column < line_len {
-                let target = Point::new(head.row, head.column + 1);
-                let new_head = snapshot.clip_point(target, Bias::Right);
-
-                // Extend selection by moving head, keeping tail fixed
-                selection.set_head(new_head, text::SelectionGoal::None);
+            for _ in 0..count {
+                let head = selection.head();
+                let line_len = snapshot.line_len(head.row);
+                if head.column < line_len {
+                    let target = Point::new(head.row, head.column + 1);
+                    let new_head = snapshot.clip_point(target, Bias::Right);
+                    selection.set_head(new_head, text::SelectionGoal::None);
+                }
             }
         }
 

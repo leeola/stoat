@@ -14,6 +14,7 @@ impl Stoat {
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn move_to_file_start(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let _count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();

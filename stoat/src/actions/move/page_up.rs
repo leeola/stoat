@@ -16,6 +16,7 @@ impl Stoat {
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn page_up(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let lines_per_page = self.viewport_lines.unwrap_or(30.0).floor() as u32;
 
         if lines_per_page == 0 {
@@ -64,7 +65,7 @@ impl Stoat {
             let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
 
             // Move up in display space
-            let new_display_row = display_point.row.saturating_sub(lines_per_page);
+            let new_display_row = display_point.row.saturating_sub(lines_per_page * count);
 
             // Determine goal column from selection's goal or current column
             let goal_column = match selection.goal {

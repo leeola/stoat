@@ -92,6 +92,14 @@ impl Stoat {
             }
         }
 
+        // Finalize insert-mode transaction so undo groups the whole insert session
+        if self.mode == "insert" && mode_name != "insert" {
+            let buffer = self.active_buffer(cx).read(cx).buffer().clone();
+            buffer.update(cx, |b, _| {
+                b.finalize_last_transaction();
+            });
+        }
+
         self.mode = mode_name.to_string();
         debug!(mode = mode_name, "Set mode");
         cx.emit(crate::stoat::StoatEvent::Changed);

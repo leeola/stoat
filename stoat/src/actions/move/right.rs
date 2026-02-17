@@ -25,6 +25,7 @@ impl Stoat {
     /// - Selections automatically merged if they overlap after move
     pub fn move_right(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
@@ -55,19 +56,18 @@ impl Stoat {
 
         // Move each selection's head right by one character
         for selection in &mut selections {
-            let head = selection.head();
-            let line_len = snapshot.line_len(head.row);
-
-            if head.column < line_len {
-                let target = Point::new(head.row, head.column + 1);
-                let clipped = snapshot.clip_point(target, Bias::Right);
-
-                // Collapse selection to new cursor position
-                selection.start = clipped;
-                selection.end = clipped;
-                selection.reversed = false;
-                selection.goal = text::SelectionGoal::None;
+            let mut head = selection.head();
+            for _ in 0..count {
+                let line_len = snapshot.line_len(head.row);
+                if head.column < line_len {
+                    let target = Point::new(head.row, head.column + 1);
+                    head = snapshot.clip_point(target, Bias::Right);
+                }
             }
+            selection.start = head;
+            selection.end = head;
+            selection.reversed = false;
+            selection.goal = text::SelectionGoal::None;
         }
 
         // Store updated selections (converts to anchors)

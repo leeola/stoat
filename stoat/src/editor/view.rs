@@ -74,6 +74,52 @@ impl EditorView {
             event.keystroke, event.keystroke.key_char
         );
 
+        let no_modifiers = !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && !event.keystroke.modifiers.shift
+            && !event.keystroke.modifiers.platform;
+
+        // Replace-char interceptor: when replace_pending is set, the next key replaces
+        if self.stoat.read(cx).replace_pending {
+            if let Some(key_char) = &event.keystroke.key_char {
+                if key_char == "\u{1b}" {
+                    self.stoat
+                        .update(cx, |stoat, _| stoat.replace_pending = false);
+                } else {
+                    self.stoat.update(cx, |stoat, cx| {
+                        stoat.replace_pending = false;
+                        stoat.replace_char_with(key_char, cx);
+                    });
+                }
+            } else {
+                self.stoat
+                    .update(cx, |stoat, _| stoat.replace_pending = false);
+            }
+            cx.notify();
+            return;
+        }
+
+        // Digit accumulation for count prefix in normal/visual modes
+        if no_modifiers {
+            let key_context = self.stoat.read(cx).key_context();
+            let mode = self.stoat.read(cx).mode().to_string();
+            if key_context == KeyContext::TextEditor && (mode == "normal" || mode == "visual") {
+                if let Some(key_char) = &event.keystroke.key_char {
+                    if let Some(digit) = key_char.chars().next().and_then(|c| c.to_digit(10)) {
+                        let has_pending = self.stoat.read(cx).pending_count.is_some();
+                        if digit >= 1 || has_pending {
+                            self.stoat.update(cx, |stoat, _| {
+                                let current = stoat.pending_count.unwrap_or(0);
+                                stoat.pending_count =
+                                    Some(current.saturating_mul(10).saturating_add(digit));
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
 
         // Look up in compiled keymap
@@ -87,13 +133,16 @@ impl EditorView {
 
         if let Some(action) = matched_action {
             if dispatch_editor_action(&self.stoat, &action, cx) {
+                self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
                 cx.notify();
                 return;
             }
             if dispatch_pane_action(&self.stoat, &action, cx) {
+                self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
                 cx.notify();
                 return;
             }
+            self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
             return;
         }
 
@@ -115,6 +164,8 @@ impl EditorView {
                 cx.notify();
             }
         }
+
+        self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
     }
 }
 

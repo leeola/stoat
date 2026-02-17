@@ -27,92 +27,86 @@ impl Stoat {
     /// - [`delete_left`](crate::Stoat::delete_left) - Delete character before cursor
     /// - [`delete_word_right`](crate::Stoat::delete_word_right) - Delete next word
     pub fn delete_right(&mut self, cx: &mut Context<Self>) {
-        let buffer_item = self.active_buffer(cx);
-        let buffer = buffer_item.read(cx).buffer().clone();
+        let count = self.take_count();
+        for _ in 0..count {
+            let buffer_item = self.active_buffer(cx);
+            let buffer = buffer_item.read(cx).buffer().clone();
 
-        let before_selections = self.selections.disjoint_anchors_arc();
-        buffer.update(cx, |buf, _| {
-            buf.start_transaction();
-        });
-        let snapshot = buffer.read(cx).snapshot();
-
-        // Auto-sync from cursor if single selection (backward compat)
-        let cursor_pos = self.cursor.position();
-        if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
-            if newest_sel.head() != cursor_pos {
-                let id = self.selections.next_id();
-                self.selections.select(
-                    vec![text::Selection {
-                        id,
-                        start: cursor_pos,
-                        end: cursor_pos,
-                        reversed: false,
-                        goal: text::SelectionGoal::None,
-                    }],
-                    &snapshot,
-                );
-            }
-        }
-
-        // Collect deletion ranges for all selections
-        let selections = self.selections.all::<text::Point>(&snapshot);
-        let mut edits = Vec::new();
-        let max_row = snapshot.max_point().row;
-
-        for selection in &selections {
-            let pos = selection.head();
-            let line_len = snapshot.line_len(pos.row);
-
-            if pos.column < line_len {
-                // Delete character on same line
-                let start = snapshot.point_to_offset(pos);
-                let end = snapshot.point_to_offset(text::Point::new(pos.row, pos.column + 1));
-                edits.push((start..end, ""));
-            } else if pos.row < max_row {
-                // At line end: merge with next line
-                let start = snapshot.point_to_offset(pos);
-                let end = snapshot.point_to_offset(text::Point::new(pos.row + 1, 0));
-                edits.push((start..end, ""));
-            }
-        }
-
-        // Apply all deletions at once
-        if !edits.is_empty() {
-            buffer.update(cx, |buffer, _| {
-                buffer.edit(edits);
-            });
-
-            // Get updated selections (anchors have auto-adjusted)
-            let snapshot = buffer.read(cx).snapshot();
-            let updated_selections = self.selections.all::<text::Point>(&snapshot);
-
-            // Sync cursor to last selection
-            if let Some(last) = updated_selections.last() {
-                self.cursor.move_to(last.head());
-            }
-
-            let tx = buffer.update(cx, |buf, _| buf.end_transaction());
-            if let Some((tx_id, _)) = tx {
-                self.selection_history
-                    .insert_transaction(tx_id, before_selections);
-                self.selection_history
-                    .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
-            }
-
-            // Reparse
-            buffer_item.update(cx, |item, cx| {
-                let _ = item.reparse(cx);
-            });
-
-            // Notify LSP servers of the change
-            self.send_did_change_notification(cx);
-
-            cx.emit(crate::stoat::StoatEvent::Changed);
-        } else {
+            let before_selections = self.selections.disjoint_anchors_arc();
             buffer.update(cx, |buf, _| {
-                buf.end_transaction();
+                buf.start_transaction();
             });
+            let snapshot = buffer.read(cx).snapshot();
+
+            let cursor_pos = self.cursor.position();
+            if self.selections.count() == 1 {
+                let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+                if newest_sel.head() != cursor_pos {
+                    let id = self.selections.next_id();
+                    self.selections.select(
+                        vec![text::Selection {
+                            id,
+                            start: cursor_pos,
+                            end: cursor_pos,
+                            reversed: false,
+                            goal: text::SelectionGoal::None,
+                        }],
+                        &snapshot,
+                    );
+                }
+            }
+
+            let selections = self.selections.all::<text::Point>(&snapshot);
+            let mut edits = Vec::new();
+            let max_row = snapshot.max_point().row;
+
+            for selection in &selections {
+                let pos = selection.head();
+                let line_len = snapshot.line_len(pos.row);
+
+                if pos.column < line_len {
+                    let start = snapshot.point_to_offset(pos);
+                    let end = snapshot.point_to_offset(text::Point::new(pos.row, pos.column + 1));
+                    edits.push((start..end, ""));
+                } else if pos.row < max_row {
+                    let start = snapshot.point_to_offset(pos);
+                    let end = snapshot.point_to_offset(text::Point::new(pos.row + 1, 0));
+                    edits.push((start..end, ""));
+                }
+            }
+
+            if !edits.is_empty() {
+                buffer.update(cx, |buffer, _| {
+                    buffer.edit(edits);
+                });
+
+                let snapshot = buffer.read(cx).snapshot();
+                let updated_selections = self.selections.all::<text::Point>(&snapshot);
+
+                if let Some(last) = updated_selections.last() {
+                    self.cursor.move_to(last.head());
+                }
+
+                let tx = buffer.update(cx, |buf, _| buf.end_transaction());
+                if let Some((tx_id, _)) = tx {
+                    self.selection_history
+                        .insert_transaction(tx_id, before_selections);
+                    self.selection_history
+                        .set_after_selections(tx_id, self.selections.disjoint_anchors_arc());
+                }
+
+                buffer_item.update(cx, |item, cx| {
+                    let _ = item.reparse(cx);
+                });
+
+                self.send_did_change_notification(cx);
+
+                cx.emit(crate::stoat::StoatEvent::Changed);
+            } else {
+                buffer.update(cx, |buf, _| {
+                    buf.end_transaction();
+                });
+            }
         }
 
         cx.notify();

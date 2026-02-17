@@ -35,6 +35,7 @@ impl Stoat {
     /// - [`delete_to_end_of_line`](crate::Stoat::delete_to_end_of_line) - Delete to line end only
     /// - [`new_line`](crate::Stoat::new_line) - Insert new line
     pub fn delete_line(&mut self, cx: &mut Context<Self>) {
+        let count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer().clone();
 
@@ -44,7 +45,6 @@ impl Stoat {
         });
         let buffer_snapshot = buffer.read(cx).snapshot();
 
-        // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
             let newest_sel = self.selections.newest::<text::Point>(&buffer_snapshot);
@@ -63,7 +63,6 @@ impl Stoat {
             }
         }
 
-        // Collect deletion ranges for all selections
         let selections = self.selections.all::<text::Point>(&buffer_snapshot);
         let mut edits = Vec::new();
         let row_count = buffer_snapshot.row_count();
@@ -72,11 +71,13 @@ impl Stoat {
             let pos = selection.head();
             let line_start = text::Point::new(pos.row, 0);
 
-            let line_end = if pos.row < row_count - 1 {
-                text::Point::new(pos.row + 1, 0)
+            let last_row = (pos.row + count).min(row_count);
+            let line_end = if last_row < row_count {
+                text::Point::new(last_row, 0)
             } else {
-                let line_len = buffer_snapshot.line_len(pos.row);
-                text::Point::new(pos.row, line_len)
+                let end_row = row_count - 1;
+                let line_len = buffer_snapshot.line_len(end_row);
+                text::Point::new(end_row, line_len)
             };
 
             debug!(row = pos.row, from = ?line_start, to = ?line_end, "Deleting line");

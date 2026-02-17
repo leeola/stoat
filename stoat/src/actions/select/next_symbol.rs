@@ -9,6 +9,7 @@ impl Stoat {
     /// In anchored mode, extends the selection. In non-anchored mode, selects just the word.
     pub fn select_next_symbol(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()
@@ -40,27 +41,29 @@ impl Stoat {
 
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
-            if !selection.is_empty() && selection.reversed {
-                let start = selection.start;
-                let end = selection.end;
-                selection.start = start;
-                selection.end = end;
-                selection.reversed = false;
-                continue;
-            }
-
-            let cursor_offset = snapshot.point_to_offset(selection.head());
-
-            if let Some(range) = CharClassifier::next_word_range(&snapshot, cursor_offset) {
-                if self.is_mode_anchored() {
-                    let selection_end = snapshot.offset_to_point(range.end);
-                    selection.set_head(selection_end, text::SelectionGoal::None);
-                } else {
-                    let selection_start = snapshot.offset_to_point(range.start);
-                    let selection_end = snapshot.offset_to_point(range.end);
-                    selection.start = selection_start;
-                    selection.end = selection_end;
+            for _ in 0..count {
+                if !selection.is_empty() && selection.reversed {
+                    let start = selection.start;
+                    let end = selection.end;
+                    selection.start = start;
+                    selection.end = end;
                     selection.reversed = false;
+                    continue;
+                }
+
+                let cursor_offset = snapshot.point_to_offset(selection.head());
+
+                if let Some(range) = CharClassifier::next_word_range(&snapshot, cursor_offset) {
+                    if self.is_mode_anchored() {
+                        let selection_end = snapshot.offset_to_point(range.end);
+                        selection.set_head(selection_end, text::SelectionGoal::None);
+                    } else {
+                        let selection_start = snapshot.offset_to_point(range.start);
+                        let selection_end = snapshot.offset_to_point(range.end);
+                        selection.start = selection_start;
+                        selection.end = selection_end;
+                        selection.reversed = false;
+                    }
                 }
             }
         }

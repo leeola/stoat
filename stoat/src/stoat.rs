@@ -338,6 +338,12 @@ pub struct Stoat {
     /// Compiled keymap from stcfg configuration, shared across all views.
     pub(crate) compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
 
+    /// Accumulating count prefix for multiplied actions (e.g., `5j` = move down 5 lines).
+    pub(crate) pending_count: Option<u32>,
+
+    /// When true, the next printable key will replace the char under each cursor.
+    pub(crate) replace_pending: bool,
+
     /// Tracks selections associated with text transactions and standalone selection history.
     pub(crate) selection_history: SelectionHistory,
 
@@ -492,9 +498,16 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap,
+            pending_count: None,
+            replace_pending: false,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
+    }
+
+    /// Consume and return the pending count prefix, defaulting to 1.
+    pub(crate) fn take_count(&mut self) -> u32 {
+        self.pending_count.take().unwrap_or(1)
     }
 
     /// Get the global configuration.
@@ -570,6 +583,8 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            pending_count: None,
+            replace_pending: false,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -1650,6 +1665,8 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            pending_count: None,
+            replace_pending: false,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         })

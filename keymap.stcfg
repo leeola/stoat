@@ -43,6 +43,20 @@ on key {
             x -> DeleteRight();
             X -> DeleteLeft();
             D -> DeleteToEndOfLine();
+            o -> OpenLineBelow();
+            O -> OpenLineAbove();
+            a -> Append();
+            A -> AppendAtLineEnd();
+            I -> InsertAtLineStart();
+            J -> JoinLines();
+            p -> PasteAfter();
+            P -> PasteBefore();
+            r -> ReplaceChar();
+            ` -> Lowercase();
+            ~ -> SwapCase();
+            alt-` -> Uppercase();
+            > -> Indent();
+            < -> Outdent();
 
             # Undo/Redo
             u -> Undo();
@@ -121,9 +135,14 @@ on key {
             $ -> SelectToLineEnd();
 
             # Operations on selection
-            y -> Copy();
-            d -> Cut();
-            x -> Cut();
+            y -> Yank();
+            d -> DeleteSelection();
+            x -> DeleteSelection();
+            c -> ChangeSelection();
+            > -> Indent();
+            < -> Outdent();
+            ` -> Lowercase();
+            ~ -> SwapCase();
 
             # Multi-cursor
             ctrl-shift-l -> SplitSelectionIntoLines();

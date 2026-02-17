@@ -16,6 +16,7 @@ impl Stoat {
     /// Updates both the new selections field and legacy cursor field for backward compatibility.
     pub fn select_down(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
@@ -49,33 +50,30 @@ impl Stoat {
         let mut selections = self.selections.all::<Point>(&snapshot);
 
         for selection in &mut selections {
-            let head = selection.head();
+            for _ in 0..count {
+                let head = selection.head();
+                let display_point =
+                    display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
 
-            // Convert to display coordinates
-            let display_point = display_snapshot.point_to_display_point(head, sum_tree::Bias::Left);
+                if display_point.row < max_display_point.row {
+                    let goal_column = match selection.goal {
+                        text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
+                        _ => display_point.column,
+                    };
 
-            // Move down in display space
-            if display_point.row < max_display_point.row {
-                // Determine goal column from selection's goal or current column
-                let goal_column = match selection.goal {
-                    text::SelectionGoal::HorizontalPosition(pos) => pos as u32,
-                    _ => display_point.column,
-                };
+                    let target_display_point = stoat_text_transform::DisplayPoint {
+                        row: display_point.row + 1,
+                        column: goal_column,
+                    };
 
-                let target_display_point = stoat_text_transform::DisplayPoint {
-                    row: display_point.row + 1,
-                    column: goal_column,
-                };
+                    let new_head = display_snapshot
+                        .display_point_to_point(target_display_point, sum_tree::Bias::Left);
 
-                // Convert back to buffer coordinates
-                let new_head = display_snapshot
-                    .display_point_to_point(target_display_point, sum_tree::Bias::Left);
-
-                // Extend selection by moving head, keeping tail fixed
-                selection.set_head(
-                    new_head,
-                    text::SelectionGoal::HorizontalPosition(goal_column as f64),
-                );
+                    selection.set_head(
+                        new_head,
+                        text::SelectionGoal::HorizontalPosition(goal_column as f64),
+                    );
+                }
             }
         }
 

@@ -50,6 +50,40 @@ actions!(
         DeleteLine,
         /// Delete from cursor to end of line
         DeleteToEndOfLine,
+        /// Open new line below and enter insert mode
+        OpenLineBelow,
+        /// Open new line above and enter insert mode
+        OpenLineAbove,
+        /// Move right one character and enter insert mode
+        Append,
+        /// Move to end of line and enter insert mode
+        AppendAtLineEnd,
+        /// Move to first non-whitespace character and enter insert mode
+        InsertAtLineStart,
+        /// Delete selected text
+        DeleteSelection,
+        /// Delete selected text and enter insert mode
+        ChangeSelection,
+        /// Yank (copy) selected text to clipboard
+        Yank,
+        /// Paste clipboard contents after cursor
+        PasteAfter,
+        /// Paste clipboard contents before cursor
+        PasteBefore,
+        /// Join current line with the next line
+        JoinLines,
+        /// Indent selected lines
+        Indent,
+        /// Outdent selected lines
+        Outdent,
+        /// Convert selection to lowercase
+        Lowercase,
+        /// Convert selection to uppercase
+        Uppercase,
+        /// Toggle case of each character in selection
+        SwapCase,
+        /// Replace character under cursor with next typed character
+        ReplaceChar,
     ]
 );
 
@@ -341,6 +375,8 @@ actions!(
         AddSelectionAbove,
         /// Add cursor on line below with same column
         AddSelectionBelow,
+        /// Select entire buffer contents
+        SelectAll,
     ]
 );
 
@@ -638,6 +674,60 @@ action_metadata!(
     DeleteToEndOfLine,
     "delete to end",
     "Delete from cursor to the end of the line"
+);
+action_metadata!(
+    OpenLineBelow,
+    "open below",
+    "Open new line below and enter insert mode"
+);
+action_metadata!(
+    OpenLineAbove,
+    "open above",
+    "Open new line above and enter insert mode"
+);
+action_metadata!(Append, "append", "Move right and enter insert mode");
+action_metadata!(
+    AppendAtLineEnd,
+    "append at end",
+    "Move to end of line and enter insert mode"
+);
+action_metadata!(
+    InsertAtLineStart,
+    "insert at start",
+    "Move to first non-whitespace and enter insert mode"
+);
+action_metadata!(
+    DeleteSelection,
+    "delete selection",
+    "Delete selected text and enter normal mode"
+);
+action_metadata!(
+    ChangeSelection,
+    "change selection",
+    "Delete selected text and enter insert mode"
+);
+action_metadata!(SelectAll, "select all", "Select the entire buffer contents");
+action_metadata!(Yank, "yank", "Copy selected text to clipboard");
+action_metadata!(
+    PasteAfter,
+    "paste after",
+    "Paste clipboard contents after cursor"
+);
+action_metadata!(
+    PasteBefore,
+    "paste before",
+    "Paste clipboard contents before cursor"
+);
+action_metadata!(JoinLines, "join lines", "Join current line with the next");
+action_metadata!(Indent, "indent", "Indent selected lines");
+action_metadata!(Outdent, "outdent", "Remove one level of indentation");
+action_metadata!(Lowercase, "lowercase", "Convert selection to lowercase");
+action_metadata!(Uppercase, "uppercase", "Convert selection to uppercase");
+action_metadata!(SwapCase, "swap case", "Toggle case of each character");
+action_metadata!(
+    ReplaceChar,
+    "replace char",
+    "Replace character under cursor with next typed character"
 );
 
 // Mode actions
@@ -1249,6 +1339,36 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DeleteToEndOfLine>(),
         DeleteToEndOfLine::action_name(),
     );
+    names.insert(TypeId::of::<OpenLineBelow>(), OpenLineBelow::action_name());
+    names.insert(TypeId::of::<OpenLineAbove>(), OpenLineAbove::action_name());
+    names.insert(TypeId::of::<Append>(), Append::action_name());
+    names.insert(
+        TypeId::of::<AppendAtLineEnd>(),
+        AppendAtLineEnd::action_name(),
+    );
+    names.insert(
+        TypeId::of::<InsertAtLineStart>(),
+        InsertAtLineStart::action_name(),
+    );
+    names.insert(
+        TypeId::of::<DeleteSelection>(),
+        DeleteSelection::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ChangeSelection>(),
+        ChangeSelection::action_name(),
+    );
+    names.insert(TypeId::of::<SelectAll>(), SelectAll::action_name());
+    names.insert(TypeId::of::<Yank>(), Yank::action_name());
+    names.insert(TypeId::of::<PasteAfter>(), PasteAfter::action_name());
+    names.insert(TypeId::of::<PasteBefore>(), PasteBefore::action_name());
+    names.insert(TypeId::of::<JoinLines>(), JoinLines::action_name());
+    names.insert(TypeId::of::<Indent>(), Indent::action_name());
+    names.insert(TypeId::of::<Outdent>(), Outdent::action_name());
+    names.insert(TypeId::of::<Lowercase>(), Lowercase::action_name());
+    names.insert(TypeId::of::<Uppercase>(), Uppercase::action_name());
+    names.insert(TypeId::of::<SwapCase>(), SwapCase::action_name());
+    names.insert(TypeId::of::<ReplaceChar>(), ReplaceChar::action_name());
 
     // Mode actions
     names.insert(
@@ -1644,6 +1764,36 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DeleteToEndOfLine>(),
         DeleteToEndOfLine::description(),
     );
+    descriptions.insert(TypeId::of::<OpenLineBelow>(), OpenLineBelow::description());
+    descriptions.insert(TypeId::of::<OpenLineAbove>(), OpenLineAbove::description());
+    descriptions.insert(TypeId::of::<Append>(), Append::description());
+    descriptions.insert(
+        TypeId::of::<AppendAtLineEnd>(),
+        AppendAtLineEnd::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<InsertAtLineStart>(),
+        InsertAtLineStart::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<DeleteSelection>(),
+        DeleteSelection::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ChangeSelection>(),
+        ChangeSelection::description(),
+    );
+    descriptions.insert(TypeId::of::<SelectAll>(), SelectAll::description());
+    descriptions.insert(TypeId::of::<Yank>(), Yank::description());
+    descriptions.insert(TypeId::of::<PasteAfter>(), PasteAfter::description());
+    descriptions.insert(TypeId::of::<PasteBefore>(), PasteBefore::description());
+    descriptions.insert(TypeId::of::<JoinLines>(), JoinLines::description());
+    descriptions.insert(TypeId::of::<Indent>(), Indent::description());
+    descriptions.insert(TypeId::of::<Outdent>(), Outdent::description());
+    descriptions.insert(TypeId::of::<Lowercase>(), Lowercase::description());
+    descriptions.insert(TypeId::of::<Uppercase>(), Uppercase::description());
+    descriptions.insert(TypeId::of::<SwapCase>(), SwapCase::description());
+    descriptions.insert(TypeId::of::<ReplaceChar>(), ReplaceChar::description());
 
     // Mode actions
     descriptions.insert(
@@ -2046,6 +2196,36 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<DeleteToEndOfLine>(),
         DeleteToEndOfLine::help_text(),
     );
+    help.insert(TypeId::of::<OpenLineBelow>(), OpenLineBelow::help_text());
+    help.insert(TypeId::of::<OpenLineAbove>(), OpenLineAbove::help_text());
+    help.insert(TypeId::of::<Append>(), Append::help_text());
+    help.insert(
+        TypeId::of::<AppendAtLineEnd>(),
+        AppendAtLineEnd::help_text(),
+    );
+    help.insert(
+        TypeId::of::<InsertAtLineStart>(),
+        InsertAtLineStart::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DeleteSelection>(),
+        DeleteSelection::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ChangeSelection>(),
+        ChangeSelection::help_text(),
+    );
+    help.insert(TypeId::of::<SelectAll>(), SelectAll::help_text());
+    help.insert(TypeId::of::<Yank>(), Yank::help_text());
+    help.insert(TypeId::of::<PasteAfter>(), PasteAfter::help_text());
+    help.insert(TypeId::of::<PasteBefore>(), PasteBefore::help_text());
+    help.insert(TypeId::of::<JoinLines>(), JoinLines::help_text());
+    help.insert(TypeId::of::<Indent>(), Indent::help_text());
+    help.insert(TypeId::of::<Outdent>(), Outdent::help_text());
+    help.insert(TypeId::of::<Lowercase>(), Lowercase::help_text());
+    help.insert(TypeId::of::<Uppercase>(), Uppercase::help_text());
+    help.insert(TypeId::of::<SwapCase>(), SwapCase::help_text());
+    help.insert(TypeId::of::<ReplaceChar>(), ReplaceChar::help_text());
 
     // Mode actions
     help.insert(

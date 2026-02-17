@@ -10,6 +10,7 @@ impl Stoat {
     /// detection, working on both code and plain text files.
     pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
+        let count = self.take_count();
         let buffer_snapshot = {
             let buffer_item = self.active_buffer(cx).read(cx);
             buffer_item.buffer().read(cx).snapshot()
@@ -35,16 +36,16 @@ impl Stoat {
 
         let mut selections = self.selections.all::<Point>(&buffer_snapshot);
         for selection in &mut selections {
-            let cursor_offset = buffer_snapshot.point_to_offset(selection.head());
-            let new_offset = CharClassifier::previous_word_start(&buffer_snapshot, cursor_offset);
-
-            if new_offset != cursor_offset {
-                let new_pos = buffer_snapshot.offset_to_point(new_offset);
-                selection.start = new_pos;
-                selection.end = new_pos;
-                selection.reversed = false;
-                selection.goal = text::SelectionGoal::None;
+            let mut cursor_offset = buffer_snapshot.point_to_offset(selection.head());
+            for _ in 0..count {
+                cursor_offset =
+                    CharClassifier::previous_word_start(&buffer_snapshot, cursor_offset);
             }
+            let new_pos = buffer_snapshot.offset_to_point(cursor_offset);
+            selection.start = new_pos;
+            selection.end = new_pos;
+            selection.reversed = false;
+            selection.goal = text::SelectionGoal::None;
         }
 
         self.selections.select(selections.clone(), &buffer_snapshot);
