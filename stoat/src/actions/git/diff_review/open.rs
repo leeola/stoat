@@ -956,16 +956,16 @@ mod tests {
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // In WorkingVsHead mode, verify syntax highlighting works
+            // In WorkingVsHead mode, verify parse tree exists for syntax highlighting
             let buffer_item_before = s.active_buffer(cx);
-            let buffer_snapshot_before = buffer_item_before.read(cx).buffer().read(cx).snapshot();
-            let token_snapshot_before = buffer_item_before.read(cx).token_snapshot();
-            let token_count_before = token_snapshot_before.token_count(&buffer_snapshot_before);
+            let source_before = buffer_item_before.read(cx).buffer().read(cx).text();
+            let captures_before = buffer_item_before
+                .read(cx)
+                .highlight_captures(0..source_before.len(), &source_before);
 
-            // Should have tokens for Rust syntax (fn, println, let, etc.)
             assert!(
-                token_count_before > 0,
-                "Should have syntax tokens in WorkingVsHead mode"
+                !captures_before.is_empty(),
+                "Should have highlight captures in WorkingVsHead mode"
             );
 
             // Cycle to IndexVsHead mode
@@ -976,8 +976,6 @@ mod tests {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
-            // ROOT CAUSE BUG: After switching to IndexVsHead, we replaced buffer content
-            // but never called reparse(), so token_map is out of sync
             let buffer_item_after = s.active_buffer(cx);
 
             // Verify buffer contains index content (STAGED)
@@ -987,28 +985,13 @@ mod tests {
                 "Buffer should contain index content (STAGED)"
             );
 
-            // BUG CHECK: Token count should still be valid (not zero, not stale)
-            let buffer_snapshot_after = buffer_item_after.read(cx).buffer().read(cx).snapshot();
-            let token_snapshot_after = buffer_item_after.read(cx).token_snapshot();
-            let token_count_after = token_snapshot_after.token_count(&buffer_snapshot_after);
-
-            // BUG: Token versions don't match buffer version
-            // The token_map version is from before the edit, but buffer version is after
-            let buffer_version = buffer_snapshot_after.version().clone();
-            let token_version = token_snapshot_after.version.clone();
-
-            // EXPECTED: buffer_version == token_version (tokens are in sync)
-            // ACTUAL: buffer_version != token_version (tokens are stale)
-            assert_eq!(
-                buffer_version, token_version,
-                "BUG: Token version {token_version:?} doesn't match buffer version {buffer_version:?}. \
-                 Syntax highlighting is out of sync! Root cause: buffer.edit() was called \
-                 but reparse() was not called to update token_map."
-            );
-
-            tracing::info!(
-                "Before: {} tokens. After mode switch: {} tokens. Buffer version: {:?}, Token version: {:?}",
-                token_count_before, token_count_after, buffer_version, token_version
+            // Highlights are computed on-demand from the tree, so they're always in sync
+            let captures_after = buffer_item_after
+                .read(cx)
+                .highlight_captures(0..buffer_text.len(), &buffer_text);
+            assert!(
+                !captures_after.is_empty(),
+                "Should have highlight captures after mode switch"
             );
         });
     }

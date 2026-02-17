@@ -3,7 +3,6 @@
 //! Combines data types, async loading logic, and rendering components for the file/buffer finder.
 //! Following Zed's pattern where a feature combines state and UI in one module.
 
-// Re-export syntax module types
 use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
 use gpui::{
     div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
@@ -11,12 +10,8 @@ use gpui::{
     LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
     StatefulInteractiveElement, Style, Styled, TextRun, Window,
 };
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
-use stoat_rope::TokenSnapshot;
-use stoat_text::{Language, Parser};
+use std::path::{Path, PathBuf};
+use stoat_text::{HighlightCapture, Language, Parser};
 use text::{Buffer, BufferId};
 
 /// Preview data for file finder.
@@ -27,24 +22,19 @@ use text::{Buffer, BufferId};
 pub enum PreviewData {
     /// Plain text preview (fast, shown immediately)
     Plain(String),
-    /// Syntax-highlighted preview (slower, shown after parsing)
-    Highlighted { text: String, tokens: TokenSnapshot },
+    /// Syntax-highlighted preview with on-demand captures
+    Highlighted {
+        text: String,
+        captures: Vec<HighlightCapture>,
+        capture_names: Vec<String>,
+    },
 }
 
 impl PreviewData {
-    /// Get the text content of this preview
     pub fn text(&self) -> &str {
         match self {
             PreviewData::Plain(text) => text,
             PreviewData::Highlighted { text, .. } => text,
-        }
-    }
-
-    /// Get the token snapshot if this is a highlighted preview
-    pub fn tokens(&self) -> Option<&TokenSnapshot> {
-        match self {
-            PreviewData::Plain(_) => None,
-            PreviewData::Highlighted { tokens, .. } => Some(tokens),
         }
     }
 }
@@ -109,19 +99,21 @@ pub async fn load_file_preview(path: &Path) -> Option<PreviewData> {
     })
     .await?;
 
-    // Phase 2: CPU-intensive parsing on thread pool
+    // Phase 2: Parse and compute captures on thread pool
     smol::unblock(move || {
         let mut parser = Parser::new(language).ok()?;
-        let buffer = Buffer::new(0, BufferId::new(1).ok()?, text.clone());
-        let snapshot = buffer.snapshot();
-        let parsed_tokens = parser.parse(&text, &snapshot).ok()?;
+        parser.parse(&text).ok()?;
 
-        // Build token snapshot
-        let mut token_map = stoat_rope::TokenMap::new(&snapshot);
-        token_map.replace_tokens(parsed_tokens, &snapshot);
-        let tokens = token_map.snapshot();
+        let tree = parser.tree()?;
+        let query = parser.highlight_query()?;
+        let captures = query.captures(tree, text.as_bytes(), 0..text.len());
+        let capture_names = query.capture_names().to_vec();
 
-        Some(PreviewData::Highlighted { text, tokens })
+        Some(PreviewData::Highlighted {
+            text,
+            captures,
+            capture_names,
+        })
     })
     .await
 }
@@ -289,12 +281,11 @@ impl Finder {
 
 /// Custom element for rendering syntax-highlighted file preview.
 ///
-/// This implements GPUI's low-level Element trait to properly render colored text
+/// Implements GPUI's low-level Element trait to render colored text
 /// using TextRun and ShapedLine APIs.
 struct PreviewElement {
     preview: Option<PreviewData>,
     theme: SyntaxTheme,
-    highlight_map: HighlightMap,
     cached_text_ptr: Option<*const str>,
     cached_layout: Option<PreviewLayout>,
 }
@@ -315,12 +306,10 @@ struct ShapedLineWithPosition {
 impl PreviewElement {
     fn new(preview: Option<PreviewData>) -> Self {
         let theme = SyntaxTheme::monokai_dark();
-        let highlight_map = HighlightMap::new(&theme);
 
         Self {
             preview,
             theme,
-            highlight_map,
             cached_text_ptr: None,
             cached_layout: None,
         }
@@ -383,28 +372,23 @@ impl Element for PreviewElement {
                 }
             }
         }
-        let buffer = text::Buffer::new(
+        let buffer = Buffer::new(
             0,
-            text::BufferId::new(1).expect("BufferId::new(1) should never fail"),
+            BufferId::new(1).expect("BufferId::new(1) should never fail"),
             preview_text.to_string(),
         );
         let snapshot = buffer.snapshot();
 
-        // Get tokens - use cached empty snapshot for Plain preview
-        // This avoids expensive TokenMap creation on every frame
-        static EMPTY_TOKENS: OnceLock<stoat_rope::TokenSnapshot> = OnceLock::new();
-        let tokens = match preview {
-            PreviewData::Highlighted { tokens, .. } => tokens,
-            PreviewData::Plain(_) => EMPTY_TOKENS.get_or_init(|| {
-                // Create minimal empty snapshot once - HighlightedChunks will return
-                // chunks with no highlighting (highlight_id = None)
-                let empty_buf = text::Buffer::new(
-                    0,
-                    text::BufferId::new(1).expect("BufferId::new(1) should never fail"),
-                    String::new(),
-                );
-                stoat_rope::TokenMap::new(&empty_buf.snapshot()).snapshot()
-            }),
+        let (captures, highlight_map) = match preview {
+            PreviewData::Highlighted {
+                captures,
+                capture_names,
+                ..
+            } => (
+                captures.clone(),
+                HighlightMap::new(&self.theme, capture_names),
+            ),
+            PreviewData::Plain(_) => (vec![], HighlightMap::default()),
         };
 
         // Font configuration
@@ -436,12 +420,11 @@ impl Element for PreviewElement {
             let line_start_offset = current_offset;
             let line_end_offset = current_offset + line_text.len();
 
-            // Build text runs with highlighting
             let highlighted_chunks = HighlightedChunks::new(
                 line_start_offset..line_end_offset,
                 &snapshot,
-                tokens,
-                &self.highlight_map,
+                &captures,
+                &highlight_map,
             );
 
             let mut text_runs = Vec::new();

@@ -69,7 +69,6 @@ impl Summary for SymbolSummary {
 #[derive(Clone)]
 pub struct SymbolIndex {
     symbols: SumTree<SymbolEntry>,
-    version: clock::Global,
 }
 
 impl SyntaxIndex for SymbolIndex {
@@ -81,10 +80,7 @@ impl SyntaxIndex for SymbolIndex {
     ) -> Self {
         let entries = extract_symbols(tree, source, buffer, language);
         let symbols = SumTree::from_iter(entries, buffer);
-        Self {
-            symbols,
-            version: buffer.version().clone(),
-        }
+        Self { symbols }
     }
 }
 
@@ -302,7 +298,7 @@ mod tests {
         let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
         let snapshot = buffer.snapshot();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
-        let _ = parser.parse(source, &snapshot).unwrap();
+        parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();
         let index = SymbolIndex::rebuild(tree, source, &snapshot, Language::Rust);
         (snapshot, index)

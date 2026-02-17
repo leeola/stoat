@@ -74,7 +74,6 @@ impl Summary for ScopeSummary {
 #[derive(Clone)]
 pub struct ScopeIndex {
     scopes: SumTree<ScopeEntry>,
-    version: clock::Global,
 }
 
 impl SyntaxIndex for ScopeIndex {
@@ -86,10 +85,7 @@ impl SyntaxIndex for ScopeIndex {
     ) -> Self {
         let entries = extract_scopes(tree, source, buffer, language);
         let scopes = SumTree::from_iter(entries, buffer);
-        Self {
-            scopes,
-            version: buffer.version().clone(),
-        }
+        Self { scopes }
     }
 }
 
@@ -267,7 +263,7 @@ mod tests {
         let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
         let snapshot = buffer.snapshot();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
-        let _ = parser.parse(source, &snapshot).unwrap();
+        parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();
         let index = ScopeIndex::rebuild(tree, source, &snapshot, Language::Rust);
         (snapshot, index)

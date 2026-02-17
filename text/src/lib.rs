@@ -1,26 +1,8 @@
-//! Tree-sitter based text parsing for rope
-//!
-//! This crate provides tree-sitter parsers that produce flat token lists
-//! compatible with [`stoat_rope::TokenEntry`]. It converts tree-sitter
-//! parse trees directly into tokens without intermediate tree structures.
-
-pub mod convert;
+pub mod highlight_query;
 pub mod language;
 pub mod parser;
 
+pub use highlight_query::{HighlightCapture, HighlightQuery};
 pub use language::Language;
-pub use parser::{ParseResult, Parser};
-pub use stoat_rope::TokenEntry;
+pub use parser::Parser;
 pub use tree_sitter;
-
-/// Parse text into tokens using tree-sitter
-///
-/// Convenience function that creates a parser and parses in one call.
-pub fn parse(
-    text: &str,
-    language: Language,
-    buffer: &text::BufferSnapshot,
-) -> anyhow::Result<Vec<TokenEntry>> {
-    let mut parser = Parser::new(language)?;
-    parser.parse(text, buffer)
-}

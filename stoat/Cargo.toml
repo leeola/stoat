@@ -10,7 +10,6 @@ gpui = { workspace = true }
 text = { workspace = true }
 sum_tree = { workspace = true }
 clock = { workspace = true }
-stoat_rope = { path = "../rope" }
 stoat_text = { path = "../text" }
 stoat_text_transform = { path = "../text_transform" }
 stoat_config = { path = "../config" }

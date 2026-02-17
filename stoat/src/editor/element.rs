@@ -86,22 +86,34 @@ impl Element for EditorElement {
         };
 
         let snapshot_start = Instant::now();
-        // Get buffer snapshot, token snapshot, display snapshot, diff, and display buffer
         // Batch reads to reduce lock overhead
-        let (buffer_snapshot, token_snapshot, is_in_diff_review, display_map_entity, diff) = {
+        let (
+            buffer_snapshot,
+            highlight_captures,
+            highlight_map,
+            is_in_diff_review,
+            display_map_entity,
+            diff,
+        ) = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
             let buffer_item_read = buffer_item.read(cx);
 
             let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot();
-            let token_snapshot = buffer_item_read.token_snapshot();
+            let source = buffer_item_read.buffer().read(cx).text();
+            let highlight_captures = buffer_item_read.highlight_captures(0..source.len(), &source);
+            let highlight_map = buffer_item_read
+                .highlight_map()
+                .cloned()
+                .unwrap_or_default();
             let is_in_diff_review = stoat.is_in_diff_review(cx);
             let display_map_entity = stoat.display_map(cx).clone();
             let diff = buffer_item_read.diff().cloned();
 
             (
                 buffer_snapshot,
-                token_snapshot,
+                highlight_captures,
+                highlight_map,
                 is_in_diff_review,
                 display_map_entity,
                 diff,
@@ -224,8 +236,8 @@ impl Element for EditorElement {
             let chunks = HighlightedChunks::new(
                 start_offset..end_offset,
                 &buffer_snapshot,
-                &token_snapshot,
-                &self.style.highlight_map,
+                &highlight_captures,
+                &highlight_map,
             );
 
             // Process chunks into TextRuns per buffer row

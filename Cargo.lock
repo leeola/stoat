@@ -1302,20 +1302,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "compact_str"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fdb1325a1cece981e8a296ab8f0f9b63ae357bd0784a9faaf548cc7b480707a"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "rustversion",
- "ryu",
- "static_assertions",
-]
-
-[[package]]
 name = "compression-codecs"
 version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6642,7 +6628,6 @@ dependencies = [
  "stoat_config",
  "stoat_log",
  "stoat_lsp",
- "stoat_rope",
  "stoat_text",
  "stoat_text_transform",
  "sum_tree",
@@ -6675,7 +6660,7 @@ dependencies = [
 name = "stoat_ast"
 version = "0.1.0"
 dependencies = [
- "compact_str 0.8.1",
+ "compact_str",
  "typed-arena",
 ]
 
@@ -6731,24 +6716,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "stoat_rope"
-version = "0.1.0"
-dependencies = [
- "clock",
- "compact_str 0.9.0",
- "rand 0.8.5",
- "rustc-hash 2.1.1",
- "smallvec",
- "sum_tree",
- "text",
-]
-
-[[package]]
 name = "stoat_text"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "stoat_rope",
+ "smallvec",
  "text",
  "tree-sitter",
  "tree-sitter-json",

@@ -24,7 +24,7 @@
 //! integrate with:
 //! - [`Cursor`](crate::cursor::Cursor) for position tracking and goal column
 //! - [`BufferItem`](crate::buffer::item::BufferItem) for buffer snapshots and bounds checking
-//! - [`TokenSnapshot`](crate::buffer::item::TokenSnapshot) for word-based movement
+//! - [`BufferItem`](crate::buffer::item::BufferItem) for buffer state
 //! - Scroll animation system for smooth viewport transitions
 
 mod down;

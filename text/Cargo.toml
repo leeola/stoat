@@ -7,9 +7,6 @@ authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
 [dependencies]
-# Rope for token types
-stoat_rope = { path = "../rope" }
-
 # Tree-sitter core
 tree-sitter = "0.20"
 
@@ -21,6 +18,10 @@ tree-sitter-toml = "0.20"
 
 # Zed's text infrastructure (for BufferSnapshot, Anchor)
 text = { workspace = true }
+
+# Required for feature unification: Zed's `text` crate uses smallvec's
+# `const_new` feature but doesn't declare it in its own Cargo.toml
+smallvec = { workspace = true }
 
 # Error handling
 anyhow = "1.0"

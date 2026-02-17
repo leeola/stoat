@@ -61,7 +61,6 @@ impl Summary for BracketSummary {
 #[derive(Clone)]
 pub struct BracketIndex {
     brackets: SumTree<BracketEntry>,
-    version: clock::Global,
 }
 
 impl SyntaxIndex for BracketIndex {
@@ -73,10 +72,7 @@ impl SyntaxIndex for BracketIndex {
     ) -> Self {
         let entries = extract_brackets(tree, source, buffer, language);
         let brackets = SumTree::from_iter(entries, buffer);
-        Self {
-            brackets,
-            version: buffer.version().clone(),
-        }
+        Self { brackets }
     }
 }
 
@@ -242,7 +238,7 @@ mod tests {
         let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
         let snapshot = buffer.snapshot();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
-        let _ = parser.parse(source, &snapshot).unwrap();
+        parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();
         let index = BracketIndex::rebuild(tree, source, &snapshot, Language::Rust);
         (snapshot, index)

@@ -5,7 +5,6 @@ members = [
   "bin",
   "text",
   "stoat_ast",
-  "rope",
   "agent/claude_code",
   "text_transform",
   "log",
