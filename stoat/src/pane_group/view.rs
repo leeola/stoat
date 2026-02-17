@@ -824,7 +824,7 @@ fn git_index_changed(root: &std::path::Path, last_mtime: &mut Option<SystemTime>
     let Ok(mtime) = metadata.modified() else {
         return false;
     };
-    let changed = last_mtime.map_or(true, |last| mtime > last);
+    let changed = last_mtime.is_none_or(|last| mtime > last);
     *last_mtime = Some(mtime);
     changed
 }

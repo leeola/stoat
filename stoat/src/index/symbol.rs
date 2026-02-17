@@ -217,9 +217,8 @@ pub fn extract_symbols(
     language: Language,
 ) -> Vec<SymbolEntry> {
     let mut entries = Vec::new();
-    match language {
-        Language::Rust => extract_rust_symbols(tree.root_node(), source, buffer, &mut entries),
-        _ => {},
+    if let Language::Rust = language {
+        extract_rust_symbols(tree.root_node(), source, buffer, &mut entries);
     }
     entries
 }

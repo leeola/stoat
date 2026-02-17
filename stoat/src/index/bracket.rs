@@ -148,14 +148,15 @@ impl BracketSnapshot {
             if open > offset {
                 break;
             }
-            if open <= offset && offset <= close {
-                if best.as_ref().map_or(true, |b| {
+            if open <= offset
+                && offset <= close
+                && best.as_ref().is_none_or(|b| {
                     let b_open = b.open.to_offset(buffer);
                     let b_close = b.close.to_offset(buffer);
                     (close - open) < (b_close - b_open)
-                }) {
-                    best = Some(entry.clone());
-                }
+                })
+            {
+                best = Some(entry.clone());
             }
             cursor.next();
         }

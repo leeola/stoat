@@ -142,7 +142,7 @@ impl CharClassifier {
         };
 
         let at_word_start =
-            first_kind == CharKind::Word && prev_kind.map_or(true, |k| k != CharKind::Word);
+            first_kind == CharKind::Word && prev_kind.is_none_or(|k| k != CharKind::Word);
 
         if at_word_start {
             let mut end = offset;
@@ -248,7 +248,7 @@ impl CharClassifier {
         };
 
         let at_group_start =
-            first_kind != CharKind::Whitespace && prev_kind.map_or(true, |k| k != first_kind);
+            first_kind != CharKind::Whitespace && prev_kind.is_none_or(|k| k != first_kind);
 
         let search_start = if at_group_start {
             offset

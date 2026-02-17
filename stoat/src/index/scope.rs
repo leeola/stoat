@@ -114,10 +114,11 @@ impl ScopeSnapshot {
             if start > offset {
                 break;
             }
-            if start <= offset && offset < end {
-                if best.as_ref().map_or(true, |b| entry.depth > b.depth) {
-                    best = Some(entry.clone());
-                }
+            if start <= offset
+                && offset < end
+                && best.as_ref().is_none_or(|b| entry.depth > b.depth)
+            {
+                best = Some(entry.clone());
             }
             cursor.next();
         }
@@ -180,11 +181,8 @@ pub fn extract_scopes(
     language: Language,
 ) -> Vec<ScopeEntry> {
     let mut entries = Vec::new();
-    match language {
-        Language::Rust => {
-            extract_rust_scopes(tree.root_node(), buffer, &mut entries, 0, None);
-        },
-        _ => {},
+    if let Language::Rust = language {
+        extract_rust_scopes(tree.root_node(), buffer, &mut entries, 0, None);
     }
     entries
 }
