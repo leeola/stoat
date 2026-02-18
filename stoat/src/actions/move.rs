@@ -28,14 +28,20 @@
 //! - Scroll animation system for smooth viewport transitions
 
 mod down;
+pub(crate) mod find_char;
+mod half_page_down;
+mod half_page_up;
 mod left;
 mod page_down;
 mod page_up;
 mod right;
 mod to_file_end;
 mod to_file_start;
+mod to_first_non_whitespace;
 mod to_line_end;
 mod to_line_start;
 mod up;
+mod word_end;
+mod word_end_big;
 mod word_left;
 mod word_right;

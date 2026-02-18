@@ -344,6 +344,9 @@ pub struct Stoat {
     /// When true, the next printable key will replace the char under each cursor.
     pub(crate) replace_pending: bool,
 
+    /// When set, the next printable key triggers a find-char operation in the given direction.
+    pub(crate) find_char_pending: Option<crate::actions::FindCharMode>,
+
     /// Tracks selections associated with text transactions and standalone selection history.
     pub(crate) selection_history: SelectionHistory,
 
@@ -500,6 +503,7 @@ impl Stoat {
             compiled_keymap,
             pending_count: None,
             replace_pending: false,
+            find_char_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -585,6 +589,7 @@ impl Stoat {
             compiled_keymap: self.compiled_keymap.clone(),
             pending_count: None,
             replace_pending: false,
+            find_char_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -1667,6 +1672,7 @@ impl Stoat {
             compiled_keymap: self.compiled_keymap.clone(),
             pending_count: None,
             replace_pending: false,
+            find_char_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         })

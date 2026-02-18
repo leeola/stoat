@@ -36,6 +36,17 @@ pub fn dispatch_editor_action<C: AppContext>(
         "MoveToFileEnd" => ed!(stoat, cx, |s, cx| s.move_to_file_end(cx)),
         "PageUp" => ed!(stoat, cx, |s, cx| s.page_up(cx)),
         "PageDown" => ed!(stoat, cx, |s, cx| s.page_down(cx)),
+        "MoveWordEnd" => ed!(stoat, cx, |s, cx| s.move_word_end(cx)),
+        "MoveWordEndBig" => ed!(stoat, cx, |s, cx| s.move_word_end_big(cx)),
+        "FindCharForward" => ed!(stoat, cx, |s, cx| s.find_char_forward(cx)),
+        "FindCharBackward" => ed!(stoat, cx, |s, cx| s.find_char_backward(cx)),
+        "TillCharForward" => ed!(stoat, cx, |s, cx| s.till_char_forward(cx)),
+        "TillCharBackward" => ed!(stoat, cx, |s, cx| s.till_char_backward(cx)),
+        "MoveToFirstNonWhitespace" => {
+            ed!(stoat, cx, |s, cx| s.move_to_first_non_whitespace(cx))
+        },
+        "HalfPageUp" => ed!(stoat, cx, |s, cx| s.half_page_up(cx)),
+        "HalfPageDown" => ed!(stoat, cx, |s, cx| s.half_page_down(cx)),
 
         "DeleteLeft" => ed!(stoat, cx, |s, cx| s.delete_left(cx)),
         "DeleteRight" => ed!(stoat, cx, |s, cx| s.delete_right(cx)),
@@ -86,6 +97,11 @@ pub fn dispatch_editor_action<C: AppContext>(
         "SelectAllMatches" => ed!(stoat, cx, |s, cx| s.select_all_matches(cx)),
         "AddSelectionAbove" => ed!(stoat, cx, |s, cx| s.add_selection_above(cx)),
         "AddSelectionBelow" => ed!(stoat, cx, |s, cx| s.add_selection_below(cx)),
+        "CollapseSelection" => ed!(stoat, cx, |s, cx| s.collapse_selection(cx)),
+        "KeepPrimarySelection" => ed!(stoat, cx, |s, cx| s.keep_primary_selection(cx)),
+        "FlipSelection" => ed!(stoat, cx, |s, cx| s.flip_selection(cx)),
+        "SelectWordEnd" => ed!(stoat, cx, |s, cx| s.select_word_end(cx)),
+        "SelectWordEndBig" => ed!(stoat, cx, |s, cx| s.select_word_end_big(cx)),
 
         "SetMode" => {
             if let Some(mode_name) = action_first_string_arg(action) {

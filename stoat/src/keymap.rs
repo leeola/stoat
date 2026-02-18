@@ -24,6 +24,10 @@ pub fn default_modes() -> HashMap<String, Mode> {
     );
     modes.insert("space".into(), Mode::new("space", "SPACE", false));
     modes.insert(
+        "goto".into(),
+        Mode::with_previous("goto", "GOTO", "normal", false),
+    );
+    modes.insert(
         "command_palette".into(),
         Mode::with_previous("command_palette", "COMMAND", "normal", false),
     );

@@ -115,6 +115,24 @@ actions!(
         PageUp,
         /// Scroll down one page
         PageDown,
+        /// Move cursor to end of current/next word
+        MoveWordEnd,
+        /// Move cursor to end of current/next WORD (whitespace-delimited)
+        MoveWordEndBig,
+        /// Find character forward on current line
+        FindCharForward,
+        /// Find character backward on current line
+        FindCharBackward,
+        /// Move till character forward on current line
+        TillCharForward,
+        /// Move till character backward on current line
+        TillCharBackward,
+        /// Move to first non-whitespace character on line
+        MoveToFirstNonWhitespace,
+        /// Scroll up half a page
+        HalfPageUp,
+        /// Scroll down half a page
+        HalfPageDown,
     ]
 );
 
@@ -377,6 +395,16 @@ actions!(
         AddSelectionBelow,
         /// Select entire buffer contents
         SelectAll,
+        /// Collapse all selections to cursor position
+        CollapseSelection,
+        /// Remove all selections except the primary
+        KeepPrimarySelection,
+        /// Swap anchor and head of all selections
+        FlipSelection,
+        /// Extend selection to end of current/next word
+        SelectWordEnd,
+        /// Extend selection to end of current/next WORD (whitespace-delimited)
+        SelectWordEndBig,
     ]
 );
 
@@ -642,6 +670,43 @@ action_metadata!(
 );
 action_metadata!(PageUp, "page up", "Scroll up one page");
 action_metadata!(PageDown, "page down", "Scroll down one page");
+action_metadata!(
+    MoveWordEnd,
+    "word end",
+    "Move the cursor to the end of the current/next word"
+);
+action_metadata!(
+    MoveWordEndBig,
+    "WORD end",
+    "Move the cursor to the end of the current/next WORD (whitespace-delimited)"
+);
+action_metadata!(
+    FindCharForward,
+    "find char forward",
+    "Find character forward on current line"
+);
+action_metadata!(
+    FindCharBackward,
+    "find char backward",
+    "Find character backward on current line"
+);
+action_metadata!(
+    TillCharForward,
+    "till char forward",
+    "Move till character forward on current line"
+);
+action_metadata!(
+    TillCharBackward,
+    "till char backward",
+    "Move till character backward on current line"
+);
+action_metadata!(
+    MoveToFirstNonWhitespace,
+    "first non-whitespace",
+    "Move to the first non-whitespace character on the line"
+);
+action_metadata!(HalfPageUp, "half page up", "Scroll up half a page");
+action_metadata!(HalfPageDown, "half page down", "Scroll down half a page");
 
 // Editing actions
 action_metadata!(
@@ -838,6 +903,31 @@ action_metadata!(
     AddSelectionBelow,
     "add selection below",
     "Add cursor on line below at same column position"
+);
+action_metadata!(
+    CollapseSelection,
+    "collapse selection",
+    "Collapse all selections to their cursor position"
+);
+action_metadata!(
+    KeepPrimarySelection,
+    "keep primary",
+    "Remove all selections except the primary"
+);
+action_metadata!(
+    FlipSelection,
+    "flip selection",
+    "Swap anchor and head of all selections"
+);
+action_metadata!(
+    SelectWordEnd,
+    "select word end",
+    "Extend selection to the end of the current/next word"
+);
+action_metadata!(
+    SelectWordEndBig,
+    "select WORD end",
+    "Extend selection to the end of the current/next WORD (whitespace-delimited)"
 );
 
 // File finder actions
@@ -1321,6 +1411,33 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::action_name());
     names.insert(TypeId::of::<PageUp>(), PageUp::action_name());
     names.insert(TypeId::of::<PageDown>(), PageDown::action_name());
+    names.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::action_name());
+    names.insert(
+        TypeId::of::<MoveWordEndBig>(),
+        MoveWordEndBig::action_name(),
+    );
+    names.insert(
+        TypeId::of::<FindCharForward>(),
+        FindCharForward::action_name(),
+    );
+    names.insert(
+        TypeId::of::<FindCharBackward>(),
+        FindCharBackward::action_name(),
+    );
+    names.insert(
+        TypeId::of::<TillCharForward>(),
+        TillCharForward::action_name(),
+    );
+    names.insert(
+        TypeId::of::<TillCharBackward>(),
+        TillCharBackward::action_name(),
+    );
+    names.insert(
+        TypeId::of::<MoveToFirstNonWhitespace>(),
+        MoveToFirstNonWhitespace::action_name(),
+    );
+    names.insert(TypeId::of::<HalfPageUp>(), HalfPageUp::action_name());
+    names.insert(TypeId::of::<HalfPageDown>(), HalfPageDown::action_name());
 
     // Editing actions
     names.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::action_name());
@@ -1442,6 +1559,20 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<AddSelectionBelow>(),
         AddSelectionBelow::action_name(),
+    );
+    names.insert(
+        TypeId::of::<CollapseSelection>(),
+        CollapseSelection::action_name(),
+    );
+    names.insert(
+        TypeId::of::<KeepPrimarySelection>(),
+        KeepPrimarySelection::action_name(),
+    );
+    names.insert(TypeId::of::<FlipSelection>(), FlipSelection::action_name());
+    names.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::action_name());
+    names.insert(
+        TypeId::of::<SelectWordEndBig>(),
+        SelectWordEndBig::action_name(),
     );
 
     // File finder actions
@@ -1746,6 +1877,33 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::description());
     descriptions.insert(TypeId::of::<PageUp>(), PageUp::description());
     descriptions.insert(TypeId::of::<PageDown>(), PageDown::description());
+    descriptions.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::description());
+    descriptions.insert(
+        TypeId::of::<MoveWordEndBig>(),
+        MoveWordEndBig::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<FindCharForward>(),
+        FindCharForward::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<FindCharBackward>(),
+        FindCharBackward::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<TillCharForward>(),
+        TillCharForward::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<TillCharBackward>(),
+        TillCharBackward::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<MoveToFirstNonWhitespace>(),
+        MoveToFirstNonWhitespace::description(),
+    );
+    descriptions.insert(TypeId::of::<HalfPageUp>(), HalfPageUp::description());
+    descriptions.insert(TypeId::of::<HalfPageDown>(), HalfPageDown::description());
 
     // Editing actions
     descriptions.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::description());
@@ -1867,6 +2025,20 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(
         TypeId::of::<AddSelectionBelow>(),
         AddSelectionBelow::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<CollapseSelection>(),
+        CollapseSelection::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<KeepPrimarySelection>(),
+        KeepPrimarySelection::description(),
+    );
+    descriptions.insert(TypeId::of::<FlipSelection>(), FlipSelection::description());
+    descriptions.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::description());
+    descriptions.insert(
+        TypeId::of::<SelectWordEndBig>(),
+        SelectWordEndBig::description(),
     );
 
     // File finder actions
@@ -2181,6 +2353,30 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::help_text());
     help.insert(TypeId::of::<PageUp>(), PageUp::help_text());
     help.insert(TypeId::of::<PageDown>(), PageDown::help_text());
+    help.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::help_text());
+    help.insert(TypeId::of::<MoveWordEndBig>(), MoveWordEndBig::help_text());
+    help.insert(
+        TypeId::of::<FindCharForward>(),
+        FindCharForward::help_text(),
+    );
+    help.insert(
+        TypeId::of::<FindCharBackward>(),
+        FindCharBackward::help_text(),
+    );
+    help.insert(
+        TypeId::of::<TillCharForward>(),
+        TillCharForward::help_text(),
+    );
+    help.insert(
+        TypeId::of::<TillCharBackward>(),
+        TillCharBackward::help_text(),
+    );
+    help.insert(
+        TypeId::of::<MoveToFirstNonWhitespace>(),
+        MoveToFirstNonWhitespace::help_text(),
+    );
+    help.insert(TypeId::of::<HalfPageUp>(), HalfPageUp::help_text());
+    help.insert(TypeId::of::<HalfPageDown>(), HalfPageDown::help_text());
 
     // Editing actions
     help.insert(TypeId::of::<DeleteLeft>(), DeleteLeft::help_text());
@@ -2293,6 +2489,20 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<AddSelectionBelow>(),
         AddSelectionBelow::help_text(),
+    );
+    help.insert(
+        TypeId::of::<CollapseSelection>(),
+        CollapseSelection::help_text(),
+    );
+    help.insert(
+        TypeId::of::<KeepPrimarySelection>(),
+        KeepPrimarySelection::help_text(),
+    );
+    help.insert(TypeId::of::<FlipSelection>(), FlipSelection::help_text());
+    help.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::help_text());
+    help.insert(
+        TypeId::of::<SelectWordEndBig>(),
+        SelectWordEndBig::help_text(),
     );
 
     // File finder actions
@@ -2642,6 +2852,7 @@ mod minimap;
 mod mode;
 #[allow(clippy::module_inception)]
 mod r#move;
+pub(crate) use r#move::find_char::FindCharMode;
 mod pane;
 mod scroll;
 mod select;

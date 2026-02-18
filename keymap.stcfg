@@ -26,13 +26,24 @@ on key {
             b -> SelectPrevSymbol();
             W -> SelectNextToken();
             B -> SelectPrevToken();
+            e -> MoveWordEnd();
+            E -> MoveWordEndBig();
             0 -> MoveToLineStart();
             $ -> MoveToLineEnd();
             G -> MoveToFileEnd();
+            g -> SetMode(goto);
             ctrl-b -> PageUp();
             ctrl-f -> PageDown();
+            ctrl-u -> HalfPageUp();
+            ctrl-d -> HalfPageDown();
             pageup -> PageUp();
             pagedown -> PageDown();
+
+            # Find-char
+            f -> FindCharForward();
+            F -> FindCharBackward();
+            t -> TillCharForward();
+            T -> TillCharBackward();
 
             # Mode transitions
             i -> SetMode(insert);
@@ -42,6 +53,8 @@ on key {
             # Editing
             x -> DeleteRight();
             X -> DeleteLeft();
+            d -> DeleteSelection();
+            c -> ChangeSelection();
             D -> DeleteToEndOfLine();
             o -> OpenLineBelow();
             O -> OpenLineAbove();
@@ -58,6 +71,12 @@ on key {
             > -> Indent();
             < -> Outdent();
 
+            # Selection manipulation
+            ; -> CollapseSelection();
+            , -> KeepPrimarySelection();
+            alt-; -> FlipSelection();
+            % -> SelectAll();
+
             # Undo/Redo
             u -> Undo();
             ctrl-r -> Redo();
@@ -67,7 +86,6 @@ on key {
 
             # Multi-cursor
             ctrl-shift-l -> SplitSelectionIntoLines();
-            ctrl-d -> SelectNext();
             ctrl-shift-d -> SelectPrevious();
             ctrl-shift-g -> SelectAllMatches();
             ctrl-alt-up -> AddSelectionAbove();
@@ -75,12 +93,10 @@ on key {
 
             # Command palette
             : -> OpenCommandPalette();
-            ; -> OpenCommandPaletteV2();
+            ctrl-; -> OpenCommandPaletteV2();
 
             # Help
             ? -> OpenHelpOverlay();
-
-            ctrl-a -> SelectAll();
         }
 
         # Insert Mode
@@ -131,6 +147,8 @@ on key {
             b -> SelectPrevSymbol();
             W -> SelectNextToken();
             B -> SelectPrevToken();
+            e -> SelectWordEnd();
+            E -> SelectWordEndBig();
             0 -> SelectToLineStart();
             $ -> SelectToLineEnd();
 
@@ -144,6 +162,11 @@ on key {
             ` -> Lowercase();
             ~ -> SwapCase();
 
+            # Selection manipulation
+            ; -> CollapseSelection();
+            , -> KeepPrimarySelection();
+            alt-; -> FlipSelection();
+
             # Multi-cursor
             ctrl-shift-l -> SplitSelectionIntoLines();
             ctrl-d -> SelectNext();
@@ -151,6 +174,16 @@ on key {
             ctrl-shift-g -> SelectAllMatches();
             ctrl-alt-up -> AddSelectionAbove();
             ctrl-alt-down -> AddSelectionBelow();
+        }
+
+        # Goto Mode (transient - auto-reverts to normal after action)
+        mode == "goto" {
+            escape -> SetMode(normal);
+            g -> MoveToFileStart();
+            e -> MoveToFileEnd();
+            h -> MoveToLineStart();
+            l -> MoveToLineEnd();
+            s -> MoveToFirstNonWhitespace();
         }
 
         # Pane Mode

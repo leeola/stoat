@@ -76,6 +76,55 @@ impl CharClassifier {
         }
     }
 
+    /// Move forward to end of current/next WORD group (whitespace-delimited).
+    ///
+    /// Treats all non-whitespace characters as the same class. Only whitespace
+    /// separates WORD boundaries (like vim's `E` motion).
+    pub fn next_word_end_big(snapshot: &BufferSnapshot, offset: usize) -> usize {
+        let len = snapshot.len();
+        if offset >= len {
+            return offset;
+        }
+
+        let mut pos = offset;
+        let mut chars = snapshot.chars_at(offset);
+
+        let Some(first) = chars.next() else {
+            return offset;
+        };
+        let is_ws = first.is_whitespace();
+        pos += first.len_utf8();
+
+        if is_ws {
+            // Skip remaining whitespace, then skip non-whitespace
+            loop {
+                let Some(ch) = chars.next() else {
+                    return pos;
+                };
+                if !ch.is_whitespace() {
+                    pos += ch.len_utf8();
+                    for ch in chars {
+                        if ch.is_whitespace() {
+                            break;
+                        }
+                        pos += ch.len_utf8();
+                    }
+                    return pos;
+                }
+                pos += ch.len_utf8();
+            }
+        } else {
+            // Skip remaining non-whitespace
+            for ch in chars {
+                if ch.is_whitespace() {
+                    break;
+                }
+                pos += ch.len_utf8();
+            }
+            pos
+        }
+    }
+
     /// Move backward to start of current/previous word group.
     ///
     /// If preceding char is Word or Punctuation, skips backward through that group.

@@ -99,6 +99,26 @@ impl EditorView {
             return;
         }
 
+        // Find-char interceptor: when find_char_pending is set, the next key triggers the find
+        if let Some(find_mode) = self.stoat.read(cx).find_char_pending {
+            if let Some(key_char) = &event.keystroke.key_char {
+                if key_char == "\u{1b}" {
+                    self.stoat
+                        .update(cx, |stoat, _| stoat.find_char_pending = None);
+                } else {
+                    self.stoat.update(cx, |stoat, cx| {
+                        stoat.find_char_pending = None;
+                        stoat.find_char_with(key_char, find_mode, cx);
+                    });
+                }
+            } else {
+                self.stoat
+                    .update(cx, |stoat, _| stoat.find_char_pending = None);
+            }
+            cx.notify();
+            return;
+        }
+
         // Digit accumulation for count prefix in normal/visual modes
         if no_modifiers {
             let key_context = self.stoat.read(cx).key_context();
@@ -132,12 +152,25 @@ impl EditorView {
         };
 
         if let Some(action) = matched_action {
+            // Capture mode before dispatch for auto-revert transient modes
+            let mode_before = self.stoat.read(cx).mode().to_string();
+
             if dispatch_editor_action(&self.stoat, &action, cx) {
+                // Auto-revert: if we were in "goto" mode and the action didn't change mode,
+                // revert to normal mode
+                if mode_before == "goto" && self.stoat.read(cx).mode() == "goto" {
+                    self.stoat
+                        .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
+                }
                 self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
                 cx.notify();
                 return;
             }
             if dispatch_pane_action(&self.stoat, &action, cx) {
+                if mode_before == "goto" && self.stoat.read(cx).mode() == "goto" {
+                    self.stoat
+                        .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
+                }
                 self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
                 cx.notify();
                 return;
