@@ -583,30 +583,35 @@ impl Element for EditorElement {
         // FIXME: Line selection indicators disabled pending incremental rebuild
         let (line_select_indicators, line_select_cursor_y) = (Vec::new(), None);
 
-        // ===== PHASE 5: Pre-compute cursor layout =====
-        let cursor_layout: Option<Bounds<Pixels>> = if !is_minimap {
+        // ===== PHASE 5: Pre-compute cursor layouts (one per selection) =====
+        let cursor_layouts: Vec<Bounds<Pixels>> = if !is_minimap {
             let stoat = self.view.read(cx).stoat.read(cx);
             if self.view.read(cx).is_focused(window) {
-                let cursor_position = stoat.cursor_position();
-
-                line_layouts.iter().find_map(|layout| {
-                    if layout.buffer_row == Some(cursor_position.row) {
-                        let x_offset = layout.shaped.x_for_index(cursor_position.column as usize);
-                        let cursor_x =
-                            bounds.origin.x + gutter_width + self.style.padding + x_offset;
-                        Some(Bounds {
-                            origin: point(cursor_x, layout.y_position),
-                            size: size(px(2.0), line_height),
+                let cursor_positions = stoat.cursor_points(cx);
+                cursor_positions
+                    .iter()
+                    .filter_map(|cursor_position| {
+                        line_layouts.iter().find_map(|layout| {
+                            if layout.buffer_row == Some(cursor_position.row) {
+                                let x_offset =
+                                    layout.shaped.x_for_index(cursor_position.column as usize);
+                                let cursor_x =
+                                    bounds.origin.x + gutter_width + self.style.padding + x_offset;
+                                Some(Bounds {
+                                    origin: point(cursor_x, layout.y_position),
+                                    size: size(px(2.0), line_height),
+                                })
+                            } else {
+                                None
+                            }
                         })
-                    } else {
-                        None
-                    }
-                })
+                    })
+                    .collect()
             } else {
-                None
+                Vec::new()
             }
         } else {
-            None
+            Vec::new()
         };
 
         // ===== PHASE 6: Pre-compute selection bounds =====
@@ -707,7 +712,7 @@ impl Element for EditorElement {
             gutter_font,
             shaped_line_numbers,
             shaped_diff_symbols,
-            cursor_layout,
+            cursor_layouts,
             selection_bounds,
             diff,
             buffer_snapshot,
@@ -942,11 +947,11 @@ impl EditorElement {
         strip_width + shaped.width + px(16.0)
     }
 
-    /// Paint the cursor (uses pre-computed bounds from prepaint)
+    /// Paint cursors (uses pre-computed bounds from prepaint)
     fn paint_cursor(&self, prepaint: &EditorPrepaintState, window: &mut Window) {
-        if let Some(cursor_bounds) = prepaint.cursor_layout {
+        for cursor_bounds in &prepaint.cursor_layouts {
             window.paint_quad(gpui::PaintQuad {
-                bounds: cursor_bounds,
+                bounds: *cursor_bounds,
                 corner_radii: 0.0.into(),
                 background: self.style.text_color.into(),
                 border_color: gpui::transparent_black(),
@@ -1386,8 +1391,8 @@ pub struct EditorPrepaintState {
     pub shaped_line_numbers: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Pre-shaped diff symbols: (shaped_line, x_position, y_position)
     pub shaped_diff_symbols: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
-    /// Pre-computed cursor bounds (if visible)
-    pub cursor_layout: Option<Bounds<Pixels>>,
+    /// Pre-computed cursor bounds for all selections
+    pub cursor_layouts: Vec<Bounds<Pixels>>,
     /// Pre-computed selection bounds
     pub selection_bounds: Vec<Bounds<Pixels>>,
     /// Git diff for gutter indicators

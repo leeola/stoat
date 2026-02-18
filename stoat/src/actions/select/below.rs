@@ -83,9 +83,11 @@ impl Stoat {
         };
 
         // Add to existing selections
+        let cursor_pos = new_selection.start;
         let mut all_selections: Vec<Selection<Point>> = self.active_selections(cx);
         all_selections.push(new_selection);
         self.selections.select(all_selections, &snapshot);
+        self.cursor.move_to(cursor_pos);
 
         cx.notify();
     }
@@ -96,6 +98,35 @@ mod tests {
     use crate::Stoat;
     use gpui::TestAppContext;
     use text::{Point, Selection, SelectionGoal};
+
+    #[gpui::test]
+    fn multi_cursor_positions(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test_with_text("aaa\nbbb\nccc", cx);
+        stoat.update(|s, cx| {
+            s.set_cursor_position(Point::new(0, 1));
+            let snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
+            let id = s.selections.next_id();
+            s.selections.select(
+                vec![Selection {
+                    id,
+                    start: Point::new(0, 1),
+                    end: Point::new(0, 1),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+
+            s.add_selection_below(cx);
+            s.add_selection_below(cx);
+
+            let cursors = s.cursor_points(cx);
+            assert_eq!(cursors.len(), 3, "should have 3 cursor positions");
+            assert_eq!(cursors[0].row, 0);
+            assert_eq!(cursors[1].row, 1);
+            assert_eq!(cursors[2].row, 2);
+        });
+    }
 
     #[gpui::test]
     fn adds_cursor_below(cx: &mut TestAppContext) {

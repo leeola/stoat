@@ -80,6 +80,21 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
+    fn cursor_stays_on_selected_line(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test_with_text("aaa\nfoo bar baz\nccc", cx);
+        stoat.update(|s, cx| {
+            s.set_cursor_position(Point::new(1, 0));
+            s.select_line(cx);
+            let cursors = s.cursor_points(cx);
+            assert_eq!(cursors.len(), 1);
+            assert_eq!(
+                cursors[0].row, 1,
+                "cursor should be on selected line, not next line"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn single_line_buffer(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {

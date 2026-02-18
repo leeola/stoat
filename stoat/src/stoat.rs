@@ -16,7 +16,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, WeakEntity};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
-use text::{Buffer, BufferId, Point};
+use text::{Anchor, Buffer, BufferId, Point, Selection};
 
 /// KeyContext for keybinding dispatch.
 ///
@@ -350,6 +350,9 @@ pub struct Stoat {
     /// When set, keystrokes accumulate into a regex pattern for sub-selection.
     pub(crate) select_regex_pending: Option<String>,
 
+    /// Saved selections from before select-regex mode, for live preview and cancel.
+    pub(crate) select_regex_base_selections: Option<Arc<[Selection<Anchor>]>>,
+
     /// Tracks selections associated with text transactions and standalone selection history.
     pub(crate) selection_history: SelectionHistory,
 
@@ -508,6 +511,7 @@ impl Stoat {
             replace_pending: false,
             find_char_pending: None,
             select_regex_pending: None,
+            select_regex_base_selections: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -595,6 +599,7 @@ impl Stoat {
             replace_pending: false,
             find_char_pending: None,
             select_regex_pending: None,
+            select_regex_base_selections: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -775,6 +780,30 @@ impl Stoat {
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         self.selections.newest(&buffer_snapshot)
+    }
+
+    /// Get visual cursor positions for all active selections.
+    ///
+    /// Returns one [`Point`] per selection, representing where the cursor should render.
+    /// For selections whose head sits at column 0 of the line after the selected range
+    /// (the past-end boundary from line-wise selections), the cursor is snapped back to
+    /// the end of the previous line's content.
+    pub fn cursor_points(&self, cx: &App) -> Vec<Point> {
+        let buffer_item = self.active_buffer(cx);
+        let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let selections = self.selections.all::<Point>(&snapshot);
+
+        selections
+            .iter()
+            .map(|sel| {
+                let head = sel.head();
+                if !sel.is_empty() && head.column == 0 && head.row > sel.tail().row {
+                    Point::new(head.row - 1, snapshot.line_len(head.row - 1))
+                } else {
+                    head
+                }
+            })
+            .collect()
     }
 
     /// Get cursor position (legacy single-cursor API).
@@ -1679,6 +1708,7 @@ impl Stoat {
             replace_pending: false,
             find_char_pending: None,
             select_regex_pending: None,
+            select_regex_base_selections: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         })

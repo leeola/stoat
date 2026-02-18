@@ -27,7 +27,16 @@
 pub mod cursor_notation;
 pub mod git_fixture;
 
-use crate::{actions::*, buffer::item::BufferItem, Stoat};
+use crate::{
+    actions::*,
+    buffer::item::BufferItem,
+    keymap::{
+        compiled::{CompiledKey, CompiledKeymap},
+        dispatch::dispatch_editor_action,
+    },
+    stoat::KeyContext,
+    Stoat,
+};
 use gpui::{Action, App, AppContext, Context, Entity, TestAppContext};
 use std::{any::TypeId, path::PathBuf, sync::Arc};
 use text::Point;
@@ -84,14 +93,13 @@ impl<'a> TestStoat<'a> {
             let buffer_store = cx.new(|_| crate::buffer::store::BufferStore::new());
 
             // Create Stoat with test text directly (avoids buffer edit after creation)
-            let empty_keymap =
-                Arc::new(crate::keymap::compiled::CompiledKeymap { bindings: vec![] });
-            let mut stoat = Stoat::new_with_text(
+            let compiled_keymap = test_keymap();
+            let stoat = Stoat::new_with_text(
                 crate::config::Config::default(),
                 worktree,
                 buffer_store,
                 None,
-                empty_keymap,
+                compiled_keymap,
                 text,
                 cx,
             );
@@ -518,22 +526,13 @@ impl<'a> TestStoat<'a> {
         let mut test_stoat = Self::new(&parsed.text, cx);
 
         test_stoat.update(|s, cx| {
-            // Set cursor position if we have one
-            if let Some(&offset) = parsed.cursors.first() {
-                let point = offset_to_point(&parsed.text, offset);
-                s.set_cursor_position(point);
-            }
+            let buffer_item = s.active_buffer(cx);
+            let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
 
-            // Set selection if we have one (use multi-cursor API)
             if let Some(sel) = parsed.selections.first() {
                 let start = offset_to_point(&parsed.text, sel.range.start);
                 let end = offset_to_point(&parsed.text, sel.range.end);
 
-                // Get buffer snapshot for anchor-based storage
-                let buffer_item = s.active_buffer(cx);
-                let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-
-                // Create selection using multi-cursor API
                 let id = s.selections.next_id();
                 s.selections.select(
                     vec![text::Selection {
@@ -546,9 +545,23 @@ impl<'a> TestStoat<'a> {
                     &buffer_snapshot,
                 );
 
-                // Sync cursor position for backward compat
                 let cursor_pos = if sel.cursor_at_start { start } else { end };
                 s.cursor.move_to(cursor_pos);
+            } else if let Some(&offset) = parsed.cursors.first() {
+                let point = offset_to_point(&parsed.text, offset);
+                s.set_cursor_position(point);
+
+                let id = s.selections.next_id();
+                s.selections.select(
+                    vec![text::Selection {
+                        id,
+                        start: point,
+                        end: point,
+                        reversed: false,
+                        goal: text::SelectionGoal::None,
+                    }],
+                    &buffer_snapshot,
+                );
             }
         });
 
@@ -557,29 +570,32 @@ impl<'a> TestStoat<'a> {
 
     /// Convert current buffer state to cursor notation string.
     ///
-    /// Returns the buffer text with cursor and selection markers.
+    /// Supports multiple selections/cursors. When all selections are empty
+    /// (cursors only), outputs cursor markers. Otherwise outputs selection
+    /// range markers for all non-empty selections.
     pub fn to_cursor_notation(&self) -> String {
         let text = self.buffer_text();
-        let cursor_pos = self.cursor_position();
-        let selection = self.selection();
+        self.cx.read_entity(&self.entity, |s, cx| {
+            let selections = s.active_selections(cx);
 
-        let cursor_offset = point_to_offset(&text, cursor_pos);
-
-        if selection.is_empty() {
-            // Just a cursor
-            cursor_notation::format(&text, &[cursor_offset], &[])
-        } else {
-            // Selection
-            let start_offset = point_to_offset(&text, selection.start);
-            let end_offset = point_to_offset(&text, selection.end);
-
-            let notation_sel = cursor_notation::Selection {
-                range: start_offset..end_offset,
-                cursor_at_start: selection.reversed,
-            };
-
-            cursor_notation::format(&text, &[], &[notation_sel])
-        }
+            if selections.iter().all(|sel| sel.is_empty()) {
+                let offsets: Vec<usize> = selections
+                    .iter()
+                    .map(|sel| point_to_offset(&text, sel.head()))
+                    .collect();
+                cursor_notation::format(&text, &offsets, &[])
+            } else {
+                let notation_sels: Vec<cursor_notation::Selection> = selections
+                    .iter()
+                    .filter(|sel| !sel.is_empty())
+                    .map(|sel| cursor_notation::Selection {
+                        range: point_to_offset(&text, sel.start)..point_to_offset(&text, sel.end),
+                        cursor_at_start: sel.reversed,
+                    })
+                    .collect();
+                cursor_notation::format(&text, &[], &notation_sels)
+            }
+        })
     }
 
     /// Assert that buffer state matches expected cursor notation.
@@ -600,6 +616,226 @@ impl<'a> TestStoat<'a> {
             "Buffer state doesn't match expected cursor notation"
         );
     }
+
+    /// Reverse-lookup an action name in the compiled keymap, then feed the
+    /// resulting keystroke through the full [`type_key`](Self::type_key) pipeline.
+    ///
+    /// Use this instead of `type_key("x")` when the key is a keymap-bound action
+    /// so that tests don't break if the keymap changes.
+    pub fn type_action(&mut self, action: &str) {
+        let keystroke = self.cx.read_entity(&self.entity, |s, _| {
+            s.compiled_keymap
+                .reverse_lookup(action, s)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no binding for {:?} in mode={:?} focus={:?}",
+                        action,
+                        s.mode(),
+                        s.key_context().as_str(),
+                    )
+                })
+                .key
+                .to_keystroke()
+        });
+        self.type_key_raw(keystroke);
+    }
+
+    /// Simulate a keystroke through the same interceptor pipeline as the GUI.
+    ///
+    /// Processes the key through select-regex, replace-char, find-char interceptors,
+    /// digit accumulation, keymap lookup, and insert-text fallback -- mirroring
+    /// [`EditorView::handle_key_down`](crate::editor::view::EditorView).
+    pub fn type_key(&mut self, key: &str) {
+        self.type_key_raw(make_keystroke(key));
+    }
+
+    fn type_key_raw(&mut self, keystroke: gpui::Keystroke) {
+        let no_modifiers = !keystroke.modifiers.control
+            && !keystroke.modifiers.alt
+            && !keystroke.modifiers.shift
+            && !keystroke.modifiers.platform;
+
+        // Select-regex interceptor
+        if self
+            .cx
+            .read_entity(&self.entity, |s, _| s.select_regex_pending.is_some())
+        {
+            match keystroke.key.as_ref() {
+                "enter" => {
+                    self.update(|s, cx| s.select_regex_submit(cx));
+                    return;
+                },
+                "backspace" => {
+                    self.update(|s, cx| {
+                        if let Some(p) = &mut s.select_regex_pending {
+                            p.pop();
+                        }
+                        s.select_regex_preview(cx);
+                    });
+                    return;
+                },
+                "escape" => {
+                    self.update(|s, cx| s.select_regex_cancel(cx));
+                    return;
+                },
+                _ => {
+                    if let Some(key_char) = &keystroke.key_char {
+                        let kc = key_char.clone();
+                        self.update(|s, cx| {
+                            if let Some(p) = &mut s.select_regex_pending {
+                                p.push_str(&kc);
+                            }
+                            s.select_regex_preview(cx);
+                        });
+                    }
+                    return;
+                },
+            }
+        }
+
+        // Replace-char interceptor
+        if self.cx.read_entity(&self.entity, |s, _| s.replace_pending) {
+            if let Some(key_char) = &keystroke.key_char {
+                if key_char == "\u{1b}" {
+                    self.update(|s, _| s.replace_pending = false);
+                } else {
+                    let kc = key_char.clone();
+                    self.update(|s, cx| {
+                        s.replace_pending = false;
+                        s.replace_char_with(&kc, cx);
+                    });
+                }
+            } else {
+                self.update(|s, _| s.replace_pending = false);
+            }
+            return;
+        }
+
+        // Find-char interceptor
+        if let Some(find_mode) = self
+            .cx
+            .read_entity(&self.entity, |s, _| s.find_char_pending)
+        {
+            if let Some(key_char) = &keystroke.key_char {
+                if key_char == "\u{1b}" {
+                    self.update(|s, _| s.find_char_pending = None);
+                } else {
+                    let kc = key_char.clone();
+                    self.update(|s, cx| {
+                        s.find_char_pending = None;
+                        s.find_char_with(&kc, find_mode, cx);
+                    });
+                }
+            } else {
+                self.update(|s, _| s.find_char_pending = None);
+            }
+            return;
+        }
+
+        // Digit accumulation for count prefix
+        if no_modifiers {
+            let (key_context, mode) = self
+                .cx
+                .read_entity(&self.entity, |s, _| (s.key_context(), s.mode().to_string()));
+            if key_context == KeyContext::TextEditor && (mode == "normal" || mode == "visual") {
+                if let Some(key_char) = &keystroke.key_char {
+                    if let Some(digit) = key_char.chars().next().and_then(|c| c.to_digit(10)) {
+                        let has_pending = self
+                            .cx
+                            .read_entity(&self.entity, |s, _| s.pending_count.is_some());
+                        if digit >= 1 || has_pending {
+                            self.update(|s, _| {
+                                let current = s.pending_count.unwrap_or(0);
+                                s.pending_count =
+                                    Some(current.saturating_mul(10).saturating_add(digit));
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Keymap lookup
+        let compiled_key = CompiledKey::from_keystroke(&keystroke);
+        let matched_action = self.cx.read_entity(&self.entity, |s, _| {
+            s.compiled_keymap
+                .lookup(&compiled_key, s)
+                .map(|b| b.action.clone())
+        });
+
+        if let Some(action) = matched_action {
+            let mode_before = self
+                .cx
+                .read_entity(&self.entity, |s, _| s.mode().to_string());
+            if dispatch_editor_action(&self.entity, &action, self.cx) {
+                let is_transient = mode_before == "goto" || mode_before == "buffer";
+                if is_transient
+                    && self
+                        .cx
+                        .read_entity(&self.entity, |s, _| s.mode() == mode_before)
+                {
+                    self.update(|s, cx| s.set_mode_by_name("normal", cx));
+                }
+                self.update(|s, _| s.pending_count = None);
+                return;
+            }
+            self.update(|s, _| s.pending_count = None);
+            return;
+        }
+
+        // InsertText fallback
+        let (key_context, mode) = self
+            .cx
+            .read_entity(&self.entity, |s, _| (s.key_context(), s.mode().to_string()));
+        let should_insert = match key_context {
+            KeyContext::FileFinder | KeyContext::CommandPalette | KeyContext::BufferFinder => true,
+            KeyContext::TextEditor => mode == "insert",
+            _ => false,
+        };
+        if should_insert {
+            if let Some(key_char) = &keystroke.key_char {
+                let kc = key_char.clone();
+                self.update(|s, cx| s.insert_text(&kc, cx));
+            }
+        }
+        self.update(|s, _| s.pending_count = None);
+    }
+}
+
+fn make_keystroke(key: &str) -> gpui::Keystroke {
+    match key {
+        "enter" | "escape" | "backspace" | "tab" | "space" => gpui::Keystroke {
+            key: key.into(),
+            modifiers: gpui::Modifiers::default(),
+            key_char: match key {
+                "enter" => Some("\n".into()),
+                "space" => Some(" ".into()),
+                "tab" => Some("\t".into()),
+                _ => None,
+            },
+        },
+        _ if key.len() == 1 => gpui::Keystroke {
+            key: key.into(),
+            modifiers: gpui::Modifiers::default(),
+            key_char: Some(key.into()),
+        },
+        _ => gpui::Keystroke {
+            key: key.into(),
+            modifiers: gpui::Modifiers::default(),
+            key_char: None,
+        },
+    }
+}
+
+fn test_keymap() -> Arc<CompiledKeymap> {
+    let source = include_str!("../../keymap.stcfg");
+    let (config, _errors) = stoat_config::parse(source);
+    Arc::new(
+        config
+            .map(|c| CompiledKeymap::compile(&c))
+            .unwrap_or_else(|| CompiledKeymap { bindings: vec![] }),
+    )
 }
 
 /// Convert absolute byte offset to Point (row, column).
@@ -731,23 +967,13 @@ mod tests {
 
     #[gpui::test]
     fn to_cursor_notation_cursor_only(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test_with_text("hello world", cx);
-
-        stoat.update(|s, _cx| {
-            s.set_cursor_position(Point::new(0, 6));
-        });
-
+        let stoat = Stoat::test_with_cursor_notation("hello |world", cx).unwrap();
         assert_eq!(stoat.to_cursor_notation(), "hello |world");
     }
 
     #[gpui::test]
     fn to_cursor_notation_multiline(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test_with_text("line1\nline2\nline3", cx);
-
-        stoat.update(|s, _cx| {
-            s.set_cursor_position(Point::new(1, 2));
-        });
-
+        let stoat = Stoat::test_with_cursor_notation("line1\nli|ne2\nline3", cx).unwrap();
         assert_eq!(stoat.to_cursor_notation(), "line1\nli|ne2\nline3");
     }
 

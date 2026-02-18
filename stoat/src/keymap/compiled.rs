@@ -142,6 +142,35 @@ impl CompiledKey {
         }
     }
 
+    pub fn to_keystroke(&self) -> gpui::Keystroke {
+        let (key_str, key_char) = match &self.key {
+            Key::Char(c) => {
+                let s = c.to_string();
+                (s.clone(), Some(s))
+            },
+            Key::Named(name) => {
+                let kc = match name.as_str() {
+                    "enter" => Some("\n".into()),
+                    "space" => Some(" ".into()),
+                    "tab" => Some("\t".into()),
+                    _ => None,
+                };
+                (name.clone(), kc)
+            },
+        };
+        gpui::Keystroke {
+            key: key_str,
+            modifiers: gpui::Modifiers {
+                control: self.ctrl,
+                alt: self.alt,
+                shift: self.shift,
+                platform: self.cmd,
+                ..Default::default()
+            },
+            key_char,
+        }
+    }
+
     pub fn display(&self) -> String {
         let mut parts = Vec::new();
         if self.ctrl {
@@ -199,6 +228,20 @@ impl CompiledKeymap {
                     .predicates
                     .iter()
                     .all(|pred| evaluate_predicate(pred, state))
+        })
+    }
+
+    pub fn reverse_lookup(
+        &self,
+        action: &str,
+        state: &dyn KeymapState,
+    ) -> Option<&CompiledBinding> {
+        self.bindings.iter().find(|binding| {
+            action_name(&binding.action) == action
+                && binding
+                    .predicates
+                    .iter()
+                    .all(|p| evaluate_predicate(p, state))
         })
     }
 }
