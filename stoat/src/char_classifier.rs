@@ -173,6 +173,137 @@ impl CharClassifier {
         }
     }
 
+    /// Move forward to start of next word group.
+    ///
+    /// From offset, skips the rest of the current group (if any), then skips whitespace,
+    /// returning where the next group starts. This is the `w` motion target.
+    pub fn next_word_start(snapshot: &BufferSnapshot, offset: usize) -> usize {
+        let len = snapshot.len();
+        if offset >= len {
+            return offset;
+        }
+
+        let mut pos = offset;
+        let mut chars = snapshot.chars_at(offset);
+
+        let Some(first) = chars.next() else {
+            return offset;
+        };
+        let kind = Self::kind(first);
+        pos += first.len_utf8();
+
+        // Skip rest of current group
+        if kind != CharKind::Whitespace {
+            for ch in chars.by_ref() {
+                if Self::kind(ch) != kind {
+                    if Self::kind(ch) == CharKind::Whitespace {
+                        pos += ch.len_utf8();
+                        break;
+                    }
+                    return pos;
+                }
+                pos += ch.len_utf8();
+            }
+        }
+
+        // Skip whitespace
+        for ch in chars {
+            if !ch.is_whitespace() {
+                return pos;
+            }
+            pos += ch.len_utf8();
+        }
+
+        pos
+    }
+
+    /// Move forward to start of next WORD (whitespace-delimited).
+    ///
+    /// Treats all non-whitespace characters as the same class. Skips the rest of the
+    /// current WORD then skips whitespace. This is the `W` motion target.
+    pub fn next_word_start_big(snapshot: &BufferSnapshot, offset: usize) -> usize {
+        let len = snapshot.len();
+        if offset >= len {
+            return offset;
+        }
+
+        let mut pos = offset;
+        let mut chars = snapshot.chars_at(offset);
+
+        let Some(first) = chars.next() else {
+            return offset;
+        };
+        pos += first.len_utf8();
+
+        if !first.is_whitespace() {
+            // Skip rest of current non-whitespace group
+            for ch in chars.by_ref() {
+                if ch.is_whitespace() {
+                    pos += ch.len_utf8();
+                    break;
+                }
+                pos += ch.len_utf8();
+            }
+        }
+
+        // Skip whitespace
+        for ch in chars {
+            if !ch.is_whitespace() {
+                return pos;
+            }
+            pos += ch.len_utf8();
+        }
+
+        pos
+    }
+
+    /// Move backward to start of current/previous WORD (whitespace-delimited).
+    ///
+    /// Treats all non-whitespace characters as the same class. Only whitespace
+    /// separates WORD boundaries. This is the `B` motion target.
+    pub fn previous_word_start_big(snapshot: &BufferSnapshot, offset: usize) -> usize {
+        if offset == 0 {
+            return 0;
+        }
+
+        let mut pos = offset;
+        let mut chars = snapshot.reversed_chars_at(offset);
+
+        let Some(first) = chars.next() else {
+            return offset;
+        };
+        let is_ws = first.is_whitespace();
+        pos -= first.len_utf8();
+
+        if is_ws {
+            // Skip remaining whitespace, then skip non-whitespace
+            loop {
+                let Some(ch) = chars.next() else {
+                    return pos;
+                };
+                if !ch.is_whitespace() {
+                    pos -= ch.len_utf8();
+                    for ch in chars {
+                        if ch.is_whitespace() {
+                            break;
+                        }
+                        pos -= ch.len_utf8();
+                    }
+                    return pos;
+                }
+                pos -= ch.len_utf8();
+            }
+        } else {
+            for ch in chars {
+                if ch.is_whitespace() {
+                    break;
+                }
+                pos -= ch.len_utf8();
+            }
+            pos
+        }
+    }
+
     /// Find the range of the next Word-class group at or after offset.
     ///
     /// If the cursor is at the start of a word, returns that word's range.
@@ -522,5 +653,61 @@ mod tests {
         assert_eq!(CharClassifier::next_word_end(&s, 5), 11);
         assert_eq!(CharClassifier::previous_word_start(&s, 11), 6);
         assert_eq!(CharClassifier::previous_word_start(&s, 6), 0);
+    }
+
+    #[test]
+    fn next_word_start_basic() {
+        let s = snapshot("hello world");
+        assert_eq!(CharClassifier::next_word_start(&s, 0), 6);
+        assert_eq!(CharClassifier::next_word_start(&s, 3), 6);
+        assert_eq!(CharClassifier::next_word_start(&s, 5), 6);
+        assert_eq!(CharClassifier::next_word_start(&s, 6), 11);
+        assert_eq!(CharClassifier::next_word_start(&s, 11), 11);
+    }
+
+    #[test]
+    fn next_word_start_punctuation() {
+        let s = snapshot("hello.world");
+        assert_eq!(CharClassifier::next_word_start(&s, 0), 5);
+        assert_eq!(CharClassifier::next_word_start(&s, 5), 6);
+        assert_eq!(CharClassifier::next_word_start(&s, 6), 11);
+    }
+
+    #[test]
+    fn next_word_start_mixed() {
+        let s = snapshot("foo, bar");
+        assert_eq!(CharClassifier::next_word_start(&s, 0), 3);
+        assert_eq!(CharClassifier::next_word_start(&s, 3), 5);
+    }
+
+    #[test]
+    fn next_word_start_big_basic() {
+        let s = snapshot("hello world");
+        assert_eq!(CharClassifier::next_word_start_big(&s, 0), 6);
+        assert_eq!(CharClassifier::next_word_start_big(&s, 6), 11);
+    }
+
+    #[test]
+    fn next_word_start_big_punctuation() {
+        let s = snapshot("hello.world foo");
+        assert_eq!(CharClassifier::next_word_start_big(&s, 0), 12);
+        assert_eq!(CharClassifier::next_word_start_big(&s, 5), 12);
+    }
+
+    #[test]
+    fn previous_word_start_big_basic() {
+        let s = snapshot("hello world");
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 11), 6);
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 6), 0);
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 5), 0);
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 0), 0);
+    }
+
+    #[test]
+    fn previous_word_start_big_punctuation() {
+        let s = snapshot("hello.world foo");
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 15), 12);
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 12), 0);
+        assert_eq!(CharClassifier::previous_word_start_big(&s, 11), 0);
     }
 }

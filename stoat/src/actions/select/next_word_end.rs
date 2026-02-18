@@ -3,11 +3,10 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Move all cursors to end of current/next WORD (whitespace-delimited).
+    /// Extend all selections to the end of the current/next word.
     ///
-    /// Unlike [`move_word_end`](Self::move_word_end), punctuation is treated the same as
-    /// word characters. Only whitespace separates WORDs.
-    pub fn move_word_end_big(&mut self, cx: &mut Context<Self>) {
+    /// Each selection's head moves to the next word boundary while the anchor stays fixed.
+    pub fn extend_next_word_end(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let buffer_snapshot = {
@@ -37,13 +36,10 @@ impl Stoat {
         for selection in &mut selections {
             let mut offset = buffer_snapshot.point_to_offset(selection.head());
             for _ in 0..count {
-                offset = CharClassifier::next_word_end_big(&buffer_snapshot, offset);
+                offset = CharClassifier::next_word_end(&buffer_snapshot, offset);
             }
-            let new_pos = buffer_snapshot.offset_to_point(offset);
-            selection.start = new_pos;
-            selection.end = new_pos;
-            selection.reversed = false;
-            selection.goal = text::SelectionGoal::None;
+            let new_head = buffer_snapshot.offset_to_point(offset);
+            selection.set_head(new_head, text::SelectionGoal::None);
         }
 
         self.selections.select(selections.clone(), &buffer_snapshot);
@@ -61,25 +57,17 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn moves_past_punctuation(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx);
-        stoat.update(|s, cx| {
-            s.insert_text("hello.world foo", cx);
-            s.set_cursor_position(Point::new(0, 0));
-            s.move_word_end_big(cx);
-            // Should skip punctuation and go to end of "hello.world"
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 11));
-        });
-    }
-
-    #[gpui::test]
-    fn stops_at_whitespace(cx: &mut TestAppContext) {
+    fn extends_selection_to_word_end(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.insert_text("hello world", cx);
             s.set_cursor_position(Point::new(0, 0));
-            s.move_word_end_big(cx);
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 5));
+            s.extend_next_word_end(cx);
+
+            let selections = s.active_selections(cx);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].head(), Point::new(0, 5));
+            assert_eq!(selections[0].tail(), Point::new(0, 0));
         });
     }
 }

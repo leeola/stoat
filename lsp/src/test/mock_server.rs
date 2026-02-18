@@ -194,9 +194,7 @@ impl MockLspServer {
             DiagnosticKind::TypeMismatch { expected, found } => (
                 DiagnosticSeverity::ERROR,
                 Some("E0308".to_string()),
-                format!(
-                    "mismatched types: expected `{expected}`, found `{found}`"
-                ),
+                format!("mismatched types: expected `{expected}`, found `{found}`"),
             ),
             DiagnosticKind::UnusedVariable => {
                 let text = extract_text_at_range(&range, source);

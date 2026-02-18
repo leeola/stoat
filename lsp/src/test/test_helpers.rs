@@ -31,9 +31,7 @@ use lsp_types::{Position, Range};
 pub fn parse_range_notation(notation: &str, source: &str) -> Result<Range> {
     let parts: Vec<&str> = notation.split('-').collect();
     if parts.len() != 2 {
-        anyhow::bail!(
-            "Invalid range notation '{notation}': expected 'line:col-line:col'"
-        );
+        anyhow::bail!("Invalid range notation '{notation}': expected 'line:col-line:col'");
     }
 
     let start = parse_position(parts[0])?;

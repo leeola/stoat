@@ -3,11 +3,11 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Extend all selections to the previous word.
+    /// Move all cursors to the start of the previous WORD (whitespace-delimited).
     ///
-    /// Each selection extends independently by finding the previous word from its head position.
-    /// In anchored mode, extends the selection. In non-anchored mode, selects just the word.
-    pub fn select_prev_symbol(&mut self, cx: &mut Context<Self>) {
+    /// Unlike [`move_prev_word_start`](Self::move_prev_word_start) which respects character
+    /// class boundaries, this treats all non-whitespace as one word class.
+    pub fn move_prev_long_word_start(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let snapshot = {
@@ -42,28 +42,17 @@ impl Stoat {
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
             for _ in 0..count {
-                if !selection.is_empty() && !selection.reversed {
-                    let start = selection.start;
-                    let end = selection.end;
-                    selection.start = end;
-                    selection.end = start;
-                    selection.reversed = true;
-                    continue;
-                }
-
                 let cursor_offset = snapshot.point_to_offset(selection.head());
+                let target = CharClassifier::previous_word_start_big(&snapshot, cursor_offset);
+                let target_point = snapshot.offset_to_point(target);
 
-                if let Some(range) = CharClassifier::prev_word_range(&snapshot, cursor_offset) {
-                    if self.is_mode_anchored() {
-                        let selection_start = snapshot.offset_to_point(range.start);
-                        selection.set_head(selection_start, text::SelectionGoal::None);
-                    } else {
-                        let selection_start = snapshot.offset_to_point(range.start);
-                        let selection_end = snapshot.offset_to_point(range.end);
-                        selection.start = selection_start;
-                        selection.end = selection_end;
-                        selection.reversed = true;
-                    }
+                if self.is_mode_anchored() {
+                    selection.set_head(target_point, text::SelectionGoal::None);
+                } else {
+                    let head = selection.head();
+                    selection.start = target_point;
+                    selection.end = head;
+                    selection.reversed = true;
                 }
             }
         }
@@ -83,15 +72,15 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn selects_previous_word(cx: &mut TestAppContext) {
+    fn selects_to_previous_word_start_big(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
-            s.insert_text("hello world", cx);
-            s.select_prev_symbol(cx);
+            s.insert_text("foo bar.baz", cx);
+            s.move_prev_long_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            assert_eq!(selections[0].head(), text::Point::new(0, 6));
+            assert_eq!(selections[0].head(), text::Point::new(0, 4));
             assert_eq!(selections[0].tail(), text::Point::new(0, 11));
         });
     }
@@ -100,7 +89,7 @@ mod tests {
     fn extends_multiple_selections_independently(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
-            s.insert_text("hello world\nfoo bar", cx);
+            s.insert_text("foo bar\nbaz qux", cx);
 
             let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let id = s.selections.next_id();
@@ -108,8 +97,8 @@ mod tests {
                 vec![
                     text::Selection {
                         id,
-                        start: text::Point::new(0, 11),
-                        end: text::Point::new(0, 11),
+                        start: text::Point::new(0, 7),
+                        end: text::Point::new(0, 7),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
@@ -124,12 +113,12 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            s.select_prev_symbol(cx);
+            s.move_prev_long_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 6));
-            assert_eq!(selections[0].tail(), text::Point::new(0, 11));
+            assert_eq!(selections[0].head(), text::Point::new(0, 4));
+            assert_eq!(selections[0].tail(), text::Point::new(0, 7));
             assert_eq!(selections[1].head(), text::Point::new(1, 4));
             assert_eq!(selections[1].tail(), text::Point::new(1, 7));
         });

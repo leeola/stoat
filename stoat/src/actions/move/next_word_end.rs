@@ -7,7 +7,7 @@ impl Stoat {
     ///
     /// Word boundaries are determined by character class transitions (word, punctuation,
     /// whitespace). Each cursor moves independently and any existing selection is collapsed.
-    pub fn move_word_end(&mut self, cx: &mut Context<Self>) {
+    pub fn move_next_word_end(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let buffer_snapshot = {
@@ -39,8 +39,9 @@ impl Stoat {
             for _ in 0..count {
                 offset = CharClassifier::next_word_end(&buffer_snapshot, offset);
             }
+            let head = selection.head();
             let new_pos = buffer_snapshot.offset_to_point(offset);
-            selection.start = new_pos;
+            selection.start = head;
             selection.end = new_pos;
             selection.reversed = false;
             selection.goal = text::SelectionGoal::None;
@@ -61,13 +62,15 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn moves_to_word_end(cx: &mut TestAppContext) {
+    fn creates_range_to_word_end(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.insert_text("hello world", cx);
             s.set_cursor_position(Point::new(0, 0));
-            s.move_word_end(cx);
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 5));
+            s.move_next_word_end(cx);
+            let sel = &s.active_selections(cx)[0];
+            assert_eq!(sel.tail(), Point::new(0, 0));
+            assert_eq!(sel.head(), Point::new(0, 5));
         });
     }
 
@@ -77,11 +80,15 @@ mod tests {
         stoat.update(|s, cx| {
             s.insert_text("hello.world", cx);
             s.set_cursor_position(Point::new(0, 0));
-            s.move_word_end(cx);
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 5));
+            s.move_next_word_end(cx);
+            let sel = &s.active_selections(cx)[0];
+            assert_eq!(sel.tail(), Point::new(0, 0));
+            assert_eq!(sel.head(), Point::new(0, 5));
 
-            s.move_word_end(cx);
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 6));
+            s.move_next_word_end(cx);
+            let sel = &s.active_selections(cx)[0];
+            assert_eq!(sel.tail(), Point::new(0, 5));
+            assert_eq!(sel.head(), Point::new(0, 6));
         });
     }
 
@@ -92,8 +99,10 @@ mod tests {
             s.insert_text("one two three", cx);
             s.set_cursor_position(Point::new(0, 0));
             s.pending_count = Some(2);
-            s.move_word_end(cx);
-            assert_eq!(s.active_selections(cx)[0].head(), Point::new(0, 7));
+            s.move_next_word_end(cx);
+            let sel = &s.active_selections(cx)[0];
+            assert_eq!(sel.tail(), Point::new(0, 0));
+            assert_eq!(sel.head(), Point::new(0, 7));
         });
     }
 }

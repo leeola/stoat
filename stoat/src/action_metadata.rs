@@ -168,10 +168,10 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
 
     // Selection actions (10)
     // Second group migrated. These extend the current selection using cursor movement.
-    registry.register::<crate::actions::SelectNextSymbol>();
-    registry.register::<crate::actions::SelectPrevSymbol>();
-    registry.register::<crate::actions::SelectNextToken>();
-    registry.register::<crate::actions::SelectPrevToken>();
+    registry.register::<crate::actions::MoveNextWordStart>();
+    registry.register::<crate::actions::MovePrevWordStart>();
+    registry.register::<crate::actions::MoveNextLongWordStart>();
+    registry.register::<crate::actions::MovePrevLongWordStart>();
     registry.register::<crate::actions::SelectLeft>();
     registry.register::<crate::actions::SelectRight>();
     registry.register::<crate::actions::SelectUp>();

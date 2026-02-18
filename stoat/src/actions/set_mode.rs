@@ -262,8 +262,8 @@ mod tests {
             // Enter visual mode
             s.set_mode_by_name("visual", cx);
 
-            // Press b once (select_prev_symbol in visual mode)
-            s.select_prev_symbol(cx);
+            // Press b once (move_prev_word_start in visual mode)
+            s.move_prev_word_start(cx);
 
             // Selection should extend backward from (0,8) to start of "bar" (0,4)
             let selections = s.active_selections(cx);
@@ -273,7 +273,7 @@ mod tests {
             assert!(selections[0].reversed);
 
             // Press b again - should extend further back to "foo" (0,0)
-            s.select_prev_symbol(cx);
+            s.move_prev_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
@@ -293,8 +293,8 @@ mod tests {
             // Enter visual mode
             s.set_mode_by_name("visual", cx);
 
-            // In visual mode, 'b' key is bound to select_prev_symbol (not move_word_left)
-            s.select_prev_symbol(cx);
+            // In visual mode, 'b' key is bound to move_prev_word_start (not move_word_left)
+            s.move_prev_word_start(cx);
 
             // Selection should extend backward
             let selections = s.active_selections(cx);

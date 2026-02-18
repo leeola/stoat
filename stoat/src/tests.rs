@@ -409,160 +409,149 @@ fn read_without_update(cx: &mut TestAppContext) {
     assert_eq!(cursor, Point::new(0, 0));
 }
 
-// ===== Selection Tests =====
+// ===== Word Motion Tests =====
 
 #[gpui::test]
-fn select_next_symbol_basic(cx: &mut TestAppContext) {
+fn move_next_word_start_basic(cx: &mut TestAppContext) {
     let mut stoat = Stoat::test_with_text("fn foo() -> Result<()>", cx);
 
     stoat.update(|s, cx| {
-        s.select_next_symbol(cx);
+        s.move_next_word_start(cx);
     });
 
-    // When cursor is at (0,0), select_next_symbol selects "fn" (the symbol at cursor)
-    // In normal mode: selection spans just the target symbol (0,2)
     let selection = stoat.selection();
     assert_eq!(selection.start, Point::new(0, 0));
-    assert_eq!(selection.end, Point::new(0, 2));
-}
-
-#[gpui::test]
-fn select_next_symbol_skips_punctuation(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test_with_text("fn foo() -> Result<()>", cx);
-
-    stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 7)); // After "fn foo("
-        s.select_next_symbol(cx);
-    });
-
-    // In normal mode: selects just "Result" (12,18)
-    let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 12));
-    assert_eq!(selection.end, Point::new(0, 18));
-}
-
-#[gpui::test]
-fn select_prev_symbol_basic(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test_with_text("fn foo() -> Result<()>", cx);
-
-    stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 22)); // At end
-        s.select_prev_symbol(cx);
-    });
-
-    // In normal mode: selects just "Result" (12-18), reversed
-    let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 12)); // head
-    assert_eq!(selection.end, Point::new(0, 18)); // tail
-    assert!(selection.reversed);
-}
-
-#[gpui::test]
-fn select_prev_symbol_mid_token(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test_with_text("foo identifier", cx);
-
-    stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 8)); // Middle of "identifier"
-        s.select_prev_symbol(cx);
-    });
-
-    // In normal mode: selects the whole previous symbol ("identifier" since cursor is in it)
-    let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 4)); // head at start
-    assert_eq!(selection.end, Point::new(0, 14)); // tail at end
-    assert!(selection.reversed);
-}
-
-#[gpui::test]
-fn select_next_token_includes_punctuation(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test_with_text("foo.bar", cx);
-
-    stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 3)); // At the dot
-        s.select_next_token(cx);
-    });
-
-    // Should select the dot token
-    let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 3));
-    assert_eq!(selection.end, Point::new(0, 4));
-}
-
-#[gpui::test]
-fn select_next_token_operator(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test_with_text("x + y", cx);
-
-    stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 2)); // At the plus
-        s.select_next_token(cx);
-    });
-
-    // Should select the plus token
-    let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 2));
     assert_eq!(selection.end, Point::new(0, 3));
 }
 
 #[gpui::test]
-fn select_prev_token_punctuation(cx: &mut TestAppContext) {
+fn move_next_word_start_skips_punctuation(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test_with_text("fn foo() -> Result<()>", cx);
+
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 7));
+        s.move_next_word_start(cx);
+    });
+
+    let selection = stoat.selection();
+    assert_eq!(selection.start, Point::new(0, 7));
+    assert_eq!(selection.end, Point::new(0, 9));
+}
+
+#[gpui::test]
+fn move_prev_word_start_basic(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test_with_text("fn foo() -> Result<()>", cx);
+
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 22));
+        s.move_prev_word_start(cx);
+    });
+
+    let selection = stoat.selection();
+    assert_eq!(selection.start, Point::new(0, 18));
+    assert_eq!(selection.end, Point::new(0, 22));
+    assert!(selection.reversed);
+}
+
+#[gpui::test]
+fn move_prev_word_start_mid_token(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test_with_text("foo identifier", cx);
+
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 8));
+        s.move_prev_word_start(cx);
+    });
+
+    let selection = stoat.selection();
+    assert_eq!(selection.start, Point::new(0, 4));
+    assert_eq!(selection.end, Point::new(0, 8));
+    assert!(selection.reversed);
+}
+
+#[gpui::test]
+fn move_next_long_word_start_includes_punctuation(cx: &mut TestAppContext) {
     let mut stoat = Stoat::test_with_text("foo.bar", cx);
 
     stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 4)); // After the dot (at "b")
-        s.select_prev_token(cx);
+        s.set_cursor_position(Point::new(0, 3));
+        s.move_next_long_word_start(cx);
     });
 
-    // Should select the dot token (reversed)
     let selection = stoat.selection();
     assert_eq!(selection.start, Point::new(0, 3));
+    assert_eq!(selection.end, Point::new(0, 7));
+}
+
+#[gpui::test]
+fn move_next_long_word_start_operator(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test_with_text("x + y", cx);
+
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 2));
+        s.move_next_long_word_start(cx);
+    });
+
+    let selection = stoat.selection();
+    assert_eq!(selection.start, Point::new(0, 2));
+    assert_eq!(selection.end, Point::new(0, 4));
+}
+
+#[gpui::test]
+fn move_prev_long_word_start_punctuation(cx: &mut TestAppContext) {
+    let mut stoat = Stoat::test_with_text("foo.bar", cx);
+
+    stoat.update(|s, cx| {
+        s.set_cursor_position(Point::new(0, 4));
+        s.move_prev_long_word_start(cx);
+    });
+
+    let selection = stoat.selection();
+    assert_eq!(selection.start, Point::new(0, 0));
     assert_eq!(selection.end, Point::new(0, 4));
     assert!(selection.reversed);
 }
 
 #[gpui::test]
-fn select_prev_token_brackets(cx: &mut TestAppContext) {
+fn move_prev_long_word_start_brackets(cx: &mut TestAppContext) {
     let mut stoat = Stoat::test_with_text("foo()", cx);
 
     stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 5)); // After "foo()"
-        s.select_prev_token(cx);
+        s.set_cursor_position(Point::new(0, 5));
+        s.move_prev_long_word_start(cx);
     });
 
-    // Adjacent punctuation chars form one group: "()"
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 3));
+    assert_eq!(selection.start, Point::new(0, 0));
     assert_eq!(selection.end, Point::new(0, 5));
     assert!(selection.reversed);
 }
 
 #[gpui::test]
-fn select_symbols_skip_whitespace(cx: &mut TestAppContext) {
+fn move_next_word_start_skip_whitespace(cx: &mut TestAppContext) {
     let mut stoat = Stoat::test_with_text("x   42", cx);
 
     stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 1)); // After "x"
-        s.select_next_symbol(cx);
+        s.set_cursor_position(Point::new(0, 1));
+        s.move_next_word_start(cx);
     });
 
-    // In normal mode: selects just "42" (4,6)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(0, 4));
-    assert_eq!(selection.end, Point::new(0, 6));
+    assert_eq!(selection.start, Point::new(0, 1));
+    assert_eq!(selection.end, Point::new(0, 4));
 }
 
 #[gpui::test]
-fn select_symbols_skip_newlines(cx: &mut TestAppContext) {
+fn move_next_word_start_skip_newlines(cx: &mut TestAppContext) {
     let mut stoat = Stoat::test_with_text("x\n\n  foo", cx);
 
     stoat.update(|s, cx| {
-        s.set_cursor_position(Point::new(0, 1)); // After "x"
-        s.select_next_symbol(cx);
+        s.set_cursor_position(Point::new(0, 1));
+        s.move_next_word_start(cx);
     });
 
-    // In normal mode: selects just "foo" (2,2 to 2,5)
     let selection = stoat.selection();
-    assert_eq!(selection.start, Point::new(2, 2));
-    assert_eq!(selection.end, Point::new(2, 5));
+    assert_eq!(selection.start, Point::new(0, 1));
+    assert_eq!(selection.end, Point::new(2, 2));
 }
 
 // ===== File Navigation Tests =====

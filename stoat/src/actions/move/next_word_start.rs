@@ -3,11 +3,11 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Extend all selections to the next word.
+    /// Move all cursors to the start of the next word.
     ///
-    /// Each selection extends independently by finding the next word from its head position.
-    /// In anchored mode, extends the selection. In non-anchored mode, selects just the word.
-    pub fn select_next_symbol(&mut self, cx: &mut Context<Self>) {
+    /// Each cursor moves independently to the next word boundary. In anchored mode,
+    /// extends the selection. In non-anchored mode, creates a range to the next word start.
+    pub fn move_next_word_start(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let snapshot = {
@@ -42,28 +42,17 @@ impl Stoat {
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
             for _ in 0..count {
-                if !selection.is_empty() && selection.reversed {
-                    let start = selection.start;
-                    let end = selection.end;
-                    selection.start = start;
-                    selection.end = end;
-                    selection.reversed = false;
-                    continue;
-                }
-
                 let cursor_offset = snapshot.point_to_offset(selection.head());
+                let target = CharClassifier::next_word_start(&snapshot, cursor_offset);
+                let target_point = snapshot.offset_to_point(target);
 
-                if let Some(range) = CharClassifier::next_word_range(&snapshot, cursor_offset) {
-                    if self.is_mode_anchored() {
-                        let selection_end = snapshot.offset_to_point(range.end);
-                        selection.set_head(selection_end, text::SelectionGoal::None);
-                    } else {
-                        let selection_start = snapshot.offset_to_point(range.start);
-                        let selection_end = snapshot.offset_to_point(range.end);
-                        selection.start = selection_start;
-                        selection.end = selection_end;
-                        selection.reversed = false;
-                    }
+                if self.is_mode_anchored() {
+                    selection.set_head(target_point, text::SelectionGoal::None);
+                } else {
+                    let head = selection.head();
+                    selection.start = head;
+                    selection.end = target_point;
+                    selection.reversed = false;
                 }
             }
         }
@@ -83,17 +72,17 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn selects_next_word(cx: &mut TestAppContext) {
+    fn selects_to_next_word_start(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.insert_text("hello world", cx);
             s.set_cursor_position(text::Point::new(0, 0));
-            s.select_next_symbol(cx);
+            s.move_next_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            assert_eq!(selections[0].head(), text::Point::new(0, 5));
             assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+            assert_eq!(selections[0].head(), text::Point::new(0, 6));
         });
     }
 
@@ -125,28 +114,28 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            s.select_next_symbol(cx);
+            s.move_next_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
-            assert_eq!(selections[0].head(), text::Point::new(0, 5));
             assert_eq!(selections[0].tail(), text::Point::new(0, 0));
-            assert_eq!(selections[1].head(), text::Point::new(1, 3));
+            assert_eq!(selections[0].head(), text::Point::new(0, 6));
             assert_eq!(selections[1].tail(), text::Point::new(1, 0));
+            assert_eq!(selections[1].head(), text::Point::new(1, 4));
         });
     }
 
     #[gpui::test]
-    fn skips_punctuation(cx: &mut TestAppContext) {
+    fn stops_at_punctuation_boundary(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
             s.insert_text("foo.bar", cx);
             s.set_cursor_position(text::Point::new(0, 0));
-            s.select_next_symbol(cx);
+            s.move_next_word_start(cx);
 
             let selections = s.active_selections(cx);
-            assert_eq!(selections[0].head(), text::Point::new(0, 3));
             assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+            assert_eq!(selections[0].head(), text::Point::new(0, 3));
         });
     }
 }

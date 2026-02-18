@@ -3,11 +3,11 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Extend all selections to the next token (any non-whitespace group).
+    /// Move all cursors to the start of the next WORD (whitespace-delimited).
     ///
-    /// Unlike [`select_next_symbol`](Self::select_next_symbol) which skips punctuation,
-    /// this selects any contiguous run of same-class non-whitespace characters.
-    pub fn select_next_token(&mut self, cx: &mut Context<Self>) {
+    /// Unlike [`move_next_word_start`](Self::move_next_word_start) which respects character
+    /// class boundaries, this treats all non-whitespace as one word class.
+    pub fn move_next_long_word_start(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let snapshot = {
@@ -42,28 +42,17 @@ impl Stoat {
         let mut selections = self.selections.all::<Point>(&snapshot);
         for selection in &mut selections {
             for _ in 0..count {
-                if !selection.is_empty() && selection.reversed {
-                    let start = selection.start;
-                    let end = selection.end;
-                    selection.start = start;
-                    selection.end = end;
-                    selection.reversed = false;
-                    continue;
-                }
-
                 let cursor_offset = snapshot.point_to_offset(selection.head());
+                let target = CharClassifier::next_word_start_big(&snapshot, cursor_offset);
+                let target_point = snapshot.offset_to_point(target);
 
-                if let Some(range) = CharClassifier::next_group_range(&snapshot, cursor_offset) {
-                    if self.is_mode_anchored() {
-                        let selection_end = snapshot.offset_to_point(range.end);
-                        selection.set_head(selection_end, text::SelectionGoal::None);
-                    } else {
-                        let selection_start = snapshot.offset_to_point(range.start);
-                        let selection_end = snapshot.offset_to_point(range.end);
-                        selection.start = selection_start;
-                        selection.end = selection_end;
-                        selection.reversed = false;
-                    }
+                if self.is_mode_anchored() {
+                    selection.set_head(target_point, text::SelectionGoal::None);
+                } else {
+                    let head = selection.head();
+                    selection.start = head;
+                    selection.end = target_point;
+                    selection.reversed = false;
                 }
             }
         }
@@ -83,17 +72,17 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn selects_next_token(cx: &mut TestAppContext) {
+    fn selects_to_next_word_start_big(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
-            s.insert_text("foo.bar", cx);
-            s.set_cursor_position(text::Point::new(0, 3));
-            s.select_next_token(cx);
+            s.insert_text("foo.bar baz", cx);
+            s.set_cursor_position(text::Point::new(0, 0));
+            s.move_next_long_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            assert_eq!(selections[0].head(), text::Point::new(0, 4));
-            assert_eq!(selections[0].tail(), text::Point::new(0, 3));
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
+            assert_eq!(selections[0].head(), text::Point::new(0, 8));
         });
     }
 
@@ -101,7 +90,7 @@ mod tests {
     fn extends_multiple_selections_independently(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
-            s.insert_text("foo.bar\nbaz.qux", cx);
+            s.insert_text("foo bar\nbaz qux", cx);
 
             let buffer_snapshot = s.active_buffer(cx).read(cx).buffer().read(cx).snapshot();
             let id = s.selections.next_id();
@@ -109,15 +98,15 @@ mod tests {
                 vec![
                     text::Selection {
                         id,
-                        start: text::Point::new(0, 3),
-                        end: text::Point::new(0, 3),
+                        start: text::Point::new(0, 0),
+                        end: text::Point::new(0, 0),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
                     text::Selection {
                         id: id + 1,
-                        start: text::Point::new(1, 3),
-                        end: text::Point::new(1, 3),
+                        start: text::Point::new(1, 0),
+                        end: text::Point::new(1, 0),
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     },
@@ -125,14 +114,14 @@ mod tests {
                 &buffer_snapshot,
             );
 
-            s.select_next_token(cx);
+            s.move_next_long_word_start(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 2);
+            assert_eq!(selections[0].tail(), text::Point::new(0, 0));
             assert_eq!(selections[0].head(), text::Point::new(0, 4));
-            assert_eq!(selections[0].tail(), text::Point::new(0, 3));
+            assert_eq!(selections[1].tail(), text::Point::new(1, 0));
             assert_eq!(selections[1].head(), text::Point::new(1, 4));
-            assert_eq!(selections[1].tail(), text::Point::new(1, 3));
         });
     }
 }

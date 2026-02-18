@@ -116,9 +116,9 @@ actions!(
         /// Scroll down one page
         PageDown,
         /// Move cursor to end of current/next word
-        MoveWordEnd,
+        MoveNextWordEnd,
         /// Move cursor to end of current/next WORD (whitespace-delimited)
-        MoveWordEndBig,
+        MoveNextLongWordEnd,
         /// Find character forward on current line
         FindCharForward,
         /// Find character backward on current line
@@ -361,14 +361,14 @@ actions!(
 actions!(
     stoat,
     [
-        /// Select next symbol (identifier, keyword, or literal)
-        SelectNextSymbol,
-        /// Select previous symbol (identifier, keyword, or literal)
-        SelectPrevSymbol,
-        /// Select next token (including punctuation and operators)
-        SelectNextToken,
-        /// Select previous token (including punctuation and operators)
-        SelectPrevToken,
+        /// Move cursor to the start of the next word
+        MoveNextWordStart,
+        /// Move cursor to the start of the previous word
+        MovePrevWordStart,
+        /// Move cursor to the start of the next WORD (whitespace-delimited)
+        MoveNextLongWordStart,
+        /// Move cursor to the start of the previous WORD (whitespace-delimited)
+        MovePrevLongWordStart,
         /// Extend selection left by one character
         SelectLeft,
         /// Extend selection right by one character
@@ -402,9 +402,9 @@ actions!(
         /// Swap anchor and head of all selections
         FlipSelection,
         /// Extend selection to end of current/next word
-        SelectWordEnd,
+        ExtendNextWordEnd,
         /// Extend selection to end of current/next WORD (whitespace-delimited)
-        SelectWordEndBig,
+        ExtendNextLongWordEnd,
         /// Select current line, or extend existing line selection downward
         SelectLine,
         /// Open regex prompt for sub-selecting within current selections
@@ -679,12 +679,12 @@ action_metadata!(
 action_metadata!(PageUp, "page up", "Scroll up one page");
 action_metadata!(PageDown, "page down", "Scroll down one page");
 action_metadata!(
-    MoveWordEnd,
+    MoveNextWordEnd,
     "word end",
     "Move the cursor to the end of the current/next word"
 );
 action_metadata!(
-    MoveWordEndBig,
+    MoveNextLongWordEnd,
     "WORD end",
     "Move the cursor to the end of the current/next WORD (whitespace-delimited)"
 );
@@ -837,24 +837,24 @@ action_metadata!(
 
 // Selection actions
 action_metadata!(
-    SelectNextSymbol,
-    "select next symbol",
-    "Select the next symbol (identifier, keyword, or literal)"
+    MoveNextWordStart,
+    "next word start",
+    "Move cursor to the start of the next word"
 );
 action_metadata!(
-    SelectPrevSymbol,
-    "select prev symbol",
-    "Select the previous symbol (identifier, keyword, or literal)"
+    MovePrevWordStart,
+    "prev word start",
+    "Move cursor to the start of the previous word"
 );
 action_metadata!(
-    SelectNextToken,
-    "select next token",
-    "Select the next token (including punctuation and operators)"
+    MoveNextLongWordStart,
+    "next WORD start",
+    "Move cursor to the start of the next WORD (whitespace-delimited)"
 );
 action_metadata!(
-    SelectPrevToken,
-    "select prev token",
-    "Select the previous token (including punctuation and operators)"
+    MovePrevLongWordStart,
+    "prev WORD start",
+    "Move cursor to the start of the previous WORD (whitespace-delimited)"
 );
 action_metadata!(
     SelectLeft,
@@ -928,13 +928,13 @@ action_metadata!(
     "Swap anchor and head of all selections"
 );
 action_metadata!(
-    SelectWordEnd,
-    "select word end",
+    ExtendNextWordEnd,
+    "extend word end",
     "Extend selection to the end of the current/next word"
 );
 action_metadata!(
-    SelectWordEndBig,
-    "select WORD end",
+    ExtendNextLongWordEnd,
+    "extend WORD end",
     "Extend selection to the end of the current/next WORD (whitespace-delimited)"
 );
 action_metadata!(
@@ -1441,10 +1441,13 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::action_name());
     names.insert(TypeId::of::<PageUp>(), PageUp::action_name());
     names.insert(TypeId::of::<PageDown>(), PageDown::action_name());
-    names.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::action_name());
     names.insert(
-        TypeId::of::<MoveWordEndBig>(),
-        MoveWordEndBig::action_name(),
+        TypeId::of::<MoveNextWordEnd>(),
+        MoveNextWordEnd::action_name(),
+    );
+    names.insert(
+        TypeId::of::<MoveNextLongWordEnd>(),
+        MoveNextLongWordEnd::action_name(),
     );
     names.insert(
         TypeId::of::<FindCharForward>(),
@@ -1542,20 +1545,20 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // Selection actions
     names.insert(
-        TypeId::of::<SelectNextSymbol>(),
-        SelectNextSymbol::action_name(),
+        TypeId::of::<MoveNextWordStart>(),
+        MoveNextWordStart::action_name(),
     );
     names.insert(
-        TypeId::of::<SelectPrevSymbol>(),
-        SelectPrevSymbol::action_name(),
+        TypeId::of::<MovePrevWordStart>(),
+        MovePrevWordStart::action_name(),
     );
     names.insert(
-        TypeId::of::<SelectNextToken>(),
-        SelectNextToken::action_name(),
+        TypeId::of::<MoveNextLongWordStart>(),
+        MoveNextLongWordStart::action_name(),
     );
     names.insert(
-        TypeId::of::<SelectPrevToken>(),
-        SelectPrevToken::action_name(),
+        TypeId::of::<MovePrevLongWordStart>(),
+        MovePrevLongWordStart::action_name(),
     );
     names.insert(TypeId::of::<SelectLeft>(), SelectLeft::action_name());
     names.insert(TypeId::of::<SelectRight>(), SelectRight::action_name());
@@ -1599,10 +1602,13 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         KeepPrimarySelection::action_name(),
     );
     names.insert(TypeId::of::<FlipSelection>(), FlipSelection::action_name());
-    names.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::action_name());
     names.insert(
-        TypeId::of::<SelectWordEndBig>(),
-        SelectWordEndBig::action_name(),
+        TypeId::of::<ExtendNextWordEnd>(),
+        ExtendNextWordEnd::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ExtendNextLongWordEnd>(),
+        ExtendNextLongWordEnd::action_name(),
     );
     names.insert(TypeId::of::<SelectLine>(), SelectLine::action_name());
     names.insert(TypeId::of::<SelectRegex>(), SelectRegex::action_name());
@@ -1914,10 +1920,13 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::description());
     descriptions.insert(TypeId::of::<PageUp>(), PageUp::description());
     descriptions.insert(TypeId::of::<PageDown>(), PageDown::description());
-    descriptions.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::description());
     descriptions.insert(
-        TypeId::of::<MoveWordEndBig>(),
-        MoveWordEndBig::description(),
+        TypeId::of::<MoveNextWordEnd>(),
+        MoveNextWordEnd::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<MoveNextLongWordEnd>(),
+        MoveNextLongWordEnd::description(),
     );
     descriptions.insert(
         TypeId::of::<FindCharForward>(),
@@ -2015,20 +2024,20 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
 
     // Selection actions
     descriptions.insert(
-        TypeId::of::<SelectNextSymbol>(),
-        SelectNextSymbol::description(),
+        TypeId::of::<MoveNextWordStart>(),
+        MoveNextWordStart::description(),
     );
     descriptions.insert(
-        TypeId::of::<SelectPrevSymbol>(),
-        SelectPrevSymbol::description(),
+        TypeId::of::<MovePrevWordStart>(),
+        MovePrevWordStart::description(),
     );
     descriptions.insert(
-        TypeId::of::<SelectNextToken>(),
-        SelectNextToken::description(),
+        TypeId::of::<MoveNextLongWordStart>(),
+        MoveNextLongWordStart::description(),
     );
     descriptions.insert(
-        TypeId::of::<SelectPrevToken>(),
-        SelectPrevToken::description(),
+        TypeId::of::<MovePrevLongWordStart>(),
+        MovePrevLongWordStart::description(),
     );
     descriptions.insert(TypeId::of::<SelectLeft>(), SelectLeft::description());
     descriptions.insert(TypeId::of::<SelectRight>(), SelectRight::description());
@@ -2072,10 +2081,13 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         KeepPrimarySelection::description(),
     );
     descriptions.insert(TypeId::of::<FlipSelection>(), FlipSelection::description());
-    descriptions.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::description());
     descriptions.insert(
-        TypeId::of::<SelectWordEndBig>(),
-        SelectWordEndBig::description(),
+        TypeId::of::<ExtendNextWordEnd>(),
+        ExtendNextWordEnd::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ExtendNextLongWordEnd>(),
+        ExtendNextLongWordEnd::description(),
     );
     descriptions.insert(TypeId::of::<SelectLine>(), SelectLine::description());
     descriptions.insert(TypeId::of::<SelectRegex>(), SelectRegex::description());
@@ -2397,8 +2409,14 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<MoveToFileEnd>(), MoveToFileEnd::help_text());
     help.insert(TypeId::of::<PageUp>(), PageUp::help_text());
     help.insert(TypeId::of::<PageDown>(), PageDown::help_text());
-    help.insert(TypeId::of::<MoveWordEnd>(), MoveWordEnd::help_text());
-    help.insert(TypeId::of::<MoveWordEndBig>(), MoveWordEndBig::help_text());
+    help.insert(
+        TypeId::of::<MoveNextWordEnd>(),
+        MoveNextWordEnd::help_text(),
+    );
+    help.insert(
+        TypeId::of::<MoveNextLongWordEnd>(),
+        MoveNextLongWordEnd::help_text(),
+    );
     help.insert(
         TypeId::of::<FindCharForward>(),
         FindCharForward::help_text(),
@@ -2489,20 +2507,20 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
 
     // Selection actions
     help.insert(
-        TypeId::of::<SelectNextSymbol>(),
-        SelectNextSymbol::help_text(),
+        TypeId::of::<MoveNextWordStart>(),
+        MoveNextWordStart::help_text(),
     );
     help.insert(
-        TypeId::of::<SelectPrevSymbol>(),
-        SelectPrevSymbol::help_text(),
+        TypeId::of::<MovePrevWordStart>(),
+        MovePrevWordStart::help_text(),
     );
     help.insert(
-        TypeId::of::<SelectNextToken>(),
-        SelectNextToken::help_text(),
+        TypeId::of::<MoveNextLongWordStart>(),
+        MoveNextLongWordStart::help_text(),
     );
     help.insert(
-        TypeId::of::<SelectPrevToken>(),
-        SelectPrevToken::help_text(),
+        TypeId::of::<MovePrevLongWordStart>(),
+        MovePrevLongWordStart::help_text(),
     );
     help.insert(TypeId::of::<SelectLeft>(), SelectLeft::help_text());
     help.insert(TypeId::of::<SelectRight>(), SelectRight::help_text());
@@ -2543,10 +2561,13 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         KeepPrimarySelection::help_text(),
     );
     help.insert(TypeId::of::<FlipSelection>(), FlipSelection::help_text());
-    help.insert(TypeId::of::<SelectWordEnd>(), SelectWordEnd::help_text());
     help.insert(
-        TypeId::of::<SelectWordEndBig>(),
-        SelectWordEndBig::help_text(),
+        TypeId::of::<ExtendNextWordEnd>(),
+        ExtendNextWordEnd::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ExtendNextLongWordEnd>(),
+        ExtendNextLongWordEnd::help_text(),
     );
     help.insert(TypeId::of::<SelectLine>(), SelectLine::help_text());
     help.insert(TypeId::of::<SelectRegex>(), SelectRegex::help_text());

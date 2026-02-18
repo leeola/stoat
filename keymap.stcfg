@@ -22,12 +22,12 @@ on key {
             j -> MoveDown();
             k -> MoveUp();
             l -> MoveRight();
-            w -> SelectNextSymbol();
-            b -> SelectPrevSymbol();
-            W -> SelectNextToken();
-            B -> SelectPrevToken();
-            e -> MoveWordEnd();
-            E -> SelectWordEnd();
+            w -> MoveNextWordStart();
+            b -> MovePrevWordStart();
+            W -> MoveNextLongWordStart();
+            B -> MovePrevLongWordStart();
+            e -> MoveNextWordEnd();
+            E -> MoveNextLongWordEnd();
             0 -> MoveToLineStart();
             $ -> MoveToLineEnd();
             G -> MoveToFileEnd();
@@ -149,12 +149,12 @@ on key {
             right -> SelectRight();
             up -> SelectUp();
             down -> SelectDown();
-            w -> SelectNextSymbol();
-            b -> SelectPrevSymbol();
-            W -> SelectNextToken();
-            B -> SelectPrevToken();
-            e -> SelectWordEnd();
-            E -> SelectWordEndBig();
+            w -> MoveNextWordStart();
+            b -> MovePrevWordStart();
+            W -> MoveNextLongWordStart();
+            B -> MovePrevLongWordStart();
+            e -> ExtendNextWordEnd();
+            E -> ExtendNextLongWordEnd();
             0 -> SelectToLineStart();
             $ -> SelectToLineEnd();
 

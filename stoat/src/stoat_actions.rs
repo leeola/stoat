@@ -400,10 +400,10 @@ mod tests {
         let commands = build_command_list();
 
         let selection_action_names = [
-            "SelectNextSymbol",
-            "SelectPrevSymbol",
-            "SelectNextToken",
-            "SelectPrevToken",
+            "MoveNextWordStart",
+            "MovePrevWordStart",
+            "MoveNextLongWordStart",
+            "MovePrevLongWordStart",
             "SelectLeft",
             "SelectRight",
             "SelectUp",

@@ -3,11 +3,10 @@ use gpui::Context;
 use text::Point;
 
 impl Stoat {
-    /// Extend all selections to the end of the current/next word.
+    /// Extend all selections to the end of the current/next WORD (whitespace-delimited).
     ///
-    /// Each selection's head moves to the next word boundary while the anchor
-    /// stays fixed. Used in visual mode for `e`.
-    pub fn select_word_end(&mut self, cx: &mut Context<Self>) {
+    /// Each selection's head moves to the next WORD boundary while the anchor stays fixed.
+    pub fn extend_next_long_word_end(&mut self, cx: &mut Context<Self>) {
         self.record_selection_change();
         let count = self.take_count();
         let buffer_snapshot = {
@@ -37,7 +36,7 @@ impl Stoat {
         for selection in &mut selections {
             let mut offset = buffer_snapshot.point_to_offset(selection.head());
             for _ in 0..count {
-                offset = CharClassifier::next_word_end(&buffer_snapshot, offset);
+                offset = CharClassifier::next_word_end_big(&buffer_snapshot, offset);
             }
             let new_head = buffer_snapshot.offset_to_point(offset);
             selection.set_head(new_head, text::SelectionGoal::None);
@@ -58,16 +57,16 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    fn extends_selection_to_word_end(cx: &mut TestAppContext) {
+    fn extends_selection_past_punctuation(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| {
-            s.insert_text("hello world", cx);
+            s.insert_text("hello.world foo", cx);
             s.set_cursor_position(Point::new(0, 0));
-            s.select_word_end(cx);
+            s.extend_next_long_word_end(cx);
 
             let selections = s.active_selections(cx);
             assert_eq!(selections.len(), 1);
-            assert_eq!(selections[0].head(), Point::new(0, 5));
+            assert_eq!(selections[0].head(), Point::new(0, 11));
             assert_eq!(selections[0].tail(), Point::new(0, 0));
         });
     }
