@@ -151,6 +151,98 @@ pub(super) fn generate_partial_hunk_patch(
     Ok(patch)
 }
 
+/// Apply a unified diff patch via libgit2.
+///
+/// When `reverse` is true, the patch is reversed (swapping additions/deletions
+/// and header fields) before application, used for unstaging or reverting.
+/// The `location` parameter controls where the patch is applied (Index or WorkDir).
+pub(super) fn apply_patch(
+    patch: &str,
+    repo_dir: &Path,
+    reverse: bool,
+    location: ApplyLocation,
+) -> Result<(), String> {
+    let repo = Repository::open(repo_dir).map_err(|e| format!("Failed to open repository: {e}"))?;
+
+    let patch_bytes = if reverse {
+        reverse_patch(patch)
+    } else {
+        patch.to_string()
+    };
+
+    let diff = Diff::from_buffer(patch_bytes.as_bytes())
+        .map_err(|e| format!("Failed to parse patch: {e}"))?;
+
+    repo.apply(&diff, location, None)
+        .map_err(|e| format!("Failed to apply patch: {e}"))?;
+
+    Ok(())
+}
+
+/// Reverse a unified diff patch by swapping additions/deletions and the `@@` header ranges.
+///
+/// The `diff --git`, `---`, and `+++` header lines are kept unchanged so that
+/// libgit2 can match the path names consistently.
+fn reverse_patch(patch: &str) -> String {
+    let mut result = String::with_capacity(patch.len());
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") || line.starts_with("--- ") || line.starts_with("+++ ") {
+            result.push_str(line);
+            result.push('\n');
+        } else if let Some(rest) = line.strip_prefix("@@ ") {
+            if let Some(reversed) = reverse_hunk_header(rest) {
+                result.push_str(&format!("@@ {reversed}\n"));
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        } else if let Some(rest) = line.strip_prefix('-') {
+            result.push('+');
+            result.push_str(rest);
+            result.push('\n');
+        } else if let Some(rest) = line.strip_prefix('+') {
+            result.push('-');
+            result.push_str(rest);
+            result.push('\n');
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+/// Swap old/new ranges in a hunk header: `-A,B +C,D @@` becomes `-C,D +A,B @@`.
+///
+/// For zero-count ranges, the start position is set to match the other side's
+/// start, since libgit2 requires positional consistency for empty ranges.
+fn reverse_hunk_header(header: &str) -> Option<String> {
+    let at_end = header.find(" @@")?;
+    let ranges = &header[..at_end];
+    let after = &header[at_end..];
+
+    let plus_idx = ranges.find(" +")?;
+    let old_range = &ranges[1..plus_idx];
+    let new_range = &ranges[plus_idx + 2..];
+
+    fn parse_range(r: &str) -> Option<(u32, u32)> {
+        let (start, count) = r.split_once(',')?;
+        Some((start.parse().ok()?, count.parse().ok()?))
+    }
+
+    let (old_start, old_count) = parse_range(old_range)?;
+    let (new_start, new_count) = parse_range(new_range)?;
+
+    let rev_old_start = new_start;
+    let rev_old_count = new_count;
+    let rev_new_start = if old_count == 0 { new_start } else { old_start };
+    let rev_new_count = old_count;
+
+    Some(format!(
+        "-{rev_old_start},{rev_old_count} +{rev_new_start},{rev_new_count}{after}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,96 +393,4 @@ mod tests {
         // old_count=1 (context), new_count=1 (context)
         assert!(patch.contains("@@ -7,1 +7,1 @@\n"));
     }
-}
-
-/// Apply a unified diff patch via libgit2.
-///
-/// When `reverse` is true, the patch is reversed (swapping additions/deletions
-/// and header fields) before application, used for unstaging or reverting.
-/// The `location` parameter controls where the patch is applied (Index or WorkDir).
-pub(super) fn apply_patch(
-    patch: &str,
-    repo_dir: &Path,
-    reverse: bool,
-    location: ApplyLocation,
-) -> Result<(), String> {
-    let repo = Repository::open(repo_dir).map_err(|e| format!("Failed to open repository: {e}"))?;
-
-    let patch_bytes = if reverse {
-        reverse_patch(patch)
-    } else {
-        patch.to_string()
-    };
-
-    let diff = Diff::from_buffer(patch_bytes.as_bytes())
-        .map_err(|e| format!("Failed to parse patch: {e}"))?;
-
-    repo.apply(&diff, location, None)
-        .map_err(|e| format!("Failed to apply patch: {e}"))?;
-
-    Ok(())
-}
-
-/// Reverse a unified diff patch by swapping additions/deletions and the `@@` header ranges.
-///
-/// The `diff --git`, `---`, and `+++` header lines are kept unchanged so that
-/// libgit2 can match the path names consistently.
-fn reverse_patch(patch: &str) -> String {
-    let mut result = String::with_capacity(patch.len());
-    for line in patch.lines() {
-        if line.starts_with("diff --git ") || line.starts_with("--- ") || line.starts_with("+++ ") {
-            result.push_str(line);
-            result.push('\n');
-        } else if let Some(rest) = line.strip_prefix("@@ ") {
-            if let Some(reversed) = reverse_hunk_header(rest) {
-                result.push_str(&format!("@@ {reversed}\n"));
-            } else {
-                result.push_str(line);
-                result.push('\n');
-            }
-        } else if let Some(rest) = line.strip_prefix('-') {
-            result.push('+');
-            result.push_str(rest);
-            result.push('\n');
-        } else if let Some(rest) = line.strip_prefix('+') {
-            result.push('-');
-            result.push_str(rest);
-            result.push('\n');
-        } else {
-            result.push_str(line);
-            result.push('\n');
-        }
-    }
-    result
-}
-
-/// Swap old/new ranges in a hunk header: `-A,B +C,D @@` becomes `-C,D +A,B @@`.
-///
-/// For zero-count ranges, the start position is set to match the other side's
-/// start, since libgit2 requires positional consistency for empty ranges.
-fn reverse_hunk_header(header: &str) -> Option<String> {
-    let at_end = header.find(" @@")?;
-    let ranges = &header[..at_end];
-    let after = &header[at_end..];
-
-    let plus_idx = ranges.find(" +")?;
-    let old_range = &ranges[1..plus_idx];
-    let new_range = &ranges[plus_idx + 2..];
-
-    fn parse_range(r: &str) -> Option<(u32, u32)> {
-        let (start, count) = r.split_once(',')?;
-        Some((start.parse().ok()?, count.parse().ok()?))
-    }
-
-    let (old_start, old_count) = parse_range(old_range)?;
-    let (new_start, new_count) = parse_range(new_range)?;
-
-    let rev_old_start = new_start;
-    let rev_old_count = new_count;
-    let rev_new_start = if old_count == 0 { new_start } else { old_start };
-    let rev_new_count = old_count;
-
-    Some(format!(
-        "-{rev_old_start},{rev_old_count} +{rev_new_start},{rev_new_count}{after}"
-    ))
 }

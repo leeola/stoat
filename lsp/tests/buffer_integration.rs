@@ -4,7 +4,7 @@
 //! and merged correctly when multiple language servers provide overlapping diagnostics.
 
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, DiagnosticSeverity};
-use text::{Bias, Buffer, BufferId, Point, ToPoint};
+use text::{Bias, Buffer, BufferId, Point};
 
 fn create_buffer(text: &str) -> Buffer {
     Buffer::new(0, BufferId::new(1).unwrap(), text)
@@ -22,8 +22,8 @@ fn create_diagnostic(
         range: snapshot.anchor_at(start, Bias::Left)..snapshot.anchor_at(end, Bias::Right),
         severity,
         code: Some("TEST".to_string()),
-        source: Some(format!("server-{}", server_id)),
-        message: format!("Test diagnostic from server {}", server_id),
+        source: Some(format!("server-{server_id}")),
+        message: format!("Test diagnostic from server {server_id}"),
         server_id,
     }
 }
@@ -205,7 +205,7 @@ fn multiline_diagnostic_appears_on_all_rows() {
     // Should appear on all spanned rows
     for row in 0..=3 {
         let diags: Vec<_> = set.diagnostics_for_row(row, &snapshot).collect();
-        assert_eq!(diags.len(), 1, "Expected diagnostic on row {}", row);
+        assert_eq!(diags.len(), 1, "Expected diagnostic on row {row}");
     }
 
     // Should not appear on row 4

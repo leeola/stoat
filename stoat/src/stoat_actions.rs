@@ -391,11 +391,7 @@ mod tests {
 
         for name in &movement_action_names {
             let found = commands.iter().any(|cmd| cmd.name == *name);
-            assert!(
-                found,
-                "Movement action '{}' should be in command list",
-                name
-            );
+            assert!(found, "Movement action '{name}' should be in command list");
         }
     }
 
@@ -418,11 +414,7 @@ mod tests {
 
         for name in &selection_action_names {
             let found = commands.iter().any(|cmd| cmd.name == *name);
-            assert!(
-                found,
-                "Selection action '{}' should be in command list",
-                name
-            );
+            assert!(found, "Selection action '{name}' should be in command list");
         }
 
         let select_left_type_id = TypeId::of::<crate::actions::SelectLeft>();
@@ -459,7 +451,7 @@ mod tests {
 
         for name in &editing_action_names {
             let found = commands.iter().any(|cmd| cmd.name == *name);
-            assert!(found, "Editing action '{}' should be in command list", name);
+            assert!(found, "Editing action '{name}' should be in command list");
         }
 
         let delete_left_type_id = TypeId::of::<crate::actions::DeleteLeft>();
@@ -495,7 +487,7 @@ mod tests {
 
         for name in &mode_action_names {
             let found = commands.iter().any(|cmd| cmd.name == *name);
-            assert!(found, "Mode action '{}' should be in command list", name);
+            assert!(found, "Mode action '{name}' should be in command list");
         }
 
         let insert_mode_type_id = TypeId::of::<crate::actions::EnterInsertMode>();
@@ -532,8 +524,7 @@ mod tests {
             let found = commands.iter().any(|cmd| cmd.name == *name);
             assert!(
                 found,
-                "File finder action '{}' should be in command list",
-                name
+                "File finder action '{name}' should be in command list"
             );
         }
 
@@ -569,8 +560,7 @@ mod tests {
             let found = commands.iter().any(|cmd| cmd.name == *name);
             assert!(
                 found,
-                "Buffer finder action '{}' should be in command list",
-                name
+                "Buffer finder action '{name}' should be in command list"
             );
         }
 
@@ -605,8 +595,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Command palette action '{}' should be in list",
-                name
+                "Command palette action '{name}' should be in list"
             );
         }
     }
@@ -629,8 +618,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Pane action '{}' should be in list",
-                name
+                "Pane action '{name}' should be in list"
             );
         }
     }
@@ -643,8 +631,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Application action '{}' should be in list",
-                name
+                "Application action '{name}' should be in list"
             );
         }
     }
@@ -657,8 +644,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "View action '{}' should be in list",
-                name
+                "View action '{name}' should be in list"
             );
         }
     }
@@ -677,8 +663,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Help action '{}' should be in list",
-                name
+                "Help action '{name}' should be in list"
             );
         }
     }
@@ -703,8 +688,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Git status action '{}' should be in list",
-                name
+                "Git status action '{name}' should be in list"
             );
         }
     }
@@ -717,8 +701,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Git diff hunk action '{}' should be in list",
-                name
+                "Git diff hunk action '{name}' should be in list"
             );
         }
     }
@@ -743,8 +726,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Diff review action '{}' should be in list",
-                name
+                "Diff review action '{name}' should be in list"
             );
         }
     }
@@ -765,8 +747,7 @@ mod tests {
         for name in &names {
             assert!(
                 commands.iter().any(|cmd| cmd.name == *name),
-                "Git repository action '{}' should be in list",
-                name
+                "Git repository action '{name}' should be in list"
             );
         }
     }

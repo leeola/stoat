@@ -32,8 +32,7 @@ pub fn parse_range_notation(notation: &str, source: &str) -> Result<Range> {
     let parts: Vec<&str> = notation.split('-').collect();
     if parts.len() != 2 {
         anyhow::bail!(
-            "Invalid range notation '{}': expected 'line:col-line:col'",
-            notation
+            "Invalid range notation '{notation}': expected 'line:col-line:col'"
         );
     }
 
@@ -41,14 +40,14 @@ pub fn parse_range_notation(notation: &str, source: &str) -> Result<Range> {
     let end = parse_position(parts[1])?;
 
     if start.line > end.line || (start.line == end.line && start.character > end.character) {
-        anyhow::bail!("Invalid range: start {:?} is after end {:?}", start, end);
+        anyhow::bail!("Invalid range: start {start:?} is after end {end:?}");
     }
 
     // Validate positions are within source bounds
     validate_position_in_source(&start, source)
-        .with_context(|| format!("Start position {:?} out of bounds", start))?;
+        .with_context(|| format!("Start position {start:?} out of bounds"))?;
     validate_position_in_source(&end, source)
-        .with_context(|| format!("End position {:?} out of bounds", end))?;
+        .with_context(|| format!("End position {end:?} out of bounds"))?;
 
     Ok(Range { start, end })
 }
@@ -57,7 +56,7 @@ pub fn parse_range_notation(notation: &str, source: &str) -> Result<Range> {
 fn parse_position(s: &str) -> Result<Position> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 2 {
-        anyhow::bail!("Invalid position '{}': expected 'line:col'", s);
+        anyhow::bail!("Invalid position '{s}': expected 'line:col'");
     }
 
     let line = parts[0]

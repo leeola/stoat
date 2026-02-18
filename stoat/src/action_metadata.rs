@@ -379,8 +379,7 @@ mod tests {
 
         assert!(
             move_up_doc.contains("Move cursor up"),
-            "Documentation should match doc comment. Got: {:?}",
-            move_up_doc
+            "Documentation should match doc comment. Got: {move_up_doc:?}"
         );
     }
 
@@ -413,8 +412,7 @@ mod tests {
         let doc = select_left_doc.unwrap();
         assert!(
             doc.contains("Extend selection"),
-            "Documentation should match doc comment. Got: {:?}",
-            doc
+            "Documentation should match doc comment. Got: {doc:?}"
         );
     }
 
@@ -444,8 +442,7 @@ mod tests {
         let doc = delete_left_doc.unwrap();
         assert!(
             doc.contains("Delete character"),
-            "Documentation should match doc comment. Got: {:?}",
-            doc
+            "Documentation should match doc comment. Got: {doc:?}"
         );
     }
 
@@ -478,8 +475,7 @@ mod tests {
         let doc = insert_mode_doc.unwrap();
         assert!(
             doc.contains("Enter insert mode"),
-            "Documentation should match doc comment. Got: {:?}",
-            doc
+            "Documentation should match doc comment. Got: {doc:?}"
         );
     }
 
@@ -518,8 +514,7 @@ mod tests {
         let doc = open_doc.unwrap();
         assert!(
             doc.contains("file finder"),
-            "Documentation should match doc comment. Got: {:?}",
-            doc
+            "Documentation should match doc comment. Got: {doc:?}"
         );
     }
 
@@ -558,8 +553,7 @@ mod tests {
         let doc = open_doc.unwrap();
         assert!(
             doc.contains("buffer finder"),
-            "Documentation should match doc comment. Got: {:?}",
-            doc
+            "Documentation should match doc comment. Got: {doc:?}"
         );
     }
 

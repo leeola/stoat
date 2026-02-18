@@ -192,7 +192,7 @@ mod tests {
         // Should find on all three lines
         for row in 0..3 {
             let found: Vec<_> = set.diagnostics_for_row(row, &snapshot).collect();
-            assert_eq!(found.len(), 1, "Expected diagnostic on row {}", row);
+            assert_eq!(found.len(), 1, "Expected diagnostic on row {row}");
         }
     }
 

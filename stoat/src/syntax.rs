@@ -878,7 +878,7 @@ mod tests {
         let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
         let snapshot = buffer.snapshot();
         let captures = vec![];
-        let theme = SyntaxTheme::monokai_dark();
+        let _theme = SyntaxTheme::monokai_dark();
         let highlight_map = HighlightMap::default();
 
         let chunks: Vec<_> =

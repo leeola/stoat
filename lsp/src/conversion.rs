@@ -175,8 +175,7 @@ mod tests {
                 let back = utf16_to_utf8_col(line, utf16_col);
                 assert_eq!(
                     back as usize, utf8_col,
-                    "Failed roundtrip at UTF-8 col {}",
-                    utf8_col
+                    "Failed roundtrip at UTF-8 col {utf8_col}"
                 );
             }
         }

@@ -20,7 +20,7 @@ async fn diagnostic_flow_end_to_end(cx: &mut TestAppContext) {
 
     // Create buffer and manager in sync context
     let (buffer_item, manager) = cx.update(|cx| {
-        let buffer = cx.new(|cx| text::Buffer::new(0, buffer_id, source));
+        let buffer = cx.new(|_cx| text::Buffer::new(0, buffer_id, source));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, Language::Rust, cx));
         let manager = Arc::new(LspManager::new(
             cx.background_executor().clone(),

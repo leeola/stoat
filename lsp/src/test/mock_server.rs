@@ -188,15 +188,14 @@ impl MockLspServer {
                 (
                     DiagnosticSeverity::ERROR,
                     Some("E0425".to_string()),
-                    format!("cannot find value `{}` in this scope", text),
+                    format!("cannot find value `{text}` in this scope"),
                 )
             },
             DiagnosticKind::TypeMismatch { expected, found } => (
                 DiagnosticSeverity::ERROR,
                 Some("E0308".to_string()),
                 format!(
-                    "mismatched types: expected `{}`, found `{}`",
-                    expected, found
+                    "mismatched types: expected `{expected}`, found `{found}`"
                 ),
             ),
             DiagnosticKind::UnusedVariable => {
@@ -205,7 +204,7 @@ impl MockLspServer {
                     DiagnosticSeverity::WARNING,
                     Some("unused_variables".to_string()),
                     if mock.message.is_empty() {
-                        format!("unused variable: `{}`", text)
+                        format!("unused variable: `{text}`")
                     } else {
                         mock.message.clone()
                     },
@@ -277,7 +276,7 @@ impl LspTransport for MockLspServer {
 
                 Ok(response.to_json()?)
             },
-            _ => anyhow::bail!("Expected request, got {:?}", msg),
+            _ => anyhow::bail!("Expected request, got {msg:?}"),
         }
     }
 
@@ -293,7 +292,7 @@ impl LspTransport for MockLspServer {
                 }
                 Ok(())
             },
-            _ => anyhow::bail!("Expected notification, got {:?}", msg),
+            _ => anyhow::bail!("Expected notification, got {msg:?}"),
         }
     }
 

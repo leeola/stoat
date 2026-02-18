@@ -196,7 +196,7 @@ mod tests {
 
     #[gpui::test]
     fn creates_single_line_editor(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let editor = cx.new(InlineEditor::new_single_line);
 
         assert!(cx.read_entity(&editor, |e, _| e.is_single_line()));
         assert!(cx.read_entity(&editor, |e, cx| e.text(cx).is_empty()));
@@ -204,14 +204,14 @@ mod tests {
 
     #[gpui::test]
     fn creates_multi_line_editor(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_multi_line(cx));
+        let editor = cx.new(InlineEditor::new_multi_line);
 
         assert!(!cx.read_entity(&editor, |e, _| e.is_single_line()));
     }
 
     #[gpui::test]
     fn sets_prefix(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let editor = cx.new(InlineEditor::new_single_line);
         editor.update(cx, |editor, _| {
             editor.set_prefix(":");
         });
@@ -222,7 +222,7 @@ mod tests {
 
     #[gpui::test]
     fn sets_placeholder(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let editor = cx.new(InlineEditor::new_single_line);
         editor.update(cx, |editor, _| {
             editor.set_placeholder("Type command...");
         });
@@ -233,7 +233,7 @@ mod tests {
 
     #[gpui::test]
     fn clears_content(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let editor = cx.new(InlineEditor::new_single_line);
 
         // Insert some text
         editor.update(cx, |editor, cx| {
@@ -256,7 +256,7 @@ mod tests {
 
     #[gpui::test]
     fn gets_text(cx: &mut gpui::TestAppContext) {
-        let editor = cx.new(|cx| InlineEditor::new_single_line(cx));
+        let editor = cx.new(InlineEditor::new_single_line);
 
         editor.update(cx, |editor, cx| {
             editor.buffer.update(cx, |buffer, _| {
