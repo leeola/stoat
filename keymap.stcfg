@@ -51,7 +51,7 @@ on key {
             space -> SetMode(space);
 
             # Editing
-            x -> DeleteRight();
+            x -> SelectLine();
             X -> DeleteLeft();
             d -> DeleteSelection();
             c -> ChangeSelection();

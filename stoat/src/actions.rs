@@ -405,6 +405,8 @@ actions!(
         SelectWordEnd,
         /// Extend selection to end of current/next WORD (whitespace-delimited)
         SelectWordEndBig,
+        /// Select current line, or extend existing line selection downward
+        SelectLine,
     ]
 );
 
@@ -932,6 +934,11 @@ action_metadata!(
     SelectWordEndBig,
     "select WORD end",
     "Extend selection to the end of the current/next WORD (whitespace-delimited)"
+);
+action_metadata!(
+    SelectLine,
+    "select line",
+    "Select the current line, or extend an existing line selection downward"
 );
 
 // File finder actions
@@ -1590,6 +1597,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<SelectWordEndBig>(),
         SelectWordEndBig::action_name(),
     );
+    names.insert(TypeId::of::<SelectLine>(), SelectLine::action_name());
 
     // File finder actions
     names.insert(
@@ -2061,6 +2069,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<SelectWordEndBig>(),
         SelectWordEndBig::description(),
     );
+    descriptions.insert(TypeId::of::<SelectLine>(), SelectLine::description());
 
     // File finder actions
     descriptions.insert(
@@ -2530,6 +2539,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<SelectWordEndBig>(),
         SelectWordEndBig::help_text(),
     );
+    help.insert(TypeId::of::<SelectLine>(), SelectLine::help_text());
 
     // File finder actions
     help.insert(TypeId::of::<OpenFileFinder>(), OpenFileFinder::help_text());

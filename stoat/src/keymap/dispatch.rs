@@ -102,6 +102,7 @@ pub fn dispatch_editor_action<C: AppContext>(
         "FlipSelection" => ed!(stoat, cx, |s, cx| s.flip_selection(cx)),
         "SelectWordEnd" => ed!(stoat, cx, |s, cx| s.select_word_end(cx)),
         "SelectWordEndBig" => ed!(stoat, cx, |s, cx| s.select_word_end_big(cx)),
+        "SelectLine" => ed!(stoat, cx, |s, cx| s.select_line(cx)),
 
         "SetMode" => {
             if let Some(mode_name) = action_first_string_arg(action) {
