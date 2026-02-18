@@ -28,6 +28,10 @@ pub fn default_modes() -> HashMap<String, Mode> {
         Mode::with_previous("goto", "GOTO", "normal", false),
     );
     modes.insert(
+        "buffer".into(),
+        Mode::with_previous("buffer", "BUFFER", "normal", false),
+    );
+    modes.insert(
         "command_palette".into(),
         Mode::with_previous("command_palette", "COMMAND", "normal", false),
     );

@@ -253,6 +253,8 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "FocusPaneDown"
             | "FocusPaneLeft"
             | "FocusPaneRight"
+            | "CloseBuffer"
+            | "CloseOtherPanes"
             // Finders
             | "OpenFileFinder"
             | "FileFinderNext"

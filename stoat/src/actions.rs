@@ -430,6 +430,10 @@ actions!(
         FocusPaneLeft,
         /// Focus the pane to the right of the current one
         FocusPaneRight,
+        /// Close the active buffer and switch to the previous one
+        CloseBuffer,
+        /// Close all panes except the focused one
+        CloseOtherPanes,
     ]
 );
 
@@ -1301,6 +1305,18 @@ action_metadata!(
     "focus down",
     "Move keyboard focus to the pane immediately below the current pane"
 );
+action_metadata!(
+    CloseBuffer,
+    "close buffer",
+    "Close the active buffer and switch to the previous one",
+    ["bd", "buffer-close"]
+);
+action_metadata!(
+    CloseOtherPanes,
+    "close other panes",
+    "Close all panes except the focused one",
+    ["only", "wonly"]
+);
 
 // Application actions
 action_metadata!(
@@ -1809,6 +1825,11 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<FocusPaneRight>(),
         FocusPaneRight::action_name(),
     );
+    names.insert(TypeId::of::<CloseBuffer>(), CloseBuffer::action_name());
+    names.insert(
+        TypeId::of::<CloseOtherPanes>(),
+        CloseOtherPanes::action_name(),
+    );
 
     // Application actions
     names.insert(TypeId::of::<QuitAll>(), QuitAll::action_name());
@@ -2275,6 +2296,11 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<FocusPaneRight>(),
         FocusPaneRight::description(),
     );
+    descriptions.insert(TypeId::of::<CloseBuffer>(), CloseBuffer::description());
+    descriptions.insert(
+        TypeId::of::<CloseOtherPanes>(),
+        CloseOtherPanes::description(),
+    );
 
     // Application actions
     descriptions.insert(TypeId::of::<QuitAll>(), QuitAll::description());
@@ -2715,6 +2741,11 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<FocusPaneDown>(), FocusPaneDown::help_text());
     help.insert(TypeId::of::<FocusPaneLeft>(), FocusPaneLeft::help_text());
     help.insert(TypeId::of::<FocusPaneRight>(), FocusPaneRight::help_text());
+    help.insert(TypeId::of::<CloseBuffer>(), CloseBuffer::help_text());
+    help.insert(
+        TypeId::of::<CloseOtherPanes>(),
+        CloseOtherPanes::help_text(),
+    );
 
     // Application actions
     help.insert(TypeId::of::<QuitAll>(), QuitAll::help_text());
@@ -2782,6 +2813,8 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
 
     // Pane management actions
     aliases.insert(TypeId::of::<Quit>(), Quit::aliases());
+    aliases.insert(TypeId::of::<CloseBuffer>(), CloseBuffer::aliases());
+    aliases.insert(TypeId::of::<CloseOtherPanes>(), CloseOtherPanes::aliases());
 
     // Application actions
     aliases.insert(TypeId::of::<QuitAll>(), QuitAll::aliases());

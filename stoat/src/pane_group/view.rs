@@ -414,6 +414,8 @@ impl PaneGroupView {
                 "SplitLeft" => self.handle_split_left(window, cx),
                 "SplitRight" => self.handle_split_right(window, cx),
                 "Quit" | "ClosePane" => self.handle_quit(window, cx),
+                "CloseBuffer" => self.handle_close_buffer(window, cx),
+                "CloseOtherPanes" => self.handle_close_other_panes(window, cx),
                 "FocusPaneUp" => self.handle_focus_pane_up(window, cx),
                 "FocusPaneDown" => self.handle_focus_pane_down(window, cx),
                 "FocusPaneLeft" => self.handle_focus_pane_left(window, cx),

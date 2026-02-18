@@ -1,3 +1,5 @@
+mod close_buffer;
+mod close_other_panes;
 mod focus_down;
 mod focus_left;
 mod focus_right;

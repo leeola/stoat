@@ -156,9 +156,9 @@ impl EditorView {
             let mode_before = self.stoat.read(cx).mode().to_string();
 
             if dispatch_editor_action(&self.stoat, &action, cx) {
-                // Auto-revert: if we were in "goto" mode and the action didn't change mode,
-                // revert to normal mode
-                if mode_before == "goto" && self.stoat.read(cx).mode() == "goto" {
+                // Auto-revert transient modes back to normal after action
+                let is_transient = mode_before == "goto" || mode_before == "buffer";
+                if is_transient && self.stoat.read(cx).mode() == mode_before {
                     self.stoat
                         .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
                 }
@@ -167,7 +167,8 @@ impl EditorView {
                 return;
             }
             if dispatch_pane_action(&self.stoat, &action, cx) {
-                if mode_before == "goto" && self.stoat.read(cx).mode() == "goto" {
+                let is_transient = mode_before == "goto" || mode_before == "buffer";
+                if is_transient && self.stoat.read(cx).mode() == mode_before {
                     self.stoat
                         .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
                 }

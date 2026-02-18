@@ -27,7 +27,7 @@ on key {
             W -> SelectNextToken();
             B -> SelectPrevToken();
             e -> MoveWordEnd();
-            E -> MoveWordEndBig();
+            E -> SelectWordEnd();
             0 -> MoveToLineStart();
             $ -> MoveToLineEnd();
             G -> MoveToFileEnd();
@@ -61,7 +61,11 @@ on key {
             a -> Append();
             A -> AppendAtLineEnd();
             I -> InsertAtLineStart();
-            J -> JoinLines();
+            H -> SelectLeft();
+            J -> SelectDown();
+            K -> SelectUp();
+            L -> SelectRight();
+            alt-j -> JoinLines();
             p -> PasteAfter();
             P -> PasteBefore();
             r -> ReplaceChar();
@@ -184,6 +188,16 @@ on key {
             h -> MoveToLineStart();
             l -> MoveToLineEnd();
             s -> MoveToFirstNonWhitespace();
+            i -> MoveToFirstNonWhitespace();
+            j -> MoveToFileEnd();
+            k -> MoveToFileStart();
+        }
+
+        # Buffer Mode (transient - auto-reverts to normal after action)
+        mode == "buffer" {
+            escape -> SetMode(normal);
+            b -> OpenBufferFinder();
+            d -> CloseBuffer();
         }
 
         # Pane Mode
@@ -198,12 +212,17 @@ on key {
 
             # Close
             q -> ClosePane();
+            o -> CloseOtherPanes();
 
             # Focus navigation
             h -> FocusPaneLeft();
             j -> FocusPaneDown();
             k -> FocusPaneUp();
             l -> FocusPaneRight();
+            left -> FocusPaneLeft();
+            down -> FocusPaneDown();
+            up -> FocusPaneUp();
+            right -> FocusPaneRight();
             ctrl-h -> FocusPaneLeft();
             ctrl-j -> FocusPaneDown();
             ctrl-k -> FocusPaneUp();
@@ -215,7 +234,7 @@ on key {
             escape -> SetMode(normal);
             a -> SetMode(pane);
             p -> OpenFileFinder();
-            b -> OpenBufferFinder();
+            b -> SetMode(buffer);
             g -> OpenGitStatus();
             d -> ToggleDiffHunk();
             r -> OpenDiffReview();
