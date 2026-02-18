@@ -109,96 +109,87 @@ impl Stoat {
 mod tests {
     use crate::Stoat;
     use gpui::TestAppContext;
-    use text::Point;
 
     #[gpui::test]
     fn selects_bar_from_line(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("<|foo bar baz||>", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some("bar".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("b");
+        stoat.type_key("a");
+        stoat.type_key("r");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("foo <|bar||> baz");
     }
 
     #[gpui::test]
     fn selects_words(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("<|hello world||>", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some(r"\w+".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-            let sels = s.active_selections(cx);
-            assert_eq!(sels.len(), 2);
-            assert_eq!(sels[0].start, Point::new(0, 0));
-            assert_eq!(sels[0].end, Point::new(0, 5));
-            assert_eq!(sels[1].start, Point::new(0, 6));
-            assert_eq!(sels[1].end, Point::new(0, 11));
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("\\");
+        stoat.type_key("w");
+        stoat.type_key("+");
+        stoat.type_key("enter");
+        stoat.assert_cursor_notation("<|hello||> <|world||>");
     }
 
     #[gpui::test]
     fn no_match_keeps_selection(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("<|foo bar baz||>", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some("xyz".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("x");
+        stoat.type_key("y");
+        stoat.type_key("z");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("<|foo bar baz||>");
     }
 
     #[gpui::test]
     fn invalid_regex_noop(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("<|hello world||>", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some("[invalid".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("[");
+        stoat.type_key("i");
+        stoat.type_key("n");
+        stoat.type_key("v");
+        stoat.type_key("a");
+        stoat.type_key("l");
+        stoat.type_key("i");
+        stoat.type_key("d");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("<|hello world||>");
     }
 
     #[gpui::test]
     fn empty_selection_noop(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("foo |bar baz", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some("bar".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("b");
+        stoat.type_key("a");
+        stoat.type_key("r");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("foo |bar baz");
     }
 
     #[gpui::test]
     fn multiline_selection(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test_with_cursor_notation("<|foo\nbar\nbaz||>", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.select_regex(cx);
-            s.select_regex_pending = Some("bar".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        stoat.type_action("SelectRegex");
+        stoat.type_key("b");
+        stoat.type_key("a");
+        stoat.type_key("r");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("foo\n<|bar||>\nbaz");
     }
 
     #[gpui::test]
     fn select_line_then_regex(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test_with_cursor_notation("aaa\nfoo bar baz\nccc", cx).unwrap();
-        stoat.update(|s, cx| {
-            s.set_cursor_position(Point::new(1, 0));
-            s.select_line(cx);
-            s.select_regex(cx);
-            s.select_regex_pending = Some("bar".to_string());
-            s.select_regex_preview(cx);
-            s.select_regex_submit(cx);
-        });
+        let mut stoat = Stoat::test_with_cursor_notation("aaa\n|foo bar baz\nccc", cx).unwrap();
+        stoat.type_action("SelectLine");
+        stoat.type_action("SelectRegex");
+        stoat.type_key("b");
+        stoat.type_key("a");
+        stoat.type_key("r");
+        stoat.type_key("enter");
         stoat.assert_cursor_notation("aaa\nfoo <|bar||> baz\nccc");
     }
 
