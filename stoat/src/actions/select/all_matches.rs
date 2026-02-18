@@ -85,6 +85,8 @@ impl Stoat {
         // Replace all selections with matches
         // SelectionsCollection::select() will merge overlapping selections
         self.selections.select(new_selections, &snapshot);
+        let newest = self.selections.newest::<Point>(&snapshot);
+        self.cursor.move_to(newest.head());
 
         cx.notify();
     }

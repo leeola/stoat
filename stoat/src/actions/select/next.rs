@@ -112,6 +112,8 @@ impl Stoat {
                 let mut all_selections: Vec<Selection<Point>> = self.active_selections(cx);
                 all_selections.push(new_selection);
                 self.selections.select(all_selections, &snapshot);
+                let newest = self.selections.newest::<Point>(&snapshot);
+                self.cursor.move_to(newest.head());
 
                 cx.notify();
             } else {

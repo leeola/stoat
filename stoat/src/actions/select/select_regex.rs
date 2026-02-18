@@ -64,8 +64,12 @@ impl Stoat {
 
         if !new_selections.is_empty() {
             self.selections.select(new_selections, &snapshot);
+            let newest = self.selections.newest::<Point>(&snapshot);
+            self.cursor.move_to(newest.head());
         } else {
             self.selections.select_anchors(base.clone());
+            let newest = self.selections.newest::<Point>(&snapshot);
+            self.cursor.move_to(newest.head());
         }
         cx.notify();
     }
@@ -74,6 +78,10 @@ impl Stoat {
     pub fn select_regex_cancel(&mut self, cx: &mut Context<Self>) {
         if let Some(base) = self.select_regex_base_selections.take() {
             self.selections.select_anchors(base);
+            let buffer_item = self.active_buffer(cx);
+            let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+            let newest = self.selections.newest::<Point>(&snapshot);
+            self.cursor.move_to(newest.head());
         }
         self.select_regex_pending = None;
         cx.notify();
@@ -89,6 +97,10 @@ impl Stoat {
         if had_pattern {
             self.record_selection_change();
         }
+        let buffer_item = self.active_buffer(cx);
+        let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let newest = self.selections.newest::<Point>(&snapshot);
+        self.cursor.move_to(newest.head());
         cx.notify();
     }
 }
@@ -231,5 +243,24 @@ mod tests {
 
         stoat.type_key("escape");
         stoat.assert_cursor_notation("<|foo bar baz||>");
+    }
+
+    #[gpui::test]
+    fn select_regex_then_move_down(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test_with_text("aaa\nbbb\nccc\nddd", cx);
+        stoat.type_action("SelectLine");
+        stoat.type_action("SelectLine");
+        stoat.type_action("SelectLine");
+
+        stoat.type_action("SelectRegex");
+        stoat.type_key("a");
+        stoat.type_key("a");
+        stoat.type_key("a");
+        stoat.type_key("enter");
+        stoat.assert_cursor_notation("<|aaa||>\nbbb\nccc\nddd");
+
+        stoat.type_action("MoveDown");
+        let sel = stoat.selection();
+        assert_eq!(sel.end.row, 1, "move_down should go to next line, not jump");
     }
 }
