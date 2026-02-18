@@ -64,7 +64,6 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -74,11 +73,11 @@ mod tests {
         let file_path = stoat.repo_path().unwrap().join("test.txt");
         stoat.set_file_path(file_path.clone());
 
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Hello from Stoat!".to_string()));
-        stoat.dispatch(WriteFile);
-
-        stoat.dispatch(GitStageFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello from Stoat!", cx);
+            s.write_file(cx).unwrap();
+            s.git_stage_file(cx).unwrap();
+        });
 
         let output = std::process::Command::new("git")
             .args(["status", "--porcelain"])
@@ -94,18 +93,18 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageFile action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Hello".to_string()));
-
-        stoat.dispatch(GitStageFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello", cx);
+            s.git_stage_file(cx).unwrap();
+        });
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageFile action failed: git add failed")]
+    #[should_panic(expected = "git add failed")]
     fn fails_outside_git_repo(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
 
@@ -113,10 +112,10 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         stoat.set_file_path(file_path.clone());
 
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Hello".to_string()));
-        stoat.dispatch(WriteFile);
-
-        stoat.dispatch(GitStageFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello", cx);
+            s.write_file(cx).unwrap();
+            s.git_stage_file(cx).unwrap();
+        });
     }
 }

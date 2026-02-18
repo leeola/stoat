@@ -60,7 +60,6 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -82,7 +81,7 @@ mod tests {
         stoat.set_file_path(file1.clone());
 
         // Stage all changes
-        stoat.dispatch(GitStageAll);
+        stoat.update(|s, cx| s.git_stage_all(cx).unwrap());
 
         // Verify all files are staged
         let output = std::process::Command::new("git")
@@ -109,14 +108,14 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageAll action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
-        stoat.dispatch(GitStageAll);
+        stoat.update(|s, cx| s.git_stage_all(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageAll action failed: git add -A failed")]
+    #[should_panic(expected = "git add -A failed")]
     fn fails_outside_git_repo(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
 
@@ -126,6 +125,6 @@ mod tests {
         std::fs::write(&file_path, "content").expect("Failed to write file");
         stoat.set_file_path(file_path);
 
-        stoat.dispatch(GitStageAll);
+        stoat.update(|s, cx| s.git_stage_all(cx).unwrap());
     }
 }

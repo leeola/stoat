@@ -299,7 +299,6 @@ fn find_line_by_content(selection: &LineSelection, target_content: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     fn setup_repo(
@@ -371,7 +370,7 @@ mod tests {
         );
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
@@ -386,7 +385,7 @@ mod tests {
         setup_repo(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(0, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
@@ -405,14 +404,14 @@ mod tests {
         );
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
             cached.contains("+new line"),
             "Should be staged first: {cached}"
         );
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
             cached.trim().is_empty(),
@@ -426,14 +425,14 @@ mod tests {
         setup_repo(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(0, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
             cached.contains("-line 2"),
             "Should be staged first: {cached}"
         );
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
             cached.trim().is_empty(),
@@ -451,7 +450,7 @@ mod tests {
         );
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(
@@ -477,7 +476,7 @@ mod tests {
         // cursor_row 1 = "charlie" (row 0 = "middle marker")
         stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(1, 0)));
 
-        stoat.dispatch(GitToggleStageLine);
+        stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
         let cached = git_cached_diff(stoat.repo_path().unwrap());
         assert!(

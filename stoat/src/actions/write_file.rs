@@ -252,43 +252,34 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
     fn writes_buffer_to_disk(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
-        // Set file path in test repo
         let file_path = stoat.repo_path().unwrap().join("test.txt");
         stoat.set_file_path(file_path.clone());
 
-        // Write content to buffer using action dispatch
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Hello from Stoat!".to_string()));
+        stoat.update(|s, cx| {
+            s.insert_text("Hello from Stoat!", cx);
+            s.write_file(cx).unwrap();
+        });
 
-        // Call write_file action using dispatch
-        stoat.dispatch(WriteFile);
-
-        // Verify file exists on disk
         assert!(file_path.exists(), "File should exist after write");
-
-        // Verify file contents match buffer
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "Hello from Stoat!");
     }
 
     #[gpui::test]
-    #[should_panic(expected = "WriteFile action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn write_fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
 
-        // Write content to buffer but don't set file path
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Hello".to_string()));
-
-        // Call write_file action - should panic
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Hello", cx);
+            s.write_file(cx).unwrap();
+        });
     }
 
     #[gpui::test]
@@ -298,18 +289,11 @@ mod tests {
         let file_path = stoat.repo_path().unwrap().join("multiline.txt");
         stoat.set_file_path(file_path.clone());
 
-        // Write multiline content using action dispatch
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Line 1".to_string()));
-        stoat.dispatch(NewLine);
-        stoat.dispatch(InsertText("Line 2".to_string()));
-        stoat.dispatch(NewLine);
-        stoat.dispatch(InsertText("Line 3".to_string()));
+        stoat.update(|s, cx| {
+            s.insert_text("Line 1\nLine 2\nLine 3", cx);
+            s.write_file(cx).unwrap();
+        });
 
-        // Write to disk using action dispatch
-        stoat.dispatch(WriteFile);
-
-        // Verify file contents
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "Line 1\nLine 2\nLine 3");
     }
@@ -320,20 +304,11 @@ mod tests {
         let file_path = stoat.repo_path().unwrap().join("modify_test.txt");
         stoat.set_file_path(file_path.clone());
 
-        // Insert initial text
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Initial".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        stoat.update(|s, cx| {
+            s.insert_text("Initial text here", cx);
+            s.write_file(cx).unwrap();
+        });
 
-        // Modify: append more text
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" text here".to_string()));
-
-        // Write to disk
-        stoat.dispatch(WriteFile);
-
-        // Verify on disk
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "Initial text here");
     }
@@ -344,24 +319,15 @@ mod tests {
         let file_path = stoat.repo_path().unwrap().join("complex_edit.txt");
         stoat.set_file_path(file_path.clone());
 
-        // Complex editing sequence: insert, delete, move, insert again
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("First".to_string()));
-        stoat.dispatch(NewLine);
-        stoat.dispatch(InsertText("Second".to_string()));
-        stoat.dispatch(NewLine);
-        stoat.dispatch(InsertText("Third".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        stoat.update(|s, cx| {
+            s.insert_text("First\nSecond\nThird", cx);
+            s.enter_normal_mode(cx);
+            s.move_to_file_start(cx);
+            s.move_word_right(cx);
+            s.delete_word_right(cx);
+            s.write_file(cx).unwrap();
+        });
 
-        // Move and delete a word
-        stoat.dispatch(MoveToFileStart);
-        stoat.dispatch(MoveWordRight);
-        stoat.dispatch(DeleteWordRight);
-
-        // Write to disk
-        stoat.dispatch(WriteFile);
-
-        // Verify complex edit result on disk (Second line should be deleted)
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "First\nThird");
     }
@@ -372,15 +338,11 @@ mod tests {
         let file_path = stoat.repo_path().unwrap().join("baseline_test.txt");
         stoat.set_file_path(file_path.clone());
 
-        // Insert text (buffer becomes dirty)
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Content".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        stoat.update(|s, cx| {
+            s.insert_text("Content", cx);
+            s.write_file(cx).unwrap();
+        });
 
-        // Write to disk (should mark buffer as clean)
-        stoat.dispatch(WriteFile);
-
-        // Verify buffer is marked as clean by checking saved text baseline
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
@@ -395,24 +357,15 @@ mod tests {
         let mut stoat = Stoat::test(cx).init_git();
         let file_path = stoat.repo_path().unwrap().join("preserve_test.txt");
 
-        // Create file with existing content
         std::fs::write(&file_path, "Existing content").expect("Failed to write initial file");
 
-        // Load the file
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
+            s.move_to_line_end(cx);
+            s.insert_text(" modified", cx);
+            s.write_file(cx).unwrap();
         });
 
-        // Modify the buffer
-        stoat.dispatch(EnterNormalMode);
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" modified".to_string()));
-
-        // Write back to disk
-        stoat.dispatch(WriteFile);
-
-        // Verify file has updated content
         let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(contents, "Existing content modified");
     }
@@ -425,10 +378,10 @@ mod tests {
 
         stoat.set_file_path(file_path.clone());
 
-        // Write content
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Atomic write test".to_string()));
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Atomic write test", cx);
+            s.write_file(cx).unwrap();
+        });
 
         // Count files in directory - should only be our target file
         let entries: Vec<_> = std::fs::read_dir(parent_dir)
@@ -470,10 +423,7 @@ mod tests {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Modify buffer (without saving)
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - buffer change".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        stoat.update(|s, cx| s.insert_text(" - buffer change", cx));
 
         // Sleep briefly to ensure mtime changes
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -531,10 +481,7 @@ mod tests {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Modify buffer
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - modified".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        stoat.update(|s, cx| s.insert_text(" - modified", cx));
 
         // Sleep and modify externally (create conflict)
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -549,8 +496,7 @@ mod tests {
             );
         });
 
-        // Write buffer (this should clear conflict by updating mtime)
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| s.write_file(cx).unwrap());
 
         // Verify conflict is cleared
         stoat.update(|s, cx| {
@@ -576,13 +522,10 @@ mod tests {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Modify buffer
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("New Line\n".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Write back to disk
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| {
+            s.insert_text("New Line\n", cx);
+            s.write_file(cx).unwrap();
+        });
 
         // Verify line endings are still Unix (LF only)
         let bytes = std::fs::read(&file_path).expect("Failed to read file");
@@ -619,13 +562,10 @@ mod tests {
             );
         });
 
-        // Modify buffer (buffer uses \n internally)
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("New Line\n".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Write back to disk (should convert \n to \r\n)
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| {
+            s.insert_text("New Line\n", cx);
+            s.write_file(cx).unwrap();
+        });
 
         // Verify line endings are still Windows (CRLF)
         let bytes = std::fs::read(&file_path).expect("Failed to read file");
@@ -656,14 +596,10 @@ mod tests {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Simulate mixed line endings in buffer by direct manipulation
-        // (in practice this shouldn't happen, but testing the conversion)
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Mixed\r\nEndings\rHere\n".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Write to disk (should normalize to Unix)
-        stoat.dispatch(WriteFile);
+        stoat.update(|s, cx| {
+            s.insert_text("Mixed\r\nEndings\rHere\n", cx);
+            s.write_file(cx).unwrap();
+        });
 
         // Verify all line endings are Unix
         let bytes = std::fs::read(&file_path).expect("Failed to read file");
@@ -688,37 +624,15 @@ mod tests {
         std::fs::write(&file2, "Initial 2").unwrap();
         std::fs::write(&file3, "Initial 3").unwrap();
 
-        // Load and modify first file
-        stoat.update(|s, cx| {
-            s.load_file(&file1, cx).unwrap();
-        });
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - modified".to_string()));
-        stoat.dispatch(EnterNormalMode);
+        for file in [&file1, &file2, &file3] {
+            stoat.update(|s, cx| {
+                s.load_file(file, cx).unwrap();
+                s.move_to_line_end(cx);
+                s.insert_text(" - modified", cx);
+            });
+        }
 
-        // Load and modify second file
-        stoat.update(|s, cx| {
-            s.load_file(&file2, cx).unwrap();
-        });
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - modified".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Load and modify third file
-        stoat.update(|s, cx| {
-            s.load_file(&file3, cx).unwrap();
-        });
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - modified".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Write all
-        stoat.update(|s, cx| {
-            s.write_all(cx).unwrap();
-        });
+        stoat.update(|s, cx| s.write_all(cx).unwrap());
 
         // Verify all files were written
         assert_eq!(
@@ -752,14 +666,11 @@ mod tests {
             s.load_file(&file1, cx).unwrap();
         });
 
-        // Load second file and modify it
         stoat.update(|s, cx| {
             s.load_file(&file2, cx).unwrap();
+            s.move_to_line_end(cx);
+            s.insert_text(" - modified", cx);
         });
-        stoat.dispatch(MoveToLineEnd);
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText(" - modified".to_string()));
-        stoat.dispatch(EnterNormalMode);
 
         // Get mtime of clean file before write_all
         let file1_mtime_before = std::fs::metadata(&file1).unwrap().modified().unwrap();
@@ -797,26 +708,16 @@ mod tests {
         std::fs::write(&file1, "").unwrap();
         std::fs::write(&file2, "").unwrap();
 
-        // Load and modify first file
         stoat.update(|s, cx| {
             s.load_file(&file1, cx).unwrap();
+            s.insert_text("Content 1", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Content 1".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Load and modify second file
         stoat.update(|s, cx| {
             s.load_file(&file2, cx).unwrap();
+            s.insert_text("Content 2", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Content 2".to_string()));
-        stoat.dispatch(EnterNormalMode);
 
-        // Write all
-        stoat.update(|s, cx| {
-            s.write_all(cx).unwrap();
-        });
+        stoat.update(|s, cx| s.write_all(cx).unwrap());
 
         // Verify both buffers are marked as clean
         stoat.update(|s, cx| {
@@ -843,26 +744,16 @@ mod tests {
         std::fs::write(&file1, "").unwrap();
         std::fs::write(&file2, "").unwrap();
 
-        // Load and modify first file
         stoat.update(|s, cx| {
             s.load_file(&file1, cx).unwrap();
+            s.insert_text("Atomic 1", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Atomic 1".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Load and modify second file
         stoat.update(|s, cx| {
             s.load_file(&file2, cx).unwrap();
+            s.insert_text("Atomic 2", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("Atomic 2".to_string()));
-        stoat.dispatch(EnterNormalMode);
 
-        // Write all
-        stoat.update(|s, cx| {
-            s.write_all(cx).unwrap();
-        });
+        stoat.update(|s, cx| s.write_all(cx).unwrap());
 
         // Verify no temp files left behind
         let entries: Vec<_> = std::fs::read_dir(&repo_path)
@@ -901,26 +792,16 @@ mod tests {
         std::fs::write(&unix_file, "Line 1\nLine 2\n").unwrap();
         std::fs::write(&windows_file, "Line 1\r\nLine 2\r\n").unwrap();
 
-        // Load and modify Unix file
         stoat.update(|s, cx| {
             s.load_file(&unix_file, cx).unwrap();
+            s.insert_text("New\n", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("New\n".to_string()));
-        stoat.dispatch(EnterNormalMode);
-
-        // Load and modify Windows file
         stoat.update(|s, cx| {
             s.load_file(&windows_file, cx).unwrap();
+            s.insert_text("New\n", cx);
         });
-        stoat.dispatch(EnterInsertMode);
-        stoat.dispatch(InsertText("New\n".to_string()));
-        stoat.dispatch(EnterNormalMode);
 
-        // Write all
-        stoat.update(|s, cx| {
-            s.write_all(cx).unwrap();
-        });
+        stoat.update(|s, cx| s.write_all(cx).unwrap());
 
         // Verify Unix file still has Unix line endings
         let unix_bytes = std::fs::read(&unix_file).unwrap();

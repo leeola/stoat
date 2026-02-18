@@ -146,7 +146,6 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     fn setup_repo_with_change(stoat: &mut crate::test::TestStoat<'_>) -> std::path::PathBuf {
@@ -201,7 +200,7 @@ mod tests {
         let mut stoat = Stoat::test(cx).init_git();
         setup_repo_with_change(&mut stoat);
 
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
 
         let output = std::process::Command::new("git")
             .args(["diff", "--cached"])
@@ -221,7 +220,7 @@ mod tests {
         let mut stoat = Stoat::test(cx).init_git();
         setup_repo_with_change(&mut stoat);
 
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
 
         // Snapshot the index after first stage
         let first_output = std::process::Command::new("git")
@@ -294,7 +293,7 @@ mod tests {
             s.set_cursor_position(text::Point::new(0, 0));
         });
 
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
 
         let cached = String::from_utf8_lossy(
             &std::process::Command::new("git")
@@ -310,7 +309,7 @@ mod tests {
             "Deletion should be staged: {cached}"
         );
 
-        stoat.dispatch(GitToggleStageHunk);
+        stoat.update(|s, cx| s.git_toggle_stage_hunk(cx).unwrap());
 
         let cached_after = String::from_utf8_lossy(
             &std::process::Command::new("git")
@@ -328,25 +327,25 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageHunk action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageHunk action failed: No diff information available")]
+    #[should_panic(expected = "No diff information available")]
     fn fails_without_diff(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
         let file_path = stoat.repo_path().unwrap().join("test.txt");
         stoat.set_file_path(file_path);
 
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitStageHunk action failed: No hunk at cursor row")]
+    #[should_panic(expected = "No hunk at cursor row")]
     fn fails_when_not_on_hunk(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
@@ -388,6 +387,6 @@ mod tests {
             });
         });
 
-        stoat.dispatch(GitStageHunk);
+        stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }
 }

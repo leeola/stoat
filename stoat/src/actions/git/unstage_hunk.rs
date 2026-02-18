@@ -159,7 +159,6 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -222,7 +221,7 @@ mod tests {
         });
 
         // Unstage the hunk
-        stoat.dispatch(GitUnstageHunk);
+        stoat.update(|s, cx| s.git_unstage_hunk(cx).unwrap());
 
         // Verify hunk is no longer staged
         let output = std::process::Command::new("git")
@@ -239,25 +238,25 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitUnstageHunk action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
-        stoat.dispatch(GitUnstageHunk);
+        stoat.update(|s, cx| s.git_unstage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitUnstageHunk action failed: No diff information available")]
+    #[should_panic(expected = "No diff information available")]
     fn fails_without_diff(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
         let file_path = stoat.repo_path().unwrap().join("test.txt");
         stoat.set_file_path(file_path);
 
-        stoat.dispatch(GitUnstageHunk);
+        stoat.update(|s, cx| s.git_unstage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitUnstageHunk action failed: No hunk at cursor row")]
+    #[should_panic(expected = "No hunk at cursor row")]
     fn fails_when_not_on_hunk(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
 
@@ -303,6 +302,6 @@ mod tests {
         });
 
         // Try to unstage hunk when cursor is not on any hunk
-        stoat.dispatch(GitUnstageHunk);
+        stoat.update(|s, cx| s.git_unstage_hunk(cx).unwrap());
     }
 }

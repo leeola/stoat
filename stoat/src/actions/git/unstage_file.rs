@@ -66,7 +66,6 @@ impl Stoat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::*;
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -114,7 +113,7 @@ mod tests {
 
         // Set file path and unstage
         stoat.set_file_path(file_path.clone());
-        stoat.dispatch(GitUnstageFile);
+        stoat.update(|s, cx| s.git_unstage_file(cx).unwrap());
 
         // Verify file is no longer staged
         let output = std::process::Command::new("git")
@@ -131,9 +130,9 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "GitUnstageFile action failed: No file path set for current buffer")]
+    #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx).init_git();
-        stoat.dispatch(GitUnstageFile);
+        stoat.update(|s, cx| s.git_unstage_file(cx).unwrap());
     }
 }

@@ -28,7 +28,6 @@ pub mod cursor_notation;
 pub mod git_fixture;
 
 use crate::{
-    actions::*,
     buffer::item::BufferItem,
     keymap::{
         compiled::{CompiledKey, CompiledKeymap},
@@ -37,8 +36,8 @@ use crate::{
     stoat::KeyContext,
     Stoat,
 };
-use gpui::{Action, App, AppContext, Context, Entity, TestAppContext};
-use std::{any::TypeId, path::PathBuf, sync::Arc};
+use gpui::{App, AppContext, Context, Entity, TestAppContext};
+use std::{path::PathBuf, sync::Arc};
 use text::Point;
 
 /// Wrapper around [`Entity<Stoat>`] that provides test-oriented helper methods.
@@ -249,149 +248,6 @@ impl<'a> TestStoat<'a> {
         self.update(|s, _cx| {
             s.current_file_path = Some(path);
         });
-    }
-
-    /// Dispatch an action to the Stoat entity.
-    ///
-    /// This provides a type-safe way to test actions, routing them to the appropriate
-    /// Stoat methods just like the GUI's action handlers do. This ensures tests exercise
-    /// the same code paths as the real editor.
-    ///
-    /// # Arguments
-    ///
-    /// * `action` - The action to dispatch (e.g., [`WriteFile`], [`InsertText`], [`MoveLeft`])
-    ///
-    /// # Panics
-    ///
-    /// Panics if the action fails or if the action type is not supported. The panic
-    /// location will point to the caller's dispatch site using `#[track_caller]`.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut stoat = Stoat::test(cx).init_git();
-    /// let file_path = stoat.repo_path().unwrap().join("test.txt");
-    /// stoat.set_file_path(file_path);
-    ///
-    /// // Dispatch actions - no error handling needed!
-    /// stoat.dispatch(EnterInsertMode);
-    /// stoat.dispatch(InsertText("Hello".to_string()));
-    /// stoat.dispatch(WriteFile);
-    /// ```
-    #[track_caller]
-    pub fn dispatch<A: Action>(&mut self, action: A) {
-        let type_id = TypeId::of::<A>();
-
-        // Match on action TypeId and call corresponding Stoat method
-        // Movement actions
-        if type_id == TypeId::of::<MoveLeft>() {
-            self.update(|s, cx| s.move_left(cx));
-        } else if type_id == TypeId::of::<MoveRight>() {
-            self.update(|s, cx| s.move_right(cx));
-        } else if type_id == TypeId::of::<MoveUp>() {
-            self.update(|s, cx| s.move_up(cx));
-        } else if type_id == TypeId::of::<MoveDown>() {
-            self.update(|s, cx| s.move_down(cx));
-        } else if type_id == TypeId::of::<MoveWordLeft>() {
-            self.update(|s, cx| s.move_word_left(cx));
-        } else if type_id == TypeId::of::<MoveWordRight>() {
-            self.update(|s, cx| s.move_word_right(cx));
-        } else if type_id == TypeId::of::<MoveToLineStart>() {
-            self.update(|s, cx| s.move_to_line_start(cx));
-        } else if type_id == TypeId::of::<MoveToLineEnd>() {
-            self.update(|s, cx| s.move_to_line_end(cx));
-        } else if type_id == TypeId::of::<MoveToFileStart>() {
-            self.update(|s, cx| s.move_to_file_start(cx));
-        } else if type_id == TypeId::of::<MoveToFileEnd>() {
-            self.update(|s, cx| s.move_to_file_end(cx));
-        } else if type_id == TypeId::of::<PageUp>() {
-            self.update(|s, cx| s.page_up(cx));
-        } else if type_id == TypeId::of::<PageDown>() {
-            self.update(|s, cx| s.page_down(cx));
-        }
-        // Edit actions
-        else if type_id == TypeId::of::<DeleteLeft>() {
-            self.update(|s, cx| s.delete_left(cx));
-        } else if type_id == TypeId::of::<DeleteRight>() {
-            self.update(|s, cx| s.delete_right(cx));
-        } else if type_id == TypeId::of::<DeleteWordLeft>() {
-            self.update(|s, cx| s.delete_word_left(cx));
-        } else if type_id == TypeId::of::<DeleteWordRight>() {
-            self.update(|s, cx| s.delete_word_right(cx));
-        } else if type_id == TypeId::of::<NewLine>() {
-            self.update(|s, cx| s.new_line(cx));
-        } else if type_id == TypeId::of::<DeleteLine>() {
-            self.update(|s, cx| s.delete_line(cx));
-        } else if type_id == TypeId::of::<DeleteToEndOfLine>() {
-            self.update(|s, cx| s.delete_to_end_of_line(cx));
-        }
-        // Mode actions
-        else if type_id == TypeId::of::<EnterInsertMode>() {
-            self.update(|s, cx| s.enter_insert_mode(cx));
-        } else if type_id == TypeId::of::<EnterNormalMode>() {
-            self.update(|s, cx| s.enter_normal_mode(cx));
-        } else if type_id == TypeId::of::<EnterVisualMode>() {
-            self.update(|s, cx| s.enter_visual_mode(cx));
-        }
-        // Parameterized actions
-        else if type_id == TypeId::of::<InsertText>() {
-            let action = unsafe { &*(&action as *const A as *const InsertText) };
-            self.update(|s, cx| s.insert_text(&action.0, cx));
-        } else if type_id == TypeId::of::<SetMode>() {
-            let action = unsafe { &*(&action as *const A as *const SetMode) };
-            self.update(|s, cx| s.set_mode_by_name(&action.0, cx));
-        }
-        // File actions
-        else if type_id == TypeId::of::<WriteFile>() {
-            self.update(|s, cx| {
-                s.write_file(cx)
-                    .unwrap_or_else(|e| panic!("WriteFile action failed: {e}"))
-            });
-        }
-        // Git actions
-        else if type_id == TypeId::of::<GitStageFile>() {
-            self.update(|s, cx| {
-                s.git_stage_file(cx)
-                    .unwrap_or_else(|e| panic!("GitStageFile action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitStageAll>() {
-            self.update(|s, cx| {
-                s.git_stage_all(cx)
-                    .unwrap_or_else(|e| panic!("GitStageAll action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitUnstageFile>() {
-            self.update(|s, cx| {
-                s.git_unstage_file(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageFile action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitUnstageAll>() {
-            self.update(|s, cx| {
-                s.git_unstage_all(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageAll action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitStageHunk>() {
-            self.update(|s, cx| {
-                s.git_stage_hunk(cx)
-                    .unwrap_or_else(|e| panic!("GitStageHunk action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitUnstageHunk>() {
-            self.update(|s, cx| {
-                s.git_unstage_hunk(cx)
-                    .unwrap_or_else(|e| panic!("GitUnstageHunk action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitToggleStageHunk>() {
-            self.update(|s, cx| {
-                s.git_toggle_stage_hunk(cx)
-                    .unwrap_or_else(|e| panic!("GitToggleStageHunk action failed: {e}"))
-            });
-        } else if type_id == TypeId::of::<GitToggleStageLine>() {
-            self.update(|s, cx| {
-                s.git_toggle_stage_line(cx)
-                    .unwrap_or_else(|e| panic!("GitToggleStageLine action failed: {e}"))
-            });
-        } else {
-            panic!("Unsupported action type: {}", std::any::type_name::<A>());
-        }
     }
 
     /// Initialize a git repository for testing.
