@@ -407,6 +407,8 @@ actions!(
         SelectWordEndBig,
         /// Select current line, or extend existing line selection downward
         SelectLine,
+        /// Open regex prompt for sub-selecting within current selections
+        SelectRegex,
     ]
 );
 
@@ -939,6 +941,11 @@ action_metadata!(
     SelectLine,
     "select line",
     "Select the current line, or extend an existing line selection downward"
+);
+action_metadata!(
+    SelectRegex,
+    "select regex",
+    "Open regex prompt to sub-select within current selections"
 );
 
 // File finder actions
@@ -1598,6 +1605,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         SelectWordEndBig::action_name(),
     );
     names.insert(TypeId::of::<SelectLine>(), SelectLine::action_name());
+    names.insert(TypeId::of::<SelectRegex>(), SelectRegex::action_name());
 
     // File finder actions
     names.insert(
@@ -2070,6 +2078,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         SelectWordEndBig::description(),
     );
     descriptions.insert(TypeId::of::<SelectLine>(), SelectLine::description());
+    descriptions.insert(TypeId::of::<SelectRegex>(), SelectRegex::description());
 
     // File finder actions
     descriptions.insert(
@@ -2540,6 +2549,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         SelectWordEndBig::help_text(),
     );
     help.insert(TypeId::of::<SelectLine>(), SelectLine::help_text());
+    help.insert(TypeId::of::<SelectRegex>(), SelectRegex::help_text());
 
     // File finder actions
     help.insert(TypeId::of::<OpenFileFinder>(), OpenFileFinder::help_text());

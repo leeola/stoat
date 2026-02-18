@@ -80,6 +80,8 @@ on key {
             , -> KeepPrimarySelection();
             alt-; -> FlipSelection();
             % -> SelectAll();
+            s -> SelectRegex();
+            C -> AddSelectionBelow();
 
             # Undo/Redo
             u -> Undo();

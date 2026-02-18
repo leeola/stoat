@@ -1070,6 +1070,9 @@ impl Render for PaneGroupView {
                         sel.total_changeable_count()
                     );
                 }
+                if let Some(pattern) = &stoat.select_regex_pending {
+                    display = format!("select: {pattern}");
+                }
 
                 // File finder data is now extracted from workspace state below
                 let ff_data = None::<(

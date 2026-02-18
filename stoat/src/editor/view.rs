@@ -119,6 +119,34 @@ impl EditorView {
             return;
         }
 
+        // Select-regex interceptor: accumulate pattern characters.
+        // Named keys are checked first via the `key` field because GPUI sets
+        // key_char for some named keys (e.g. Enter has key_char "\n").
+        if self.stoat.read(cx).select_regex_pending.is_some() {
+            match event.keystroke.key.as_ref() {
+                "enter" => self.stoat.update(cx, |s, cx| s.select_regex_submit(cx)),
+                "backspace" => self.stoat.update(cx, |stoat, _| {
+                    if let Some(pattern) = &mut stoat.select_regex_pending {
+                        pattern.pop();
+                    }
+                }),
+                "escape" => self
+                    .stoat
+                    .update(cx, |stoat, _| stoat.select_regex_pending = None),
+                _ => {
+                    if let Some(key_char) = &event.keystroke.key_char {
+                        self.stoat.update(cx, |stoat, _| {
+                            if let Some(pattern) = &mut stoat.select_regex_pending {
+                                pattern.push_str(key_char);
+                            }
+                        });
+                    }
+                },
+            }
+            cx.notify();
+            return;
+        }
+
         // Digit accumulation for count prefix in normal/visual modes
         if no_modifiers {
             let key_context = self.stoat.read(cx).key_context();

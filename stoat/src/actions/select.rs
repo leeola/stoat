@@ -43,6 +43,7 @@ mod prev_token;
 mod previous;
 mod right;
 mod select_line;
+mod select_regex;
 mod split_into_lines;
 mod to_line_end;
 mod to_line_start;

@@ -347,6 +347,9 @@ pub struct Stoat {
     /// When set, the next printable key triggers a find-char operation in the given direction.
     pub(crate) find_char_pending: Option<crate::actions::FindCharMode>,
 
+    /// When set, keystrokes accumulate into a regex pattern for sub-selection.
+    pub(crate) select_regex_pending: Option<String>,
+
     /// Tracks selections associated with text transactions and standalone selection history.
     pub(crate) selection_history: SelectionHistory,
 
@@ -504,6 +507,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             find_char_pending: None,
+            select_regex_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -590,6 +594,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             find_char_pending: None,
+            select_regex_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         }
@@ -1673,6 +1678,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             find_char_pending: None,
+            select_regex_pending: None,
             selection_history: SelectionHistory::default(),
             app_state_history: AppStateHistory::default(),
         })
