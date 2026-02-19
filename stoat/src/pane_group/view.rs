@@ -876,7 +876,18 @@ impl Render for PaneGroupView {
                     let is_poll = matches!(event, futures::future::Either::Right(_));
 
                     if is_poll && !git_index_changed(&root, &mut last_index_mtime) {
-                        continue;
+                        let follow_active = this.update(cx, |this, cx| {
+                            this.active_editor()
+                                .map(|e| {
+                                    let editor = e.read(cx);
+                                    let stoat = editor.stoat.read(cx);
+                                    stoat.mode() == "diff_review" && stoat.review_state.follow
+                                })
+                                .unwrap_or(false)
+                        });
+                        if !matches!(follow_active, Ok(true)) {
+                            continue;
+                        }
                     }
 
                     smol::Timer::after(debounce).await;
