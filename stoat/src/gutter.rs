@@ -80,6 +80,8 @@ pub struct DiffIndicator {
     pub corner_radii: Corners<Pixels>,
     /// Origin of this indicator (unstaged, staged, or committed)
     pub origin: DiffOrigin,
+    /// Whether this indicator belongs to the actively selected hunk in diff review
+    pub is_active: bool,
 }
 
 /// Complete gutter layout for rendering.
@@ -155,6 +157,7 @@ impl GutterLayout {
         line_height: Pixels,
         strip_width: Pixels,
         is_in_diff_review: bool,
+        active_hunk_y: Option<(Pixels, Pixels)>,
     ) -> Self {
         let dimensions = GutterDimensions {
             width: gutter_width,
@@ -163,6 +166,13 @@ impl GutterLayout {
         };
 
         let mut diff_indicators = Vec::new();
+
+        let overlaps_active = |start_y: Pixels, end_y: Pixels| -> bool {
+            match active_hunk_y {
+                Some((active_start, active_end)) => start_y < active_end && end_y > active_start,
+                None => false,
+            }
+        };
 
         // PHASE 1: Create indicators for display rows (includes phantom rows)
         // Group consecutive rows with the same diff status and origin
@@ -191,6 +201,7 @@ impl GutterLayout {
                             },
                             corner_radii: Corners::all(px(0.0)),
                             origin: group_origin,
+                            is_active: overlaps_active(start_y, end_y),
                         });
                         current_group = Some((
                             status,
@@ -217,6 +228,7 @@ impl GutterLayout {
                     },
                     corner_radii: Corners::all(px(0.0)),
                     origin: group_origin,
+                    is_active: overlaps_active(start_y, end_y),
                 });
                 current_group = None;
             }
@@ -231,6 +243,7 @@ impl GutterLayout {
                 },
                 corner_radii: Corners::all(px(0.0)),
                 origin: group_origin,
+                is_active: overlaps_active(start_y, end_y),
             });
         }
 
@@ -268,6 +281,7 @@ impl GutterLayout {
                             bounds,
                             corner_radii: Corners::all(px(0.0)),
                             origin: DiffOrigin::Unstaged,
+                            is_active: false,
                         });
                     }
                 }

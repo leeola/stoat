@@ -17,7 +17,7 @@ use gpui::{
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoat_lsp::BufferDiagnostic;
-use text::BufferSnapshot;
+use text::{BufferSnapshot, ToPoint};
 
 pub struct EditorElement {
     view: Entity<EditorView>,
@@ -694,6 +694,33 @@ impl Element for EditorElement {
             (0.275 * line_height).floor()
         };
 
+        let active_hunk_y: Option<(Pixels, Pixels)> = if is_in_diff_review {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            let hunk_idx = stoat.review_state.hunk_idx;
+            diff.as_ref()
+                .and_then(|d| d.hunks.get(hunk_idx))
+                .and_then(|hunk| {
+                    let start_row = display_buffer.buffer_row_to_display(
+                        hunk.buffer_range.start.to_point(&buffer_snapshot).row,
+                    );
+                    let end_row = display_buffer.buffer_row_to_display(
+                        hunk.buffer_range.end.to_point(&buffer_snapshot).row,
+                    );
+                    let start_y = line_layouts
+                        .iter()
+                        .find(|l| l.display_row == start_row.0)?
+                        .y_position;
+                    let end_y = line_layouts
+                        .iter()
+                        .rfind(|l| l.display_row <= end_row.0 && l.diff_status.is_some())
+                        .map(|l| l.y_position + line_height)
+                        .unwrap_or(start_y + line_height);
+                    Some((start_y, end_y))
+                })
+        } else {
+            None
+        };
+
         let total_prepaint = prepaint_start.elapsed();
         if !is_minimap {
             tracing::debug!(
@@ -718,6 +745,7 @@ impl Element for EditorElement {
             buffer_snapshot,
             strip_width,
             is_in_diff_review,
+            active_hunk_y,
             line_select_indicators,
             line_select_cursor_y,
         }
@@ -1012,6 +1040,7 @@ impl EditorElement {
             self.style.line_height,
             prepaint.strip_width,
             prepaint.is_in_diff_review,
+            prepaint.active_hunk_y,
         );
 
         // Paint diff indicators
@@ -1038,12 +1067,12 @@ impl EditorElement {
                 (DiffHunkStatus::Deleted, DiffOrigin::Unstaged) => self.style.diff_deleted_color,
             };
 
-            // Blend with background for subtle appearance (60% opacity)
+            let alpha = if indicator.is_active { 1.0 } else { 0.6 };
             let blended_color = gpui::Hsla {
                 h: diff_color.h,
                 s: diff_color.s,
                 l: diff_color.l,
-                a: diff_color.a * 0.6,
+                a: diff_color.a * alpha,
             };
 
             window.paint_quad(gpui::PaintQuad {
@@ -1287,7 +1316,6 @@ fn apply_diagnostic_underlines(
     // Convert diagnostic ranges from anchors to column ranges for this row
     let mut diagnostic_ranges: Vec<(std::ops::Range<u32>, gpui::Hsla)> = Vec::new();
     for diag in diagnostics {
-        use text::ToPoint;
         let start_point = diag.range.start.to_point(snapshot);
         let end_point = diag.range.end.to_point(snapshot);
 
@@ -1403,6 +1431,8 @@ pub struct EditorPrepaintState {
     pub strip_width: Pixels,
     /// Whether editor is in diff review mode
     pub is_in_diff_review: bool,
+    /// Y-range of the active hunk in diff review (for brightening the gutter indicator)
+    pub active_hunk_y: Option<(Pixels, Pixels)>,
     /// Line selection checkbox indicators: (shaped_line, x_position, y_position)
     pub line_select_indicators: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Y position of the cursor line during line_select mode
