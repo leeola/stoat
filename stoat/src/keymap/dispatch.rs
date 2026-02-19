@@ -151,6 +151,7 @@ pub fn dispatch_editor_action<C: AppContext>(
                 }
             });
         },
+        "DiffReviewToggleFollow" => ed!(stoat, cx, |s, cx| s.diff_review_toggle_follow(cx)),
 
         "DiffReviewEnterLineSelect" => {
             ed!(stoat, cx, |s, cx| s.diff_review_enter_line_select(cx))

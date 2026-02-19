@@ -177,6 +177,8 @@ pub struct ScopeState {
     pub hunk_idx: usize,
     pub approved_hunks: HashMap<PathBuf, HashSet<usize>>,
     pub filter: ViewFilter,
+    pub follow: bool,
+    pub last_hunk_snapshot: HashMap<PathBuf, usize>,
 }
 
 /// Information about a file in diff review mode.

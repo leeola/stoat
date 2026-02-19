@@ -21,3 +21,4 @@ mod previous_commit;
 mod reset_progress;
 mod revert_hunk;
 mod toggle_approval;
+mod toggle_follow;

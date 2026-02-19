@@ -41,6 +41,8 @@ pub struct StatusBar {
     lsp_status: String,
     /// Temporary flash message (replaces file path when present)
     flash_message: Option<String>,
+    /// Whether live follow mode is active in diff review
+    follow_active: bool,
 }
 
 impl StatusBar {
@@ -57,6 +59,7 @@ impl StatusBar {
         scope_filter: Option<(ReviewScope, ViewFilter)>,
         lsp_status: String,
         flash_message: Option<String>,
+        follow_active: bool,
     ) -> Self {
         Self {
             mode_display,
@@ -68,6 +71,7 @@ impl StatusBar {
             scope_filter,
             lsp_status,
             flash_message,
+            follow_active,
         }
     }
 
@@ -203,7 +207,12 @@ impl RenderOnce for StatusBar {
                     .child(div().text_color(rgb(0x808080)).child("|"));
             }
 
-            // Add hunk position
+            if self.follow_active {
+                center = center
+                    .child(div().text_color(rgb(0xce9178)).child("[FOLLOW]"))
+                    .child(div().text_color(rgb(0x808080)).child("|"));
+            }
+
             if let Some((current, total)) = self.hunk_position {
                 let patch_text = format!("Patch {current}/{total}");
                 center = center

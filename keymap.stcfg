@@ -336,6 +336,7 @@ on key {
             p -> DiffReviewPreviousCommit();
             u -> GitUnstageHunk();
             r -> DiffReviewRevertHunk();
+            f -> DiffReviewToggleFollow();
             J -> MoveDown();
             K -> MoveUp();
         }

@@ -306,6 +306,8 @@ actions!(
         DiffReviewPreviousCommit,
         /// Revert current hunk in Commit scope
         DiffReviewRevertHunk,
+        /// Toggle live follow mode in diff review
+        DiffReviewToggleFollow,
     ]
 );
 
@@ -1165,6 +1167,11 @@ action_metadata!(
     "revert hunk",
     "Revert the current hunk to the working tree (Commit scope only)"
 );
+action_metadata!(
+    DiffReviewToggleFollow,
+    "toggle follow",
+    "Toggle live follow mode that auto-navigates to new hunks on file changes"
+);
 
 // Git repository actions
 action_metadata!(
@@ -1751,6 +1758,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewRevertHunk>(),
         DiffReviewRevertHunk::action_name(),
     );
+    names.insert(
+        TypeId::of::<DiffReviewToggleFollow>(),
+        DiffReviewToggleFollow::action_name(),
+    );
 
     // Git repository actions
     names.insert(TypeId::of::<GitStageFile>(), GitStageFile::action_name());
@@ -2230,6 +2241,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<DiffReviewRevertHunk>(),
         DiffReviewRevertHunk::description(),
     );
+    descriptions.insert(
+        TypeId::of::<DiffReviewToggleFollow>(),
+        DiffReviewToggleFollow::description(),
+    );
 
     // Git repository actions
     descriptions.insert(TypeId::of::<GitStageFile>(), GitStageFile::description());
@@ -2694,6 +2709,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewRevertHunk>(),
         DiffReviewRevertHunk::help_text(),
+    );
+    help.insert(
+        TypeId::of::<DiffReviewToggleFollow>(),
+        DiffReviewToggleFollow::help_text(),
     );
 
     // Git repository actions

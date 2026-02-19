@@ -287,6 +287,7 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     registry.register::<crate::actions::DiffReviewCycleComparisonMode>();
     registry.register::<crate::actions::DiffReviewPreviousCommit>();
     registry.register::<crate::actions::DiffReviewRevertHunk>();
+    registry.register::<crate::actions::DiffReviewToggleFollow>();
 
     // Git repository actions (6)
     // Fifteenth group migrated. These provide git staging operations.

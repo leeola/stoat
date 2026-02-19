@@ -843,8 +843,12 @@ impl Render for PaneGroupView {
                 if let Some(editor) = this.active_editor().cloned() {
                     editor.update(cx, |editor, cx| {
                         editor.stoat.update(cx, |stoat, cx| {
-                            stoat.reload_if_changed_on_disk(cx);
-                            stoat.refresh_git_diff(cx);
+                            if stoat.mode() == "diff_review" {
+                                stoat.refresh_review_state(cx);
+                            } else {
+                                stoat.reload_if_changed_on_disk(cx);
+                                stoat.refresh_git_diff(cx);
+                            }
                         });
                     });
                 }
@@ -883,8 +887,12 @@ impl Render for PaneGroupView {
                         if let Some(editor) = this.active_editor().cloned() {
                             editor.update(cx, |editor, cx| {
                                 editor.stoat.update(cx, |stoat, cx| {
-                                    stoat.reload_if_changed_on_disk(cx);
-                                    stoat.refresh_git_diff(cx);
+                                    if stoat.mode() == "diff_review" {
+                                        stoat.refresh_review_state(cx);
+                                    } else {
+                                        stoat.reload_if_changed_on_disk(cx);
+                                        stoat.refresh_git_diff(cx);
+                                    }
                                 });
                             });
                         }
@@ -1115,6 +1123,8 @@ impl Render for PaneGroupView {
                         None
                     },
                     self.app_state.lsp_state.status.read().display_string(),
+                    stoat.review_state.follow
+                        && (mode_name == "diff_review" || mode_name == "line_select"),
                 );
 
                 // Calculate minimap scroll position for later update
@@ -1255,6 +1265,7 @@ impl Render for PaneGroupView {
                 hunk_position,
                 scope_filter,
                 lsp_status,
+                follow_active,
             )| {
                 (
                     mode,
@@ -1266,6 +1277,7 @@ impl Render for PaneGroupView {
                     hunk_position,
                     scope_filter,
                     lsp_status,
+                    follow_active,
                 )
             },
         );
@@ -1471,6 +1483,7 @@ impl Render for PaneGroupView {
                     hunk_position,
                     scope_filter,
                     lsp_status,
+                    follow_active,
                 )| {
                     let flash_message = self.app_state.flash_message.clone();
                     div.child(StatusBar::new(
@@ -1484,6 +1497,7 @@ impl Render for PaneGroupView {
                         scope_filter,
                         lsp_status,
                         flash_message,
+                        follow_active,
                     ))
                 },
             )

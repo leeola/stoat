@@ -293,6 +293,173 @@ impl Stoat {
         });
         self.cursor.move_to(text::Point::new(0, 0));
     }
+
+    /// Capture current per-file hunk counts into [`ScopeState::last_hunk_snapshot`].
+    pub(crate) fn refresh_review_hunk_snapshot(&mut self) {
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
+
+        if let Ok(counts) = repo.count_hunks_by_file(self.review_comparison_mode()) {
+            self.review_state.last_hunk_snapshot = counts;
+        }
+    }
+
+    /// Among files whose hunk count increased (or are entirely new), return the one
+    /// with the most recent mtime.
+    fn find_newest_change(
+        old_snapshot: &std::collections::HashMap<std::path::PathBuf, usize>,
+        new_counts: &std::collections::HashMap<std::path::PathBuf, usize>,
+        workdir: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
+        let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+
+        for (path, &new_count) in new_counts {
+            let old_count = old_snapshot.get(path).copied().unwrap_or(0);
+            if new_count <= old_count {
+                continue;
+            }
+
+            let abs_path = workdir.join(path);
+            let mtime = std::fs::metadata(&abs_path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_mtime)| mtime > *best_mtime)
+            {
+                best = Some((path.clone(), mtime));
+            }
+        }
+
+        best.map(|(path, _)| path)
+    }
+
+    /// Refresh the diff review state from disk/git.
+    ///
+    /// Re-gathers git status to update the file list, reloads the current file's
+    /// diff, and when follow mode is on, auto-navigates to the most recently
+    /// modified file's new hunks.
+    pub(crate) fn refresh_review_state(&mut self, cx: &mut Context<Self>) {
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = match crate::git::repository::Repository::discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => return,
+        };
+
+        let entries = match crate::git::status::gather_git_status(repo.inner()) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        let mut seen = std::collections::HashSet::new();
+        let new_files: Vec<std::path::PathBuf> = entries
+            .into_iter()
+            .filter(|e| seen.insert(e.path.clone()))
+            .map(|e| e.path)
+            .collect();
+
+        // Preserve file_idx by matching current file path in new list
+        let current_path = self
+            .review_state
+            .files
+            .get(self.review_state.file_idx)
+            .cloned();
+        self.review_state.files = new_files;
+        if let Some(ref current) = current_path {
+            self.review_state.file_idx = self
+                .review_state
+                .files
+                .iter()
+                .position(|p| p == current)
+                .unwrap_or(0);
+        } else {
+            self.review_state.file_idx = 0;
+        }
+
+        let new_counts = match repo.count_hunks_by_file(self.review_comparison_mode()) {
+            Ok(counts) => counts,
+            Err(_) => return,
+        };
+
+        self.reload_if_changed_on_disk(cx);
+        self.refresh_git_diff(cx);
+
+        // Clamp hunk_idx if it exceeds new hunk count
+        if let Some(current) = current_path.as_ref() {
+            let max_hunks = new_counts.get(current).copied().unwrap_or(0);
+            if max_hunks == 0 {
+                self.review_state.hunk_idx = 0;
+            } else if self.review_state.hunk_idx >= max_hunks {
+                self.review_state.hunk_idx = max_hunks.saturating_sub(1);
+            }
+        }
+
+        if self.review_state.follow {
+            if let Some(target_path) = Self::find_newest_change(
+                &self.review_state.last_hunk_snapshot,
+                &new_counts,
+                repo.workdir(),
+            ) {
+                let old_count = self
+                    .review_state
+                    .last_hunk_snapshot
+                    .get(&target_path)
+                    .copied()
+                    .unwrap_or(0);
+
+                if let Some(target_idx) = self
+                    .review_state
+                    .files
+                    .iter()
+                    .position(|p| *p == target_path)
+                {
+                    let abs_path = repo.workdir().join(&target_path);
+
+                    if self.load_file(&abs_path, cx).is_ok() {
+                        match self.review_comparison_mode() {
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                if let Ok(content) = repo.index_content(&abs_path) {
+                                    let buffer_item = self.active_buffer(cx);
+                                    self.replace_buffer_content(&content, &buffer_item, cx);
+                                }
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                if let Ok(content) = repo.head_content(&abs_path) {
+                                    let buffer_item = self.active_buffer(cx);
+                                    self.replace_buffer_content(&content, &buffer_item, cx);
+                                }
+                            },
+                            _ => {},
+                        }
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) =
+                            self.compute_diff_for_review_mode(&abs_path, cx)
+                        {
+                            if !diff.hunks.is_empty() {
+                                let buffer_item = self.active_buffer(cx);
+                                buffer_item.update(cx, |item, _| {
+                                    item.set_diff(Some(diff));
+                                    item.set_staged_rows(staged_rows);
+                                    item.set_staged_hunk_indices(staged_hunk_indices);
+                                });
+
+                                self.review_state.file_idx = target_idx;
+                                self.review_state.hunk_idx = old_count;
+                                self.jump_to_current_hunk(true, cx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.review_state.last_hunk_snapshot = new_counts;
+        cx.notify();
+    }
 }
 
 /// Build the list of all available commands from action metadata.
@@ -721,6 +888,7 @@ mod tests {
             "DiffReviewCycleComparisonMode",
             "DiffReviewPreviousCommit",
             "DiffReviewRevertHunk",
+            "DiffReviewToggleFollow",
         ];
 
         for name in &names {
