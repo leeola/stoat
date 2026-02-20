@@ -208,6 +208,26 @@ impl<'a> TestStoat<'a> {
         })
     }
 
+    /// Get conflict review file list.
+    pub fn conflict_files(&self) -> Vec<PathBuf> {
+        self.cx
+            .read_entity(&self.entity, |s, _| s.conflict_state.files.clone())
+    }
+
+    /// Get current file/conflict position in conflict review.
+    ///
+    /// Returns `(file_idx, conflict_idx)` tuple.
+    pub fn conflict_position(&self) -> (usize, usize) {
+        self.cx.read_entity(&self.entity, |s, _| {
+            (s.conflict_state.file_idx, s.conflict_state.conflict_idx)
+        })
+    }
+
+    /// Get conflict count for active buffer.
+    pub fn conflict_count(&self) -> usize {
+        self.read_buffer(|item, _| item.conflicts().len())
+    }
+
     /// Get the test repository path.
     ///
     /// Returns the path to the temporary git repository created by [`init_git`](Self::init_git),

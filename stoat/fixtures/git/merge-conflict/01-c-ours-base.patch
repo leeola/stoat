@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] initial
+
+---
+ config.txt |  7 +++++++
+ file.txt   | 13 +++++++++++++
+ 2 files changed, 20 insertions(+)
+ create mode 100644 config.txt
+ create mode 100644 file.txt
+
+diff --git a/config.txt b/config.txt
+new file mode 100644
+--- /dev/null
++++ b/config.txt
+@@ -0,0 +1,7 @@
++[settings]
++name = default
++[database]
++host = localhost
++[logging]
++level = info
++done
+diff --git a/file.txt b/file.txt
+new file mode 100644
+--- /dev/null
++++ b/file.txt
+@@ -0,0 +1,13 @@
++header
++alpha line one
++alpha line two
++alpha line three
++middle section
++beta line one
++beta line two
++beta line three
++footer section
++gamma line one
++gamma line two
++gamma line three
++end
+--
+2.39.0
+

@@ -311,6 +311,27 @@ actions!(
     ]
 );
 
+// Conflict review actions
+actions!(
+    stoat,
+    [
+        /// Open conflict review mode
+        OpenConflictReview,
+        /// Exit conflict review mode
+        ConflictReviewDismiss,
+        /// Accept our side of the conflict
+        ConflictAcceptOurs,
+        /// Accept their side of the conflict
+        ConflictAcceptTheirs,
+        /// Accept both sides of the conflict
+        ConflictAcceptBoth,
+        /// Jump to next conflict
+        ConflictNextConflict,
+        /// Jump to previous conflict
+        ConflictPrevConflict,
+    ]
+);
+
 // Git repository actions
 actions!(
     stoat,
@@ -1173,6 +1194,46 @@ action_metadata!(
     "Toggle live follow mode that auto-navigates to new hunks on file changes"
 );
 
+// Conflict review actions
+action_metadata!(
+    OpenConflictReview,
+    "conflict review",
+    "Open conflict review mode to resolve merge conflicts"
+);
+action_metadata!(
+    ConflictReviewDismiss,
+    "dismiss conflict",
+    "Exit conflict review mode",
+    hidden
+);
+action_metadata!(
+    ConflictAcceptOurs,
+    "accept ours",
+    "Resolve the current conflict by accepting our changes"
+);
+action_metadata!(
+    ConflictAcceptTheirs,
+    "accept theirs",
+    "Resolve the current conflict by accepting their changes"
+);
+action_metadata!(
+    ConflictAcceptBoth,
+    "accept both",
+    "Resolve the current conflict by keeping both sides"
+);
+action_metadata!(
+    ConflictNextConflict,
+    "next conflict",
+    "Jump to the next conflict marker",
+    hidden
+);
+action_metadata!(
+    ConflictPrevConflict,
+    "prev conflict",
+    "Jump to the previous conflict marker",
+    hidden
+);
+
 // Git repository actions
 action_metadata!(
     GitStageFile,
@@ -1763,6 +1824,36 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewToggleFollow::action_name(),
     );
 
+    // Conflict review actions
+    names.insert(
+        TypeId::of::<OpenConflictReview>(),
+        OpenConflictReview::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictReviewDismiss>(),
+        ConflictReviewDismiss::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictAcceptOurs>(),
+        ConflictAcceptOurs::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictAcceptTheirs>(),
+        ConflictAcceptTheirs::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictAcceptBoth>(),
+        ConflictAcceptBoth::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictNextConflict>(),
+        ConflictNextConflict::action_name(),
+    );
+    names.insert(
+        TypeId::of::<ConflictPrevConflict>(),
+        ConflictPrevConflict::action_name(),
+    );
+
     // Git repository actions
     names.insert(TypeId::of::<GitStageFile>(), GitStageFile::action_name());
     names.insert(TypeId::of::<GitStageAll>(), GitStageAll::action_name());
@@ -2246,6 +2337,36 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewToggleFollow::description(),
     );
 
+    // Conflict review actions
+    descriptions.insert(
+        TypeId::of::<OpenConflictReview>(),
+        OpenConflictReview::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictReviewDismiss>(),
+        ConflictReviewDismiss::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictAcceptOurs>(),
+        ConflictAcceptOurs::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictAcceptTheirs>(),
+        ConflictAcceptTheirs::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictAcceptBoth>(),
+        ConflictAcceptBoth::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictNextConflict>(),
+        ConflictNextConflict::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<ConflictPrevConflict>(),
+        ConflictPrevConflict::description(),
+    );
+
     // Git repository actions
     descriptions.insert(TypeId::of::<GitStageFile>(), GitStageFile::description());
     descriptions.insert(TypeId::of::<GitStageAll>(), GitStageAll::description());
@@ -2713,6 +2834,36 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewToggleFollow>(),
         DiffReviewToggleFollow::help_text(),
+    );
+
+    // Conflict review actions
+    help.insert(
+        TypeId::of::<OpenConflictReview>(),
+        OpenConflictReview::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictReviewDismiss>(),
+        ConflictReviewDismiss::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictAcceptOurs>(),
+        ConflictAcceptOurs::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictAcceptTheirs>(),
+        ConflictAcceptTheirs::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictAcceptBoth>(),
+        ConflictAcceptBoth::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictNextConflict>(),
+        ConflictNextConflict::help_text(),
+    );
+    help.insert(
+        TypeId::of::<ConflictPrevConflict>(),
+        ConflictPrevConflict::help_text(),
     );
 
     // Git repository actions

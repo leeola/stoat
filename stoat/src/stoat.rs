@@ -43,6 +43,8 @@ pub enum KeyContext {
     InlineInput,
     /// Diff review mode context
     DiffReview,
+    /// Conflict review mode context
+    ConflictReview,
     /// Help modal context
     HelpModal,
     /// About modal context
@@ -61,6 +63,7 @@ impl KeyContext {
             Self::CommandPaletteV2 => "CommandPaletteV2",
             Self::InlineInput => "InlineInput",
             Self::DiffReview => "DiffReview",
+            Self::ConflictReview => "ConflictReview",
             Self::HelpModal => "HelpModal",
             Self::AboutModal => "AboutModal",
         }
@@ -78,6 +81,7 @@ impl KeyContext {
             "CommandPaletteV2" => Ok(Self::CommandPaletteV2),
             "InlineInput" => Ok(Self::InlineInput),
             "DiffReview" => Ok(Self::DiffReview),
+            "ConflictReview" => Ok(Self::ConflictReview),
             "HelpModal" => Ok(Self::HelpModal),
             "AboutModal" => Ok(Self::AboutModal),
             _ => Err(format!("Unknown KeyContext: {s}")),
@@ -285,6 +289,20 @@ pub struct Stoat {
         crate::git::diff_review::ReviewScope,
         crate::git::diff_review::ScopeState,
     )>,
+
+    // Conflict review state
+    pub(crate) conflict_review_previous_mode: Option<String>,
+    pub(crate) conflict_state: crate::git::conflict::ConflictReviewState,
+    pub(crate) conflict_view_kind: crate::git::conflict::ConflictViewKind,
+
+    /// Cached row count from merge view's `compute_merge_rows` (set during prepaint).
+    pub(crate) merge_display_row_count: Option<u32>,
+
+    /// Highlight ranges for merge sub-editors (ours/result/theirs columns).
+    pub(crate) merge_highlight_rows: Vec<crate::editor::merge::align::MergeHighlightRange>,
+
+    /// Active conflict index propagated from the main stoat to merge sub-editors.
+    pub(crate) active_merge_conflict_idx: Option<usize>,
 
     /// Line-level selection within a hunk for partial staging.
     pub(crate) line_selection: Option<crate::git::line_selection::LineSelection>,
@@ -497,6 +515,12 @@ impl Stoat {
             review_scope: crate::git::diff_review::ReviewScope::default(),
             review_state: crate::git::diff_review::ScopeState::default(),
             review_saved: None,
+            conflict_review_previous_mode: None,
+            conflict_state: crate::git::conflict::ConflictReviewState::default(),
+            conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
+            merge_display_row_count: None,
+            merge_highlight_rows: Vec::new(),
+            active_merge_conflict_idx: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: HashMap::new(),
@@ -585,6 +609,12 @@ impl Stoat {
                 ..Default::default()
             },
             review_saved: None,
+            conflict_review_previous_mode: None,
+            conflict_state: crate::git::conflict::ConflictReviewState::default(),
+            conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
+            merge_display_row_count: None,
+            merge_highlight_rows: Vec::new(),
+            active_merge_conflict_idx: None,
             line_selection: None,
             current_file_path: self.current_file_path.clone(),
             buffer_versions: self.buffer_versions.clone(),
@@ -924,6 +954,24 @@ impl Stoat {
         }
         (self.mode == "diff_review" || self.mode == "line_select")
             && !self.review_state.files.is_empty()
+    }
+
+    pub fn is_in_conflict_review(&self) -> bool {
+        self.mode == "conflict_review"
+    }
+
+    /// `(current_file_1indexed, file_count, conflict_idx_1indexed, conflict_count)`
+    pub fn conflict_review_info(&self, cx: &App) -> Option<(usize, usize, usize, usize)> {
+        if !self.is_in_conflict_review() {
+            return None;
+        }
+        let conflict_count = self.active_buffer(cx).read(cx).conflicts().len();
+        Some((
+            self.conflict_state.file_idx + 1,
+            self.conflict_state.files.len(),
+            self.conflict_state.conflict_idx + 1,
+            conflict_count,
+        ))
     }
 
     /// Get diff review progress as (reviewed_count, total_count).
@@ -1316,6 +1364,8 @@ impl Stoat {
                     }
                 }
             }
+
+            item.reparse_conflicts(cx);
         });
 
         // Update active_buffer_id
@@ -1371,6 +1421,33 @@ impl Stoat {
         cx.emit(StoatEvent::FileOpened { language });
 
         Ok(())
+    }
+
+    /// Switch to an already-open buffer without reloading from disk.
+    ///
+    /// Looks up the buffer by path in [`BufferStore`]. If found, sets it as the active
+    /// buffer and resets cursor/selections. Returns [`None`] if no buffer exists for
+    /// the given path.
+    pub fn activate_buffer_by_path(
+        &mut self,
+        path: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<BufferItem>> {
+        let path_buf = path.to_path_buf();
+        let buffer_item = self.buffer_store.read(cx).get_buffer_by_path(&path_buf)?;
+        let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
+
+        self.active_buffer_id = Some(buffer_id);
+        self.current_file_path = Some(self.normalize_file_path(&path_buf));
+
+        self.cursor.move_to(text::Point::new(0, 0));
+        let new_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        self.selections = SelectionsCollection::new(&new_snapshot);
+
+        self.maybe_drop_initial_buffer(cx);
+        cx.notify();
+
+        Some(buffer_item)
     }
 
     /// Drop the initial buffer if it's still empty.
@@ -1694,6 +1771,12 @@ impl Stoat {
             review_scope: crate::git::diff_review::ReviewScope::default(),
             review_state: crate::git::diff_review::ScopeState::default(),
             review_saved: None,
+            conflict_review_previous_mode: None,
+            conflict_state: crate::git::conflict::ConflictReviewState::default(),
+            conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
+            merge_display_row_count: None,
+            merge_highlight_rows: Vec::new(),
+            active_merge_conflict_idx: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: self.buffer_versions.clone(),

@@ -5,8 +5,11 @@
 
 use crate::{
     buffer::display::{DiffOrigin, DisplayRow as BufferDisplayRow},
-    editor::{style::EditorStyle, view::EditorView},
-    git::diff::{BufferDiff, DiffHunkStatus},
+    editor::{merge::align::MergeHighlightRange, style::EditorStyle, view::EditorView},
+    git::{
+        conflict::ConflictSide,
+        diff::{BufferDiff, DiffHunkStatus},
+    },
     gutter::{DisplayRow, GutterLayout},
     syntax::HighlightedChunks,
 };
@@ -732,6 +735,18 @@ impl Element for EditorElement {
             );
         }
 
+        let (conflicts, merge_highlights, active_conflict_idx) = {
+            let stoat = self.view.read(cx).stoat.read(cx);
+            let conflicts = stoat.active_buffer(cx).read(cx).conflicts().to_vec();
+            let merge_highlights = stoat.merge_highlight_rows.clone();
+            let active_conflict_idx = if stoat.is_in_conflict_review() {
+                Some(stoat.conflict_state.conflict_idx)
+            } else {
+                stoat.active_merge_conflict_idx
+            };
+            (conflicts, merge_highlights, active_conflict_idx)
+        };
+
         EditorPrepaintState {
             line_layouts,
             gutter_width,
@@ -748,6 +763,9 @@ impl Element for EditorElement {
             active_hunk_y,
             line_select_indicators,
             line_select_cursor_y,
+            conflicts,
+            active_conflict_idx,
+            merge_highlights,
         }
     }
 
@@ -797,6 +815,24 @@ impl Element for EditorElement {
             prepaint.gutter_width,
             window,
             cx,
+        );
+
+        // Paint conflict region backgrounds (visible in all modes when conflicts exist)
+        self.paint_conflict_backgrounds(
+            bounds,
+            &prepaint.line_layouts,
+            &prepaint.conflicts,
+            prepaint.active_conflict_idx,
+            window,
+        );
+
+        // Paint merge highlight backgrounds (for sub-editors in 3-way merge view)
+        self.paint_merge_highlights(
+            bounds,
+            &prepaint.line_layouts,
+            &prepaint.merge_highlights,
+            prepaint.active_conflict_idx,
+            window,
         );
 
         // Paint line selection cursor highlight bar
@@ -1204,6 +1240,120 @@ impl EditorElement {
             }
         }
     }
+
+    fn paint_conflict_backgrounds(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        conflicts: &[crate::git::conflict::ConflictRegion],
+        active_conflict_idx: Option<usize>,
+        window: &mut Window,
+    ) {
+        if conflicts.is_empty() {
+            return;
+        }
+
+        for layout in line_layouts {
+            let Some(buffer_row) = layout.buffer_row else {
+                continue;
+            };
+
+            let match_result = conflicts.iter().enumerate().find_map(|(idx, c)| {
+                if buffer_row < c.start_row || buffer_row > c.end_row {
+                    return None;
+                }
+                let color = if buffer_row == c.start_row
+                    || buffer_row == c.end_row
+                    || buffer_row == c.separator_row
+                {
+                    self.style.conflict_marker_color
+                } else if buffer_row < c.separator_row {
+                    self.style.conflict_ours_color
+                } else {
+                    self.style.conflict_theirs_color
+                };
+                Some((idx, color))
+            });
+
+            if let Some((conflict_idx, base_color)) = match_result {
+                let is_active = active_conflict_idx == Some(conflict_idx);
+                let alpha = if is_active { 0.25 } else { 0.06 };
+
+                let background_color = gpui::Hsla {
+                    h: base_color.h,
+                    s: base_color.s,
+                    l: base_color.l,
+                    a: alpha,
+                };
+
+                let bar_bounds = Bounds {
+                    origin: point(bounds.origin.x, layout.y_position),
+                    size: size(bounds.size.width, self.style.line_height),
+                };
+
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: bar_bounds,
+                    corner_radii: 0.0.into(),
+                    background: background_color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+            }
+        }
+    }
+    fn paint_merge_highlights(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        highlights: &[MergeHighlightRange],
+        active_conflict_idx: Option<usize>,
+        window: &mut Window,
+    ) {
+        if highlights.is_empty() {
+            return;
+        }
+
+        for layout in line_layouts {
+            let Some(buffer_row) = layout.buffer_row else {
+                continue;
+            };
+
+            let highlight = highlights
+                .iter()
+                .find(|h| buffer_row >= h.start_row && buffer_row <= h.end_row);
+
+            if let Some(h) = highlight {
+                let base_color = match h.side {
+                    ConflictSide::Ours => self.style.conflict_ours_color,
+                    ConflictSide::Theirs => self.style.conflict_theirs_color,
+                    ConflictSide::Both => self.style.conflict_ours_color,
+                };
+
+                let is_active = active_conflict_idx == Some(h.conflict_idx);
+                let alpha = if is_active { 0.25 } else { 0.06 };
+
+                let background_color = gpui::Hsla {
+                    h: base_color.h,
+                    s: base_color.s,
+                    l: base_color.l,
+                    a: alpha,
+                };
+
+                window.paint_quad(gpui::PaintQuad {
+                    bounds: Bounds {
+                        origin: point(bounds.origin.x, layout.y_position),
+                        size: size(bounds.size.width, self.style.line_height),
+                    },
+                    corner_radii: 0.0.into(),
+                    background: background_color.into(),
+                    border_color: gpui::transparent_black(),
+                    border_widths: 0.0.into(),
+                    border_style: gpui::BorderStyle::default(),
+                });
+            }
+        }
+    }
 }
 
 /// Apply stronger background highlighting to modified ranges within a line.
@@ -1437,6 +1587,12 @@ pub struct EditorPrepaintState {
     pub line_select_indicators: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Y position of the cursor line during line_select mode
     pub line_select_cursor_y: Option<Pixels>,
+    /// Parsed conflict regions for the current buffer
+    pub conflicts: Vec<crate::git::conflict::ConflictRegion>,
+    /// Index of the active conflict in conflict review mode
+    pub active_conflict_idx: Option<usize>,
+    /// Merge highlight ranges for sub-editors in 3-way merge view
+    pub merge_highlights: Vec<MergeHighlightRange>,
 }
 
 /// A single line that has been shaped and is ready to paint.

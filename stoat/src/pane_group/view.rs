@@ -467,6 +467,7 @@ impl PaneGroupView {
                     self.handle_git_status_set_filter_untracked(window, cx);
                 },
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
+                "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
                 "OpenHelpOverlay" => self.handle_open_help_overlay(window, cx),
                 "OpenHelpModal" => self.handle_open_help_modal(window, cx),
                 "HelpModalDismiss" => self.handle_help_modal_dismiss(window, cx),
@@ -1035,7 +1036,17 @@ impl Render for PaneGroupView {
 
         // Compute minimap opacity and check if animating
         let (minimap_opacity, is_animating) = self.calculate_minimap_opacity();
-        let minimap_visible = minimap_opacity > 0.0;
+        let in_merge_view = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|c| c.as_editor())
+            .map(|editor| {
+                let stoat = editor.read(cx).stoat.read(cx);
+                stoat.is_in_conflict_review()
+                    && stoat.conflict_view_kind == crate::git::conflict::ConflictViewKind::Merge
+            })
+            .unwrap_or(false);
+        let minimap_visible = minimap_opacity > 0.0 && !in_merge_view;
 
         // Request animation frame if currently animating
         if is_animating {
@@ -1136,6 +1147,7 @@ impl Render for PaneGroupView {
                     self.app_state.lsp_state.status.read().display_string(),
                     stoat.review_state.follow
                         && (mode_name == "diff_review" || mode_name == "line_select"),
+                    stoat.conflict_review_info(cx),
                 );
 
                 // Calculate minimap scroll position for later update
@@ -1277,6 +1289,7 @@ impl Render for PaneGroupView {
                 scope_filter,
                 lsp_status,
                 follow_active,
+                conflict_info,
             )| {
                 (
                     mode,
@@ -1289,6 +1302,7 @@ impl Render for PaneGroupView {
                     scope_filter,
                     lsp_status,
                     follow_active,
+                    conflict_info,
                 )
             },
         );
@@ -1495,6 +1509,7 @@ impl Render for PaneGroupView {
                     scope_filter,
                     lsp_status,
                     follow_active,
+                    conflict_info,
                 )| {
                     let flash_message = self.app_state.flash_message.clone();
                     div.child(StatusBar::new(
@@ -1509,6 +1524,7 @@ impl Render for PaneGroupView {
                         lsp_status,
                         flash_message,
                         follow_active,
+                        conflict_info,
                     ))
                 },
             )

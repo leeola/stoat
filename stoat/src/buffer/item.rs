@@ -1,5 +1,8 @@
 use crate::{
-    git::diff::BufferDiff,
+    git::{
+        conflict::{parse_conflicts, ConflictRegion},
+        diff::BufferDiff,
+    },
     index::{
         bracket::{BracketIndex, BracketSnapshot},
         scope::{ScopeIndex, ScopeSnapshot},
@@ -36,6 +39,7 @@ pub struct BufferItem {
     symbol_index: Option<SymbolIndex>,
     scope_index: Option<ScopeIndex>,
     bracket_index: Option<BracketIndex>,
+    conflicts: Vec<ConflictRegion>,
     diagnostics: SmallVec<[(ServerId, DiagnosticSet); 2]>,
     diagnostics_version: u64,
 }
@@ -60,6 +64,7 @@ impl BufferItem {
             symbol_index: None,
             scope_index: None,
             bracket_index: None,
+            conflicts: Vec::new(),
             diagnostics: SmallVec::new(),
             diagnostics_version: 0,
         }
@@ -243,6 +248,15 @@ impl BufferItem {
 
     pub fn set_staged_hunk_indices(&mut self, indices: Option<Vec<usize>>) {
         self.staged_hunk_indices = indices;
+    }
+
+    pub fn conflicts(&self) -> &[ConflictRegion] {
+        &self.conflicts
+    }
+
+    pub fn reparse_conflicts(&mut self, cx: &App) {
+        let text = self.buffer.read(cx).text();
+        self.conflicts = parse_conflicts(&text);
     }
 
     pub fn is_modified(&self, cx: &App) -> bool {

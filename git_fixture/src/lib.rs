@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -82,12 +83,46 @@ pub fn collect_changed_files(repo: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+struct PatchInfo {
+    kind: char,
+    branch: String,
+}
+
+/// Parse patch filename in `{NN}-{type}-{branch}[-{description}].patch` format.
+///
+/// Branch names must not contain hyphens (use underscores for multi-word names).
+fn parse_patch_name(name: &str) -> Result<PatchInfo> {
+    let stem = name
+        .strip_suffix(".patch")
+        .ok_or_else(|| anyhow::anyhow!("not a .patch file: {name}"))?;
+    let parts: Vec<&str> = stem.splitn(4, '-').collect();
+    if parts.len() < 3 {
+        bail!("invalid patch name '{name}', expected {{NN}}-{{type}}-{{branch}}[.patch]");
+    }
+    let kind = parts[1]
+        .chars()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty type in '{name}'"))?;
+    if !matches!(kind, 'c' | 's' | 'w') {
+        bail!("unknown patch type '{kind}' in '{name}', expected c/s/w");
+    }
+    Ok(PatchInfo {
+        kind,
+        branch: parts[2].to_string(),
+    })
+}
+
 /// Apply patches from `fixture_dir` into `repo_dir` in sorted order.
 ///
-/// Patch prefix conventions:
-/// - `c-` -- committed via `git am`
-/// - `s-` -- staged via `git apply --cached`
-/// - `w-` -- working tree via `git apply`
+/// Patch filename format: `{NN}-{type}-{branch}[-{description}].patch`
+///
+/// - `NN` -- two-digit number controlling application order
+/// - `type` -- `c` (committed via `git am`), `s` (staged via `git apply --cached`), `w` (working
+///   tree via `git apply`)
+/// - `branch` -- target branch; the first branch seen becomes the default. Subsequent branches are
+///   created automatically and merged into the default after all patches.
+///
+/// Branch names must not contain hyphens.
 pub fn apply_patches(fixture_dir: &Path, repo_dir: &Path) -> Result<()> {
     let mut patches: Vec<_> = fs::read_dir(fixture_dir)
         .with_context(|| format!("reading fixture dir: {}", fixture_dir.display()))?
@@ -103,22 +138,77 @@ pub fn apply_patches(fixture_dir: &Path, repo_dir: &Path) -> Result<()> {
         .collect();
     patches.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let mut default_branch: Option<String> = None;
+    let mut known_branches: BTreeSet<String> = BTreeSet::new();
+    let mut current_branch: Option<String> = None;
+
     for (name, path) in &patches {
+        let info = parse_patch_name(name)?;
         let abs_patch = fs::canonicalize(path)
             .with_context(|| format!("canonicalizing patch: {}", path.display()))?;
         let patch_str = abs_patch.to_string_lossy();
 
-        if name.starts_with("c-") {
-            run_git(repo_dir, &["am", &patch_str])?;
-        } else if name.starts_with("s-") {
-            run_git(repo_dir, &["apply", "--cached", &patch_str])?;
-        } else if name.starts_with("w-") {
-            run_git(repo_dir, &["apply", &patch_str])?;
-        } else {
-            bail!("unknown patch prefix in '{name}', expected c-/s-/w-");
+        // Handle branch switching
+        if default_branch.is_none() {
+            default_branch = Some(info.branch.clone());
+            let _ = run_git(repo_dir, &["branch", "-M", &info.branch]);
+            known_branches.insert(info.branch.clone());
+            current_branch = Some(info.branch.clone());
+        } else if current_branch.as_deref() != Some(&info.branch) {
+            if known_branches.contains(&info.branch) {
+                run_git(repo_dir, &["checkout", &info.branch])?;
+            } else {
+                run_git(repo_dir, &["checkout", "-b", &info.branch])?;
+                known_branches.insert(info.branch.clone());
+            }
+            current_branch = Some(info.branch.clone());
+        }
+
+        match info.kind {
+            'c' => {
+                run_git(repo_dir, &["am", &patch_str])?;
+            },
+            's' => {
+                run_git(repo_dir, &["apply", "--cached", &patch_str])?;
+            },
+            'w' => {
+                run_git(repo_dir, &["apply", &patch_str])?;
+            },
+            _ => unreachable!(),
         }
     }
 
+    // Merge non-default branches into the default branch
+    if let Some(ref default) = default_branch {
+        if current_branch.as_deref() != Some(default) {
+            run_git(repo_dir, &["checkout", default])?;
+        }
+        for branch in &known_branches {
+            if branch != default {
+                merge_no_fail(repo_dir, branch)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Attempt `git merge`; allow it to fail with conflicts (exit code 1).
+///
+/// Returns `Ok(())` whether the merge succeeds cleanly or produces conflicts.
+/// Only propagates errors from process spawn or unexpected exit codes.
+fn merge_no_fail(repo_dir: &Path, branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["merge", branch])
+        .current_dir(repo_dir)
+        .output()
+        .context("running git merge")?;
+
+    // Exit code 1 means conflicts -- that's expected
+    if !output.status.success() && output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git merge {branch} failed unexpectedly:\n{stderr}");
+    }
     Ok(())
 }
 
@@ -203,6 +293,28 @@ mod tests {
         );
         assert!(content.contains("9 this is line nine"));
         assert!(content.contains("21 this is line twenty-one"));
+    }
+
+    #[test]
+    fn merge_conflict() {
+        let fixture_dir = fixtures_dir().join("merge-conflict");
+        let fixture = GitFixture::new(&fixture_dir).unwrap();
+
+        for name in ["file.txt", "config.txt"] {
+            let content = std::fs::read_to_string(fixture.dir().join(name)).unwrap();
+            assert!(
+                content.contains("<<<<<<<"),
+                "{name} should have conflict markers: {content}"
+            );
+        }
+
+        let file_content = std::fs::read_to_string(fixture.dir().join("file.txt")).unwrap();
+        assert!(file_content.contains("ours alpha"), "{file_content}");
+        assert!(file_content.contains("theirs alpha"), "{file_content}");
+
+        let config_content = std::fs::read_to_string(fixture.dir().join("config.txt")).unwrap();
+        assert!(config_content.contains("ours-name"), "{config_content}");
+        assert!(config_content.contains("theirs-name"), "{config_content}");
     }
 
     #[test]

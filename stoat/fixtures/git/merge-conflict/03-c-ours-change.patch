@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:02 +0000
+Subject: [PATCH] ours change
+
+---
+ config.txt |  9 ++++++---
+ file.txt   | 18 +++++++++--------
+ 2 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/config.txt b/config.txt
+--- a/config.txt
++++ b/config.txt
+@@ -1,7 +1,10 @@
+ [settings]
+-name = default
++ours-name-one
++ours-name-two
++ours-name-three
+ [database]
+-host = localhost
++ours-host
+ [logging]
+-level = info
++ours-level-one
++ours-level-two
+ done
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,13 +1,13 @@
+ header
+-alpha line one
+-alpha line two
+-alpha line three
++ours alpha one
++ours alpha two
+ middle section
+-beta line one
+-beta line two
+-beta line three
++ours beta one
++ours beta two
++ours beta three
++ours beta four
+ footer section
+-gamma line one
+-gamma line two
+-gamma line three
++ours gamma one
++ours gamma two
++ours gamma three
+ end
+--
+2.39.0
+

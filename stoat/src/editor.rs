@@ -4,11 +4,11 @@
 //! multi-cursor state tracking.
 
 pub mod element;
+pub mod merge;
 pub mod state;
 pub mod style;
 pub mod view;
 
-// Re-export main components
 pub use element::EditorElement;
 pub use state::{AddSelectionsGroup, AddSelectionsState, SelectNextState};
 pub use style::EditorStyle;

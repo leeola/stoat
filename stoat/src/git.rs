@@ -3,6 +3,7 @@
 //! Provides git repository operations, diff computation, status tracking,
 //! and diff review functionality.
 
+pub mod conflict;
 pub mod diff;
 pub mod diff_review;
 pub mod line_selection;

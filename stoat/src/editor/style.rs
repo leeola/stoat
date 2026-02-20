@@ -47,6 +47,14 @@ pub struct EditorStyle {
     pub diagnostic_info_color: Hsla,
     /// Color for hint diagnostics (gray)
     pub diagnostic_hint_color: Hsla,
+    /// Background tint for "ours" conflict lines (green)
+    pub conflict_ours_color: Hsla,
+    /// Background tint for "theirs" conflict lines (blue)
+    pub conflict_theirs_color: Hsla,
+    /// Background tint for conflict marker lines
+    pub conflict_marker_color: Hsla,
+    /// Thin vertical line between merge view columns
+    pub merge_separator_color: Hsla,
     /// Whether to show the minimap
     pub show_minimap: bool,
     /// Color for the minimap viewport thumb
@@ -113,9 +121,13 @@ impl EditorStyle {
             diagnostic_warning_color: rgb(0xdcdcaa).into(), // Yellow (VS Code yellow)
             diagnostic_info_color: rgb(0x569cd6).into(), // Blue (VS Code blue)
             diagnostic_hint_color: rgb(0x808080).into(), // Gray
-            show_minimap: true,                     /* Enabled: Now using persistent
-                                                     * MinimapView
-                                                     * entity */
+            conflict_ours_color: rgb(0x4ec9b0).into(), // Green (same as diff added)
+            conflict_theirs_color: rgb(0x569cd6).into(), // Blue (same as diff modified)
+            conflict_marker_color: rgb(0x808080).into(), // Dimmed gray
+            merge_separator_color: rgb(0x4d4d4d).into(),
+            show_minimap: true, /* Enabled: Now using persistent
+                                 * MinimapView
+                                 * entity */
             minimap_thumb_color: Hsla {
                 h: 0.0,
                 s: 0.0,

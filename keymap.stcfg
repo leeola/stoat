@@ -240,6 +240,7 @@ on key {
             g -> OpenGitStatus();
             d -> ToggleDiffHunk();
             r -> OpenDiffReview();
+            x -> OpenConflictReview();
         }
     }
 
@@ -339,6 +340,23 @@ on key {
             f -> DiffReviewToggleFollow();
             J -> MoveDown();
             K -> MoveUp();
+        }
+    }
+
+    # ConflictReview Context
+    focus == "ConflictReview" {
+        mode == "conflict_review" {
+            escape -> SetKeyContext(TextEditor);
+            o -> ConflictAcceptOurs();
+            t -> ConflictAcceptTheirs();
+            b -> ConflictAcceptBoth();
+            j -> ConflictNextConflict();
+            k -> ConflictPrevConflict();
+            down -> ConflictNextConflict();
+            up -> ConflictPrevConflict();
+            q -> ConflictReviewDismiss();
+            v -> ConflictToggleView();
+            ? -> OpenHelpOverlay();
         }
     }
 

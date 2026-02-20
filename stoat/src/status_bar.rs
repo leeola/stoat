@@ -43,6 +43,8 @@ pub struct StatusBar {
     flash_message: Option<String>,
     /// Whether live follow mode is active in diff review
     follow_active: bool,
+    /// Conflict review: (file_idx, file_count, conflict_idx, conflict_count)
+    conflict_info: Option<(usize, usize, usize, usize)>,
 }
 
 impl StatusBar {
@@ -60,6 +62,7 @@ impl StatusBar {
         lsp_status: String,
         flash_message: Option<String>,
         follow_active: bool,
+        conflict_info: Option<(usize, usize, usize, usize)>,
     ) -> Self {
         Self {
             mode_display,
@@ -72,6 +75,7 @@ impl StatusBar {
             lsp_status,
             flash_message,
             follow_active,
+            conflict_info,
         }
     }
 
@@ -178,7 +182,8 @@ impl RenderOnce for StatusBar {
 
         let in_review_mode = self.scope_filter.is_some()
             || self.hunk_position.is_some()
-            || self.review_file_progress.is_some();
+            || self.review_file_progress.is_some()
+            || self.conflict_info.is_some();
 
         // Apply path truncation based on available space
         // Review mode has center section, so less space for path
@@ -223,6 +228,15 @@ impl RenderOnce for StatusBar {
             // Add file progress
             if let Some((current, total_files)) = self.review_file_progress {
                 let file_text = format!("File {current}/{total_files}");
+                center = center.child(div().text_color(rgb(0x4ec9b0)).child(file_text));
+            }
+
+            if let Some((file_idx, file_count, conflict_idx, conflict_count)) = self.conflict_info {
+                let conflict_text = format!("Conflict {conflict_idx}/{conflict_count}");
+                center = center
+                    .child(div().text_color(rgb(0x4ec9b0)).child(conflict_text))
+                    .child(div().text_color(rgb(0x808080)).child("|"));
+                let file_text = format!("File {file_idx}/{file_count}");
                 center = center.child(div().text_color(rgb(0x4ec9b0)).child(file_text));
             }
 

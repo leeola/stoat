@@ -48,6 +48,10 @@ pub fn default_modes() -> HashMap<String, Mode> {
         Mode::with_previous("diff_review", "DIFF REVIEW", "normal", false),
     );
     modes.insert(
+        "conflict_review".into(),
+        Mode::with_previous("conflict_review", "CONFLICT", "normal", false),
+    );
+    modes.insert(
         "help_modal".into(),
         Mode::with_previous("help_modal", "HELP", "normal", false),
     );
@@ -79,6 +83,10 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
     contexts.insert(
         KeyContext::DiffReview,
         KeyContextMeta::new("diff_review".into()),
+    );
+    contexts.insert(
+        KeyContext::ConflictReview,
+        KeyContextMeta::new("conflict_review".into()),
     );
     contexts.insert(
         KeyContext::HelpModal,

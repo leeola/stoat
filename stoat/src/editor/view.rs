@@ -1,6 +1,7 @@
 use crate::{
     buffer::item::BufferItemEvent,
-    editor::{element::EditorElement, style::EditorStyle},
+    editor::{element::EditorElement, merge::align::extract_merge_content, style::EditorStyle},
+    git::conflict::ConflictViewKind,
     keymap::{
         compiled::CompiledKey,
         dispatch::{dispatch_editor_action, dispatch_pane_action},
@@ -9,11 +10,20 @@ use crate::{
     stoat::{KeyContext, Stoat},
 };
 use gpui::{
-    div, point, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled, Subscription, Window,
+    div, point, px, AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, Hsla,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollWheelEvent, Styled,
+    Subscription, Window,
 };
 use std::sync::Arc;
 use tracing::debug;
+
+pub(crate) struct MergeState {
+    pub ours_view: Entity<EditorView>,
+    pub result_view: Entity<EditorView>,
+    pub theirs_view: Entity<EditorView>,
+    resolution_count: usize,
+    file_idx: usize,
+}
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
@@ -23,6 +33,8 @@ pub struct EditorView {
     pub(crate) editor_style: Arc<EditorStyle>,
     /// Subscription to BufferItem events for automatic UI updates when diagnostics change
     _buffer_subscription: Subscription,
+    /// When in merge mode, holds the 3 sub-editor views
+    merge_state: Option<MergeState>,
     // NOTE: Selection state (add_selections_state, select_next_state, select_prev_state)
     // is tracked in Stoat struct, not here. EditorView is just a view layer.
 }
@@ -52,6 +64,7 @@ impl EditorView {
             this: None,
             editor_style,
             _buffer_subscription: buffer_subscription,
+            merge_state: None,
         }
     }
 
@@ -61,6 +74,153 @@ impl EditorView {
 
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
+    }
+
+    /// Rebuild the 3 sub-editors from current buffer + resolution state.
+    pub(crate) fn rebuild_merge_state(&mut self, cx: &mut Context<'_, Self>) {
+        let (content, language, config, worktree, buffer_store, compiled_keymap) = {
+            let stoat = self.stoat.read(cx);
+            let buffer_item = stoat.active_buffer(cx);
+            let text = buffer_item.read(cx).buffer().read(cx).text();
+            let conflicts = buffer_item.read(cx).conflicts().to_vec();
+            let language = buffer_item.read(cx).language();
+            let file_idx = stoat.conflict_state.file_idx;
+            let resolutions = &stoat.conflict_state.resolutions;
+            let content = extract_merge_content(&text, &conflicts, resolutions, file_idx);
+            let config = stoat.config().clone();
+            let worktree = stoat.worktree.clone();
+            let buffer_store = stoat.buffer_store.clone();
+            let compiled_keymap = stoat.compiled_keymap.clone();
+            (
+                content,
+                language,
+                config,
+                worktree,
+                buffer_store,
+                compiled_keymap,
+            )
+        };
+
+        let mut merge_style = (*self.editor_style).clone();
+        merge_style.show_diff_indicators = false;
+        merge_style.show_minimap = false;
+        let merge_style = Arc::new(merge_style);
+
+        let create_sub_editor = |text: &str, cx: &mut Context<'_, Self>| -> Entity<EditorView> {
+            let config = config.clone();
+            let worktree = worktree.clone();
+            let buffer_store = buffer_store.clone();
+            let compiled_keymap = compiled_keymap.clone();
+            let merge_style = merge_style.clone();
+
+            let sub_stoat = cx.new(|cx| {
+                let s = Stoat::new_with_text(
+                    config,
+                    worktree,
+                    buffer_store,
+                    None,
+                    compiled_keymap,
+                    text,
+                    cx,
+                );
+                s.active_buffer(cx).update(cx, |item, cx| {
+                    item.set_language(language);
+                    let _ = item.reparse(cx);
+                });
+                s
+            });
+
+            let sub_buffer = sub_stoat.read(cx).active_buffer(cx);
+            let view = cx.new(|cx| {
+                let buffer_subscription = cx.subscribe(&sub_buffer, |_, _, _event, _cx| {});
+                EditorView {
+                    stoat: sub_stoat,
+                    focus_handle: cx.focus_handle(),
+                    this: None,
+                    editor_style: merge_style,
+                    _buffer_subscription: buffer_subscription,
+                    merge_state: None,
+                }
+            });
+            view.update(cx, |ev, _cx| {
+                ev.this = Some(view.clone());
+            });
+            view
+        };
+
+        // Set scroll limit on main stoat based on content line count
+        let line_count = content.ours.chars().filter(|&c| c == '\n').count() as u32;
+        self.stoat
+            .update(cx, |s, _| s.merge_display_row_count = Some(line_count));
+
+        let ours_view = create_sub_editor(&content.ours, cx);
+        let result_view = create_sub_editor(&content.result, cx);
+        let theirs_view = create_sub_editor(&content.theirs, cx);
+
+        ours_view.update(cx, |ev, cx| {
+            ev.stoat.update(cx, |s, _| {
+                s.merge_highlight_rows = content.ours_highlights.clone()
+            });
+        });
+        result_view.update(cx, |ev, cx| {
+            ev.stoat.update(cx, |s, _| {
+                s.merge_highlight_rows = content.result_highlights.clone()
+            });
+        });
+        theirs_view.update(cx, |ev, cx| {
+            ev.stoat.update(cx, |s, _| {
+                s.merge_highlight_rows = content.theirs_highlights.clone()
+            });
+        });
+
+        let resolution_count = self.stoat.read(cx).conflict_state.resolutions.len();
+        let file_idx = self.stoat.read(cx).conflict_state.file_idx;
+        self.merge_state = Some(MergeState {
+            ours_view,
+            result_view,
+            theirs_view,
+            resolution_count,
+            file_idx,
+        });
+    }
+
+    /// Update the result sub-editor's buffer content after a resolution change.
+    pub(crate) fn rebuild_result_content(&mut self, cx: &mut Context<'_, Self>) {
+        let merge = match &self.merge_state {
+            Some(m) => m,
+            None => return,
+        };
+
+        let content = {
+            let stoat = self.stoat.read(cx);
+            let buffer_item = stoat.active_buffer(cx);
+            let text = buffer_item.read(cx).buffer().read(cx).text();
+            let conflicts = buffer_item.read(cx).conflicts().to_vec();
+            let file_idx = stoat.conflict_state.file_idx;
+            let resolutions = &stoat.conflict_state.resolutions;
+            extract_merge_content(&text, &conflicts, resolutions, file_idx)
+        };
+
+        let result_view = merge.result_view.clone();
+        result_view.update(cx, |ev, cx| {
+            let buffer = ev
+                .stoat
+                .read(cx)
+                .active_buffer(cx)
+                .read(cx)
+                .buffer()
+                .clone();
+            buffer.update(cx, |buf, _| {
+                let old_len = buf.text().len();
+                buf.edit([(0..old_len, content.result.as_str())]);
+            });
+            ev.stoat.read(cx).active_buffer(cx).update(cx, |item, cx| {
+                let _ = item.reparse(cx);
+            });
+            ev.stoat.update(cx, |s, _| {
+                s.merge_highlight_rows = content.result_highlights
+            });
+        });
     }
 
     fn handle_key_down(
@@ -246,6 +406,94 @@ impl Render for EditorView {
             .clone()
             .expect("EditorView entity not set - call set_entity() after creation");
 
+        let use_merge = {
+            let s = self.stoat.read(cx);
+            s.is_in_conflict_review() && s.conflict_view_kind == ConflictViewKind::Merge
+        };
+
+        // Manage merge_state lifecycle
+        if use_merge && self.merge_state.is_none() {
+            self.rebuild_merge_state(cx);
+        } else if use_merge {
+            let (current_file_idx, current_count) = {
+                let stoat = self.stoat.read(cx);
+                (
+                    stoat.conflict_state.file_idx,
+                    stoat.conflict_state.resolutions.len(),
+                )
+            };
+
+            if self
+                .merge_state
+                .as_ref()
+                .is_some_and(|m| m.file_idx != current_file_idx)
+            {
+                self.rebuild_merge_state(cx);
+            } else if self
+                .merge_state
+                .as_ref()
+                .is_some_and(|m| m.resolution_count != current_count)
+            {
+                self.rebuild_result_content(cx);
+                if let Some(m) = &mut self.merge_state {
+                    m.resolution_count = current_count;
+                }
+            }
+        } else if self.merge_state.is_some() {
+            self.merge_state = None;
+        }
+
+        // Sync scroll and active conflict index from main stoat to sub-editors
+        if use_merge {
+            if let Some(merge) = &self.merge_state {
+                let (scroll_y, active_idx) = {
+                    let stoat = self.stoat.read(cx);
+                    (stoat.scroll_position().y, stoat.conflict_state.conflict_idx)
+                };
+                for sub_view in [&merge.ours_view, &merge.result_view, &merge.theirs_view] {
+                    let sub_view = sub_view.clone();
+                    sub_view.update(cx, |ev, cx| {
+                        ev.stoat.update(cx, |s, _| {
+                            s.set_scroll_position(gpui::point(0.0, scroll_y));
+                            s.active_merge_conflict_idx = Some(active_idx);
+                        });
+                    });
+                }
+            }
+        }
+
+        let child: AnyElement = if use_merge {
+            let merge = self.merge_state.as_ref().unwrap();
+            let style = self.editor_style.clone();
+
+            let separator_color: Hsla = style.merge_separator_color;
+
+            div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .child(EditorElement::new(merge.ours_view.clone(), style.clone())),
+                )
+                .child(div().w(px(1.0)).h_full().bg(separator_color))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(EditorElement::new(merge.result_view.clone(), style.clone())),
+                )
+                .child(div().w(px(1.0)).h_full().bg(separator_color))
+                .child(
+                    div()
+                        .flex_1()
+                        .child(EditorElement::new(merge.theirs_view.clone(), style)),
+                )
+                .into_any_element()
+        } else {
+            EditorElement::new(view_entity, self.editor_style.clone()).into_any_element()
+        };
+
         div()
             .id("editor")
             .track_focus(&self.focus_handle)
@@ -255,7 +503,6 @@ impl Render for EditorView {
                  event: &ScrollWheelEvent,
                  _window: &mut Window,
                  cx: &mut Context<'_, EditorView>| {
-                    // Invert Y direction for natural scrolling
                     let delta = match event.delta {
                         gpui::ScrollDelta::Pixels(pixels) => {
                             scroll::ScrollDelta::Pixels(point(pixels.x, -pixels.y))
@@ -272,9 +519,9 @@ impl Render for EditorView {
                     cx.notify();
                 },
             ))
-            .relative() // Enable absolute positioning for children
+            .relative()
             .size_full()
-            .child(EditorElement::new(view_entity, self.editor_style.clone()))
+            .child(child)
         // FIXME: Minimap rendering will be integrated into EditorElement following Zed's approach
     }
 }

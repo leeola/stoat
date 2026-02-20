@@ -210,6 +210,14 @@ pub fn dispatch_editor_action<C: AppContext>(
             });
         },
 
+        "ConflictAcceptOurs" => ed!(stoat, cx, |s, cx| s.conflict_accept_ours(cx)),
+        "ConflictAcceptTheirs" => ed!(stoat, cx, |s, cx| s.conflict_accept_theirs(cx)),
+        "ConflictAcceptBoth" => ed!(stoat, cx, |s, cx| s.conflict_accept_both(cx)),
+        "ConflictNextConflict" => ed!(stoat, cx, |s, cx| s.conflict_next_conflict(cx)),
+        "ConflictPrevConflict" => ed!(stoat, cx, |s, cx| s.conflict_prev_conflict(cx)),
+        "ConflictReviewDismiss" => ed!(stoat, cx, |s, cx| s.conflict_review_dismiss(cx)),
+        "ConflictToggleView" => ed!(stoat, cx, |s, cx| s.conflict_toggle_view(cx)),
+
         "WriteFile" | "Save" => {
             let _ = stoat.update(cx, |s, cx| {
                 if let Err(e) = s.write_file(cx) {
@@ -304,6 +312,8 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "ShowMinimapOnScroll"
             // Diff review (open from pane level)
             | "OpenDiffReview"
+            // Conflict review (open from pane level)
+            | "OpenConflictReview"
             // Command line
             | "ShowCommandLine"
             | "CommandLineDismiss"

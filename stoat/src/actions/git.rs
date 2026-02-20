@@ -1,5 +1,6 @@
 //! Git action implementations.
 
+mod conflict;
 mod diff_hunk;
 mod diff_review;
 mod hunk_patch;
