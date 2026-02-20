@@ -157,19 +157,23 @@ impl EditorView {
         let result_view = create_sub_editor(&content.result, cx);
         let theirs_view = create_sub_editor(&content.theirs, cx);
 
+        let main_stoat = self.stoat.clone();
         ours_view.update(cx, |ev, cx| {
             ev.stoat.update(cx, |s, _| {
-                s.merge_highlight_rows = content.ours_highlights.clone()
+                s.merge_highlight_rows = content.ours_highlights.clone();
+                s.scroll_source = Some(main_stoat.clone());
             });
         });
         result_view.update(cx, |ev, cx| {
             ev.stoat.update(cx, |s, _| {
-                s.merge_highlight_rows = content.result_highlights.clone()
+                s.merge_highlight_rows = content.result_highlights.clone();
+                s.scroll_source = Some(main_stoat.clone());
             });
         });
         theirs_view.update(cx, |ev, cx| {
             ev.stoat.update(cx, |s, _| {
-                s.merge_highlight_rows = content.theirs_highlights.clone()
+                s.merge_highlight_rows = content.theirs_highlights.clone();
+                s.scroll_source = Some(main_stoat.clone());
             });
         });
 
@@ -202,6 +206,7 @@ impl EditorView {
         };
 
         let result_view = merge.result_view.clone();
+        let main_stoat = self.stoat.clone();
         result_view.update(cx, |ev, cx| {
             let buffer = ev
                 .stoat
@@ -218,7 +223,8 @@ impl EditorView {
                 let _ = item.reparse(cx);
             });
             ev.stoat.update(cx, |s, _| {
-                s.merge_highlight_rows = content.result_highlights
+                s.merge_highlight_rows = content.result_highlights;
+                s.scroll_source = Some(main_stoat);
             });
         });
     }
@@ -441,25 +447,6 @@ impl Render for EditorView {
             }
         } else if self.merge_state.is_some() {
             self.merge_state = None;
-        }
-
-        // Sync scroll and active conflict index from main stoat to sub-editors
-        if use_merge {
-            if let Some(merge) = &self.merge_state {
-                let (scroll_y, active_idx) = {
-                    let stoat = self.stoat.read(cx);
-                    (stoat.scroll_position().y, stoat.conflict_state.conflict_idx)
-                };
-                for sub_view in [&merge.ours_view, &merge.result_view, &merge.theirs_view] {
-                    let sub_view = sub_view.clone();
-                    sub_view.update(cx, |ev, cx| {
-                        ev.stoat.update(cx, |s, _| {
-                            s.set_scroll_position(gpui::point(0.0, scroll_y));
-                            s.active_merge_conflict_idx = Some(active_idx);
-                        });
-                    });
-                }
-            }
         }
 
         let child: AnyElement = if use_merge {

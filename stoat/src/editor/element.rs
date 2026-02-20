@@ -5,7 +5,7 @@
 
 use crate::{
     buffer::display::{DiffOrigin, DisplayRow as BufferDisplayRow},
-    editor::{merge::align::MergeHighlightRange, style::EditorStyle, view::EditorView},
+    editor::{style::EditorStyle, view::EditorView},
     git::{
         conflict::ConflictSide,
         diff::{BufferDiff, DiffHunkStatus},
@@ -15,8 +15,8 @@ use crate::{
 };
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
-    FontWeight, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString,
-    Style, TextRun, UnderlineStyle, Window,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
+    SharedString, Style, TextRun, UnderlineStyle, Window,
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoat_lsp::BufferDiagnostic;
@@ -144,12 +144,16 @@ impl Element for EditorElement {
         let visible_lines_precise = (bounds.size.height - self.style.padding * 2.0) / line_height;
         let max_lines = visible_lines_precise.floor() as u32;
 
-        // Set viewport lines on Stoat and get scroll position
+        // Set viewport lines on Stoat and get scroll position (pull from source if set)
         let stoat_entity = self.view.read(cx).stoat.clone();
-        let scroll_y = stoat_entity.update(cx, |stoat, _cx| {
+        let scroll_y = stoat_entity.update(cx, |stoat, cx| {
             stoat.set_viewport_lines(visible_lines_precise);
             stoat.update_scroll_animation();
-            stoat.scroll_position().y
+            if let Some(source) = &stoat.scroll_source {
+                source.read(cx).scroll_position().y
+            } else {
+                stoat.scroll_position().y
+            }
         });
 
         // Calculate gutter width (minimap has no gutter)
@@ -362,6 +366,7 @@ impl Element for EditorElement {
                         y_position: y,
                         diff_status: row_info.diff_status,
                         diff_origin: row_info.diff_origin,
+                        row_background: None,
                     });
                 } else {
                     // Phantom row (deleted content): plain text with deleted color
@@ -402,6 +407,7 @@ impl Element for EditorElement {
                         y_position: y,
                         diff_status: row_info.diff_status,
                         diff_origin: row_info.diff_origin,
+                        row_background: None,
                     });
                 }
 
@@ -477,6 +483,7 @@ impl Element for EditorElement {
                     y_position: y,
                     diff_status: diff_row_info.and_then(|r| r.diff_status),
                     diff_origin: diff_row_info.map(|r| r.diff_origin).unwrap_or_default(),
+                    row_background: None,
                 });
 
                 y += line_height;
@@ -735,17 +742,124 @@ impl Element for EditorElement {
             );
         }
 
-        let (conflicts, merge_highlights, active_conflict_idx) = {
+        // Compute row background highlights (single pass, replaces 3 separate paint functions)
+        {
             let stoat = self.view.read(cx).stoat.read(cx);
-            let conflicts = stoat.active_buffer(cx).read(cx).conflicts().to_vec();
             let merge_highlights = stoat.merge_highlight_rows.clone();
-            let active_conflict_idx = if stoat.is_in_conflict_review() {
+            let conflicts = stoat.active_buffer(cx).read(cx).conflicts().to_vec();
+            let active_conflict_idx = if let Some(source) = &stoat.scroll_source {
+                let src = source.read(cx);
+                if src.is_in_conflict_review() {
+                    Some(src.conflict_state.conflict_idx)
+                } else {
+                    None
+                }
+            } else if stoat.is_in_conflict_review() {
                 Some(stoat.conflict_state.conflict_idx)
             } else {
-                stoat.active_merge_conflict_idx
+                None
             };
-            (conflicts, merge_highlights, active_conflict_idx)
-        };
+
+            if !merge_highlights.is_empty() {
+                for layout in &mut line_layouts {
+                    if let Some(row) = layout.buffer_row {
+                        if let Some(h) = merge_highlights
+                            .iter()
+                            .find(|h| row >= h.start_row && row <= h.end_row)
+                        {
+                            let base = match h.side {
+                                ConflictSide::Ours => self.style.conflict_ours_color,
+                                ConflictSide::Theirs => self.style.conflict_theirs_color,
+                                ConflictSide::Both => self.style.conflict_ours_color,
+                            };
+                            let alpha = if active_conflict_idx == Some(h.conflict_idx) {
+                                0.25
+                            } else {
+                                0.06
+                            };
+                            layout.row_background = Some(Hsla {
+                                h: base.h,
+                                s: base.s,
+                                l: base.l,
+                                a: alpha,
+                            });
+                        }
+                    }
+                }
+            } else if !conflicts.is_empty() {
+                for layout in &mut line_layouts {
+                    let Some(buffer_row) = layout.buffer_row else {
+                        continue;
+                    };
+                    let match_result = conflicts.iter().enumerate().find_map(|(idx, c)| {
+                        if buffer_row < c.start_row || buffer_row > c.end_row {
+                            return None;
+                        }
+                        let color = if buffer_row == c.start_row
+                            || buffer_row == c.end_row
+                            || buffer_row == c.separator_row
+                        {
+                            self.style.conflict_marker_color
+                        } else if buffer_row < c.separator_row {
+                            self.style.conflict_ours_color
+                        } else {
+                            self.style.conflict_theirs_color
+                        };
+                        Some((idx, color))
+                    });
+                    if let Some((conflict_idx, base_color)) = match_result {
+                        let is_active = active_conflict_idx == Some(conflict_idx);
+                        let alpha = if is_active { 0.25 } else { 0.06 };
+                        layout.row_background = Some(Hsla {
+                            h: base_color.h,
+                            s: base_color.s,
+                            l: base_color.l,
+                            a: alpha,
+                        });
+                    }
+                }
+            } else if is_in_diff_review {
+                for layout in &mut line_layouts {
+                    if let Some(status) = layout.diff_status {
+                        let base = match (status, layout.diff_origin) {
+                            (DiffHunkStatus::Added, DiffOrigin::Committed) => {
+                                self.style.diff_committed_added_color
+                            },
+                            (DiffHunkStatus::Modified, DiffOrigin::Committed) => {
+                                self.style.diff_committed_modified_color
+                            },
+                            (DiffHunkStatus::Deleted, DiffOrigin::Committed) => {
+                                self.style.diff_committed_deleted_color
+                            },
+                            (DiffHunkStatus::Added, DiffOrigin::Staged) => {
+                                self.style.diff_staged_added_color
+                            },
+                            (DiffHunkStatus::Modified, DiffOrigin::Staged) => {
+                                self.style.diff_staged_modified_color
+                            },
+                            (DiffHunkStatus::Deleted, DiffOrigin::Staged) => {
+                                self.style.diff_staged_deleted_color
+                            },
+                            (DiffHunkStatus::Added, DiffOrigin::Unstaged) => {
+                                self.style.diff_added_color
+                            },
+                            (DiffHunkStatus::Modified, DiffOrigin::Unstaged) => {
+                                self.style.diff_modified_color
+                            },
+                            (DiffHunkStatus::Deleted, DiffOrigin::Unstaged) => {
+                                self.style.diff_deleted_color
+                            },
+                        };
+                        layout.row_background = Some(Hsla {
+                            h: base.h,
+                            s: base.s,
+                            l: base.l,
+                            a: 0.15,
+                        });
+                    }
+                }
+            }
+        }
 
         EditorPrepaintState {
             line_layouts,
@@ -763,9 +877,6 @@ impl Element for EditorElement {
             active_hunk_y,
             line_select_indicators,
             line_select_cursor_y,
-            conflicts,
-            active_conflict_idx,
-            merge_highlights,
         }
     }
 
@@ -808,32 +919,8 @@ impl Element for EditorElement {
         // ===== FAST PATH: Just paint the pre-shaped lines from prepaint =====
         // All expensive work (syntax highlighting + text shaping) was done in prepaint()
 
-        // Paint full-width background bars for diff rows (before text)
-        self.paint_diff_backgrounds(
-            bounds,
-            &prepaint.line_layouts,
-            prepaint.gutter_width,
-            window,
-            cx,
-        );
-
-        // Paint conflict region backgrounds (visible in all modes when conflicts exist)
-        self.paint_conflict_backgrounds(
-            bounds,
-            &prepaint.line_layouts,
-            &prepaint.conflicts,
-            prepaint.active_conflict_idx,
-            window,
-        );
-
-        // Paint merge highlight backgrounds (for sub-editors in 3-way merge view)
-        self.paint_merge_highlights(
-            bounds,
-            &prepaint.line_layouts,
-            &prepaint.merge_highlights,
-            prepaint.active_conflict_idx,
-            window,
-        );
+        // Paint row backgrounds (diff/conflict/merge highlights computed in prepaint)
+        self.paint_row_backgrounds(bounds, &prepaint.line_layouts, window);
 
         // Paint line selection cursor highlight bar
         if let Some(cursor_y) = prepaint.line_select_cursor_y {
@@ -1165,188 +1252,21 @@ impl EditorElement {
         }
     }
 
-    /// Paint full-width background bars for diff rows.
-    ///
-    /// Paints subtle colored rectangles spanning from gutter edge to right edge
-    /// for all rows with diff status. These provide visual context for changes.
-    fn paint_diff_backgrounds(
+    fn paint_row_backgrounds(
         &self,
         bounds: Bounds<Pixels>,
         line_layouts: &[ShapedLineLayout],
-        _gutter_width: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let stoat = self.view.read(cx).stoat.read(cx);
-        let is_in_diff_review = stoat.is_in_diff_review(cx);
-
-        // Only paint backgrounds in review mode
-        if !is_in_diff_review {
-            return;
-        }
-
-        for layout in line_layouts {
-            if let Some(status) = layout.diff_status {
-                let base_color = match (status, layout.diff_origin) {
-                    (DiffHunkStatus::Added, DiffOrigin::Committed) => {
-                        self.style.diff_committed_added_color
-                    },
-                    (DiffHunkStatus::Modified, DiffOrigin::Committed) => {
-                        self.style.diff_committed_modified_color
-                    },
-                    (DiffHunkStatus::Deleted, DiffOrigin::Committed) => {
-                        self.style.diff_committed_deleted_color
-                    },
-                    (DiffHunkStatus::Added, DiffOrigin::Staged) => {
-                        self.style.diff_staged_added_color
-                    },
-                    (DiffHunkStatus::Modified, DiffOrigin::Staged) => {
-                        self.style.diff_staged_modified_color
-                    },
-                    (DiffHunkStatus::Deleted, DiffOrigin::Staged) => {
-                        self.style.diff_staged_deleted_color
-                    },
-                    (DiffHunkStatus::Added, DiffOrigin::Unstaged) => self.style.diff_added_color,
-                    (DiffHunkStatus::Modified, DiffOrigin::Unstaged) => {
-                        self.style.diff_modified_color
-                    },
-                    (DiffHunkStatus::Deleted, DiffOrigin::Unstaged) => {
-                        self.style.diff_deleted_color
-                    },
-                };
-
-                // Make it very subtle for full-width backgrounds (15% opacity in review mode)
-                let background_color = gpui::Hsla {
-                    h: base_color.h,
-                    s: base_color.s,
-                    l: base_color.l,
-                    a: 0.15,
-                };
-
-                // Paint full-width background bar
-                let bar_bounds = Bounds {
-                    origin: point(bounds.origin.x, layout.y_position),
-                    size: size(bounds.size.width, self.style.line_height),
-                };
-
-                window.paint_quad(gpui::PaintQuad {
-                    bounds: bar_bounds,
-                    corner_radii: 0.0.into(),
-                    background: background_color.into(),
-                    border_color: gpui::transparent_black(),
-                    border_widths: 0.0.into(),
-                    border_style: gpui::BorderStyle::default(),
-                });
-            }
-        }
-    }
-
-    fn paint_conflict_backgrounds(
-        &self,
-        bounds: Bounds<Pixels>,
-        line_layouts: &[ShapedLineLayout],
-        conflicts: &[crate::git::conflict::ConflictRegion],
-        active_conflict_idx: Option<usize>,
         window: &mut Window,
     ) {
-        if conflicts.is_empty() {
-            return;
-        }
-
         for layout in line_layouts {
-            let Some(buffer_row) = layout.buffer_row else {
-                continue;
-            };
-
-            let match_result = conflicts.iter().enumerate().find_map(|(idx, c)| {
-                if buffer_row < c.start_row || buffer_row > c.end_row {
-                    return None;
-                }
-                let color = if buffer_row == c.start_row
-                    || buffer_row == c.end_row
-                    || buffer_row == c.separator_row
-                {
-                    self.style.conflict_marker_color
-                } else if buffer_row < c.separator_row {
-                    self.style.conflict_ours_color
-                } else {
-                    self.style.conflict_theirs_color
-                };
-                Some((idx, color))
-            });
-
-            if let Some((conflict_idx, base_color)) = match_result {
-                let is_active = active_conflict_idx == Some(conflict_idx);
-                let alpha = if is_active { 0.25 } else { 0.06 };
-
-                let background_color = gpui::Hsla {
-                    h: base_color.h,
-                    s: base_color.s,
-                    l: base_color.l,
-                    a: alpha,
-                };
-
-                let bar_bounds = Bounds {
-                    origin: point(bounds.origin.x, layout.y_position),
-                    size: size(bounds.size.width, self.style.line_height),
-                };
-
-                window.paint_quad(gpui::PaintQuad {
-                    bounds: bar_bounds,
-                    corner_radii: 0.0.into(),
-                    background: background_color.into(),
-                    border_color: gpui::transparent_black(),
-                    border_widths: 0.0.into(),
-                    border_style: gpui::BorderStyle::default(),
-                });
-            }
-        }
-    }
-    fn paint_merge_highlights(
-        &self,
-        bounds: Bounds<Pixels>,
-        line_layouts: &[ShapedLineLayout],
-        highlights: &[MergeHighlightRange],
-        active_conflict_idx: Option<usize>,
-        window: &mut Window,
-    ) {
-        if highlights.is_empty() {
-            return;
-        }
-
-        for layout in line_layouts {
-            let Some(buffer_row) = layout.buffer_row else {
-                continue;
-            };
-
-            let highlight = highlights
-                .iter()
-                .find(|h| buffer_row >= h.start_row && buffer_row <= h.end_row);
-
-            if let Some(h) = highlight {
-                let base_color = match h.side {
-                    ConflictSide::Ours => self.style.conflict_ours_color,
-                    ConflictSide::Theirs => self.style.conflict_theirs_color,
-                    ConflictSide::Both => self.style.conflict_ours_color,
-                };
-
-                let is_active = active_conflict_idx == Some(h.conflict_idx);
-                let alpha = if is_active { 0.25 } else { 0.06 };
-
-                let background_color = gpui::Hsla {
-                    h: base_color.h,
-                    s: base_color.s,
-                    l: base_color.l,
-                    a: alpha,
-                };
-
+            if let Some(bg) = layout.row_background {
                 window.paint_quad(gpui::PaintQuad {
                     bounds: Bounds {
                         origin: point(bounds.origin.x, layout.y_position),
                         size: size(bounds.size.width, self.style.line_height),
                     },
                     corner_radii: 0.0.into(),
-                    background: background_color.into(),
+                    background: bg.into(),
                     border_color: gpui::transparent_black(),
                     border_widths: 0.0.into(),
                     border_style: gpui::BorderStyle::default(),
@@ -1587,12 +1507,6 @@ pub struct EditorPrepaintState {
     pub line_select_indicators: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Y position of the cursor line during line_select mode
     pub line_select_cursor_y: Option<Pixels>,
-    /// Parsed conflict regions for the current buffer
-    pub conflicts: Vec<crate::git::conflict::ConflictRegion>,
-    /// Index of the active conflict in conflict review mode
-    pub active_conflict_idx: Option<usize>,
-    /// Merge highlight ranges for sub-editors in 3-way merge view
-    pub merge_highlights: Vec<MergeHighlightRange>,
 }
 
 /// A single line that has been shaped and is ready to paint.
@@ -1612,6 +1526,8 @@ pub struct ShapedLineLayout {
     pub diff_status: Option<DiffHunkStatus>,
     /// Origin of this row's diff change (unstaged, staged, or committed)
     pub diff_origin: DiffOrigin,
+    /// Full-width row background color (computed in prepaint from diff/conflict/merge state)
+    pub row_background: Option<Hsla>,
 }
 
 impl DisplayRow for ShapedLineLayout {

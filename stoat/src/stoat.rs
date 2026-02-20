@@ -301,8 +301,8 @@ pub struct Stoat {
     /// Highlight ranges for merge sub-editors (ours/result/theirs columns).
     pub(crate) merge_highlight_rows: Vec<crate::editor::merge::align::MergeHighlightRange>,
 
-    /// Active conflict index propagated from the main stoat to merge sub-editors.
-    pub(crate) active_merge_conflict_idx: Option<usize>,
+    /// Source stoat for scroll/conflict synchronization (set on merge sub-editors).
+    pub(crate) scroll_source: Option<Entity<Stoat>>,
 
     /// Line-level selection within a hunk for partial staging.
     pub(crate) line_selection: Option<crate::git::line_selection::LineSelection>,
@@ -520,7 +520,7 @@ impl Stoat {
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
             merge_display_row_count: None,
             merge_highlight_rows: Vec::new(),
-            active_merge_conflict_idx: None,
+            scroll_source: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: HashMap::new(),
@@ -614,7 +614,7 @@ impl Stoat {
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
             merge_display_row_count: None,
             merge_highlight_rows: Vec::new(),
-            active_merge_conflict_idx: None,
+            scroll_source: None,
             line_selection: None,
             current_file_path: self.current_file_path.clone(),
             buffer_versions: self.buffer_versions.clone(),
@@ -1776,7 +1776,7 @@ impl Stoat {
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
             merge_display_row_count: None,
             merge_highlight_rows: Vec::new(),
-            active_merge_conflict_idx: None,
+            scroll_source: None,
             line_selection: None,
             current_file_path: None,
             buffer_versions: self.buffer_versions.clone(),
