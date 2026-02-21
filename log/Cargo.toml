@@ -8,4 +8,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+dirs.workspace = true
+tracing-appender.workspace = true
 tracing-subscriber.workspace = true

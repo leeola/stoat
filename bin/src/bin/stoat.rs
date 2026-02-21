@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::{collections::HashMap, path::PathBuf};
+use stoat::log::{LogConfig, LogGuard};
 
 #[derive(Parser)]
 #[command(name = "stoat")]
@@ -27,6 +28,9 @@ pub enum Command {
 
         #[arg(long, help = "Set log level (info, debug, trace)")]
         log: Option<String>,
+
+        #[arg(long, env = "STOAT_LOG_FILE", help = "Override log file path")]
+        log_file: Option<PathBuf>,
 
         #[cfg(debug_assertions)]
         #[arg(long, help = "Auto-quit after N seconds (dev builds only)")]
@@ -102,22 +106,37 @@ fn main() {
         return;
     }
 
-    // Set STOAT_LOG env var if --log flag was provided
-    if let Some(Command::Gui {
+    // Extract log options from the Gui command before initializing
+    let log_file_path = if let Some(Command::Gui {
         log: Some(ref log_level),
+        log_file: ref lf,
         ..
     }) = cli.command
     {
         std::env::set_var("STOAT_LOG", log_level);
-    }
+        lf.clone()
+    } else if let Some(Command::Gui {
+        log_file: ref lf, ..
+    }) = cli.command
+    {
+        lf.clone()
+    } else {
+        None
+    };
 
-    // Initialize logging with STOAT_LOG support
-    if let Err(e) = stoat::log::init() {
-        eprintln!("Failed to initialize logging: {e}");
-        std::process::exit(1);
-    }
+    let _log_guard: LogGuard = match stoat::log::init(LogConfig { log_file_path }) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("Failed to initialize logging: {e}");
+            std::process::exit(1);
+        },
+    };
 
-    tracing::info!("Starting Stoat editor");
+    tracing::info!(
+        pid = std::process::id(),
+        log_file = %_log_guard.log_file.display(),
+        "Starting Stoat editor"
+    );
 
     let build_info = stoat::build_info::build_info();
     tracing::info!(
@@ -133,6 +152,7 @@ fn main() {
             cwd,
             input,
             log: _,
+            log_file: _,
             #[cfg(debug_assertions)]
             timeout,
             paths,

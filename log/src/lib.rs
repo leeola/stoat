@@ -1,67 +1,130 @@
-//! Logging setup for Stoat with user-friendly environment variable controls.
+//! Logging setup for Stoat with file output and optional stdout.
 //!
-//! ## User Experience
+//! Logs always go to a file at `warn` level (or higher if `--log` is set).
+//! Stdout logging is enabled when `STOAT_LOG` or `RUST_LOG` is set, or in debug builds.
 //!
-//! ### Basic Usage (90% of users)
-//!
-//! ```bash
-//! # Default: quiet, only important messages
-//! stoat
-//!
-//! # Debug level for all stoat crates
-//! STOAT_LOG=debug stoat
-//!
-//! # Trace level for all stoat crates
-//! STOAT_LOG=trace stoat
-//! ```
-//!
-//! ### Advanced Usage
-//!
-//! ```bash
-//! # Module-specific levels using STOAT_LOG
-//! STOAT_LOG=stoat_core=debug,stoat_gui=trace stoat
-//!
-//! # Complex filtering with any tracing syntax
-//! STOAT_LOG=warn,stoat_core::node=trace,iced=error stoat
-//!
-//! # Full control with RUST_LOG (STOAT_LOG takes precedence if both set)
-//! RUST_LOG=debug stoat
-//! ```
-//!
-//! ## Environment Variable Priority
+//! ## Environment Variables
 //!
 //! 1. **`STOAT_LOG`** (highest priority) - Stoat-specific logging control
 //! 2. **`RUST_LOG`** - Standard tracing environment variable
 //! 3. **Default** - `warn` globally, `info` for stoat crates
 //!
-//! ## Implementation Details
+//! ## Log File Location
 //!
-//! The [`init`] function uses [`tracing_subscriber`] with [`EnvFilter`] to provide
-//! logging control. All functions are designed to be safe - they will not crash if called
-//! multiple times or if logging is already initialized.
+//! Default: `<data_local_dir>/stoat/logs/stoat-<pid>.log`
+//! - macOS: `~/Library/Application Support/stoat/logs/stoat-12345.log`
+//! - Linux: `~/.local/share/stoat/logs/stoat-12345.log`
+//!
+//! Override with `--log-file <path>` or `STOAT_LOG_FILE`.
 
-use std::env;
-use tracing_subscriber::{fmt, EnvFilter};
+use std::{env, path::PathBuf};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{
+    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
+};
+
+/// Returned from [`init`]; must be held alive to ensure log file flushing.
+pub struct LogGuard {
+    _file_guard: WorkerGuard,
+    pub log_file: PathBuf,
+}
+
+pub struct LogConfig {
+    pub log_file_path: Option<PathBuf>,
+}
 
 /// Initialize logging.
 ///
 /// This function respects the environment variable priority described in the module docs:
 /// [`STOAT_LOG`] > [`RUST_LOG`] > default settings.
 ///
-/// Safe to call multiple times - will not crash if logging is already initialized.
-pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// The returned [`LogGuard`] must be held for the lifetime of the program --
+/// dropping it flushes and stops the background file writer.
+///
+/// Safe to call multiple times -- will not crash if logging is already initialized.
+pub fn init(config: LogConfig) -> Result<LogGuard, Box<dyn std::error::Error + Send + Sync>> {
+    let log_dir_and_filename = resolve_log_path(config.log_file_path);
+    let (log_dir, filename) = match &log_dir_and_filename {
+        Some((dir, name)) => (dir.as_path(), name.as_str()),
+        None => unreachable!(),
+    };
+
+    std::fs::create_dir_all(log_dir).ok();
+
+    let file_appender = tracing_appender::rolling::never(log_dir, filename);
+    let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_filter = create_file_filter()?;
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking_file)
+        .with_ansi(false)
+        .with_filter(file_filter);
+
+    let stdout_enabled =
+        env::var("STOAT_LOG").is_ok() || env::var("RUST_LOG").is_ok() || cfg!(debug_assertions);
+
+    let stdout_layer = if stdout_enabled {
+        Some(fmt::layer().with_filter(create_filter()?))
+    } else {
+        None
+    };
+
+    Registry::default()
+        .with(file_layer)
+        .with(stdout_layer)
+        .try_init()?;
+
+    Ok(LogGuard {
+        _file_guard: file_guard,
+        log_file: log_dir.join(filename),
+    })
+}
+
+/// Initialize logging for tests.
+///
+/// Identical to [`init`] but stdout-only (no file output), with a name that makes it
+/// clear this is safe for test usage. Will not crash if called multiple times or if
+/// logging is already initialized by another test.
+#[allow(clippy::let_unit_value)]
+pub fn test() {
+    let _ = test_init();
+}
+
+fn test_init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let filter = create_filter()?;
     fmt().with_env_filter(filter).try_init()?;
     Ok(())
 }
 
-/// Initialize logging for tests.
-///
-/// Identical to [`init`] but with a name that makes it clear this is safe for test usage.
-/// Will not crash if called multiple times or if logging is already initialized by another test.
-#[allow(clippy::let_unit_value)]
-pub fn test() {
-    let _ = init();
+fn resolve_log_path(override_path: Option<PathBuf>) -> Option<(PathBuf, String)> {
+    let filename = format!("stoat-{}.log", std::process::id());
+
+    if let Some(path) = override_path {
+        if path.extension().is_some() {
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(filename);
+            return Some((dir.to_path_buf(), name));
+        }
+        return Some((path, filename));
+    }
+
+    let dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("stoat")
+        .join("logs");
+
+    Some((dir, filename))
+}
+
+/// File filter: uses user-specified level if set, otherwise defaults to `warn`.
+fn create_file_filter() -> Result<EnvFilter, Box<dyn std::error::Error + Send + Sync>> {
+    if env::var("STOAT_LOG").is_ok() || env::var("RUST_LOG").is_ok() {
+        return create_filter();
+    }
+    Ok(EnvFilter::new("warn"))
 }
 
 /// Create the appropriate [`EnvFilter`] based on environment variables.
@@ -92,14 +155,6 @@ fn create_filter() -> Result<EnvFilter, Box<dyn std::error::Error + Send + Sync>
 /// This function provides the user-friendly experience where:
 /// - `STOAT_LOG=debug` becomes `warn,stoat=debug,stoat_core=debug,...`
 /// - `STOAT_LOG=stoat_core=trace,stoat=debug` is used as-is (advanced syntax)
-///
-/// # Arguments
-///
-/// * `stoat_log` - The value of the [`STOAT_LOG`] environment variable
-///
-/// # Returns
-///
-/// An [`EnvFilter`] configured according to the [`STOAT_LOG`] value.
 fn expand_stoat_log(stoat_log: &str) -> EnvFilter {
     // If the STOAT_LOG contains module-specific syntax (contains '=', ':', or ','),
     // use it as-is to allow advanced usage like STOAT_LOG=stoat_core=debug,stoat_gui=trace
@@ -107,7 +162,6 @@ fn expand_stoat_log(stoat_log: &str) -> EnvFilter {
         return EnvFilter::new(stoat_log);
     }
 
-    // Otherwise, treat it as a simple level and apply to all stoat crates
     EnvFilter::new(format!(
         "warn,stoat={stoat_log},stoat_core={stoat_log},stoat_bin={stoat_log},stoat_gui={stoat_log},stoat_text={stoat_log},stoat_display_map={stoat_log}"
     ))
