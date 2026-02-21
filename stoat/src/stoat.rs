@@ -54,6 +54,13 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
+    pub fn is_text_input_overlay(&self) -> bool {
+        matches!(
+            self,
+            Self::CommandPalette | Self::FileFinder | Self::BufferFinder
+        )
+    }
+
     /// Get the string representation for GPUI KeyContext.
     pub fn as_str(&self) -> &'static str {
         match self {

@@ -1,11 +1,8 @@
 use crate::{
     claude::state::{ChatMessage, ClaudeState, ClaudeStateEvent, ClaudeStatus},
     content_view::{ContentView, ViewType},
-    keymap::{
-        compiled::CompiledKey,
-        dispatch::{dispatch_editor_action, dispatch_pane_action},
-    },
-    stoat::{KeyContext, Stoat},
+    keymap::dispatch::handle_key_common,
+    stoat::Stoat,
 };
 use gpui::{
     div, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
@@ -77,49 +74,20 @@ impl ClaudeView {
             }
         }
 
-        let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
-
-        let matched_action = {
-            let stoat = self.stoat.read(cx);
-            stoat
-                .compiled_keymap
-                .lookup(&compiled_key, stoat)
-                .map(|binding| binding.action.clone())
-        };
-
-        if let Some(action) = matched_action {
-            if dispatch_editor_action(&self.stoat, &action, cx) {
-                cx.notify();
-                return;
-            }
-            if dispatch_pane_action(&self.stoat, &action, cx) {
-                cx.notify();
-                return;
-            }
+        if handle_key_common(&self.stoat, event, cx) {
+            cx.notify();
             return;
         }
 
-        let key_context = self.stoat.read(cx).key_context();
-        let is_overlay = matches!(
-            key_context,
-            KeyContext::CommandPalette | KeyContext::FileFinder | KeyContext::BufferFinder
-        );
-
-        if is_overlay || mode == "insert" {
+        // Claude-specific: insert text in Claude insert mode
+        if mode == "insert" {
             if let Some(key_char) = &event.keystroke.key_char {
                 if !key_char.is_empty()
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
                 {
-                    if is_overlay {
-                        self.stoat.update(cx, |stoat, cx| {
-                            stoat.insert_text(key_char, cx);
-                        });
-                    } else {
-                        self.state.update(cx, |s, _| {
-                            s.input_text.push_str(key_char);
-                        });
-                    }
+                    self.state
+                        .update(cx, |s, _| s.input_text.push_str(key_char));
                     cx.notify();
                 }
             }

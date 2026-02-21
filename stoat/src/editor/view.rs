@@ -2,10 +2,7 @@ use crate::{
     buffer::item::BufferItemEvent,
     editor::{element::EditorElement, merge::align::extract_merge_content, style::EditorStyle},
     git::conflict::ConflictViewKind,
-    keymap::{
-        compiled::CompiledKey,
-        dispatch::{dispatch_editor_action, dispatch_pane_action},
-    },
+    keymap::dispatch::handle_key_common,
     scroll,
     stoat::{KeyContext, Stoat},
 };
@@ -336,66 +333,21 @@ impl EditorView {
             }
         }
 
-        let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
-
-        // Look up in compiled keymap
-        let matched_action = {
-            let stoat = self.stoat.read(cx);
-            stoat
-                .compiled_keymap
-                .lookup(&compiled_key, stoat)
-                .map(|binding| binding.action.clone())
-        };
-
-        if let Some(action) = matched_action {
-            // Capture mode before dispatch for auto-revert transient modes
-            let mode_before = self.stoat.read(cx).mode().to_string();
-
-            if dispatch_editor_action(&self.stoat, &action, cx) {
-                // Auto-revert transient modes back to normal after action
-                let is_transient = mode_before == "goto" || mode_before == "buffer";
-                if is_transient && self.stoat.read(cx).mode() == mode_before {
-                    self.stoat
-                        .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
-                }
-                self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
-                cx.notify();
-                return;
-            }
-            if dispatch_pane_action(&self.stoat, &action, cx) {
-                let is_transient = mode_before == "goto" || mode_before == "buffer";
-                if is_transient && self.stoat.read(cx).mode() == mode_before {
-                    self.stoat
-                        .update(cx, |stoat, cx| stoat.set_mode_by_name("normal", cx));
-                }
-                self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
-                cx.notify();
-                return;
-            }
-            self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
+        if handle_key_common(&self.stoat, event, cx) {
+            cx.notify();
             return;
         }
 
-        // No keymap match: InsertText fallback for text-input contexts
+        // Editor-specific: insert text in TextEditor insert mode
         let key_context = self.stoat.read(cx).key_context();
         let mode = self.stoat.read(cx).mode().to_string();
-
-        let should_insert = match key_context {
-            KeyContext::FileFinder | KeyContext::CommandPalette | KeyContext::BufferFinder => true,
-            KeyContext::TextEditor => mode == "insert",
-            _ => false,
-        };
-
-        if should_insert {
+        if key_context == KeyContext::TextEditor && mode == "insert" {
             if let Some(key_char) = &event.keystroke.key_char {
-                self.stoat.update(cx, |stoat, cx| {
-                    stoat.insert_text(key_char, cx);
-                });
+                self.stoat
+                    .update(cx, |stoat, cx| stoat.insert_text(key_char, cx));
                 cx.notify();
             }
         }
-
-        self.stoat.update(cx, |stoat, _| stoat.pending_count = None);
     }
 }
 

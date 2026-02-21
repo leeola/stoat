@@ -1,9 +1,55 @@
 use crate::{
-    keymap::compiled::{action_first_string_arg, action_name},
+    keymap::compiled::{action_first_string_arg, action_name, CompiledKey},
     stoat::{KeyContext, Stoat, StoatEvent},
 };
-use gpui::{AppContext, Entity};
+use gpui::{App, AppContext, Entity, KeyDownEvent};
 use stoat_config::ActionExpr;
+
+/// Shared key-down pipeline: keymap lookup, action dispatch, transient mode
+/// auto-revert, overlay text input, and pending_count clear.
+///
+/// Returns `true` if the key was consumed (callers should `cx.notify()` and return).
+/// Returns `false` if the key was unmatched and the caller should handle its own
+/// insert-mode text input.
+pub fn handle_key_common(stoat: &Entity<Stoat>, event: &KeyDownEvent, cx: &mut App) -> bool {
+    let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
+
+    let matched_action = {
+        let s = stoat.read(cx);
+        s.compiled_keymap
+            .lookup(&compiled_key, s)
+            .map(|binding| binding.action.clone())
+    };
+
+    if let Some(action) = matched_action {
+        let mode_before = stoat.read(cx).mode().to_string();
+
+        let dispatched =
+            dispatch_editor_action(stoat, &action, cx) || dispatch_pane_action(stoat, &action, cx);
+
+        if dispatched {
+            let is_transient = mode_before == "goto" || mode_before == "buffer";
+            if is_transient && stoat.read(cx).mode() == mode_before {
+                stoat.update(cx, |s, cx| s.set_mode_by_name("normal", cx));
+            }
+        }
+        stoat.update(cx, |s, _| s.pending_count = None);
+        return dispatched;
+    }
+
+    // No keymap match -- handle overlay text input
+    let key_context = stoat.read(cx).key_context();
+    if key_context.is_text_input_overlay() {
+        if let Some(key_char) = &event.keystroke.key_char {
+            stoat.update(cx, |s, cx| s.insert_text(key_char, cx));
+        }
+        stoat.update(cx, |s, _| s.pending_count = None);
+        return true;
+    }
+
+    stoat.update(cx, |s, _| s.pending_count = None);
+    false
+}
 
 /// Dispatch an editor-level action directly on the [`Stoat`] entity.
 ///
