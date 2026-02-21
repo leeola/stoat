@@ -285,7 +285,6 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     registry.register::<crate::actions::DiffReviewResetProgress>();
     registry.register::<crate::actions::DiffReviewDismiss>();
     registry.register::<crate::actions::DiffReviewCycleComparisonMode>();
-    registry.register::<crate::actions::DiffReviewPreviousCommit>();
     registry.register::<crate::actions::DiffReviewRevertHunk>();
     registry.register::<crate::actions::DiffReviewToggleFollow>();
 

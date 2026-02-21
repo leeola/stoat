@@ -11,7 +11,7 @@
 //!
 //! Renders as a small fixed-height bar at the bottom of the window.
 
-use crate::git::diff_review::{ReviewScope, ViewFilter};
+use crate::git::diff_review::DiffSource;
 use gpui::{div, px, rgb, IntoElement, ParentElement, RenderOnce, Styled};
 
 /// Status bar component showing file path, git status, and mode.
@@ -35,8 +35,8 @@ pub struct StatusBar {
     review_file_progress: Option<(usize, usize)>,
     /// Hunk position: (current_hunk, total_hunks) across all files
     hunk_position: Option<(usize, usize)>,
-    /// Scope and filter (only shown in diff_review mode)
-    scope_filter: Option<(ReviewScope, ViewFilter)>,
+    /// Diff source (only shown in diff_review mode)
+    diff_source: Option<DiffSource>,
     /// LSP status string for display
     lsp_status: String,
     /// Temporary flash message (replaces file path when present)
@@ -58,7 +58,7 @@ impl StatusBar {
         _review_progress: Option<(usize, usize)>,
         review_file_progress: Option<(usize, usize)>,
         hunk_position: Option<(usize, usize)>,
-        scope_filter: Option<(ReviewScope, ViewFilter)>,
+        diff_source: Option<DiffSource>,
         lsp_status: String,
         flash_message: Option<String>,
         follow_active: bool,
@@ -71,7 +71,7 @@ impl StatusBar {
             file_path,
             review_file_progress,
             hunk_position,
-            scope_filter,
+            diff_source,
             lsp_status,
             flash_message,
             follow_active,
@@ -180,7 +180,7 @@ impl RenderOnce for StatusBar {
         let git_branch = self.git_branch_display();
         let git_wt_status = self.working_tree_status_display();
 
-        let in_review_mode = self.scope_filter.is_some()
+        let in_review_mode = self.diff_source.is_some()
             || self.hunk_position.is_some()
             || self.review_file_progress.is_some()
             || self.conflict_info.is_some();
@@ -200,13 +200,8 @@ impl RenderOnce for StatusBar {
         let center_div = if in_review_mode {
             let mut center = div().flex().items_center().gap_2();
 
-            if let Some((scope, filter)) = self.scope_filter {
-                let mode_text = match scope {
-                    ReviewScope::Commit => "[Commit \u{00b7} HEAD]".to_string(),
-                    ReviewScope::WorkingTree => {
-                        format!("[Working Tree \u{00b7} {}]", filter.display_name())
-                    },
-                };
+            if let Some(source) = self.diff_source {
+                let mode_text = format!("[{}]", source.display_name());
                 center = center
                     .child(div().text_color(rgb(0x4ec9b0)).child(mode_text))
                     .child(div().text_color(rgb(0x808080)).child("|"));

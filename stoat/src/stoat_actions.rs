@@ -294,7 +294,7 @@ impl Stoat {
         self.cursor.move_to(text::Point::new(0, 0));
     }
 
-    /// Capture current per-file hunk counts into [`ScopeState::last_hunk_snapshot`].
+    /// Capture current per-file hunk counts into [`DiffReviewState::last_hunk_snapshot`].
     pub(crate) fn refresh_review_hunk_snapshot(&mut self) {
         let root_path = self.worktree.lock().root().to_path_buf();
         let repo = match crate::git::repository::Repository::discover(&root_path) {
@@ -350,17 +350,23 @@ impl Stoat {
             Err(_) => return,
         };
 
-        let entries = match crate::git::status::gather_git_status(repo.inner()) {
-            Ok(entries) => entries,
-            Err(_) => return,
+        let new_files: Vec<std::path::PathBuf> = if self.review_state.source.is_commit() {
+            match repo.commit_changed_files() {
+                Ok(paths) => paths,
+                Err(_) => return,
+            }
+        } else {
+            let entries = match crate::git::status::gather_git_status(repo.inner()) {
+                Ok(entries) => entries,
+                Err(_) => return,
+            };
+            let mut seen = std::collections::HashSet::new();
+            entries
+                .into_iter()
+                .filter(|e| seen.insert(e.path.clone()))
+                .map(|e| e.path)
+                .collect()
         };
-
-        let mut seen = std::collections::HashSet::new();
-        let new_files: Vec<std::path::PathBuf> = entries
-            .into_iter()
-            .filter(|e| seen.insert(e.path.clone()))
-            .map(|e| e.path)
-            .collect();
 
         // Preserve file_idx by matching current file path in new list
         let current_path = self
@@ -886,7 +892,6 @@ mod tests {
             "DiffReviewResetProgress",
             "DiffReviewDismiss",
             "DiffReviewCycleComparisonMode",
-            "DiffReviewPreviousCommit",
             "DiffReviewRevertHunk",
             "DiffReviewToggleFollow",
         ];

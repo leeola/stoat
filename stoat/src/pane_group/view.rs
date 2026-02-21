@@ -1140,7 +1140,7 @@ impl Render for PaneGroupView {
                     stoat.diff_review_file_progress(cx),
                     stoat.diff_review_hunk_position(cx),
                     if mode_name == "diff_review" || mode_name == "line_select" {
-                        Some((stoat.review_scope, stoat.review_state.filter))
+                        Some(stoat.review_state.source)
                     } else {
                         None
                     },
@@ -1286,7 +1286,7 @@ impl Render for PaneGroupView {
                 review_progress,
                 review_file_progress,
                 hunk_position,
-                scope_filter,
+                diff_source,
                 lsp_status,
                 follow_active,
                 conflict_info,
@@ -1299,7 +1299,7 @@ impl Render for PaneGroupView {
                     review_progress,
                     review_file_progress,
                     hunk_position,
-                    scope_filter,
+                    diff_source,
                     lsp_status,
                     follow_active,
                     conflict_info,
@@ -1506,7 +1506,7 @@ impl Render for PaneGroupView {
                     review_progress,
                     review_file_progress,
                     hunk_position,
-                    scope_filter,
+                    diff_source,
                     lsp_status,
                     follow_active,
                     conflict_info,
@@ -1520,7 +1520,7 @@ impl Render for PaneGroupView {
                         review_progress,
                         review_file_progress,
                         hunk_position,
-                        scope_filter,
+                        diff_source,
                         lsp_status,
                         flash_message,
                         follow_active,

@@ -1,16 +1,12 @@
-use crate::{git::diff_review::ReviewScope, stoat::Stoat};
+use crate::stoat::Stoat;
 use gpui::Context;
 
 impl Stoat {
-    /// Revert the current hunk in Commit scope by applying the reverse patch to the
-    /// working tree.
-    ///
-    /// After reverting, the working tree differs from HEAD at that location, so the
-    /// hunk transitions from committed (purple) to unstaged (green/blue/red) color
-    /// automatically on recompute.
+    /// Revert the current hunk in LastCommit source by applying the reverse patch
+    /// to the working tree.
     pub fn diff_review_revert_hunk(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.review_scope != ReviewScope::Commit {
-            return Err("Revert hunk is only available in Commit scope".to_string());
+        if !self.review_state.source.is_commit() {
+            return Err("Revert hunk is only available in LastCommit source".to_string());
         }
 
         let file_path = self

@@ -5,7 +5,7 @@
 //! is rendered while mode determines interaction within that context.
 
 use crate::{
-    git::diff_review::ReviewScope,
+    git::diff_review::DiffSource,
     stoat::{KeyContext, Stoat},
 };
 use gpui::Context;
@@ -87,8 +87,7 @@ impl Stoat {
         // When leaving diff review, phantom rows disappear. Snap scroll to cursor
         // so the viewport doesn't end up past the end of the buffer.
         if was_diff_review && context == KeyContext::TextEditor {
-            self.review_scope = ReviewScope::WorkingTree;
-            self.review_saved = None;
+            self.review_state.source = DiffSource::All;
 
             self.refresh_git_diff(cx);
 

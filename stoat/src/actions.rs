@@ -300,11 +300,9 @@ actions!(
         DiffReviewResetProgress,
         /// Exit diff review mode
         DiffReviewDismiss,
-        /// Cycle view filter (All/Unstaged/Staged) within WorkingTree scope
+        /// Cycle diff source (All/Unstaged/Staged/LastCommit)
         DiffReviewCycleComparisonMode,
-        /// Toggle between WorkingTree and Commit scope
-        DiffReviewPreviousCommit,
-        /// Revert current hunk in Commit scope
+        /// Revert current hunk in LastCommit source
         DiffReviewRevertHunk,
         /// Toggle live follow mode in diff review
         DiffReviewToggleFollow,
@@ -1175,13 +1173,8 @@ action_metadata!(
 );
 action_metadata!(
     DiffReviewCycleComparisonMode,
-    "cycle filter",
-    "Cycle view filter: All Changes, Unstaged, Staged (WorkingTree scope only)"
-);
-action_metadata!(
-    DiffReviewPreviousCommit,
-    "toggle commit",
-    "Toggle between WorkingTree and Commit scope (saves/restores position)"
+    "cycle source",
+    "Cycle diff source: All Changes, Unstaged, Staged, Last Commit"
 );
 action_metadata!(
     DiffReviewRevertHunk,
@@ -1812,10 +1805,6 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewCycleComparisonMode::action_name(),
     );
     names.insert(
-        TypeId::of::<DiffReviewPreviousCommit>(),
-        DiffReviewPreviousCommit::action_name(),
-    );
-    names.insert(
         TypeId::of::<DiffReviewRevertHunk>(),
         DiffReviewRevertHunk::action_name(),
     );
@@ -2325,10 +2314,6 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         DiffReviewCycleComparisonMode::description(),
     );
     descriptions.insert(
-        TypeId::of::<DiffReviewPreviousCommit>(),
-        DiffReviewPreviousCommit::description(),
-    );
-    descriptions.insert(
         TypeId::of::<DiffReviewRevertHunk>(),
         DiffReviewRevertHunk::description(),
     );
@@ -2822,10 +2807,6 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<DiffReviewCycleComparisonMode>(),
         DiffReviewCycleComparisonMode::help_text(),
-    );
-    help.insert(
-        TypeId::of::<DiffReviewPreviousCommit>(),
-        DiffReviewPreviousCommit::help_text(),
     );
     help.insert(
         TypeId::of::<DiffReviewRevertHunk>(),

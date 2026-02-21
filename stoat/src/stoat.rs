@@ -283,12 +283,7 @@ pub struct Stoat {
 
     // Diff review state
     pub(crate) diff_review_previous_mode: Option<String>,
-    pub(crate) review_scope: crate::git::diff_review::ReviewScope,
-    pub(crate) review_state: crate::git::diff_review::ScopeState,
-    pub(crate) review_saved: Option<(
-        crate::git::diff_review::ReviewScope,
-        crate::git::diff_review::ScopeState,
-    )>,
+    pub(crate) review_state: crate::git::diff_review::DiffReviewState,
 
     // Conflict review state
     pub(crate) conflict_review_previous_mode: Option<String>,
@@ -512,9 +507,7 @@ impl Stoat {
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
             diff_review_previous_mode: None,
-            review_scope: crate::git::diff_review::ReviewScope::default(),
-            review_state: crate::git::diff_review::ScopeState::default(),
-            review_saved: None,
+            review_state: crate::git::diff_review::DiffReviewState::default(),
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
@@ -603,12 +596,10 @@ impl Stoat {
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
             diff_review_previous_mode: None,
-            review_scope: self.review_scope,
-            review_state: crate::git::diff_review::ScopeState {
-                filter: self.review_state.filter,
+            review_state: crate::git::diff_review::DiffReviewState {
+                source: self.review_state.source,
                 ..Default::default()
             },
-            review_saved: None,
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
@@ -1102,15 +1093,9 @@ impl Stoat {
         self.parent_stoat.as_ref()
     }
 
-    /// Get the current diff comparison mode.
-    ///
-    /// Returns the active comparison mode used in diff review for determining which
-    /// Derive the current [`DiffComparisonMode`] from scope and filter.
+    /// Derive the current [`DiffComparisonMode`] from the active [`DiffSource`].
     pub fn review_comparison_mode(&self) -> crate::git::diff_review::DiffComparisonMode {
-        crate::git::diff_review::DiffComparisonMode::from_scope_and_filter(
-            self.review_scope,
-            self.review_state.filter,
-        )
+        crate::git::diff_review::DiffComparisonMode::from_source(self.review_state.source)
     }
 
     /// Get viewport height in lines
@@ -1768,9 +1753,7 @@ impl Stoat {
             about_modal_previous_mode: None,
             about_modal_previous_key_context: None,
             diff_review_previous_mode: None,
-            review_scope: crate::git::diff_review::ReviewScope::default(),
-            review_state: crate::git::diff_review::ScopeState::default(),
-            review_saved: None,
+            review_state: crate::git::diff_review::DiffReviewState::default(),
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),

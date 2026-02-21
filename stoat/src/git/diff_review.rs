@@ -39,53 +39,50 @@ use std::{
     path::PathBuf,
 };
 
+/// Which set of changes the diff review is showing.
+///
+/// Cycled by the `c` keybind: All, Unstaged, Staged, LastCommit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum DiffSource {
+    #[default]
+    All,
+    Unstaged,
+    Staged,
+    LastCommit,
+}
+
+impl DiffSource {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Unstaged,
+            Self::Unstaged => Self::Staged,
+            Self::Staged => Self::LastCommit,
+            Self::LastCommit => Self::All,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::All => "All Changes",
+            Self::Unstaged => "Unstaged",
+            Self::Staged => "Staged",
+            Self::LastCommit => "Last Commit",
+        }
+    }
+
+    pub fn is_commit(self) -> bool {
+        matches!(self, Self::LastCommit)
+    }
+}
+
 /// Mode for comparing different git states during diff review.
 ///
-/// Determines which version of the file to use as the "base" for diff computation.
-/// This controls whether we're reviewing all changes, only unstaged changes, or only
-/// staged changes.
-///
-/// # Usage
-///
-/// Used by [`Stoat`](crate::Stoat) to determine which diffs to compute when loading
-/// files in diff review mode. The mode can be changed to filter which hunks are visible.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Review all changes (working tree vs HEAD)
-/// let mode = DiffComparisonMode::WorkingVsHead;
-///
-/// // Review only unstaged changes (working tree vs index)
-/// let mode = DiffComparisonMode::WorkingVsIndex;
-///
-/// // Review only staged changes (index vs HEAD)
-/// let mode = DiffComparisonMode::IndexVsHead;
-/// ```
+/// Each variant maps 1:1 from a [`DiffSource`] variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DiffComparisonMode {
-    /// Compare working tree vs HEAD (shows all changes).
-    ///
-    /// This is the default mode. Diffs show all changes in the working tree
-    /// compared to the last commit, regardless of staging state.
     WorkingVsHead,
-
-    /// Compare working tree vs index (shows unstaged changes only).
-    ///
-    /// Diffs show only changes that are in the working tree but not yet staged.
-    /// Useful for reviewing changes before staging them.
     WorkingVsIndex,
-
-    /// Compare index vs HEAD (shows staged changes only).
-    ///
-    /// Diffs show only changes that are staged in the index but not yet committed.
-    /// Useful for reviewing what will be included in the next commit.
     IndexVsHead,
-
-    /// Compare HEAD vs its parent commit (shows what the last commit changed).
-    ///
-    /// Activated by a dedicated keybind, not part of the `c` cycle.
-    /// Allows reverting individual hunks from the last commit to the working tree.
     HeadVsParent,
 }
 
@@ -96,87 +93,33 @@ impl Default for DiffComparisonMode {
 }
 
 impl DiffComparisonMode {
-    /// Get human-readable display name for this mode.
-    ///
-    /// Returns a short description suitable for UI display.
-    ///
-    /// # Returns
-    ///
-    /// Static string describing the comparison mode
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::WorkingVsHead => "All Changes",
             Self::WorkingVsIndex => "Unstaged",
             Self::IndexVsHead => "Staged",
-            Self::HeadVsParent => "Previous Commit",
+            Self::HeadVsParent => "Last Commit",
         }
     }
 
-    /// Derive the comparison mode from a scope and filter combination.
-    pub fn from_scope_and_filter(scope: ReviewScope, filter: ViewFilter) -> Self {
-        match scope {
-            ReviewScope::WorkingTree => match filter {
-                ViewFilter::All => Self::WorkingVsHead,
-                ViewFilter::Unstaged => Self::WorkingVsIndex,
-                ViewFilter::Staged => Self::IndexVsHead,
-            },
-            ReviewScope::Commit => Self::HeadVsParent,
+    pub fn from_source(source: DiffSource) -> Self {
+        match source {
+            DiffSource::All => Self::WorkingVsHead,
+            DiffSource::Unstaged => Self::WorkingVsIndex,
+            DiffSource::Staged => Self::IndexVsHead,
+            DiffSource::LastCommit => Self::HeadVsParent,
         }
     }
 }
 
-/// What set of changes we're reviewing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum ReviewScope {
-    #[default]
-    WorkingTree,
-    Commit,
-}
-
-impl ReviewScope {
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::WorkingTree => "Working Tree",
-            Self::Commit => "Commit",
-        }
-    }
-}
-
-/// Within WorkingTree scope, which subset of changes to show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum ViewFilter {
-    #[default]
-    All,
-    Unstaged,
-    Staged,
-}
-
-impl ViewFilter {
-    pub fn next(&self) -> Self {
-        match self {
-            Self::All => Self::Unstaged,
-            Self::Unstaged => Self::Staged,
-            Self::Staged => Self::All,
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::All => "All Changes",
-            Self::Unstaged => "Unstaged",
-            Self::Staged => "Staged",
-        }
-    }
-}
-
-/// Saved state for a review scope, enabling save/restore across scope transitions.
+/// Per-source review state (file list, position, approvals).
 #[derive(Clone, Debug, Default)]
-pub struct ScopeState {
+pub struct DiffReviewState {
     pub files: Vec<PathBuf>,
     pub file_idx: usize,
     pub hunk_idx: usize,
     pub approved_hunks: HashMap<PathBuf, HashSet<usize>>,
-    pub filter: ViewFilter,
+    pub source: DiffSource,
     pub follow: bool,
     pub last_hunk_snapshot: HashMap<PathBuf, usize>,
 }

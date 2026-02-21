@@ -334,7 +334,6 @@ on key {
             c -> DiffReviewCycleComparisonMode();
             s -> GitToggleStageHunk();
             S -> GitToggleStageLine();
-            p -> DiffReviewPreviousCommit();
             u -> GitUnstageHunk();
             r -> DiffReviewRevertHunk();
             f -> DiffReviewToggleFollow();

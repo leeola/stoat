@@ -141,9 +141,6 @@ pub fn dispatch_editor_action<C: AppContext>(
         "DiffReviewCycleComparisonMode" => {
             ed!(stoat, cx, |s, cx| s.diff_review_cycle_comparison_mode(cx))
         },
-        "DiffReviewPreviousCommit" => {
-            ed!(stoat, cx, |s, cx| s.diff_review_previous_commit(cx))
-        },
         "DiffReviewRevertHunk" => {
             let _ = stoat.update(cx, |s, cx| {
                 if let Err(e) = s.diff_review_revert_hunk(cx) {

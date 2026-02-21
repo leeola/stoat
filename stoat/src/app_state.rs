@@ -240,22 +240,6 @@ impl GitStatus {
     }
 }
 
-/// Diff review state.
-///
-/// Contains all state for diff review mode which allows reviewing and
-/// approving git diff hunks across multiple files.
-#[derive(Default)]
-pub struct DiffReview {
-    /// Previous mode to restore when exiting review
-    pub previous_mode: Option<String>,
-    pub scope: crate::git::diff_review::ReviewScope,
-    pub state: crate::git::diff_review::ScopeState,
-    pub saved: Option<(
-        crate::git::diff_review::ReviewScope,
-        crate::git::diff_review::ScopeState,
-    )>,
-}
-
 /// Application-level state shared across all panes and view types.
 ///
 /// This struct contains all state that should be accessible from any view
@@ -314,8 +298,6 @@ pub struct AppState {
     pub command_line: CommandLine,
     /// Git status modal state
     pub git_status: GitStatus,
-    /// Diff review mode state
-    pub diff_review: DiffReview,
     /// LSP manager for language server coordination
     ///
     /// Manages language server processes and routes diagnostics to buffers.
@@ -445,7 +427,6 @@ impl AppState {
                 dirty_count,
                 ..Default::default()
             },
-            diff_review: DiffReview::default(),
             lsp_manager,
             lsp_state,
             project_env,
