@@ -5,10 +5,9 @@ pub use self::builder::ClaudeCodeBuilder;
 use self::process::{Process, ProcessBuilder as ProcessBuilderInner};
 use crate::messages::{PermissionMode, SdkMessage, UserMessage};
 use anyhow::{Context, Result};
-use tokio::{
-    sync::mpsc,
-    time::{Duration, timeout},
-};
+use async_channel::{Receiver, Sender};
+use async_io::Timer;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone, Default)]
@@ -44,15 +43,13 @@ impl SessionConfig {
 
 pub struct ClaudeCode {
     process: Option<Process>,
-    // Channels for communicating with Process
-    process_stdin_tx: mpsc::Sender<String>,
-    process_stdout_rx: mpsc::Receiver<SdkMessage>,
+    process_stdin_tx: Sender<String>,
+    process_stdout_rx: Receiver<SdkMessage>,
     current_config: SessionConfig,
     managed_session_id: uuid::Uuid,
 }
 
 impl ClaudeCode {
-    /// Create a new builder for ClaudeCode
     pub fn builder() -> ClaudeCodeBuilder {
         ClaudeCodeBuilder::new()
     }
@@ -61,11 +58,10 @@ impl ClaudeCode {
         ClaudeCodeBuilder::from_config(config).build().await
     }
 
-    /// Create ClaudeCode from a Process instance with communication channels
     pub(crate) fn from_process(
         process: Process,
-        process_stdin_tx: mpsc::Sender<String>,
-        process_stdout_rx: mpsc::Receiver<SdkMessage>,
+        process_stdin_tx: Sender<String>,
+        process_stdout_rx: Receiver<SdkMessage>,
         config: SessionConfig,
         session_id: uuid::Uuid,
     ) -> Self {
@@ -89,44 +85,49 @@ impl ClaudeCode {
         self.process_stdin_tx
             .send(json)
             .await
-            .context("Failed to send message to Claude Code")?;
+            .map_err(|_| anyhow::anyhow!("Failed to send message to Claude Code"))?;
         Ok(())
     }
 
-    pub async fn shutdown(mut self) -> Result<()> {
+    pub fn shutdown(mut self) -> Result<()> {
         info!(
             "Shutting down ClaudeCode for session: {}",
             self.managed_session_id
         );
         if let Some(process) = self.process.take() {
-            // Close process and discard recovered channels
-            let _ = process.close().await;
+            let _ = process.close();
         }
         Ok(())
     }
 
-    /// Wait for the next assistant response with a timeout
     pub async fn wait_for_response(&mut self, duration: Duration) -> Result<Option<String>> {
-        let deadline = tokio::time::Instant::now() + duration;
+        let deadline = Instant::now() + duration;
 
-        while tokio::time::Instant::now() < deadline {
-            match timeout(
-                deadline - tokio::time::Instant::now(),
-                self.process_stdout_rx.recv(),
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let recv = self.process_stdout_rx.recv();
+            let timeout = Timer::after(remaining);
+            match futures_lite::future::or(
+                async {
+                    match recv.await {
+                        Ok(msg) => Some(msg),
+                        Err(_) => None,
+                    }
+                },
+                async {
+                    timeout.await;
+                    None
+                },
             )
             .await
             {
-                Ok(Some(msg)) => {
+                Some(msg) => {
                     if let SdkMessage::Assistant { message, .. } = msg {
                         return Ok(Some(message.get_text_content()));
                     }
                     continue;
                 },
-                Ok(None) => {
-                    debug!("Channel closed while waiting for response");
-                    return Ok(None);
-                },
-                Err(_) => {
+                None => {
                     debug!("Timeout waiting for assistant response");
                     return Ok(None);
                 },
@@ -136,29 +137,33 @@ impl ClaudeCode {
         Ok(None)
     }
 
-    /// Receive any type of message with a timeout
     pub async fn recv_any_message(&mut self, duration: Duration) -> Result<Option<SdkMessage>> {
-        match timeout(duration, self.process_stdout_rx.recv()).await {
-            Ok(Some(msg)) => Ok(Some(msg)),
-            Ok(None) => {
-                debug!("Channel closed while receiving message");
-                Ok(None)
+        let recv = self.process_stdout_rx.recv();
+        let timeout = Timer::after(duration);
+        match futures_lite::future::or(
+            async {
+                match recv.await {
+                    Ok(msg) => Some(msg),
+                    Err(_) => None,
+                }
             },
-            Err(_) => {
-                // Timeout is not an error, just no message available
-                Ok(None)
+            async {
+                timeout.await;
+                None
             },
+        )
+        .await
+        {
+            Some(msg) => Ok(Some(msg)),
+            None => Ok(None),
         }
     }
 
-    /// Get the current session ID
     pub fn get_session_id(&self) -> String {
         self.managed_session_id.to_string()
     }
 
-    /// Check if the Claude process is still alive
-    pub async fn is_alive(&mut self) -> bool {
-        // Check both process and channel status
+    pub fn is_alive(&mut self) -> bool {
         if let Some(process) = self.process.as_mut() {
             process.is_alive() && !self.process_stdin_tx.is_closed()
         } else {
@@ -166,7 +171,6 @@ impl ClaudeCode {
         }
     }
 
-    /// Switch to a different model at runtime
     pub async fn switch_model(&mut self, model: impl Into<String>) -> Result<()> {
         let model_str = model.into();
         info!(
@@ -174,19 +178,14 @@ impl ClaudeCode {
             self.current_config.model, model_str
         );
 
-        // Update config with new model
         self.current_config.model = Some(model_str.clone());
 
-        // Take the current process
         if let Some(current_process) = self.process.take() {
-            // Close current process and recover channels
             let recovered = current_process
                 .close()
-                .await
                 .context("Failed to close current process")?;
 
-            // Wait a bit for the process to fully terminate
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            Timer::after(Duration::from_millis(100)).await;
 
             let process_builder = ProcessBuilderInner::new(recovered.stdin_rx, recovered.stdout_tx)
                 .session_id(self.managed_session_id.to_string());
@@ -199,9 +198,6 @@ impl ClaudeCode {
                 },
             };
 
-            // Just update the process - channels and buffer task remain the same!
-            // The buffer task is still reading from the same channel that's connected
-            // to the new process through the recovered channels.
             self.process = Some(new_process);
             info!("Model switch completed successfully");
         } else {

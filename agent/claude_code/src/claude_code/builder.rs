@@ -3,7 +3,6 @@ use crate::{
     messages::PermissionMode,
 };
 use anyhow::Result;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Default)]
 pub struct ClaudeCodeBuilder {
@@ -64,15 +63,14 @@ impl ClaudeCodeBuilder {
         self
     }
 
-    /// Build with automatic logic - create new if no session_id, otherwise resume.
     pub async fn build(self) -> Result<ClaudeCode> {
         let existing_session_id = self.managed_session_id.or(self.config.session_id);
 
         match existing_session_id {
             None => {
                 let session_id = uuid::Uuid::new_v4();
-                let (stdin_tx, stdin_rx) = mpsc::channel::<String>(32);
-                let (stdout_tx, stdout_rx) = mpsc::channel(32);
+                let (stdin_tx, stdin_rx) = async_channel::bounded::<String>(32);
+                let (stdout_tx, stdout_rx) = async_channel::bounded(32);
 
                 let process_builder = ProcessBuilderInner::new(stdin_rx, stdout_tx)
                     .session_id(session_id.to_string());
@@ -94,8 +92,8 @@ impl ClaudeCodeBuilder {
                 ))
             },
             Some(session_id) => {
-                let (stdin_tx, stdin_rx) = mpsc::channel::<String>(32);
-                let (stdout_tx, stdout_rx) = mpsc::channel(32);
+                let (stdin_tx, stdin_rx) = async_channel::bounded::<String>(32);
+                let (stdout_tx, stdout_rx) = async_channel::bounded(32);
 
                 let process_builder = ProcessBuilderInner::new(stdin_rx, stdout_tx)
                     .session_id(session_id.to_string());
@@ -125,8 +123,8 @@ impl ClaudeCodeBuilder {
             .or(self.config.session_id)
             .unwrap_or_else(uuid::Uuid::new_v4);
 
-        let (stdin_tx, stdin_rx) = mpsc::channel::<String>(32);
-        let (stdout_tx, stdout_rx) = mpsc::channel(32);
+        let (stdin_tx, stdin_rx) = async_channel::bounded::<String>(32);
+        let (stdout_tx, stdout_rx) = async_channel::bounded(32);
 
         let process_builder =
             ProcessBuilderInner::new(stdin_rx, stdout_tx).session_id(session_id.to_string());
@@ -154,8 +152,8 @@ impl ClaudeCodeBuilder {
             .or(self.config.session_id)
             .ok_or_else(|| anyhow::anyhow!("Session ID required for resume"))?;
 
-        let (stdin_tx, stdin_rx) = mpsc::channel::<String>(32);
-        let (stdout_tx, stdout_rx) = mpsc::channel(32);
+        let (stdin_tx, stdin_rx) = async_channel::bounded::<String>(32);
+        let (stdout_tx, stdout_rx) = async_channel::bounded(32);
 
         let process_builder =
             ProcessBuilderInner::new(stdin_rx, stdout_tx).session_id(session_id.to_string());

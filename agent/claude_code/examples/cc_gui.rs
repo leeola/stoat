@@ -11,31 +11,21 @@ use stoat_agent_claude_code::{
     claude_code::{ClaudeCode, SessionConfig},
     messages::{MessageContent, SdkMessage, UserContent, UserContentBlock},
 };
-use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-// Scrollable ID for auto-scrolling
 fn chat_scroll_id() -> Id {
     Id::new("chat_scroll")
 }
 
-/// GUI application state
 struct App {
-    /// The ClaudeCode instance wrapped for sharing
-    claude: Arc<Mutex<Option<ClaudeCode>>>,
-    /// Current text input value
+    claude: Arc<smol::lock::Mutex<Option<ClaudeCode>>>,
     input_value: String,
-    /// Chat history
     messages: Vec<ChatMessage>,
-    /// Whether we're waiting for a response
     waiting_for_response: bool,
-    /// Process status
     process_alive: bool,
-    /// Whether to auto-scroll to bottom
     auto_scroll: bool,
 }
 
-/// A chat message
 #[derive(Debug, Clone)]
 struct ChatMessage {
     role: MessageRole,
@@ -49,30 +39,20 @@ enum MessageRole {
     System,
 }
 
-/// Application messages
 #[derive(Debug, Clone)]
 enum Message {
-    /// Text input changed
     InputChanged(String),
-    /// Send button pressed or Enter key pressed
     Send,
-    /// Response received from Claude
     ResponseReceived(String),
-    /// Any message received (for debugging)
     SdkMessageReceived(SdkMessage),
-    /// Scrollable viewport changed
     ScrollViewportChanged(scrollable::Viewport),
-    /// Process status update
     ProcessStatusUpdate(bool),
-    /// Tick for polling
     Tick,
-    /// Exit the application
     Exit,
 }
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        // Initialize tracing
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env()
@@ -81,7 +61,7 @@ impl App {
             .try_init();
 
         let app = Self {
-            claude: Arc::new(Mutex::new(None)),
+            claude: Arc::new(smol::lock::Mutex::new(None)),
             input_value: String::new(),
             messages: vec![ChatMessage {
                 role: MessageRole::System,
@@ -92,7 +72,6 @@ impl App {
             auto_scroll: true,
         };
 
-        // Initialize ClaudeCode asynchronously
         let claude_arc = Arc::clone(&app.claude);
         let init_task = Task::perform(
             async move {
@@ -104,17 +83,14 @@ impl App {
                 match ClaudeCode::new(config).await {
                     Ok(mut claude) => {
                         let session_id = claude.get_session_id().to_string();
-                        let alive = claude.is_alive().await;
+                        let alive = claude.is_alive();
                         *claude_arc.lock().await = Some(claude);
                         (format!("Session started: {session_id}"), alive)
                     },
                     Err(e) => (format!("Failed to initialize: {e}"), false),
                 }
             },
-            |(msg, _alive)| {
-                // Just create a system chat message directly
-                Message::ResponseReceived(msg)
-            },
+            |(msg, _alive)| Message::ResponseReceived(msg),
         );
 
         (app, init_task)
@@ -134,7 +110,6 @@ impl App {
                 let content = self.input_value.clone();
                 self.input_value.clear();
 
-                // Add user message to history
                 self.messages.push(ChatMessage {
                     role: MessageRole::User,
                     content: content.clone(),
@@ -142,7 +117,6 @@ impl App {
 
                 self.waiting_for_response = true;
 
-                // Send message to Claude
                 let claude = Arc::clone(&self.claude);
                 Task::perform(
                     async move {
@@ -168,7 +142,6 @@ impl App {
             Message::SdkMessageReceived(sdk_msg) => {
                 match sdk_msg {
                     SdkMessage::Assistant { message, .. } => {
-                        // Extract all content types, not just text
                         let mut content_parts = Vec::new();
                         for content in &message.content {
                             match content {
@@ -194,7 +167,6 @@ impl App {
                         }
                     },
                     SdkMessage::System { session_id, .. } => {
-                        // Show system initialization message
                         self.messages.push(ChatMessage {
                             role: MessageRole::System,
                             content: format!("[System initialized for session: {session_id}]"),
@@ -205,48 +177,38 @@ impl App {
                         duration_ms,
                         ..
                     } => {
-                        // Show completion status
                         let status = format!("[Session result: {subtype:?} in {duration_ms}ms]");
                         self.messages.push(ChatMessage {
                             role: MessageRole::System,
                             content: status,
                         });
                     },
-                    SdkMessage::User { message, .. } => {
-                        // Handle tool results from user messages
-                        match &message.content {
-                            UserContent::Text(_) => {
-                                // Regular user messages are already shown when sent
-                            },
-                            UserContent::Blocks(blocks) => {
-                                // Show tool results
-                                for block in blocks {
-                                    match block {
-                                        UserContentBlock::ToolResult {
-                                            tool_use_id,
-                                            content,
-                                        } => {
-                                            let short_id =
-                                                &tool_use_id[0..8.min(tool_use_id.len())];
-                                            let preview = if content.len() > 100 {
-                                                format!("{}...", &content[0..100])
-                                            } else {
-                                                content.clone()
-                                            };
-                                            self.messages.push(ChatMessage {
-                                                role: MessageRole::System,
-                                                content: format!(
-                                                    "[Tool result ({short_id})]: {preview}"
-                                                ),
-                                            });
-                                        },
-                                        UserContentBlock::Text { .. } => {
-                                            // Text blocks in user messages are shown when sent
-                                        },
-                                    }
+                    SdkMessage::User { message, .. } => match &message.content {
+                        UserContent::Text(_) => {},
+                        UserContent::Blocks(blocks) => {
+                            for block in blocks {
+                                match block {
+                                    UserContentBlock::ToolResult {
+                                        tool_use_id,
+                                        content,
+                                    } => {
+                                        let short_id = &tool_use_id[0..8.min(tool_use_id.len())];
+                                        let preview = if content.len() > 100 {
+                                            format!("{}...", &content[0..100])
+                                        } else {
+                                            content.clone()
+                                        };
+                                        self.messages.push(ChatMessage {
+                                            role: MessageRole::System,
+                                            content: format!(
+                                                "[Tool result ({short_id})]: {preview}"
+                                            ),
+                                        });
+                                    },
+                                    UserContentBlock::Text { .. } => {},
                                 }
-                            },
-                        }
+                            }
+                        },
                     },
                 }
                 if self.auto_scroll {
@@ -305,30 +267,24 @@ impl App {
                 }
             },
             Message::ScrollViewportChanged(viewport) => {
-                // Check if we're at the bottom (within a small threshold)
                 let at_bottom = viewport.relative_offset().y >= 0.95;
                 self.auto_scroll = at_bottom;
                 Task::none()
             },
-            Message::Exit => {
-                // Close the application
-                iced::exit()
-            },
+            Message::Exit => iced::exit(),
             Message::Tick => {
-                // Check for responses and process status
                 let claude = Arc::clone(&self.claude);
                 Task::perform(
                     async move {
                         let mut claude_guard = claude.lock().await;
                         if let Some(claude) = claude_guard.as_mut() {
-                            // Check for any message type
                             if let Ok(Some(msg)) = claude
-                                .recv_any_message(tokio::time::Duration::from_millis(100))
+                                .recv_any_message(std::time::Duration::from_millis(100))
                                 .await
                             {
-                                return Some((Some(msg), claude.is_alive().await));
+                                return Some((Some(msg), claude.is_alive()));
                             }
-                            return Some((None, claude.is_alive().await));
+                            return Some((None, claude.is_alive()));
                         }
                         None
                     },
@@ -360,7 +316,6 @@ impl App {
         ]
         .spacing(10);
 
-        // Chat history
         let mut chat_column = Column::new().spacing(10).padding(10);
         for msg in &self.messages {
             let label = match msg.role {
@@ -384,7 +339,6 @@ impl App {
             .id(chat_scroll_id())
             .on_scroll(Message::ScrollViewportChanged);
 
-        // Input area
         let input_row = row![
             text_input("Type a message...", &self.input_value)
                 .on_input(Message::InputChanged)
@@ -409,7 +363,6 @@ impl App {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
-        // Poll every 100ms when waiting for response, otherwise every 500ms
         let interval = if self.waiting_for_response {
             std::time::Duration::from_millis(100)
         } else {

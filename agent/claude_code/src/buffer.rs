@@ -1,11 +1,12 @@
 use crate::messages::SdkMessage;
+use async_broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender, broadcast};
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
 pub struct MessageBuffer {
     messages: Arc<Mutex<Vec<BufferedMessage>>>,
-    update_tx: broadcast::Sender<BufferUpdate>,
+    update_tx: BroadcastSender<BufferUpdate>,
+    update_rx: BroadcastReceiver<BufferUpdate>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,10 +41,12 @@ impl Default for MessageBuffer {
 
 impl MessageBuffer {
     pub fn new() -> Self {
-        let (update_tx, _) = broadcast::channel(100);
+        let (mut update_tx, update_rx) = broadcast(100);
+        update_tx.set_overflow(true);
         Self {
             messages: Arc::new(Mutex::new(Vec::new())),
             update_tx,
+            update_rx,
         }
     }
 
@@ -53,7 +56,6 @@ impl MessageBuffer {
                 message,
                 session_id,
             } => {
-                // Convert UserContent to string for buffering
                 let content_str = match &message.content {
                     crate::messages::UserContent::Text(s) => s.clone(),
                     crate::messages::UserContent::Blocks(blocks) => blocks
@@ -124,8 +126,9 @@ impl MessageBuffer {
         let mut messages = self.messages.lock().expect("Message buffer lock poisoned");
         messages.push(buffered.clone());
 
-        // Notify subscribers
-        let _ = self.update_tx.send(BufferUpdate::MessageAdded(buffered));
+        let _ = self
+            .update_tx
+            .try_broadcast(BufferUpdate::MessageAdded(buffered));
     }
 
     pub fn get_messages(&self) -> Vec<BufferedMessage> {
@@ -150,11 +153,11 @@ impl MessageBuffer {
             .lock()
             .expect("Message buffer lock poisoned")
             .clear();
-        let _ = self.update_tx.send(BufferUpdate::BufferCleared);
+        let _ = self.update_tx.try_broadcast(BufferUpdate::BufferCleared);
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<BufferUpdate> {
-        self.update_tx.subscribe()
+    pub fn subscribe(&self) -> BroadcastReceiver<BufferUpdate> {
+        self.update_rx.clone()
     }
 
     pub fn get_rendered_text(&self) -> String {

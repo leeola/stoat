@@ -1,7 +1,7 @@
 #[cfg(feature = "e2e_claude_code")]
 mod e2e_tests {
+    use std::time::Duration;
     use stoat_agent_claude_code::ClaudeCode;
-    use tokio::time::Duration;
     use tracing::info;
     use tracing_subscriber::EnvFilter;
 
@@ -15,173 +15,153 @@ mod e2e_tests {
             .try_init();
     }
 
-    #[tokio::test]
-    async fn test_basic_math_query() {
+    #[test]
+    fn test_basic_math_query() {
         init_logging();
+        smol::block_on(async {
+            info!("Starting e2e test");
 
-        info!("Starting e2e test");
+            info!("Creating ClaudeCode instance");
+            let mut claude = ClaudeCode::builder()
+                .model("sonnet")
+                .build()
+                .await
+                .expect("Failed to spawn Claude");
 
-        // Create ClaudeCode instance with builder
-        info!("Creating ClaudeCode instance");
-        let claude = ClaudeCode::builder()
-            .model("sonnet")
-            .build()
-            .await
-            .expect("Failed to spawn Claude");
+            info!("ClaudeCode instance created successfully");
 
-        info!("ClaudeCode instance created successfully");
+            info!("Sending initial message");
+            claude
+                .send_message("What is 2+2? Reply with just the number.")
+                .await
+                .expect("Failed to send message");
+            info!("Message sent successfully");
 
-        // Create mutable ClaudeCode for wait_for_response
-        let mut claude = claude;
+            info!("Waiting for assistant response (30s timeout)");
+            let response = claude
+                .wait_for_response(Duration::from_secs(30))
+                .await
+                .expect("Failed to wait for response");
 
-        // Send the initial message
-        info!("Sending initial message");
-        claude
-            .send_message("What is 2+2? Reply with just the number.")
-            .await
-            .expect("Failed to send message");
-        info!("Message sent successfully");
+            let content = response.expect("No assistant message received");
+            assert!(
+                content.contains("4"),
+                "Expected response to contain '4', got: {content}"
+            );
 
-        // Wait for response with timeout
-        info!("Waiting for assistant response (30s timeout)");
-        let response = claude
-            .wait_for_response(Duration::from_secs(30))
-            .await
-            .expect("Failed to wait for response");
-
-        // Verify we got an assistant message with the expected content
-        let content = response.expect("No assistant message received");
-        assert!(
-            content.contains("4"),
-            "Expected response to contain '4', got: {content}"
-        );
-
-        // Clean shutdown
-        info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
-        info!("Test completed successfully");
+            info!("Shutting down");
+            claude.shutdown().expect("Failed to shutdown");
+            info!("Test completed successfully");
+        });
     }
 
-    #[tokio::test]
-    async fn test_wait_for_response() {
+    #[test]
+    fn test_wait_for_response() {
         init_logging();
+        smol::block_on(async {
+            info!("Starting wait_for_response test");
 
-        info!("Starting wait_for_response test");
+            let mut claude = ClaudeCode::builder()
+                .model("sonnet")
+                .build()
+                .await
+                .expect("Failed to spawn Claude");
 
-        // Create ClaudeCode instance
-        let mut claude = ClaudeCode::builder()
-            .model("sonnet")
-            .build()
-            .await
-            .expect("Failed to spawn Claude");
+            info!("Sending message");
+            claude
+                .send_message("What is 10+10? Reply with just the number.")
+                .await
+                .expect("Failed to send message");
 
-        info!("Sending message");
-        claude
-            .send_message("What is 10+10? Reply with just the number.")
-            .await
-            .expect("Failed to send message");
+            info!("Waiting for response");
+            let response = claude
+                .wait_for_response(Duration::from_secs(30))
+                .await
+                .expect("Failed to wait for response");
 
-        // Wait for response using the helper
-        info!("Waiting for response");
-        let response = claude
-            .wait_for_response(Duration::from_secs(30))
-            .await
-            .expect("Failed to wait for response");
+            let content = response.expect("Expected to receive a response");
+            assert!(
+                content.contains("20"),
+                "Expected response to contain '20', got: {content}"
+            );
 
-        // Verify we got a response
-        let content = response.expect("Expected to receive a response");
-        assert!(
-            content.contains("20"),
-            "Expected response to contain '20', got: {content}"
-        );
+            assert!(claude.is_alive(), "Expected Claude to be alive");
 
-        // Test is_alive
-        assert!(claude.is_alive().await, "Expected Claude to be alive");
-
-        // Clean shutdown
-        info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
-        info!("Test completed successfully");
+            info!("Shutting down");
+            claude.shutdown().expect("Failed to shutdown");
+            info!("Test completed successfully");
+        });
     }
 
-    #[tokio::test]
-    async fn test_model_switching() {
+    #[test]
+    fn test_model_switching() {
         init_logging();
+        smol::block_on(async {
+            info!("Starting model switching test");
 
-        info!("Starting model switching test");
+            let mut claude = ClaudeCode::builder()
+                .model("sonnet")
+                .build()
+                .await
+                .expect("Failed to spawn Claude");
 
-        // Create ClaudeCode instance
-        let mut claude = ClaudeCode::builder()
-            .model("sonnet")
-            .build()
-            .await
-            .expect("Failed to spawn Claude");
+            let session_id = claude.get_session_id().to_string();
+            info!("Initial session ID: {}", session_id);
 
-        // Get initial session ID
-        let session_id = claude.get_session_id().to_string();
-        info!("Initial session ID: {}", session_id);
+            info!("Sending message with first model");
+            claude
+                .send_message("What is 1+1? Reply with just the number.")
+                .await
+                .expect("Failed to send message");
 
-        // Send a message with first model
-        info!("Sending message with first model");
-        claude
-            .send_message("What is 1+1? Reply with just the number.")
-            .await
-            .expect("Failed to send message");
+            let response1 = claude
+                .wait_for_response(Duration::from_secs(30))
+                .await
+                .expect("Failed to wait for response")
+                .expect("Expected to receive a response");
 
-        // Wait for response
-        let response1 = claude
-            .wait_for_response(Duration::from_secs(30))
-            .await
-            .expect("Failed to wait for response")
-            .expect("Expected to receive a response");
+            assert!(
+                response1.contains("2"),
+                "Expected response to contain '2', got: {response1}"
+            );
 
-        assert!(
-            response1.contains("2"),
-            "Expected response to contain '2', got: {response1}"
-        );
+            info!("Switching to haiku model");
+            claude
+                .switch_model("haiku")
+                .await
+                .expect("Failed to switch model");
 
-        // Switch to a different model
-        info!("Switching to haiku model");
-        claude
-            .switch_model("haiku")
-            .await
-            .expect("Failed to switch model");
+            assert_eq!(
+                claude.get_session_id(),
+                session_id,
+                "Session ID should be preserved after model switch"
+            );
 
-        // Verify session ID is preserved
-        assert_eq!(
-            claude.get_session_id(),
-            session_id,
-            "Session ID should be preserved after model switch"
-        );
+            info!("Sending message with new model");
+            claude
+                .send_message("What is 3+3? Reply with just the number.")
+                .await
+                .expect("Failed to send message");
 
-        // Send another message with new model
-        info!("Sending message with new model");
-        claude
-            .send_message("What is 3+3? Reply with just the number.")
-            .await
-            .expect("Failed to send message");
+            let response2 = claude
+                .wait_for_response(Duration::from_secs(30))
+                .await
+                .expect("Failed to wait for response")
+                .expect("Expected to receive a response");
 
-        // Wait for response from new model
-        let response2 = claude
-            .wait_for_response(Duration::from_secs(30))
-            .await
-            .expect("Failed to wait for response")
-            .expect("Expected to receive a response");
+            assert!(
+                response2.contains("6"),
+                "Expected response to contain '6', got: {response2}"
+            );
 
-        assert!(
-            response2.contains("6"),
-            "Expected response to contain '6', got: {response2}"
-        );
+            assert!(
+                claude.is_alive(),
+                "Expected Claude to be alive after switch"
+            );
 
-        // Verify process is still alive
-        assert!(
-            claude.is_alive().await,
-            "Expected Claude to be alive after switch"
-        );
-
-        // Clean shutdown
-        info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
-        info!("Model switching test completed successfully");
+            info!("Shutting down");
+            claude.shutdown().expect("Failed to shutdown");
+            info!("Model switching test completed successfully");
+        });
     }
 }

@@ -1,6 +1,6 @@
 use gpui::{Context, EventEmitter};
+use smol::channel;
 use stoat_agent_claude_code::{ClaudeCode, PermissionMode, SdkMessage};
-use tokio::sync::mpsc;
 
 pub enum ChatMessage {
     User(String),
@@ -25,7 +25,7 @@ pub struct ClaudeState {
     pub messages: Vec<ChatMessage>,
     pub input_text: String,
     pub status: ClaudeStatus,
-    stdin_tx: Option<mpsc::Sender<String>>,
+    stdin_tx: Option<channel::Sender<String>>,
 }
 
 impl ClaudeState {
@@ -39,7 +39,7 @@ impl ClaudeState {
     }
 
     pub fn start(&mut self, workdir: String, cx: &mut Context<Self>) {
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(32);
+        let (stdin_tx, stdin_rx) = channel::bounded::<String>(32);
         self.stdin_tx = Some(stdin_tx);
 
         cx.spawn(async move |this, cx| {
@@ -73,37 +73,43 @@ impl ClaudeState {
             .ok();
 
             loop {
-                tokio::select! {
-                    result = claude.recv_any_message(tokio::time::Duration::from_millis(100)) => {
-                        match result {
-                            Ok(Some(msg)) => {
-                                let is_terminal = msg.is_terminal();
-                                this.update(cx, |state, cx| {
-                                    Self::process_message(state, msg);
-                                    if is_terminal {
-                                        state.status = ClaudeStatus::Idle;
-                                    }
-                                    cx.emit(ClaudeStateEvent::Updated);
-                                    cx.notify();
-                                }).ok();
-                            },
-                            Ok(None) => {},
-                            Err(_) => break,
-                        }
+                match claude
+                    .recv_any_message(std::time::Duration::from_millis(100))
+                    .await
+                {
+                    Ok(Some(msg)) => {
+                        let is_terminal = msg.is_terminal();
+                        this.update(cx, |state, cx| {
+                            Self::process_message(state, msg);
+                            if is_terminal {
+                                state.status = ClaudeStatus::Idle;
+                            }
+                            cx.emit(ClaudeStateEvent::Updated);
+                            cx.notify();
+                        })
+                        .ok();
                     },
-                    Some(text) = stdin_rx.recv() => {
+                    Ok(None) => {},
+                    Err(_) => break,
+                }
+
+                match stdin_rx.try_recv() {
+                    Ok(text) => {
                         this.update(cx, |state, cx| {
                             state.status = ClaudeStatus::Responding;
                             cx.emit(ClaudeStateEvent::Updated);
                             cx.notify();
-                        }).ok();
+                        })
+                        .ok();
                         if claude.send_message(&text).await.is_err() {
                             break;
                         }
                     },
+                    Err(channel::TryRecvError::Empty) => {},
+                    Err(channel::TryRecvError::Closed) => break,
                 }
 
-                if !claude.is_alive().await {
+                if !claude.is_alive() {
                     break;
                 }
             }
@@ -116,7 +122,7 @@ impl ClaudeState {
             })
             .ok();
 
-            let _ = claude.shutdown().await;
+            let _ = claude.shutdown();
         })
         .detach();
     }

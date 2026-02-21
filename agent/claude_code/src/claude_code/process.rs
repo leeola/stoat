@@ -1,18 +1,17 @@
 use crate::messages::{PermissionMode, SdkMessage};
-use snafu::{ResultExt, Snafu};
-use std::{process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::mpsc,
-    task::JoinHandle,
+use async_channel::{Receiver, Sender};
+use snafu::Snafu;
+use std::{
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
+    thread::JoinHandle,
+    time::Duration,
 };
 use tracing::{debug, error, trace};
 
-/// Channels needed for process communication that can be recovered on error
 pub struct ProcessChannels {
-    pub stdin_rx: mpsc::Receiver<String>,
-    pub stdout_tx: mpsc::Sender<SdkMessage>,
+    pub stdin_rx: Receiver<String>,
+    pub stdout_tx: Sender<SdkMessage>,
 }
 
 #[derive(Debug, Snafu)]
@@ -71,23 +70,21 @@ pub enum CloseError {
 
 pub struct Process {
     child: Child,
-    stdin_handle: JoinHandle<mpsc::Receiver<String>>,
-    stdout_handle: JoinHandle<mpsc::Sender<SdkMessage>>,
-    stderr_handle: JoinHandle<String>, // Returns last stderr line
+    stdin_handle: JoinHandle<Receiver<String>>,
+    stdout_handle: JoinHandle<Sender<SdkMessage>>,
+    stderr_handle: JoinHandle<String>,
 }
 
 pub struct RecoveredChannels {
-    pub stdin_rx: mpsc::Receiver<String>,
-    pub stdout_tx: mpsc::Sender<SdkMessage>,
+    pub stdin_rx: Receiver<String>,
+    pub stdout_tx: Sender<SdkMessage>,
     pub last_stderr: String,
 }
 
 pub struct ProcessBuilder {
-    // Required channels (passed in constructor)
-    stdin_rx: mpsc::Receiver<String>,
-    stdout_tx: mpsc::Sender<SdkMessage>,
+    stdin_rx: Receiver<String>,
+    stdout_tx: Sender<SdkMessage>,
 
-    // Optional configuration
     session_id: Option<String>,
     model: Option<String>,
     max_turns: Option<u32>,
@@ -97,7 +94,7 @@ pub struct ProcessBuilder {
 }
 
 impl ProcessBuilder {
-    pub fn new(stdin_rx: mpsc::Receiver<String>, stdout_tx: mpsc::Sender<SdkMessage>) -> Self {
+    pub fn new(stdin_rx: Receiver<String>, stdout_tx: Sender<SdkMessage>) -> Self {
         Self {
             stdin_rx,
             stdout_tx,
@@ -140,12 +137,8 @@ impl ProcessBuilder {
         self
     }
 
-    /// Default build method - simplified to only generate session_id if missing
     pub async fn build(self) -> Result<Process, (ProcessChannels, BuildError)> {
-        // This method should only be used as a fallback when session_id is missing
-        // ClaudeCode should normally call new_session() or resume_session() directly
         if self.session_id.is_none() {
-            // No session ID provided - generate one and create new
             let mut builder = self;
             builder.session_id = Some(uuid::Uuid::new_v4().to_string());
             match builder.new_session().await {
@@ -153,8 +146,6 @@ impl ProcessBuilder {
                 Err((channels, e)) => Err((channels, BuildError::NewSession { source: e })),
             }
         } else {
-            // If session_id is present, caller should use resume_session() or new_session()
-            // directly Default to resume for backward compatibility
             match self.resume_session().await {
                 Ok(process) => Ok(process),
                 Err((channels, e)) => Err((channels, BuildError::ResumeSession { source: e })),
@@ -162,13 +153,10 @@ impl ProcessBuilder {
         }
     }
 
-    /// Create a new session (fails if session already exists)
     pub async fn new_session(self) -> Result<Process, (ProcessChannels, NewSessionError)> {
-        // Validate session_id is present
         let session_id = match &self.session_id {
             Some(id) => id.clone(),
             None => {
-                // Return channels with error since we own them
                 return Err((
                     ProcessChannels {
                         stdin_rx: self.stdin_rx,
@@ -179,12 +167,10 @@ impl ProcessBuilder {
             },
         };
 
-        // Build args and spawn child before taking ownership of channels
         let args = self.build_args(false);
-        let mut child = match self.spawn_child(args).await {
+        let mut child = match self.spawn_child(args) {
             Ok(child) => child,
             Err(e) => {
-                // Take ownership of channels to return them
                 return Err((
                     ProcessChannels {
                         stdin_rx: self.stdin_rx,
@@ -195,14 +181,13 @@ impl ProcessBuilder {
             },
         };
 
-        // Now take ownership of channels
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
 
         let (stdin, stdout, stderr) = match Self::extract_stdio(&mut child) {
             Ok(stdio) => stdio,
             Err(e) => {
-                let _ = child.kill().await;
+                let _ = child.kill();
                 return Err((
                     ProcessChannels {
                         stdin_rx,
@@ -216,7 +201,6 @@ impl ProcessBuilder {
         let (stdin_handle, stdout_handle, stderr_handle) =
             Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
 
-        // Check for early exit/errors
         let mut process = Process {
             child,
             stdin_handle,
@@ -224,14 +208,11 @@ impl ProcessBuilder {
             stderr_handle,
         };
 
-        // Wait briefly to see if process fails to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
 
-        if let Some(_error_msg) = process.check_early_exit().await {
-            // Process exited early, close it to get the actual stderr
-            match process.close().await {
+        if process.check_early_exit().is_some() {
+            match process.close() {
                 Ok(recovered) => {
-                    // Check the actual stderr message
                     if recovered.last_stderr.contains("is already in use") {
                         return Err((
                             ProcessChannels {
@@ -243,7 +224,6 @@ impl ProcessBuilder {
                             },
                         ));
                     } else {
-                        // Some other error occurred - still return channels
                         return Err((
                             ProcessChannels {
                                 stdin_rx: recovered.stdin_rx,
@@ -259,11 +239,8 @@ impl ProcessBuilder {
                     }
                 },
                 Err(e) => {
-                    // Can't recover channels, return a different error
-                    // We need to create dummy channels since we must return them
-                    let (dummy_stdin_tx, dummy_stdin_rx) = mpsc::channel(1);
-                    let (dummy_stdout_tx, _) = mpsc::channel(1);
-                    drop(dummy_stdin_tx); // Close the channel
+                    let (_, dummy_stdin_rx) = async_channel::bounded(1);
+                    let (dummy_stdout_tx, _) = async_channel::bounded(1);
                     return Err((
                         ProcessChannels {
                             stdin_rx: dummy_stdin_rx,
@@ -278,13 +255,10 @@ impl ProcessBuilder {
         Ok(process)
     }
 
-    /// Resume an existing session (fails if session doesn't exist)  
     pub async fn resume_session(self) -> Result<Process, (ProcessChannels, ResumeSessionError)> {
-        // Validate session_id is present
         let session_id = match &self.session_id {
             Some(id) => id.clone(),
             None => {
-                // Return channels with error since we own them
                 return Err((
                     ProcessChannels {
                         stdin_rx: self.stdin_rx,
@@ -295,12 +269,10 @@ impl ProcessBuilder {
             },
         };
 
-        // Build args and spawn child before taking ownership of channels
         let args = self.build_args(true);
-        let mut child = match self.spawn_child(args).await {
+        let mut child = match self.spawn_child(args) {
             Ok(child) => child,
             Err(e) => {
-                // Take ownership of channels to return them
                 return Err((
                     ProcessChannels {
                         stdin_rx: self.stdin_rx,
@@ -311,14 +283,13 @@ impl ProcessBuilder {
             },
         };
 
-        // Now take ownership of channels
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
 
         let (stdin, stdout, stderr) = match Self::extract_stdio(&mut child) {
             Ok(stdio) => stdio,
             Err(_) => {
-                let _ = child.kill().await;
+                let _ = child.kill();
                 return Err((
                     ProcessChannels {
                         stdin_rx,
@@ -332,7 +303,6 @@ impl ProcessBuilder {
         let (stdin_handle, stdout_handle, stderr_handle) =
             Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
 
-        // Check for early exit/errors
         let mut process = Process {
             child,
             stdin_handle,
@@ -340,14 +310,11 @@ impl ProcessBuilder {
             stderr_handle,
         };
 
-        // Wait briefly to see if process fails to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        async_io::Timer::after(Duration::from_millis(100)).await;
 
-        if let Some(_error_msg) = process.check_early_exit().await {
-            // Process exited early, close it to get the actual stderr
-            match process.close().await {
+        if process.check_early_exit().is_some() {
+            match process.close() {
                 Ok(recovered) => {
-                    // Check the actual stderr message
                     if recovered
                         .last_stderr
                         .contains("No conversation found with session ID")
@@ -362,10 +329,8 @@ impl ProcessBuilder {
                             },
                         ));
                     } else {
-                        // Some other error occurred
-                        let (dummy_stdin_tx, dummy_stdin_rx) = mpsc::channel(1);
-                        let (dummy_stdout_tx, _) = mpsc::channel(1);
-                        drop(dummy_stdin_tx); // Close the channel
+                        let (_, dummy_stdin_rx) = async_channel::bounded(1);
+                        let (dummy_stdout_tx, _) = async_channel::bounded(1);
                         return Err((
                             ProcessChannels {
                                 stdin_rx: dummy_stdin_rx,
@@ -383,11 +348,8 @@ impl ProcessBuilder {
                     }
                 },
                 Err(e) => {
-                    // Can't recover channels, return a different error
-                    // We need to create dummy channels since we must return them
-                    let (dummy_stdin_tx, dummy_stdin_rx) = mpsc::channel(1);
-                    let (dummy_stdout_tx, _) = mpsc::channel(1);
-                    drop(dummy_stdin_tx); // Close the channel
+                    let (_, dummy_stdin_rx) = async_channel::bounded(1);
+                    let (dummy_stdout_tx, _) = async_channel::bounded(1);
                     return Err((
                         ProcessChannels {
                             stdin_rx: dummy_stdin_rx,
@@ -402,7 +364,6 @@ impl ProcessBuilder {
         Ok(process)
     }
 
-    // Build command arguments
     fn build_args(&self, use_resume: bool) -> Vec<String> {
         let mut args = vec![
             "--print".to_string(),
@@ -413,7 +374,6 @@ impl ProcessBuilder {
             "--verbose".to_string(),
         ];
 
-        // Session handling
         if use_resume {
             args.push("--resume".to_string());
         } else {
@@ -426,7 +386,6 @@ impl ProcessBuilder {
                 .clone(),
         );
 
-        // Optional arguments
         if let Some(model) = &self.model {
             args.push("--model".to_string());
             args.push(model.clone());
@@ -463,8 +422,7 @@ impl ProcessBuilder {
         args
     }
 
-    // Spawn the child process
-    async fn spawn_child(&self, args: Vec<String>) -> Result<Child, std::io::Error> {
+    fn spawn_child(&self, args: Vec<String>) -> Result<Child, std::io::Error> {
         let mut cmd = Command::new("claude");
         cmd.args(&args)
             .stdin(Stdio::piped())
@@ -475,7 +433,6 @@ impl ProcessBuilder {
         cmd.spawn()
     }
 
-    // Extract stdio handles
     fn extract_stdio(
         child: &mut Child,
     ) -> Result<(ChildStdin, ChildStdout, ChildStderr), NewSessionError> {
@@ -485,16 +442,15 @@ impl ProcessBuilder {
         Ok((stdin, stdout, stderr))
     }
 
-    // Setup all handlers
     fn setup_handlers(
         stdin: ChildStdin,
         stdout: ChildStdout,
         stderr: ChildStderr,
-        stdin_rx: mpsc::Receiver<String>,
-        stdout_tx: mpsc::Sender<SdkMessage>,
+        stdin_rx: Receiver<String>,
+        stdout_tx: Sender<SdkMessage>,
     ) -> (
-        JoinHandle<mpsc::Receiver<String>>,
-        JoinHandle<mpsc::Sender<SdkMessage>>,
+        JoinHandle<Receiver<String>>,
+        JoinHandle<Sender<SdkMessage>>,
         JoinHandle<String>,
     ) {
         let stdin_handle = Self::spawn_stdin_handler(stdin, stdin_rx);
@@ -504,61 +460,40 @@ impl ProcessBuilder {
         (stdin_handle, stdout_handle, stderr_handle)
     }
 
-    // Stdin handler
     fn spawn_stdin_handler(
-        stdin: ChildStdin,
-        mut stdin_rx: mpsc::Receiver<String>,
-    ) -> JoinHandle<mpsc::Receiver<String>> {
-        tokio::spawn(async move {
-            let mut stdin = stdin;
-            loop {
-                match stdin_rx.recv().await {
-                    Some(message) => {
-                        if let Err(e) = Self::write_message(&mut stdin, message).await {
-                            error!("Failed to write to stdin: {}", e);
-                            break stdin_rx;
-                        }
-                    },
-                    None => {
-                        debug!("stdin channel closed");
-                        break stdin_rx;
-                    },
+        mut stdin: ChildStdin,
+        stdin_rx: Receiver<String>,
+    ) -> JoinHandle<Receiver<String>> {
+        std::thread::spawn(move || {
+            while let Ok(message) = stdin_rx.recv_blocking() {
+                if write!(stdin, "{}\n", message).is_err() {
+                    break;
+                }
+                if stdin.flush().is_err() {
+                    break;
                 }
             }
+            stdin_rx
         })
     }
 
-    async fn write_message(stdin: &mut ChildStdin, message: String) -> std::io::Result<()> {
-        stdin.write_all(message.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await
-    }
-
-    // Stdout handler
     fn spawn_stdout_handler(
         stdout: ChildStdout,
-        stdout_tx: mpsc::Sender<SdkMessage>,
-    ) -> JoinHandle<mpsc::Sender<SdkMessage>> {
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => {
-                        debug!("Claude Code stdout closed");
-                        break stdout_tx;
-                    },
-                    Ok(_) => {
+        stdout_tx: Sender<SdkMessage>,
+    ) -> JoinHandle<Sender<SdkMessage>> {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
                             match serde_json::from_str::<SdkMessage>(trimmed) {
                                 Ok(message) => {
                                     trace!("Received message: {:?}", message);
-                                    if stdout_tx.send(message).await.is_err() {
+                                    if stdout_tx.send_blocking(message).is_err() {
                                         error!("Failed to send message to channel");
-                                        break stdout_tx;
+                                        break;
                                     }
                                 },
                                 Err(e) => {
@@ -572,88 +507,70 @@ impl ProcessBuilder {
                     },
                     Err(e) => {
                         error!("Failed to read from stdout: {}", e);
-                        break stdout_tx;
+                        break;
                     },
                 }
             }
+            stdout_tx
         })
     }
 
-    // Stderr handler that maintains a small buffer
     fn spawn_stderr_handler(stderr: ChildStderr) -> JoinHandle<String> {
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
             let mut last_error = String::new();
-
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break last_error, // Return last error on EOF
-                    Ok(_) => {
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
                             error!("Claude Code stderr: {}", trimmed);
-                            // Keep the last error line - any non-empty stderr is likely an error
                             last_error = trimmed.to_string();
                         }
                     },
                     Err(e) => {
                         error!("Failed to read from stderr: {}", e);
-                        break last_error;
+                        break;
                     },
                 }
             }
+            last_error
         })
     }
 }
 
 impl Process {
-    /// Create a new builder
-    pub fn builder(
-        stdin_rx: mpsc::Receiver<String>,
-        stdout_tx: mpsc::Sender<SdkMessage>,
-    ) -> ProcessBuilder {
+    pub fn builder(stdin_rx: Receiver<String>, stdout_tx: Sender<SdkMessage>) -> ProcessBuilder {
         ProcessBuilder::new(stdin_rx, stdout_tx)
     }
 
-    /// Check if process exited early and get stderr if available
-    async fn check_early_exit(&mut self) -> Option<String> {
-        // Check if process has exited
+    fn check_early_exit(&mut self) -> Option<String> {
         if let Ok(Some(_status)) = self.child.try_wait() {
-            // Process exited, wait a bit more for stderr to be captured
-            tokio::time::sleep(Duration::from_millis(200)).await;
-
-            // Process has exited - we need to get the error message
-            // Since we can't peek at the JoinHandle result, we'll just indicate
-            // that the process exited and let the caller handle it
+            std::thread::sleep(Duration::from_millis(200));
             Some("Process exited early".to_string())
         } else {
             None
         }
     }
 
-    /// Close the process and recover the channels
-    pub async fn close(mut self) -> Result<RecoveredChannels, CloseError> {
-        // Kill the child process
-        self.child.kill().await.context(KillFailedSnafu)?;
+    pub fn close(mut self) -> Result<RecoveredChannels, CloseError> {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
 
-        // Recover channels and get last stderr
         let stdin_rx = self
             .stdin_handle
-            .await
+            .join()
             .map_err(|_| CloseError::HandlerPanicked {
                 task: "stdin".to_string(),
             })?;
         let stdout_tx = self
             .stdout_handle
-            .await
+            .join()
             .map_err(|_| CloseError::HandlerPanicked {
                 task: "stdout".to_string(),
             })?;
-        let last_stderr = self.stderr_handle.await.unwrap_or_else(|_| String::new());
+        let last_stderr = self.stderr_handle.join().unwrap_or_default();
 
-        // Log last stderr if present
         if !last_stderr.is_empty() {
             debug!("Process closed with last stderr: {}", last_stderr);
         }
@@ -665,7 +582,6 @@ impl Process {
         })
     }
 
-    /// Check if the process is still alive
     pub fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
