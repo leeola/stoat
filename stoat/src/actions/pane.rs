@@ -4,6 +4,7 @@ mod focus_down;
 mod focus_left;
 mod focus_right;
 mod focus_up;
+mod open_claude_chat;
 mod quit;
 mod split_down;
 mod split_left;

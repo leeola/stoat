@@ -316,6 +316,8 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "CommandLineDismiss"
             | "ChangeDirectory"
             | "PrintWorkingDirectory"
+            // Claude
+            | "OpenClaudeChat"
             // Application
             | "QuitAll"
     );

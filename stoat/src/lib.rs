@@ -9,6 +9,7 @@ pub mod actions;
 pub mod buffer;
 pub mod build_info;
 pub mod char_classifier;
+pub mod claude;
 pub mod command;
 pub mod command_line;
 pub mod command_palette_v2;

@@ -241,6 +241,7 @@ on key {
             d -> ToggleDiffHunk();
             r -> OpenDiffReview();
             x -> OpenConflictReview();
+            l -> OpenClaudeChat();
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::messages::{AssistantMessage, MessageContent, SdkMessage};
+use crate::messages::SdkMessage;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -87,7 +87,7 @@ impl MessageBuffer {
                 session_id: session_id.clone(),
                 timestamp: std::time::SystemTime::now(),
                 message_type: MessageType::Assistant,
-                content: extract_text_content(message),
+                content: message.get_text_content(),
             },
 
             SdkMessage::System {
@@ -175,16 +175,4 @@ impl MessageBuffer {
 
         output
     }
-}
-
-fn extract_text_content(message: &AssistantMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            MessageContent::Text { text } => Some(text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }

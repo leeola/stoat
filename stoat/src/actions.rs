@@ -475,6 +475,15 @@ actions!(
     ]
 );
 
+// Claude actions
+actions!(
+    stoat,
+    [
+        /// Open Claude chat side panel
+        OpenClaudeChat,
+    ]
+);
+
 // View actions
 actions!(
     stoat,
@@ -1477,6 +1486,9 @@ action_metadata!(
     "Set the active mode within the current KeyContext"
 );
 
+// Claude actions
+action_metadata!(OpenClaudeChat, "claude chat", "Open Claude chat side panel");
+
 // Static maps for looking up action metadata by TypeId
 
 /// Map from TypeId to action name
@@ -1984,6 +1996,11 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     // KeyContext and Mode actions
     names.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::action_name());
     names.insert(TypeId::of::<SetMode>(), SetMode::action_name());
+
+    names.insert(
+        TypeId::of::<OpenClaudeChat>(),
+        OpenClaudeChat::action_name(),
+    );
 
     names
 });
@@ -2494,6 +2511,11 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::description());
     descriptions.insert(TypeId::of::<SetMode>(), SetMode::description());
 
+    descriptions.insert(
+        TypeId::of::<OpenClaudeChat>(),
+        OpenClaudeChat::description(),
+    );
+
     descriptions
 });
 
@@ -2977,6 +2999,8 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::help_text());
     help.insert(TypeId::of::<SetMode>(), SetMode::help_text());
 
+    help.insert(TypeId::of::<OpenClaudeChat>(), OpenClaudeChat::help_text());
+
     help
 });
 
@@ -3041,6 +3065,8 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
         TypeId::of::<PrintWorkingDirectory>(),
         PrintWorkingDirectory::aliases(),
     );
+
+    aliases.insert(TypeId::of::<OpenClaudeChat>(), OpenClaudeChat::aliases());
 
     aliases
 });

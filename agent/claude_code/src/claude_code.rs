@@ -3,7 +3,7 @@ pub mod process;
 
 pub use self::builder::ClaudeCodeBuilder;
 use self::process::{Process, ProcessBuilder as ProcessBuilderInner};
-use crate::messages::{MessageContent, PermissionMode, SdkMessage};
+use crate::messages::{PermissionMode, SdkMessage, UserMessage};
 use anyhow::{Context, Result};
 use tokio::{
     sync::mpsc,
@@ -21,6 +21,27 @@ pub struct SessionConfig {
     pub model: Option<String>,
 }
 
+impl SessionConfig {
+    pub(crate) fn apply_to(&self, mut builder: ProcessBuilderInner) -> ProcessBuilderInner {
+        if let Some(model) = &self.model {
+            builder = builder.model(model.clone());
+        }
+        if let Some(max_turns) = self.max_turns {
+            builder = builder.max_turns(max_turns);
+        }
+        if let Some(cwd) = &self.cwd {
+            builder = builder.cwd(cwd.clone());
+        }
+        if let Some(tools) = &self.allowed_tools {
+            builder = builder.allowed_tools(tools.clone());
+        }
+        if let Some(mode) = &self.permission_mode {
+            builder = builder.permission_mode(mode.clone());
+        }
+        builder
+    }
+}
+
 pub struct ClaudeCode {
     process: Option<Process>,
     // Channels for communicating with Process
@@ -36,30 +57,8 @@ impl ClaudeCode {
         ClaudeCodeBuilder::new()
     }
 
-    /// Create a new ClaudeCode with the given configuration
     pub async fn new(config: SessionConfig) -> Result<Self> {
-        let mut builder = ClaudeCodeBuilder::new();
-
-        if let Some(model) = config.model {
-            builder = builder.model(model);
-        }
-        if let Some(session_id) = config.session_id {
-            builder = builder.session_id(session_id.to_string());
-        }
-        if let Some(max_turns) = config.max_turns {
-            builder = builder.max_turns(max_turns);
-        }
-        if let Some(cwd) = config.cwd {
-            builder = builder.cwd(cwd);
-        }
-        if let Some(tools) = config.allowed_tools {
-            builder = builder.allowed_tools(tools);
-        }
-        if let Some(mode) = config.permission_mode {
-            builder = builder.permission_mode(mode);
-        }
-
-        builder.build().await
+        ClaudeCodeBuilder::from_config(config).build().await
     }
 
     /// Create ClaudeCode from a Process instance with communication channels
@@ -82,23 +81,13 @@ impl ClaudeCode {
     }
 
     pub async fn send_message(&self, content: &str) -> Result<()> {
-        // Create user message in stream-json format
-        let user_msg = serde_json::json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content
-                    }
-                ]
-            }
-        });
-
-        let message = serde_json::to_string(&user_msg)?;
+        let msg = SdkMessage::User {
+            message: UserMessage::from_text(content),
+            session_id: self.managed_session_id.to_string(),
+        };
+        let json = serde_json::to_string(&msg)?;
         self.process_stdin_tx
-            .send(message)
+            .send(json)
             .await
             .context("Failed to send message to Claude Code")?;
         Ok(())
@@ -128,22 +117,9 @@ impl ClaudeCode {
             .await
             {
                 Ok(Some(msg)) => {
-                    // Check if it's an assistant message
                     if let SdkMessage::Assistant { message, .. } = msg {
-                        // Extract text content for convenience
-                        let content = message
-                            .content
-                            .iter()
-                            .filter_map(|c| match c {
-                                MessageContent::Text { text } => Some(text.clone()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-
-                        return Ok(Some(content));
+                        return Ok(Some(message.get_text_content()));
                     }
-                    // Continue for non-assistant messages
                     continue;
                 },
                 Ok(None) => {
@@ -212,25 +188,9 @@ impl ClaudeCode {
             // Wait a bit for the process to fully terminate
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // Build new process with the RECOVERED channels
-            // This reuses the same channels - ClaudeCode's stdin_tx and stdout_rx stay connected!
-            let mut process_builder =
-                ProcessBuilderInner::new(recovered.stdin_rx, recovered.stdout_tx)
-                    .session_id(self.managed_session_id.to_string())
-                    .model(model_str);
-
-            if let Some(max_turns) = self.current_config.max_turns {
-                process_builder = process_builder.max_turns(max_turns);
-            }
-            if let Some(cwd) = &self.current_config.cwd {
-                process_builder = process_builder.cwd(cwd.clone());
-            }
-            if let Some(tools) = &self.current_config.allowed_tools {
-                process_builder = process_builder.allowed_tools(tools.clone());
-            }
-            if let Some(mode) = &self.current_config.permission_mode {
-                process_builder = process_builder.permission_mode(mode.clone());
-            }
+            let process_builder = ProcessBuilderInner::new(recovered.stdin_rx, recovered.stdout_tx)
+                .session_id(self.managed_session_id.to_string());
+            let process_builder = self.current_config.apply_to(process_builder);
 
             let new_process = match process_builder.resume_session().await {
                 Ok(process) => process,

@@ -302,6 +302,9 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     // Command line actions (1)
     registry.register::<crate::actions::PrintWorkingDirectory>();
 
+    // Claude actions (1)
+    registry.register::<crate::actions::OpenClaudeChat>();
+
     registry
 });
 

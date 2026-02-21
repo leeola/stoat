@@ -485,6 +485,7 @@ impl PaneGroupView {
                 "PrintWorkingDirectory" => {
                     self.handle_print_working_directory(window, cx);
                 },
+                "OpenClaudeChat" => self.handle_open_claude_chat(window, cx),
                 "QuitAll" => cx.quit(),
                 _ => {
                     tracing::warn!("Unknown pane action: {}", name);
@@ -783,6 +784,11 @@ impl PaneGroupView {
                             .flex_1()
                             .size_full()
                             .child(static_view.clone())
+                            .into_any_element(),
+                        crate::content_view::PaneContent::Claude(claude_view) => div()
+                            .flex_1()
+                            .size_full()
+                            .child(claude_view.clone())
                             .into_any_element(),
                     }
                 } else {

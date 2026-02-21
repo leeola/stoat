@@ -110,21 +110,9 @@ pub trait ContentView: Render + Focusable {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewType {
-    /// Text editor view for editing source code and text files.
-    ///
-    /// Backed by a [`Stoat`] entity. Handles all text editing actions
-    /// (movement, deletion, selection, etc.).
     Editor,
-    /// Static read-only text view for displaying fixed content.
-    ///
-    /// Not backed by a [`Stoat`] entity. Does not handle text editing actions.
-    /// Used for help text, licenses, and other read-only information.
     Static,
-    // Future view types:
-    // /// Image viewer for displaying image files
-    // Image,
-    // /// Table viewer for viewing structured data
-    // Table,
+    Claude,
 }
 
 /// Type-erased wrapper for different view types that can be stored in panes.
@@ -168,19 +156,9 @@ pub enum ViewType {
 /// to all actions when adding new types.
 #[derive(Clone)]
 pub enum PaneContent {
-    /// Text editor view.
-    ///
-    /// Contains an [`EditorView`](crate::editor::view::EditorView) entity which
-    /// wraps a [`Stoat`] entity for text editing functionality.
     Editor(Entity<crate::editor::view::EditorView>),
-    /// Static read-only text view.
-    ///
-    /// Contains a [`StaticView`](crate::static_view::StaticView) entity for
-    /// displaying fixed content without editing capabilities.
     Static(Entity<crate::static_view::StaticView>),
-    // Future variants:
-    // Image(Entity<ImageView>),
-    // Table(Entity<TableView>),
+    Claude(Entity<crate::claude::view::ClaudeView>),
 }
 
 impl PaneContent {
@@ -191,6 +169,7 @@ impl PaneContent {
         match self {
             Self::Editor(_) => ViewType::Editor,
             Self::Static(_) => ViewType::Static,
+            Self::Claude(_) => ViewType::Claude,
         }
     }
 
@@ -239,6 +218,13 @@ impl PaneContent {
     pub fn as_static(&self) -> Option<&Entity<crate::static_view::StaticView>> {
         match self {
             Self::Static(entity) => Some(entity),
+            _ => None,
+        }
+    }
+
+    pub fn as_claude(&self) -> Option<&Entity<crate::claude::view::ClaudeView>> {
+        match self {
+            Self::Claude(entity) => Some(entity),
             _ => None,
         }
     }
