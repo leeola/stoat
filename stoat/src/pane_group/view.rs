@@ -1,4 +1,5 @@
 use crate::{
+    claude::{state::ClaudeState, view::ClaudeView},
     command::{overlay::CommandOverlay, palette::CommandPalette},
     editor::view::EditorView,
     file_finder::Finder,
@@ -154,6 +155,7 @@ pub struct PaneGroupView {
     pub(crate) pending_actions: Vec<(String, Vec<String>)>,
     activation_observer_set: bool,
     _git_watcher: Option<notify::RecommendedWatcher>,
+    pub(crate) hidden_claude: Option<(Entity<ClaudeState>, Entity<ClaudeView>)>,
 }
 
 impl PaneGroupView {
@@ -297,6 +299,7 @@ impl PaneGroupView {
             pending_actions: Vec::new(),
             activation_observer_set: false,
             _git_watcher: None,
+            hidden_claude: None,
         }
     }
 
@@ -305,6 +308,17 @@ impl PaneGroupView {
         self.pane_contents
             .get(&self.active_pane)
             .and_then(|content| content.as_editor())
+    }
+
+    /// Get the [`Stoat`] entity from the active pane, regardless of pane type.
+    pub fn active_stoat(&self, cx: &App) -> Option<Entity<Stoat>> {
+        match self.pane_contents.get(&self.active_pane)? {
+            crate::content_view::PaneContent::Editor(editor) => Some(editor.read(cx).stoat.clone()),
+            crate::content_view::PaneContent::Claude(claude) => {
+                Some(claude.read(cx).stoat().clone())
+            },
+            crate::content_view::PaneContent::Static(_) => None,
+        }
     }
 
     /// Focus the currently active editor.
@@ -322,20 +336,47 @@ impl PaneGroupView {
     ///
     /// This is called after pane commands execute to make Pane mode a one-shot mode.
     pub(crate) fn exit_pane_mode(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(editor) = self
-            .pane_contents
-            .get_mut(&self.active_pane)
-            .and_then(|content| content.as_editor())
-        {
-            editor.update(cx, |editor, cx| {
-                let mode = editor.stoat.read(cx).mode().to_string();
-                if mode == "pane" {
-                    editor.stoat.update(cx, |stoat, _| {
-                        stoat.set_mode("normal");
-                    });
-                    cx.notify();
-                }
-            });
+        let stoat = match self.pane_contents.get(&self.active_pane) {
+            Some(crate::content_view::PaneContent::Editor(editor)) => {
+                Some(editor.read(cx).stoat.clone())
+            },
+            Some(crate::content_view::PaneContent::Claude(claude)) => {
+                Some(claude.read(cx).stoat().clone())
+            },
+            _ => None,
+        };
+        if let Some(stoat) = stoat {
+            let mode = stoat.read(cx).mode().to_string();
+            if mode == "pane" {
+                stoat.update(cx, |s, _| s.set_mode("normal"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Focus a pane's content and update key_context accordingly.
+    pub(crate) fn focus_pane_content(
+        &mut self,
+        pane_id: crate::pane::PaneId,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match self.pane_contents.get(&pane_id) {
+            Some(crate::content_view::PaneContent::Editor(editor)) => {
+                let stoat = editor.read(cx).stoat.clone();
+                stoat.update(cx, |s, _| s.set_key_context(KeyContext::TextEditor));
+                window.focus(&editor.read(cx).focus_handle(cx));
+            },
+            Some(crate::content_view::PaneContent::Claude(claude)) => {
+                let stoat = claude.read(cx).stoat().clone();
+                stoat.update(cx, |s, _| s.set_key_context(KeyContext::Claude));
+                stoat.update(cx, |s, _| s.set_mode("normal"));
+                window.focus(&claude.read(cx).focus_handle(cx));
+            },
+            Some(crate::content_view::PaneContent::Static(view)) => {
+                window.focus(&view.read(cx).focus_handle(cx));
+            },
+            None => {},
         }
     }
 
@@ -1204,18 +1245,26 @@ impl Render for PaneGroupView {
                     thumb_data,
                 )
             })
-            .unwrap_or((
-                KeyContext::TextEditor,
-                "normal".to_string(),
-                "NORMAL".to_string(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ));
+            .unwrap_or_else(|| {
+                let (kc, mode, display) = self
+                    .active_stoat(cx)
+                    .map(|stoat| {
+                        let s = stoat.read(cx);
+                        let kc = s.key_context();
+                        let m = s.mode().to_string();
+                        let d = s
+                            .get_mode(&m)
+                            .map(|md| md.display_name.clone())
+                            .unwrap_or_else(|| m.to_uppercase());
+                        (kc, m, d)
+                    })
+                    .unwrap_or((
+                        KeyContext::TextEditor,
+                        "normal".to_string(),
+                        "NORMAL".to_string(),
+                    ));
+                (kc, mode, display, None, None, None, None, None, None, None)
+            });
 
         // Extract file finder data from workspace if in FileFinder context
         let file_finder_data = if key_context == KeyContext::FileFinder {
@@ -1280,6 +1329,33 @@ impl Render for PaneGroupView {
             ))
         } else {
             None
+        };
+
+        // If active pane is Claude, provide status bar data from ClaudeView
+        let status_bar_data = if status_bar_data.is_none() {
+            self.pane_contents
+                .get(&self.active_pane)
+                .and_then(|content| content.as_claude())
+                .map(|claude_view| {
+                    let (mode, status) = claude_view.read(cx).status_bar_info(cx);
+                    let claude_label =
+                        format!("Claude \u{2014} {}", ClaudeView::status_label(status));
+                    (
+                        mode,
+                        None,
+                        Vec::new(),
+                        Some(claude_label),
+                        None,
+                        None,
+                        None,
+                        None,
+                        String::new(),
+                        false,
+                        None,
+                    )
+                })
+        } else {
+            status_bar_data
         };
 
         // Update status_bar_data with workspace git_status data

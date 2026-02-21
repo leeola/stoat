@@ -202,46 +202,62 @@ on key {
             d -> CloseBuffer();
         }
 
-        # Pane Mode
-        mode == "pane" {
-            escape -> SetMode(normal);
+    }
 
-            # Splitting
-            v -> SplitDown();
-            s -> SplitRight();
-            ctrl-v -> SplitRight();
-            ctrl-s -> SplitDown();
+    # Pane Mode (global - works from any focus context)
+    mode == "pane" {
+        escape -> SetMode(normal);
 
-            # Close
+        # Splitting
+        v -> SplitDown();
+        s -> SplitRight();
+        ctrl-v -> SplitRight();
+        ctrl-s -> SplitDown();
+
+        # Close
+        q -> ClosePane();
+        o -> CloseOtherPanes();
+
+        # Focus navigation
+        h -> FocusPaneLeft();
+        j -> FocusPaneDown();
+        k -> FocusPaneUp();
+        l -> FocusPaneRight();
+        left -> FocusPaneLeft();
+        down -> FocusPaneDown();
+        up -> FocusPaneUp();
+        right -> FocusPaneRight();
+        ctrl-h -> FocusPaneLeft();
+        ctrl-j -> FocusPaneDown();
+        ctrl-k -> FocusPaneUp();
+        ctrl-l -> FocusPaneRight();
+    }
+
+    # Space Mode (global - works from any focus context)
+    mode == "space" {
+        escape -> SetMode(normal);
+        a -> SetMode(pane);
+        p -> OpenFileFinder();
+        b -> SetMode(buffer);
+        g -> OpenGitStatus();
+        d -> ToggleDiffHunk();
+        r -> OpenDiffReview();
+        x -> OpenConflictReview();
+        l -> OpenClaudeChat();
+    }
+
+    # Claude Context
+    focus == "Claude" {
+        mode == "normal" {
+            i -> SetMode(insert);
+            space -> SetMode(space);
             q -> ClosePane();
-            o -> CloseOtherPanes();
-
-            # Focus navigation
-            h -> FocusPaneLeft();
-            j -> FocusPaneDown();
-            k -> FocusPaneUp();
-            l -> FocusPaneRight();
-            left -> FocusPaneLeft();
-            down -> FocusPaneDown();
-            up -> FocusPaneUp();
-            right -> FocusPaneRight();
-            ctrl-h -> FocusPaneLeft();
-            ctrl-j -> FocusPaneDown();
-            ctrl-k -> FocusPaneUp();
-            ctrl-l -> FocusPaneRight();
+            : -> OpenCommandPalette();
+            ? -> OpenHelpOverlay();
+            ctrl-q -> Quit();
         }
-
-        # Space Mode (leader key)
-        mode == "space" {
+        mode == "insert" {
             escape -> SetMode(normal);
-            a -> SetMode(pane);
-            p -> OpenFileFinder();
-            b -> SetMode(buffer);
-            g -> OpenGitStatus();
-            d -> ToggleDiffHunk();
-            r -> OpenDiffReview();
-            x -> OpenConflictReview();
-            l -> OpenClaudeChat();
         }
     }
 

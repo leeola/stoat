@@ -830,7 +830,7 @@ mod tests {
         for point in points {
             let offset = snapshot.to_inlay_offset(point);
             let back = snapshot.offset_to_inlay_point(offset);
-            assert_eq!(back, point, "Roundtrip failed for {:?}", point);
+            assert_eq!(back, point, "Roundtrip failed for {point:?}");
         }
     }
 
@@ -866,8 +866,7 @@ mod tests {
             let back = snapshot.offset_to_inlay_point(offset);
             assert_eq!(
                 back, point,
-                "Roundtrip failed for {:?} (offset: {:?})",
-                point, offset
+                "Roundtrip failed for {point:?} (offset: {offset:?})"
             );
         }
     }
@@ -910,8 +909,7 @@ mod tests {
             let back = snapshot.offset_to_inlay_point(offset);
             assert_eq!(
                 back, point,
-                "Roundtrip failed for {:?} (offset: {:?})",
-                point, offset
+                "Roundtrip failed for {point:?} (offset: {offset:?})"
             );
         }
     }

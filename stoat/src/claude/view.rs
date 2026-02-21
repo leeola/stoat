@@ -1,6 +1,11 @@
 use crate::{
     claude::state::{ChatMessage, ClaudeState, ClaudeStateEvent, ClaudeStatus},
     content_view::{ContentView, ViewType},
+    keymap::{
+        compiled::CompiledKey,
+        dispatch::{dispatch_editor_action, dispatch_pane_action},
+    },
+    stoat::{KeyContext, Stoat},
 };
 use gpui::{
     div, px, rgb, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
@@ -8,25 +13,19 @@ use gpui::{
     Styled, Window,
 };
 
-#[derive(Clone, Copy, PartialEq)]
-enum InputMode {
-    Normal,
-    Insert,
-}
-
 pub enum ClaudeViewEvent {
     CloseRequested,
 }
 
 pub struct ClaudeView {
     state: Entity<ClaudeState>,
+    stoat: Entity<Stoat>,
     focus_handle: FocusHandle,
-    mode: InputMode,
     scroll_handle: ScrollHandle,
 }
 
 impl ClaudeView {
-    pub fn new(state: Entity<ClaudeState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(state: Entity<ClaudeState>, stoat: Entity<Stoat>, cx: &mut Context<Self>) -> Self {
         cx.subscribe(&state, |_this, _state, event, cx| match event {
             ClaudeStateEvent::Updated => cx.notify(),
             ClaudeStateEvent::CloseRequested => {
@@ -37,10 +36,14 @@ impl ClaudeView {
 
         Self {
             state,
+            stoat,
             focus_handle: cx.focus_handle(),
-            mode: InputMode::Normal,
             scroll_handle: ScrollHandle::new(),
         }
+    }
+
+    pub fn stoat(&self) -> &Entity<Stoat> {
+        &self.stoat
     }
 
     fn handle_key_down(
@@ -49,69 +52,96 @@ impl ClaudeView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.mode {
-            InputMode::Normal => self.handle_normal_key(event, cx),
-            InputMode::Insert => self.handle_insert_key(event, cx),
-        }
-    }
+        let mode = self.stoat.read(cx).mode().to_string();
 
-    fn handle_normal_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "i" => {
-                self.mode = InputMode::Insert;
-                cx.notify();
-            },
-            "q" => {
-                self.state.update(cx, |s, cx| s.request_close(cx));
-            },
-            _ => {},
+        if mode == "insert" {
+            match event.keystroke.key.as_str() {
+                "enter" => {
+                    self.state.update(cx, |s, cx| s.send_message(cx));
+                    cx.notify();
+                    return;
+                },
+                "backspace" => {
+                    self.state.update(cx, |s, _| {
+                        let text = &mut s.input_text;
+                        if !text.is_empty() {
+                            let boundary =
+                                text.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                            text.truncate(boundary);
+                        }
+                    });
+                    cx.notify();
+                    return;
+                },
+                _ => {},
+            }
         }
-    }
 
-    fn handle_insert_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.mode = InputMode::Normal;
+        let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
+
+        let matched_action = {
+            let stoat = self.stoat.read(cx);
+            stoat
+                .compiled_keymap
+                .lookup(&compiled_key, stoat)
+                .map(|binding| binding.action.clone())
+        };
+
+        if let Some(action) = matched_action {
+            if dispatch_editor_action(&self.stoat, &action, cx) {
                 cx.notify();
-            },
-            "enter" => {
-                self.state.update(cx, |s, cx| s.send_message(cx));
+                return;
+            }
+            if dispatch_pane_action(&self.stoat, &action, cx) {
                 cx.notify();
-            },
-            "backspace" => {
-                self.state.update(cx, |s, _| {
-                    let text = &mut s.input_text;
-                    if !text.is_empty() {
-                        let boundary = text.char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
-                        text.truncate(boundary);
-                    }
-                });
-                cx.notify();
-            },
-            _ => {
-                if let Some(key_char) = &event.keystroke.key_char {
-                    if !key_char.is_empty()
-                        && !event.keystroke.modifiers.control
-                        && !event.keystroke.modifiers.alt
-                    {
+                return;
+            }
+            return;
+        }
+
+        let key_context = self.stoat.read(cx).key_context();
+        let is_overlay = matches!(
+            key_context,
+            KeyContext::CommandPalette | KeyContext::FileFinder | KeyContext::BufferFinder
+        );
+
+        if is_overlay || mode == "insert" {
+            if let Some(key_char) = &event.keystroke.key_char {
+                if !key_char.is_empty()
+                    && !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                {
+                    if is_overlay {
+                        self.stoat.update(cx, |stoat, cx| {
+                            stoat.insert_text(key_char, cx);
+                        });
+                    } else {
                         self.state.update(cx, |s, _| {
                             s.input_text.push_str(key_char);
                         });
-                        cx.notify();
                     }
+                    cx.notify();
                 }
-            },
+            }
         }
     }
 
-    fn mode_label(&self) -> &'static str {
-        match self.mode {
-            InputMode::Normal => "NORMAL",
-            InputMode::Insert => "INSERT",
-        }
+    pub fn state_entity(&self) -> &Entity<ClaudeState> {
+        &self.state
     }
 
-    fn status_label(status: ClaudeStatus) -> &'static str {
+    pub fn status_bar_info(&self, cx: &App) -> (String, ClaudeStatus) {
+        let stoat = self.stoat.read(cx);
+        let mode_name = stoat.mode();
+        let display = stoat
+            .get_mode(mode_name)
+            .map(|m| m.display_name.clone())
+            .unwrap_or_else(|| mode_name.to_uppercase());
+        let status = self.state.read(cx).status;
+        (display, status)
+    }
+
+    pub fn status_label(status: ClaudeStatus) -> &'static str {
         match status {
             ClaudeStatus::Idle => "Idle",
             ClaudeStatus::Connecting => "Connecting...",
@@ -137,9 +167,8 @@ impl Focusable for ClaudeView {
 impl Render for ClaudeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let status = state.status;
         let input_text = state.input_text.clone();
-        let mode_label = self.mode_label();
+        let mode = self.stoat.read(cx).mode().to_string();
 
         let mut messages_container = div()
             .id("claude-messages")
@@ -177,11 +206,7 @@ impl Render for ClaudeView {
             );
         }
 
-        let cursor = if self.mode == InputMode::Insert {
-            "\u{2588}"
-        } else {
-            ""
-        };
+        let cursor = if mode == "insert" { "\u{2588}" } else { "" };
         let input_display = format!("{input_text}{cursor}");
 
         div()
@@ -193,59 +218,20 @@ impl Render for ClaudeView {
             .flex_col()
             .bg(rgb(0x1e1e1e))
             .font_family("Menlo")
-            // Header
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .bg(rgb(0x252526))
-                    .border_b_1()
-                    .border_color(rgb(0x3e3e42))
-                    .flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_color(rgb(0xe0e0e0))
-                            .text_size(px(13.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child("Claude"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x808080))
-                            .text_size(px(11.0))
-                            .child(Self::status_label(status)),
-                    ),
-            )
-            // Messages
             .child(messages_container)
-            // Input area
             .child(
                 div()
                     .px(px(12.0))
-                    .py(px(6.0))
-                    .bg(rgb(0x252526))
+                    .py(px(4.0))
                     .border_t_1()
                     .border_color(rgb(0x3e3e42))
-                    .flex()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_color(rgb(0x569cd6))
-                            .text_size(px(10.0))
-                            .child(mode_label),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(rgb(0xd4d4d4))
-                            .text_size(px(13.0))
-                            .child(if input_display.is_empty() {
-                                "Press i to type...".to_string()
-                            } else {
-                                input_display
-                            }),
-                    ),
+                    .text_color(rgb(0xd4d4d4))
+                    .text_size(px(13.0))
+                    .child(if input_display.is_empty() {
+                        "Press i to type...".to_string()
+                    } else {
+                        input_display
+                    }),
             )
     }
 }

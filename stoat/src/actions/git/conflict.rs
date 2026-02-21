@@ -425,6 +425,23 @@ impl Stoat {
     }
 }
 
+impl PaneGroupView {
+    pub(crate) fn handle_open_conflict_review(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<'_, Self>,
+    ) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.stoat.update(cx, |stoat, cx| {
+                    stoat.open_conflict_review(cx);
+                });
+            });
+            cx.notify();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -596,22 +613,5 @@ mod tests {
             stoat.update(|s, _| s.conflict_view_kind),
             ConflictViewKind::Merge
         );
-    }
-}
-
-impl PaneGroupView {
-    pub(crate) fn handle_open_conflict_review(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<'_, Self>,
-    ) {
-        if let Some(editor) = self.active_editor() {
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, cx| {
-                    stoat.open_conflict_review(cx);
-                });
-            });
-            cx.notify();
-        }
     }
 }

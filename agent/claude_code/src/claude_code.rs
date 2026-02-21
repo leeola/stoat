@@ -107,18 +107,10 @@ impl ClaudeCode {
             let remaining = deadline.saturating_duration_since(Instant::now());
             let recv = self.process_stdout_rx.recv();
             let timeout = Timer::after(remaining);
-            match futures_lite::future::or(
-                async {
-                    match recv.await {
-                        Ok(msg) => Some(msg),
-                        Err(_) => None,
-                    }
-                },
-                async {
-                    timeout.await;
-                    None
-                },
-            )
+            match futures_lite::future::or(async { (recv.await).ok() }, async {
+                timeout.await;
+                None
+            })
             .await
             {
                 Some(msg) => {
@@ -140,18 +132,10 @@ impl ClaudeCode {
     pub async fn recv_any_message(&mut self, duration: Duration) -> Result<Option<SdkMessage>> {
         let recv = self.process_stdout_rx.recv();
         let timeout = Timer::after(duration);
-        match futures_lite::future::or(
-            async {
-                match recv.await {
-                    Ok(msg) => Some(msg),
-                    Err(_) => None,
-                }
-            },
-            async {
-                timeout.await;
-                None
-            },
-        )
+        match futures_lite::future::or(async { (recv.await).ok() }, async {
+            timeout.await;
+            None
+        })
         .await
         {
             Some(msg) => Ok(Some(msg)),

@@ -7,25 +7,24 @@ impl PaneGroupView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let editor_opt = self.active_editor().cloned();
-        if let Some(editor) = editor_opt {
-            let (current_mode, current_key_context) = {
-                let stoat = editor.read(cx).stoat.read(cx);
-                (stoat.mode().to_string(), stoat.key_context())
-            };
+        let Some(stoat) = self.active_stoat(cx) else {
+            return;
+        };
 
-            self.app_state
-                .open_command_palette(current_mode, current_key_context, cx);
+        let (current_mode, current_key_context) = {
+            let s = stoat.read(cx);
+            (s.mode().to_string(), s.key_context())
+        };
 
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_key_context(KeyContext::CommandPalette);
-                    stoat.set_mode("command_palette");
-                    stoat.command_palette_input_ref = self.app_state.command_palette.input.clone();
-                });
-            });
+        self.app_state
+            .open_command_palette(current_mode, current_key_context, cx);
 
-            cx.notify();
-        }
+        stoat.update(cx, |s, _cx| {
+            s.set_key_context(KeyContext::CommandPalette);
+            s.set_mode("command_palette");
+            s.command_palette_input_ref = self.app_state.command_palette.input.clone();
+        });
+
+        cx.notify();
     }
 }

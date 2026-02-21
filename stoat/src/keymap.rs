@@ -96,6 +96,7 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
         KeyContext::AboutModal,
         KeyContextMeta::new("about_modal".into()),
     );
+    contexts.insert(KeyContext::Claude, KeyContextMeta::new("normal".into()));
 
     contexts
 }

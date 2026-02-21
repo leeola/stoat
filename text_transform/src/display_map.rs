@@ -993,7 +993,7 @@ mod tests {
                 let display = snapshot.point_to_display_point(original, Bias::Left);
                 let back = snapshot.display_point_to_point(display, Bias::Left);
 
-                assert_eq!(back, original, "Roundtrip failed for {:?}", original);
+                assert_eq!(back, original, "Roundtrip failed for {original:?}");
             }
         }
     }
@@ -1004,7 +1004,7 @@ mod tests {
 
         // Create a buffer with 100 lines
         let text = (0..100)
-            .map(|i| format!("Line {}", i))
+            .map(|i| format!("Line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let display_map = create_display_map(&text, cx);
@@ -1374,7 +1374,7 @@ mod tests {
         for point in points {
             let display_point = snapshot.point_to_display_point(point, Bias::Left);
             let back = snapshot.display_point_to_point(display_point, Bias::Left);
-            assert_eq!(back, point, "Roundtrip failed for point {:?}", point);
+            assert_eq!(back, point, "Roundtrip failed for point {point:?}");
         }
     }
 
@@ -1396,13 +1396,13 @@ mod tests {
         for point in test_points {
             let display_point = snapshot.point_to_display_point(point, Bias::Left);
             let back = snapshot.display_point_to_point(display_point, Bias::Left);
-            assert_eq!(back, point, "Roundtrip failed for long line at {:?}", point);
+            assert_eq!(back, point, "Roundtrip failed for long line at {point:?}");
         }
     }
 
     #[gpui::test]
     fn large_file_coordinate_conversions(cx: &mut gpui::TestAppContext) {
-        let lines: Vec<String> = (0..1000).map(|i| format!("Line {}", i)).collect();
+        let lines: Vec<String> = (0..1000).map(|i| format!("Line {i}")).collect();
         let content = lines.join("\n");
         let display_map = create_display_map(&content, cx);
 
@@ -1415,11 +1415,7 @@ mod tests {
             let point = Point::new(row, 0);
             let display_point = snapshot.point_to_display_point(point, Bias::Left);
             let back = snapshot.display_point_to_point(display_point, Bias::Left);
-            assert_eq!(
-                back, point,
-                "Roundtrip failed for large file at row {}",
-                row
-            );
+            assert_eq!(back, point, "Roundtrip failed for large file at row {row}");
         }
     }
 
@@ -1434,7 +1430,7 @@ mod tests {
         for i in 0..10 {
             buffer_entity.update(cx, |buffer, _cx| {
                 let offset = Point::new(0, 6).to_offset(&buffer.snapshot());
-                buffer.edit([(offset..offset, format!(" {}", i).as_str())]);
+                buffer.edit([(offset..offset, format!(" {i}").as_str())]);
             });
 
             let snapshot = display_map.update(cx, |dm, cx| dm.snapshot(cx));

@@ -1,5 +1,5 @@
-use crate::pane_group::view::PaneGroupView;
-use gpui::{Context, Focusable, Window};
+use crate::{content_view::PaneContent, pane_group::view::PaneGroupView};
+use gpui::{Context, Window};
 use tracing::debug;
 
 impl PaneGroupView {
@@ -7,6 +7,15 @@ impl PaneGroupView {
         let pane_to_close = self.active_pane;
 
         debug!(pane_id = pane_to_close, "Attempting to quit/close pane");
+
+        if self
+            .pane_contents
+            .get(&pane_to_close)
+            .is_some_and(|c| matches!(c, PaneContent::Claude(_)))
+        {
+            self.hide_claude_pane(window, cx);
+            return;
+        }
 
         match self.pane_group.remove(pane_to_close) {
             Ok(()) => {
@@ -22,18 +31,9 @@ impl PaneGroupView {
                     );
 
                     self.active_pane = new_active_pane;
-                    if let Some(editor) = self
-                        .pane_contents
-                        .get(&new_active_pane)
-                        .and_then(|content| content.as_editor())
-                    {
-                        window.focus(&editor.read(cx).focus_handle(cx));
-                    }
-
+                    self.focus_pane_content(new_active_pane, window, cx);
                     self.update_minimap_to_active_pane(cx);
-
                     self.exit_pane_mode(cx);
-
                     cx.notify();
                 }
             },

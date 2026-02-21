@@ -480,8 +480,7 @@ mod tests {
             );
             assert_eq!(
                 fold_point.column, 0,
-                "TabPoint column {} should map to FoldPoint column 0",
-                col
+                "TabPoint column {col} should map to FoldPoint column 0"
             );
         }
 

@@ -1,5 +1,5 @@
 use crate::{pane::SplitDirection, pane_group::view::PaneGroupView};
-use gpui::{Context, Focusable, Window};
+use gpui::{Context, Window};
 use tracing::debug;
 
 impl PaneGroupView {
@@ -16,18 +16,9 @@ impl PaneGroupView {
                 "Focusing pane"
             );
             self.active_pane = new_pane;
-            if let Some(editor) = self
-                .pane_contents
-                .get(&new_pane)
-                .and_then(|content| content.as_editor())
-            {
-                window.focus(&editor.read(cx).focus_handle(cx));
-            }
-
+            self.focus_pane_content(new_pane, window, cx);
             self.update_minimap_to_active_pane(cx);
-
             self.exit_pane_mode(cx);
-
             cx.notify();
         } else {
             debug!(

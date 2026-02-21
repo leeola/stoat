@@ -49,6 +49,8 @@ pub enum KeyContext {
     HelpModal,
     /// About modal context
     AboutModal,
+    /// Claude chat context
+    Claude,
 }
 
 impl KeyContext {
@@ -66,6 +68,7 @@ impl KeyContext {
             Self::ConflictReview => "ConflictReview",
             Self::HelpModal => "HelpModal",
             Self::AboutModal => "AboutModal",
+            Self::Claude => "Claude",
         }
     }
 
@@ -84,6 +87,7 @@ impl KeyContext {
             "ConflictReview" => Ok(Self::ConflictReview),
             "HelpModal" => Ok(Self::HelpModal),
             "AboutModal" => Ok(Self::AboutModal),
+            "Claude" => Ok(Self::Claude),
             _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }

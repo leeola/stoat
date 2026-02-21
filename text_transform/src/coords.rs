@@ -235,7 +235,7 @@ mod tests {
             column: 20,
         };
         let p2 = p1; // Copy
-        let p3 = p1.clone(); // Clone
+        let p3 = p1; // Clone
 
         assert_eq!(p1, p2);
         assert_eq!(p1, p3);

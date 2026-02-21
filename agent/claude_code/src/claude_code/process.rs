@@ -465,7 +465,7 @@ impl ProcessBuilder {
     ) -> JoinHandle<Receiver<String>> {
         std::thread::spawn(move || {
             while let Ok(message) = stdin_rx.recv_blocking() {
-                if write!(stdin, "{}\n", message).is_err() {
+                if writeln!(stdin, "{message}").is_err() {
                     break;
                 }
                 if stdin.flush().is_err() {

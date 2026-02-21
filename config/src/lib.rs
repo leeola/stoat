@@ -27,35 +27,35 @@ mod tests {
     fn assert_binding(stmt: &Spanned<Statement>) -> &Binding {
         match &stmt.node {
             Statement::Binding(b) => b,
-            _ => panic!("expected binding, got {:?}", stmt),
+            _ => panic!("expected binding, got {stmt:?}"),
         }
     }
 
     fn assert_predicate_block(stmt: &Spanned<Statement>) -> &PredicateBlock {
         match &stmt.node {
             Statement::PredicateBlock(s) => s,
-            _ => panic!("expected predicate block, got {:?}", stmt),
+            _ => panic!("expected predicate block, got {stmt:?}"),
         }
     }
 
     fn assert_setting(stmt: &Spanned<Statement>) -> &Setting {
         match &stmt.node {
             Statement::Setting(s) => s,
-            _ => panic!("expected setting, got {:?}", stmt),
+            _ => panic!("expected setting, got {stmt:?}"),
         }
     }
 
     fn assert_let(stmt: &Spanned<Statement>) -> &LetBinding {
         match &stmt.node {
             Statement::Let(l) => l,
-            _ => panic!("expected let binding, got {:?}", stmt),
+            _ => panic!("expected let binding, got {stmt:?}"),
         }
     }
 
     fn assert_fn_decl(stmt: &Spanned<Statement>) -> &FnDecl {
         match &stmt.node {
             Statement::FnDecl(f) => f,
-            _ => panic!("expected fn decl, got {:?}", stmt),
+            _ => panic!("expected fn decl, got {stmt:?}"),
         }
     }
 

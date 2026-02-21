@@ -288,7 +288,7 @@ mod tests_transform {
     #[test]
     fn transform_isomorphic() {
         let summary = TextSummary::from("hello world");
-        let transform = Transform::isomorphic(summary.clone());
+        let transform = Transform::isomorphic(summary);
 
         assert!(transform.is_isomorphic());
         assert_eq!(transform.summary.input, summary);
@@ -315,15 +315,12 @@ mod tests_transform {
         let summary1 = TextSummary::from("hello ");
         let summary2 = TextSummary::from("world");
 
-        push_isomorphic(&mut transforms, summary1.clone());
-        push_isomorphic(&mut transforms, summary2.clone());
+        push_isomorphic(&mut transforms, summary1);
+        push_isomorphic(&mut transforms, summary2);
 
         // Should have merged into one transform
         assert_eq!(transforms.len(), 1);
-        assert_eq!(
-            transforms[0].summary.input,
-            summary1.clone() + summary2.clone()
-        );
+        assert_eq!(transforms[0].summary.input, summary1 + summary2);
     }
 
     #[test]
