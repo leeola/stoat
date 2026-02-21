@@ -1,6 +1,6 @@
 use gpui::{Context, EventEmitter};
 use smol::channel;
-use stoat_agent_claude_code::{ClaudeCode, PermissionMode, SdkMessage};
+use stoat_agent_claude_code::{ClaudeCode, SdkMessage};
 
 pub enum ChatMessage {
     User(String),
@@ -43,11 +43,7 @@ impl ClaudeState {
         self.stdin_tx = Some(stdin_tx);
 
         cx.spawn(async move |this, cx| {
-            let claude = ClaudeCode::builder()
-                .cwd(&workdir)
-                .permission_mode(PermissionMode::BypassPermissions)
-                .build()
-                .await;
+            let claude = ClaudeCode::builder().cwd(&workdir).build().await;
 
             let mut claude = match claude {
                 Ok(c) => c,

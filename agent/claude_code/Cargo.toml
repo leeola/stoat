@@ -23,7 +23,6 @@ uuid = { version = "1", features = ["v4"] }
 e2e_claude_code = []
 
 [dev-dependencies]
-iced = { version = "0.13.1", features = ["tokio"] }
 smol = "2"
 
 [lints]

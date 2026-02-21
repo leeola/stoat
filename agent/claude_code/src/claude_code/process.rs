@@ -396,11 +396,6 @@ impl ProcessBuilder {
             args.push(max_turns.to_string());
         }
 
-        if let Some(cwd) = &self.cwd {
-            args.push("--cwd".to_string());
-            args.push(cwd.clone());
-        }
-
         if let Some(tools) = &self.allowed_tools {
             for tool in tools {
                 args.push("--tool".to_string());
@@ -428,6 +423,10 @@ impl ProcessBuilder {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
 
         debug!("Spawning Claude Code process with args: {:?}", args);
         cmd.spawn()
