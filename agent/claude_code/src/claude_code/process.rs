@@ -3,6 +3,7 @@ use async_channel::{Receiver, Sender};
 use snafu::Snafu;
 use std::{
     io::{BufRead, BufReader, Write},
+    path::PathBuf,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     thread::JoinHandle,
     time::Duration,
@@ -91,6 +92,7 @@ pub struct ProcessBuilder {
     cwd: Option<String>,
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<PermissionMode>,
+    log_dir: Option<PathBuf>,
 }
 
 impl ProcessBuilder {
@@ -104,6 +106,7 @@ impl ProcessBuilder {
             cwd: None,
             allowed_tools: None,
             permission_mode: None,
+            log_dir: None,
         }
     }
 
@@ -134,6 +137,11 @@ impl ProcessBuilder {
 
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = Some(mode);
+        self
+    }
+
+    pub fn log_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.log_dir = Some(dir.into());
         self
     }
 
@@ -198,8 +206,12 @@ impl ProcessBuilder {
             },
         };
 
+        let log_file = self
+            .log_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
         let (stdin_handle, stdout_handle, stderr_handle) =
-            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
+            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, log_file);
 
         let mut process = Process {
             child,
@@ -300,8 +312,12 @@ impl ProcessBuilder {
             },
         };
 
+        let log_file = self
+            .log_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
         let (stdin_handle, stdout_handle, stderr_handle) =
-            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
+            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, log_file);
 
         let mut process = Process {
             child,
@@ -447,13 +463,14 @@ impl ProcessBuilder {
         stderr: ChildStderr,
         stdin_rx: Receiver<String>,
         stdout_tx: Sender<SdkMessage>,
+        log_file: Option<PathBuf>,
     ) -> (
         JoinHandle<Receiver<String>>,
         JoinHandle<Sender<SdkMessage>>,
         JoinHandle<String>,
     ) {
         let stdin_handle = Self::spawn_stdin_handler(stdin, stdin_rx);
-        let stdout_handle = Self::spawn_stdout_handler(stdout, stdout_tx);
+        let stdout_handle = Self::spawn_stdout_handler(stdout, stdout_tx, log_file);
         let stderr_handle = Self::spawn_stderr_handler(stderr);
 
         (stdin_handle, stdout_handle, stderr_handle)
@@ -479,14 +496,38 @@ impl ProcessBuilder {
     fn spawn_stdout_handler(
         stdout: ChildStdout,
         stdout_tx: Sender<SdkMessage>,
+        log_file: Option<PathBuf>,
     ) -> JoinHandle<Sender<SdkMessage>> {
         std::thread::spawn(move || {
+            let mut log_writer = log_file.and_then(|path| {
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        error!("Failed to create log directory: {e}");
+                        return None;
+                    }
+                }
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    Ok(f) => Some(std::io::BufWriter::new(f)),
+                    Err(e) => {
+                        error!("Failed to open log file {}: {e}", path.display());
+                        None
+                    },
+                }
+            });
+
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
+                            if let Some(w) = log_writer.as_mut() {
+                                let _ = writeln!(w, "{trimmed}");
+                            }
                             match serde_json::from_str::<SdkMessage>(trimmed) {
                                 Ok(message) => {
                                     trace!("Received message: {:?}", message);

@@ -3,6 +3,7 @@ use crate::{
     messages::PermissionMode,
 };
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(Debug, Default)]
 pub struct ClaudeCodeBuilder {
@@ -60,6 +61,11 @@ impl ClaudeCodeBuilder {
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.config.model = Some(model.into());
+        self
+    }
+
+    pub fn log_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.config.log_dir = Some(dir.into());
         self
     }
 

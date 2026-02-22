@@ -7,7 +7,10 @@ use crate::messages::{PermissionMode, SdkMessage, UserMessage};
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
 use async_io::Timer;
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone, Default)]
@@ -18,6 +21,7 @@ pub struct SessionConfig {
     pub permission_mode: Option<PermissionMode>,
     pub session_id: Option<uuid::Uuid>,
     pub model: Option<String>,
+    pub log_dir: Option<PathBuf>,
 }
 
 impl SessionConfig {
@@ -37,6 +41,9 @@ impl SessionConfig {
         if let Some(mode) = &self.permission_mode {
             builder = builder.permission_mode(mode.clone());
         }
+        if let Some(dir) = &self.log_dir {
+            builder = builder.log_dir(dir.clone());
+        }
         builder
     }
 }
@@ -47,6 +54,7 @@ pub struct ClaudeCode {
     process_stdout_rx: Receiver<SdkMessage>,
     current_config: SessionConfig,
     managed_session_id: uuid::Uuid,
+    log_file: Option<PathBuf>,
 }
 
 impl ClaudeCode {
@@ -67,12 +75,18 @@ impl ClaudeCode {
     ) -> Self {
         info!("ClaudeCode instance created for session: {}", session_id);
 
+        let log_file = config
+            .log_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
+
         Self {
             process: Some(process),
             process_stdin_tx,
             process_stdout_rx,
             current_config: config,
             managed_session_id: session_id,
+            log_file,
         }
     }
 
@@ -145,6 +159,10 @@ impl ClaudeCode {
 
     pub fn get_session_id(&self) -> String {
         self.managed_session_id.to_string()
+    }
+
+    pub fn log_file(&self) -> Option<&Path> {
+        self.log_file.as_deref()
     }
 
     pub fn is_alive(&mut self) -> bool {

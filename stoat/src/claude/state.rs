@@ -42,8 +42,16 @@ impl ClaudeState {
         let (stdin_tx, stdin_rx) = channel::bounded::<String>(32);
         self.stdin_tx = Some(stdin_tx);
 
+        let log_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("stoat/logs");
+
         cx.spawn(async move |this, cx| {
-            let claude = ClaudeCode::builder().cwd(&workdir).build().await;
+            let claude = ClaudeCode::builder()
+                .cwd(&workdir)
+                .log_dir(&log_dir)
+                .build()
+                .await;
 
             let mut claude = match claude {
                 Ok(c) => c,
@@ -61,8 +69,13 @@ impl ClaudeState {
                 },
             };
 
+            let log_path_msg = claude.log_file().map(|p| format!("Log: {}", p.display()));
+
             this.update(cx, |state, cx| {
                 state.status = ClaudeStatus::Idle;
+                if let Some(msg) = log_path_msg {
+                    state.messages.push(ChatMessage::System(msg));
+                }
                 cx.emit(ClaudeStateEvent::Updated);
                 cx.notify();
             })
