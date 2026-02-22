@@ -364,6 +364,7 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "PrintWorkingDirectory"
             // Claude
             | "OpenClaudeChat"
+            | "CycleClaudePermission"
             // Application
             | "QuitAll"
     );

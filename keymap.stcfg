@@ -255,6 +255,7 @@ on key {
             : -> OpenCommandPalette();
             ? -> OpenHelpOverlay();
             ctrl-q -> Quit();
+            Tab -> CycleClaudePermission();
         }
         mode == "insert" {
             escape -> SetMode(normal);

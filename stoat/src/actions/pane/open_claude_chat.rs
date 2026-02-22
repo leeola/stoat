@@ -125,6 +125,18 @@ impl PaneGroupView {
         cx.notify();
     }
 
+    pub(crate) fn handle_cycle_claude_permission(&mut self, cx: &mut Context<'_, Self>) {
+        let claude_pane = self
+            .pane_contents
+            .iter()
+            .find(|(_, content)| matches!(content, PaneContent::Claude(_)));
+
+        if let Some((_, PaneContent::Claude(view))) = claude_pane {
+            let state = view.read(cx).state_entity().clone();
+            state.update(cx, |s, cx| s.cycle_permission_mode(cx));
+        }
+    }
+
     pub(crate) fn hide_claude_pane(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let claude_pane = self
             .pane_contents

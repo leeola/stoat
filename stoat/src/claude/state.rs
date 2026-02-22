@@ -1,6 +1,6 @@
 use gpui::{Context, EventEmitter};
 use smol::channel;
-use stoat_agent_claude_code::{ClaudeCode, SdkMessage};
+use stoat_agent_claude_code::{ClaudeCode, PermissionMode, SdkMessage};
 
 pub enum ChatMessage {
     User(String),
@@ -25,7 +25,9 @@ pub struct ClaudeState {
     pub messages: Vec<ChatMessage>,
     pub input_text: String,
     pub status: ClaudeStatus,
-    stdin_tx: Option<channel::Sender<String>>,
+    pub permission_mode: PermissionMode,
+    stdin_tx: Option<channel::Sender<(String, PermissionMode)>>,
+    initialized: bool,
 }
 
 impl ClaudeState {
@@ -34,13 +36,16 @@ impl ClaudeState {
             messages: Vec::new(),
             input_text: String::new(),
             status: ClaudeStatus::Connecting,
+            permission_mode: PermissionMode::Default,
             stdin_tx: None,
+            initialized: false,
         }
     }
 
     pub fn start(&mut self, workdir: String, cx: &mut Context<Self>) {
-        let (stdin_tx, stdin_rx) = channel::bounded::<String>(32);
+        let (stdin_tx, stdin_rx) = channel::bounded::<(String, PermissionMode)>(32);
         self.stdin_tx = Some(stdin_tx);
+        let initial_mode = self.permission_mode.clone();
 
         let log_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -50,6 +55,7 @@ impl ClaudeState {
             let claude = ClaudeCode::builder()
                 .cwd(&workdir)
                 .log_dir(&log_dir)
+                .permission_mode(initial_mode)
                 .build()
                 .await;
 
@@ -69,13 +75,12 @@ impl ClaudeState {
                 },
             };
 
-            let log_path_msg = claude.log_file().map(|p| format!("Log: {}", p.display()));
+            if let Some(p) = claude.log_file() {
+                tracing::info!("Claude Code log: {}", p.display());
+            }
 
             this.update(cx, |state, cx| {
                 state.status = ClaudeStatus::Idle;
-                if let Some(msg) = log_path_msg {
-                    state.messages.push(ChatMessage::System(msg));
-                }
                 cx.emit(ClaudeStateEvent::Updated);
                 cx.notify();
             })
@@ -103,7 +108,20 @@ impl ClaudeState {
                 }
 
                 match stdin_rx.try_recv() {
-                    Ok(text) => {
+                    Ok((text, desired_mode)) => {
+                        let current_mode = claude.permission_mode().cloned();
+                        if current_mode.as_ref() != Some(&desired_mode) {
+                            if let Err(e) = claude.switch_permission_mode(desired_mode).await {
+                                this.update(cx, |state, cx| {
+                                    state.messages.push(ChatMessage::Error(format!(
+                                        "Failed to switch permission mode: {e}"
+                                    )));
+                                    cx.emit(ClaudeStateEvent::Updated);
+                                    cx.notify();
+                                })
+                                .ok();
+                            }
+                        }
                         this.update(cx, |state, cx| {
                             state.status = ClaudeStatus::Responding;
                             cx.emit(ClaudeStateEvent::Updated);
@@ -145,17 +163,14 @@ impl ClaudeState {
                 }
             },
             SdkMessage::System { .. } => {
-                state
-                    .messages
-                    .push(ChatMessage::System("Session started".into()));
-            },
-            SdkMessage::Result { result, .. } => {
-                if let Some(text) = result {
-                    if !text.is_empty() {
-                        state.messages.push(ChatMessage::Assistant(text.clone()));
-                    }
+                if !state.initialized {
+                    state.initialized = true;
+                    state
+                        .messages
+                        .push(ChatMessage::System("Session started".into()));
                 }
             },
+            SdkMessage::Result { .. } => {},
             SdkMessage::User { .. } => {},
         }
     }
@@ -170,14 +185,35 @@ impl ClaudeState {
 
         if let Some(tx) = &self.stdin_tx {
             let tx = tx.clone();
+            let mode = self.permission_mode.clone();
             cx.spawn(async move |_, _| {
-                let _ = tx.send(text).await;
+                let _ = tx.send((text, mode)).await;
             })
             .detach();
         }
 
         cx.emit(ClaudeStateEvent::Updated);
         cx.notify();
+    }
+
+    pub fn cycle_permission_mode(&mut self, cx: &mut Context<Self>) {
+        self.permission_mode = match self.permission_mode {
+            PermissionMode::Default => PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits => PermissionMode::Plan,
+            PermissionMode::Plan => PermissionMode::Default,
+            PermissionMode::BypassPermissions => PermissionMode::Default,
+        };
+        cx.emit(ClaudeStateEvent::Updated);
+        cx.notify();
+    }
+
+    pub fn permission_mode_label(&self) -> &'static str {
+        match self.permission_mode {
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::BypassPermissions => "bypass",
+        }
     }
 
     pub fn request_close(&mut self, cx: &mut Context<Self>) {

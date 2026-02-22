@@ -176,6 +176,7 @@ impl Render for ClaudeView {
 
         let cursor = if mode == "insert" { "\u{2588}" } else { "" };
         let input_display = format!("{input_text}{cursor}");
+        let mode_label = state.permission_mode_label();
 
         div()
             .id("claude-view")
@@ -196,9 +197,9 @@ impl Render for ClaudeView {
                     .text_color(rgb(0xd4d4d4))
                     .text_size(px(13.0))
                     .child(if input_display.is_empty() {
-                        "Press i to type...".to_string()
+                        format!("[{mode_label}] Press i to type...")
                     } else {
-                        input_display
+                        format!("[{mode_label}] {input_display}")
                     }),
             )
     }

@@ -527,6 +527,7 @@ impl PaneGroupView {
                     self.handle_print_working_directory(window, cx);
                 },
                 "OpenClaudeChat" => self.handle_open_claude_chat(window, cx),
+                "CycleClaudePermission" => self.handle_cycle_claude_permission(cx),
                 "QuitAll" => cx.quit(),
                 _ => {
                     tracing::warn!("Unknown pane action: {}", name);

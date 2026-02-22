@@ -173,15 +173,11 @@ impl ClaudeCode {
         }
     }
 
-    pub async fn switch_model(&mut self, model: impl Into<String>) -> Result<()> {
-        let model_str = model.into();
-        info!(
-            "Switching model from {:?} to {}",
-            self.current_config.model, model_str
-        );
+    pub fn permission_mode(&self) -> Option<&PermissionMode> {
+        self.current_config.permission_mode.as_ref()
+    }
 
-        self.current_config.model = Some(model_str.clone());
-
+    async fn restart_with_config(&mut self, context: &str) -> Result<()> {
         if let Some(current_process) = self.process.take() {
             let recovered = current_process
                 .close()
@@ -196,16 +192,35 @@ impl ClaudeCode {
             let new_process = match process_builder.resume_session().await {
                 Ok(process) => process,
                 Err((_channels, e)) => {
-                    anyhow::bail!("Failed to resume session with new model: {e:?}");
+                    anyhow::bail!("Failed to resume session after {context}: {e:?}");
                 },
             };
 
             self.process = Some(new_process);
-            info!("Model switch completed successfully");
+            info!("{} completed successfully", context);
         } else {
-            anyhow::bail!("No active process to switch model");
+            anyhow::bail!("No active process for {}", context);
         }
 
         Ok(())
+    }
+
+    pub async fn switch_model(&mut self, model: impl Into<String>) -> Result<()> {
+        let model_str = model.into();
+        info!(
+            "Switching model from {:?} to {}",
+            self.current_config.model, model_str
+        );
+        self.current_config.model = Some(model_str);
+        self.restart_with_config("model switch").await
+    }
+
+    pub async fn switch_permission_mode(&mut self, mode: PermissionMode) -> Result<()> {
+        info!(
+            "Switching permission mode from {:?} to {:?}",
+            self.current_config.permission_mode, mode
+        );
+        self.current_config.permission_mode = Some(mode);
+        self.restart_with_config("permission mode switch").await
     }
 }

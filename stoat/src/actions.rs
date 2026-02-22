@@ -481,6 +481,8 @@ actions!(
     [
         /// Open Claude chat side panel
         OpenClaudeChat,
+        /// Cycle Claude permission mode (default -> accept-edits -> plan)
+        CycleClaudePermission,
     ]
 );
 
@@ -1488,6 +1490,11 @@ action_metadata!(
 
 // Claude actions
 action_metadata!(OpenClaudeChat, "claude chat", "Open Claude chat side panel");
+action_metadata!(
+    CycleClaudePermission,
+    "cycle claude permission",
+    "Cycle Claude permission mode"
+);
 
 // Static maps for looking up action metadata by TypeId
 
@@ -2000,6 +2007,10 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<OpenClaudeChat>(),
         OpenClaudeChat::action_name(),
+    );
+    names.insert(
+        TypeId::of::<CycleClaudePermission>(),
+        CycleClaudePermission::action_name(),
     );
 
     names
@@ -2515,6 +2526,10 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<OpenClaudeChat>(),
         OpenClaudeChat::description(),
     );
+    descriptions.insert(
+        TypeId::of::<CycleClaudePermission>(),
+        CycleClaudePermission::description(),
+    );
 
     descriptions
 });
@@ -3000,6 +3015,10 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(TypeId::of::<SetMode>(), SetMode::help_text());
 
     help.insert(TypeId::of::<OpenClaudeChat>(), OpenClaudeChat::help_text());
+    help.insert(
+        TypeId::of::<CycleClaudePermission>(),
+        CycleClaudePermission::help_text(),
+    );
 
     help
 });
@@ -3067,6 +3086,10 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
     );
 
     aliases.insert(TypeId::of::<OpenClaudeChat>(), OpenClaudeChat::aliases());
+    aliases.insert(
+        TypeId::of::<CycleClaudePermission>(),
+        CycleClaudePermission::aliases(),
+    );
 
     aliases
 });
