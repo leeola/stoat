@@ -24,16 +24,17 @@ pub(crate) struct MergeState {
 
 pub struct EditorView {
     pub(crate) stoat: Entity<Stoat>,
-    focus_handle: FocusHandle,
-    this: Option<Entity<Self>>,
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) this: Option<Entity<Self>>,
     /// Cached editor style (Arc makes cloning cheap - just bumps refcount)
     pub(crate) editor_style: Arc<EditorStyle>,
     /// Subscription to BufferItem events for automatic UI updates when diagnostics change
-    _buffer_subscription: Subscription,
+    pub(crate) _buffer_subscription: Subscription,
     /// When in merge mode, holds the 3 sub-editor views
-    merge_state: Option<MergeState>,
-    // NOTE: Selection state (add_selections_state, select_next_state, select_prev_state)
-    // is tracked in Stoat struct, not here. EditorView is just a view layer.
+    pub(crate) merge_state: Option<MergeState>,
+    /// When true, show cursor even when this view doesn't have focus.
+    /// Used by ClaudeView which keeps focus itself but routes keys to this view's stoat.
+    pub(crate) force_cursor: bool,
 }
 
 impl EditorView {
@@ -62,6 +63,7 @@ impl EditorView {
             editor_style,
             _buffer_subscription: buffer_subscription,
             merge_state: None,
+            force_cursor: false,
         }
     }
 
@@ -137,6 +139,7 @@ impl EditorView {
                     editor_style: merge_style,
                     _buffer_subscription: buffer_subscription,
                     merge_state: None,
+                    force_cursor: false,
                 }
             });
             view.update(cx, |ev, _cx| {

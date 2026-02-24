@@ -596,7 +596,8 @@ impl Element for EditorElement {
         // ===== PHASE 5: Pre-compute cursor layouts (one per selection) =====
         let cursor_layouts: Vec<Bounds<Pixels>> = if !is_minimap {
             let stoat = self.view.read(cx).stoat.read(cx);
-            if self.view.read(cx).is_focused(window) {
+            let view = self.view.read(cx);
+            if view.is_focused(window) || view.force_cursor {
                 let cursor_positions = stoat.cursor_points(cx);
                 cursor_positions
                     .iter()

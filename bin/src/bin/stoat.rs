@@ -36,6 +36,10 @@ pub enum Command {
         #[arg(long, help = "Auto-quit after N seconds (dev builds only)")]
         timeout: Option<u64>,
 
+        #[cfg(debug_assertions)]
+        #[arg(long, help = "Open window behind other windows (dev builds only)")]
+        background: bool,
+
         #[arg(help = "Files to open")]
         paths: Vec<PathBuf>,
     },
@@ -155,11 +159,14 @@ fn main() {
             log_file: _,
             #[cfg(debug_assertions)]
             timeout,
+            #[cfg(debug_assertions)]
+            background,
             paths,
         }) => {
             // Launch GUI
             #[cfg(debug_assertions)]
-            let result = stoat_bin::commands::gui::run(config, cwd, input, timeout, paths);
+            let result =
+                stoat_bin::commands::gui::run(config, cwd, input, timeout, background, paths);
             #[cfg(not(debug_assertions))]
             let result = stoat_bin::commands::gui::run(config, cwd, input, paths);
 

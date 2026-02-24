@@ -40,7 +40,7 @@ pub fn run_git_open(
 
     #[cfg(debug_assertions)]
     {
-        stoat::app::run_with_paths(None, None, None, paths)
+        stoat::app::run_with_paths(None, None, None, false, paths)
     }
     #[cfg(not(debug_assertions))]
     {

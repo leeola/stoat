@@ -7,9 +7,16 @@ pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
     input_sequence: Option<String>,
     timeout: Option<u64>,
+    background: bool,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_paths_impl(config_path, input_sequence, Some(timeout), paths)
+    run_with_paths_impl(
+        config_path,
+        input_sequence,
+        Some(timeout),
+        background,
+        paths,
+    )
 }
 
 #[cfg(not(debug_assertions))]
@@ -18,13 +25,14 @@ pub fn run_with_paths(
     input_sequence: Option<String>,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_paths_impl(config_path, input_sequence, None, paths)
+    run_with_paths_impl(config_path, input_sequence, None, false, paths)
 }
 
 fn run_with_paths_impl(
     config_path: Option<std::path::PathBuf>,
     input_sequence: Option<String>,
     timeout: Option<Option<u64>>,
+    background: bool,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::new().run(move |cx: &mut App| {
@@ -52,6 +60,7 @@ fn run_with_paths_impl(
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                focus: !background,
                 ..Default::default()
             },
             move |window, cx| {
@@ -147,7 +156,7 @@ fn run_with_paths_impl(
         })
         .detach();
 
-        cx.activate(true);
+        cx.activate(!background);
     });
 
     Ok(())

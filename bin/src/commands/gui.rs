@@ -6,6 +6,7 @@ pub fn run(
     cwd: Option<PathBuf>,
     input: Option<String>,
     #[cfg(debug_assertions)] timeout: Option<u64>,
+    #[cfg(debug_assertions)] background: bool,
     paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cwd) = cwd {
@@ -14,7 +15,7 @@ pub fn run(
     }
     #[cfg(debug_assertions)]
     {
-        stoat::app::run_with_paths(config_path, input, timeout, paths)
+        stoat::app::run_with_paths(config_path, input, timeout, background, paths)
     }
     #[cfg(not(debug_assertions))]
     {
@@ -28,6 +29,7 @@ pub fn run(
     _cwd: Option<PathBuf>,
     _input: Option<String>,
     #[cfg(debug_assertions)] _timeout: Option<u64>,
+    #[cfg(debug_assertions)] _background: bool,
     _paths: Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Error: gui feature not enabled");

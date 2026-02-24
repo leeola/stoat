@@ -23,7 +23,6 @@ pub enum ClaudeStateEvent {
 
 pub struct ClaudeState {
     pub messages: Vec<ChatMessage>,
-    pub input_text: String,
     pub status: ClaudeStatus,
     pub permission_mode: PermissionMode,
     stdin_tx: Option<channel::Sender<(String, PermissionMode)>>,
@@ -34,7 +33,6 @@ impl ClaudeState {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         Self {
             messages: Vec::new(),
-            input_text: String::new(),
             status: ClaudeStatus::Connecting,
             permission_mode: PermissionMode::Default,
             stdin_tx: None,
@@ -175,12 +173,11 @@ impl ClaudeState {
         }
     }
 
-    pub fn send_message(&mut self, cx: &mut Context<Self>) {
-        let text = self.input_text.trim().to_string();
+    pub fn send_message(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
-        self.input_text.clear();
         self.messages.push(ChatMessage::User(text.clone()));
 
         if let Some(tx) = &self.stdin_tx {
