@@ -24,6 +24,7 @@
 //! }
 //! ```
 
+pub mod app;
 pub mod cursor_notation;
 pub mod git_fixture;
 

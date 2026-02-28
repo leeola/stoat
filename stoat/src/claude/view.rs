@@ -113,7 +113,12 @@ impl ClaudeView {
         &self.stoat
     }
 
-    fn input_is_focused(&self, window: &Window, cx: &App) -> bool {
+    #[cfg(any(test, feature = "dev-tools"))]
+    pub(crate) fn input_stoat(&self) -> &Entity<Stoat> {
+        &self.input_stoat
+    }
+
+    pub(crate) fn input_is_focused(&self, window: &Window, cx: &App) -> bool {
         self.input_editor_view
             .read(cx)
             .focus_handle

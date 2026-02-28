@@ -1,0 +1,6 @@
+---
+source: stoat/src/test/app.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=insert
+  1:Hi |hello world
