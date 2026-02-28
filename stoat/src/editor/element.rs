@@ -597,7 +597,7 @@ impl Element for EditorElement {
         let cursor_layouts: Vec<Bounds<Pixels>> = if !is_minimap {
             let stoat = self.view.read(cx).stoat.read(cx);
             let view = self.view.read(cx);
-            if view.is_focused(window) || view.force_cursor {
+            if view.is_focused(window) {
                 let cursor_positions = stoat.cursor_points(cx);
                 cursor_positions
                     .iter()

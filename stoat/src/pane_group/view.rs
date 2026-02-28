@@ -1338,7 +1338,8 @@ impl Render for PaneGroupView {
                 .get(&self.active_pane)
                 .and_then(|content| content.as_claude())
                 .map(|claude_view| {
-                    let (mode, status, perm_label) = claude_view.read(cx).status_bar_info(cx);
+                    let (mode, status, perm_label) =
+                        claude_view.read(cx).status_bar_info(window, cx);
                     let claude_label = format!(
                         "Claude \u{2014} {} \u{2014} [{}]",
                         ClaudeView::status_label(status),

@@ -4,7 +4,7 @@ use crate::{
     content_view::{ContentView, ViewType},
     editor::{element::EditorElement, style::EditorStyle, view::EditorView},
     keymap::dispatch::handle_key_common,
-    stoat::{Stoat, StoatEvent},
+    stoat::{KeyContext, Stoat, StoatEvent},
 };
 use gpui::{
     div, px, rgb, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
@@ -25,7 +25,6 @@ pub struct ClaudeView {
     input_stoat: Entity<Stoat>,
     input_editor_view: Entity<EditorView>,
     input_style: Arc<EditorStyle>,
-    input_active: bool,
 }
 
 impl ClaudeView {
@@ -75,7 +74,6 @@ impl ClaudeView {
                     editor_style: style_clone,
                     _buffer_subscription: buffer_subscription,
                     merge_state: None,
-                    force_cursor: false,
                 }
             });
             view.update(cx, |ev, _cx| {
@@ -88,10 +86,7 @@ impl ClaudeView {
         let main_stoat = stoat.clone();
         cx.subscribe(&input_stoat, move |this, _stoat, event: &StoatEvent, cx| {
             if let StoatEvent::Action { name, args } = event {
-                this.input_active = false;
                 this.input_stoat.update(cx, |s, _| s.set_mode("normal"));
-                this.input_editor_view
-                    .update(cx, |v, _| v.force_cursor = false);
                 main_stoat.update(cx, |_, cx| {
                     cx.emit(StoatEvent::Action {
                         name: name.clone(),
@@ -111,7 +106,6 @@ impl ClaudeView {
             input_stoat,
             input_editor_view,
             input_style,
-            input_active: false,
         }
     }
 
@@ -119,13 +113,37 @@ impl ClaudeView {
         &self.stoat
     }
 
+    fn input_is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input_editor_view
+            .read(cx)
+            .focus_handle
+            .is_focused(window)
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.input_active {
+        let main_ctx = self.stoat.read(cx).key_context();
+
+        // When main stoat is in an overlay context (command palette, finder, etc.
+        // opened from input), route keys through main stoat which has the correct
+        // key_context for the overlay's keymap and text input handling.
+        if main_ctx != KeyContext::Claude {
+            if main_ctx == KeyContext::TextEditor {
+                self.stoat
+                    .update(cx, |s, _| s.set_key_context(KeyContext::Claude));
+            } else {
+                if handle_key_common(&self.stoat, event, cx) {
+                    cx.notify();
+                }
+                return;
+            }
+        }
+
+        if self.input_is_focused(window, cx) {
             let input_mode = self.input_stoat.read(cx).mode().to_string();
 
             if input_mode == "insert"
@@ -137,9 +155,7 @@ impl ClaudeView {
             }
 
             if input_mode == "normal" && event.keystroke.key.as_str() == "escape" {
-                self.input_active = false;
-                self.input_editor_view
-                    .update(cx, |v, _| v.force_cursor = false);
+                window.focus(&self.focus_handle);
                 cx.notify();
                 return;
             }
@@ -161,10 +177,9 @@ impl ClaudeView {
 
         let mode = self.stoat.read(cx).mode().to_string();
         if mode == "normal" && event.keystroke.key.as_str() == "i" {
-            self.input_active = true;
+            let input_handle = self.input_editor_view.read(cx).focus_handle.clone();
+            window.focus(&input_handle);
             self.input_stoat.update(cx, |s, _| s.set_mode("insert"));
-            self.input_editor_view
-                .update(cx, |v, _| v.force_cursor = true);
             cx.notify();
             return;
         }
@@ -205,8 +220,12 @@ impl ClaudeView {
         &self.state
     }
 
-    pub fn status_bar_info(&self, cx: &App) -> (String, ClaudeStatus, &'static str) {
-        let stoat = if self.input_active {
+    pub fn status_bar_info(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (String, ClaudeStatus, &'static str) {
+        let stoat = if self.input_is_focused(window, cx) {
             &self.input_stoat
         } else {
             &self.stoat
@@ -300,10 +319,15 @@ impl Render for ClaudeView {
                     .min_h(px(80.0))
                     .border_t_1()
                     .border_color(rgb(0x3e3e42))
-                    .child(EditorElement::new(
-                        self.input_editor_view.clone(),
-                        self.input_style.clone(),
-                    )),
+                    .child(
+                        div()
+                            .track_focus(&self.input_editor_view.read(cx).focus_handle)
+                            .size_full()
+                            .child(EditorElement::new(
+                                self.input_editor_view.clone(),
+                                self.input_style.clone(),
+                            )),
+                    ),
             )
     }
 }

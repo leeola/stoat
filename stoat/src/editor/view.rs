@@ -32,9 +32,6 @@ pub struct EditorView {
     pub(crate) _buffer_subscription: Subscription,
     /// When in merge mode, holds the 3 sub-editor views
     pub(crate) merge_state: Option<MergeState>,
-    /// When true, show cursor even when this view doesn't have focus.
-    /// Used by ClaudeView which keeps focus itself but routes keys to this view's stoat.
-    pub(crate) force_cursor: bool,
 }
 
 impl EditorView {
@@ -63,7 +60,6 @@ impl EditorView {
             editor_style,
             _buffer_subscription: buffer_subscription,
             merge_state: None,
-            force_cursor: false,
         }
     }
 
@@ -139,7 +135,6 @@ impl EditorView {
                     editor_style: merge_style,
                     _buffer_subscription: buffer_subscription,
                     merge_state: None,
-                    force_cursor: false,
                 }
             });
             view.update(cx, |ev, _cx| {
