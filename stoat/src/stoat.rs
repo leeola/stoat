@@ -1419,6 +1419,44 @@ impl Stoat {
         Ok(())
     }
 
+    /// Create a pathless buffer with the given content and display label.
+    ///
+    /// Simplified variant of [`load_file`](Self::load_file) that skips file I/O,
+    /// git diff, mtime tracking, LSP notifications, and line ending detection.
+    pub(crate) fn load_scratch_buffer(
+        &mut self,
+        label: &str,
+        content: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (buffer_id, buffer_item) = self
+            .buffer_store
+            .update(cx, |store, cx| {
+                store.open_buffer(None, Language::PlainText, cx)
+            })
+            .expect("failed to create scratch buffer");
+
+        self.replace_buffer_content(content, &buffer_item, cx);
+
+        if !self
+            .open_buffers
+            .iter()
+            .any(|item| item.read(cx).buffer().read(cx).remote_id() == buffer_id)
+        {
+            self.open_buffers.push(buffer_item.clone());
+        }
+
+        self.active_buffer_id = Some(buffer_id);
+        self.current_file_path = Some(label.into());
+        self.cursor.move_to(Point::new(0, 0));
+
+        let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        self.selections = SelectionsCollection::new(&snapshot);
+
+        cx.notify();
+        self.maybe_drop_initial_buffer(cx);
+    }
+
     /// Switch to an already-open buffer without reloading from disk.
     ///
     /// Looks up the buffer by path in [`BufferStore`]. If found, sets it as the active

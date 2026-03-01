@@ -362,6 +362,7 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "CommandLineDismiss"
             | "ChangeDirectory"
             | "PrintWorkingDirectory"
+            | "DumpEnv"
             // Claude
             | "OpenClaudeChat"
             | "CycleClaudePermission"

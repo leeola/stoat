@@ -299,8 +299,9 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     registry.register::<crate::actions::GitToggleStageHunk>();
     registry.register::<crate::actions::GitToggleStageLine>();
 
-    // Command line actions (1)
+    // Command line actions (2)
     registry.register::<crate::actions::PrintWorkingDirectory>();
+    registry.register::<crate::actions::DumpEnv>();
 
     // Claude actions (1)
     registry.register::<crate::actions::OpenClaudeChat>();

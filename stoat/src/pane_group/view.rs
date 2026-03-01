@@ -530,6 +530,7 @@ impl PaneGroupView {
                 "PrintWorkingDirectory" => {
                     self.handle_print_working_directory(window, cx);
                 },
+                "DumpEnv" => self.handle_dump_env(window, cx),
                 "OpenClaudeChat" => self.handle_open_claude_chat(window, cx),
                 "CycleClaudePermission" => self.handle_cycle_claude_permission(cx),
                 "QuitAll" => cx.quit(),

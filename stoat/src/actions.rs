@@ -235,6 +235,8 @@ actions!(
         CommandLineDismiss,
         /// Print the current working directory
         PrintWorkingDirectory,
+        /// Dump captured environment variables to a new buffer
+        DumpEnv,
     ]
 );
 
@@ -1475,6 +1477,12 @@ action_metadata!(
     "Print the current working directory",
     ["cwd", "pwd"]
 );
+action_metadata!(
+    DumpEnv,
+    "dump environment",
+    "Show all captured environment variables in a buffer",
+    ["env", "environment"]
+);
 
 // KeyContext and Mode actions
 action_metadata!(
@@ -1999,6 +2007,7 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<PrintWorkingDirectory>(),
         PrintWorkingDirectory::action_name(),
     );
+    names.insert(TypeId::of::<DumpEnv>(), DumpEnv::action_name());
 
     // KeyContext and Mode actions
     names.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::action_name());
@@ -2517,6 +2526,7 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<PrintWorkingDirectory>(),
         PrintWorkingDirectory::description(),
     );
+    descriptions.insert(TypeId::of::<DumpEnv>(), DumpEnv::description());
 
     // KeyContext and Mode actions
     descriptions.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::description());
@@ -3009,6 +3019,7 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<PrintWorkingDirectory>(),
         PrintWorkingDirectory::help_text(),
     );
+    help.insert(TypeId::of::<DumpEnv>(), DumpEnv::help_text());
 
     // KeyContext and Mode actions
     help.insert(TypeId::of::<SetKeyContext>(), SetKeyContext::help_text());
@@ -3084,6 +3095,7 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
         TypeId::of::<PrintWorkingDirectory>(),
         PrintWorkingDirectory::aliases(),
     );
+    aliases.insert(TypeId::of::<DumpEnv>(), DumpEnv::aliases());
 
     aliases.insert(TypeId::of::<OpenClaudeChat>(), OpenClaudeChat::aliases());
     aliases.insert(
