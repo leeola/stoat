@@ -1,0 +1,5 @@
+---
+source: stoat/src/test/app.rs
+expression: app.snapshot_layout()
+---
+[editor] | [claude*]

@@ -71,6 +71,15 @@ impl<'a> TestApp<'a> {
         })
     }
 
+    pub fn flush(&mut self) {
+        let view = self.view.clone();
+        self.cx.update(|window, cx| {
+            view.update(cx, |pgv, entity_cx| {
+                pgv.process_pending_actions(window, entity_cx);
+            });
+        });
+    }
+
     pub fn snapshot_active(&mut self) -> String {
         let view = self.view.clone();
         self.cx.update(|window, cx| {
@@ -84,7 +93,7 @@ impl<'a> TestApp<'a> {
                     snapshot_editor(&stoat, pane_id, &pgv.app_state, cx)
                 },
                 Some(PaneContent::Claude(claude_view)) => {
-                    snapshot_claude(claude_view, pane_id, window, cx)
+                    snapshot_claude(claude_view, pane_id, &pgv.app_state, window, cx)
                 },
                 Some(PaneContent::Static(_)) => {
                     format!("[static] pane={pane_id}")
@@ -244,36 +253,51 @@ fn format_buffer_finder(app_state: &AppState, header: &str, cx: &App) -> String 
 fn snapshot_claude(
     claude_view: &Entity<ClaudeView>,
     pane_id: PaneId,
+    app_state: &AppState,
     window: &Window,
     cx: &App,
 ) -> String {
     let cv = claude_view.read(cx);
     let stoat = cv.stoat();
-    let mode = stoat.read(cx).mode().to_string();
+    let s = stoat.read(cx);
+    let mode = s.mode().to_string();
+    let key_ctx = s.key_context();
     let input_focused = cv.input_is_focused(window, cx);
     let focus_label = if input_focused { "input" } else { "main" };
 
-    let mut result = format!("[claude] pane={pane_id} mode={mode} focus={focus_label}");
-
-    let input_stoat = cv.input_stoat();
-    let input_buffer_item = input_stoat.read(cx).active_buffer(cx);
-    let input_text = input_buffer_item.read(cx).buffer().read(cx).text();
-    result.push_str(&format!("\ninput: \"{input_text}|\""));
-
-    result.push_str("\n---");
-
-    let state = cv.state_entity().read(cx);
-    for msg in &state.messages {
-        let (role, text) = match msg {
-            ChatMessage::User(t) => ("You", t.as_str()),
-            ChatMessage::Assistant(t) => ("Claude", t.as_str()),
-            ChatMessage::System(t) => ("System", t.as_str()),
-            ChatMessage::Error(t) => ("Error", t.as_str()),
-        };
-        result.push_str(&format!("\n{role}: {text}"));
+    let mut header = format!("[claude] pane={pane_id} mode={mode} focus={focus_label}");
+    if key_ctx != KeyContext::Claude && key_ctx != KeyContext::TextEditor {
+        header.push_str(&format!(" ctx={}", key_context_label(key_ctx)));
     }
 
-    result
+    match key_ctx {
+        KeyContext::CommandPalette => format_command_palette(app_state, &header, cx),
+        KeyContext::FileFinder => format_file_finder(app_state, &header, cx),
+        KeyContext::BufferFinder => format_buffer_finder(app_state, &header, cx),
+        _ => {
+            let mut result = header;
+
+            let input_stoat = cv.input_stoat();
+            let input_buffer_item = input_stoat.read(cx).active_buffer(cx);
+            let input_text = input_buffer_item.read(cx).buffer().read(cx).text();
+            result.push_str(&format!("\ninput: \"{input_text}|\""));
+
+            result.push_str("\n---");
+
+            let state = cv.state_entity().read(cx);
+            for msg in &state.messages {
+                let (role, text) = match msg {
+                    ChatMessage::User(t) => ("You", t.as_str()),
+                    ChatMessage::Assistant(t) => ("Claude", t.as_str()),
+                    ChatMessage::System(t) => ("System", t.as_str()),
+                    ChatMessage::Error(t) => ("Error", t.as_str()),
+                };
+                result.push_str(&format!("\n{role}: {text}"));
+            }
+
+            result
+        },
+    }
 }
 
 fn key_context_label(ctx: KeyContext) -> &'static str {
@@ -321,5 +345,107 @@ mod tests {
 
         app.type_input("<Esc>");
         insta::assert_snapshot!("after-escape", app.snapshot_active());
+    }
+
+    #[gpui::test]
+    fn claude_command_palette_typing(cx: &mut TestAppContext) {
+        let mut app = TestApp::new(cx);
+
+        app.type_input("<Space>l");
+        app.flush();
+        insta::assert_snapshot!("open-claude", app.snapshot_layout());
+        insta::assert_snapshot!("claude-initial", app.snapshot_active());
+
+        app.type_input("i");
+        insta::assert_snapshot!("insert-mode", app.snapshot_active());
+
+        app.type_input("foo");
+        insta::assert_snapshot!("typed-foo", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("escaped-insert", app.snapshot_active());
+
+        app.type_input(":");
+        app.flush();
+        insta::assert_snapshot!("command-palette", app.snapshot_active());
+
+        app.type_input("test");
+        insta::assert_snapshot!("palette-typing", app.snapshot_active());
+    }
+
+    #[gpui::test]
+    fn claude_escape_then_pane_switch(cx: &mut TestAppContext) {
+        let mut app = TestApp::new_with_text("original", cx);
+
+        app.type_input("<Space>l");
+        app.flush();
+        insta::assert_snapshot!("layout", app.snapshot_layout());
+
+        app.type_input("i");
+        app.type_input("hello");
+        insta::assert_snapshot!("claude-typing", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("after-first-esc", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("after-second-esc", app.snapshot_active());
+
+        app.type_input("<Space>ah");
+        app.flush();
+        insta::assert_snapshot!("switched-to-editor", app.snapshot_active());
+
+        app.type_input("iworld<Esc>");
+        insta::assert_snapshot!("editor-typing", app.snapshot_active());
+    }
+
+    #[gpui::test]
+    fn claude_overlay_dismiss_restores_context(cx: &mut TestAppContext) {
+        let mut app = TestApp::new(cx);
+
+        app.type_input("<Space>l");
+        app.flush();
+        insta::assert_snapshot!("claude-open", app.snapshot_active());
+
+        app.type_input(":");
+        app.flush();
+        insta::assert_snapshot!("palette-open", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        app.flush();
+        insta::assert_snapshot!("palette-dismissed", app.snapshot_active());
+
+        app.type_input("i");
+        insta::assert_snapshot!("restored-insert", app.snapshot_active());
+    }
+
+    #[gpui::test]
+    fn claude_input_focus_transitions(cx: &mut TestAppContext) {
+        let mut app = TestApp::new(cx);
+
+        app.type_input("<Space>l");
+        app.flush();
+        insta::assert_snapshot!("initial", app.snapshot_active());
+
+        app.type_input("i");
+        insta::assert_snapshot!("focus-input-1", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("input-normal-1", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("unfocus-input-1", app.snapshot_active());
+
+        app.type_input("i");
+        insta::assert_snapshot!("focus-input-2", app.snapshot_active());
+
+        app.type_input("hello");
+        insta::assert_snapshot!("typed-hello", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("input-normal-2", app.snapshot_active());
+
+        app.type_input("<Esc>");
+        insta::assert_snapshot!("unfocus-input-2", app.snapshot_active());
     }
 }

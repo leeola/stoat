@@ -446,7 +446,11 @@ impl PaneGroupView {
         self.process_pending_actions(window, cx);
     }
 
-    fn process_pending_actions(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub(crate) fn process_pending_actions(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let actions = std::mem::take(&mut self.pending_actions);
         for (name, _args) in actions {
             match name.as_str() {

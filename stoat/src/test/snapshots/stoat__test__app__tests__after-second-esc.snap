@@ -1,0 +1,7 @@
+---
+source: stoat/src/test/app.rs
+expression: app.snapshot_active()
+---
+[claude] pane=1 mode=normal focus=main
+input: "hello|"
+---
