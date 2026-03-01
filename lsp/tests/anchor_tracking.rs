@@ -30,7 +30,6 @@ fn create_diagnostic(
 #[test]
 fn diagnostic_tracks_through_insert_before() {
     let mut buffer = create_buffer("let foo = bar;");
-    let snapshot = buffer.snapshot();
 
     // Create diagnostic on "bar" at position 10-13
     let diag = create_diagnostic(

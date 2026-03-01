@@ -43,8 +43,6 @@ pub struct ConflictReviewState {
 /// Zed's `ConflictSet::parse` but uses byte offsets instead of anchors.
 pub fn parse_conflicts(text: &str) -> Vec<ConflictRegion> {
     let mut conflicts = Vec::new();
-    let mut row: u32 = 0;
-
     let mut conflict_start: Option<usize> = None;
     let mut conflict_start_row: Option<u32> = None;
     let mut ours_start: Option<usize> = None;
@@ -55,7 +53,7 @@ pub fn parse_conflicts(text: &str) -> Vec<ConflictRegion> {
     let mut separator_row: Option<u32> = None;
 
     let mut line_pos: usize = 0;
-    for line in text.split('\n') {
+    for (row, line) in (0_u32..).zip(text.split('\n')) {
         let line_end = line_pos + line.len();
 
         if line.starts_with("<<<<<<< ") {
@@ -109,7 +107,6 @@ pub fn parse_conflicts(text: &str) -> Vec<ConflictRegion> {
         }
 
         line_pos = line_end + 1;
-        row += 1;
     }
 
     conflicts

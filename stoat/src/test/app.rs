@@ -2,15 +2,18 @@ use crate::{
     app_state::AppState,
     claude::{state::ChatMessage, view::ClaudeView},
     content_view::{PaneContent, ViewType},
+    git::diff::HunkLineOrigin,
     input_simulator::parse_input_sequence,
     pane::{Member, PaneId},
     pane_group::view::PaneGroupView,
     stoat::KeyContext,
     test::cursor_notation,
+    worktree::Worktree,
     Stoat,
 };
 use gpui::{App, Axis, Entity, TestAppContext, VisualTestContext, Window};
-use std::collections::HashMap;
+use parking_lot::Mutex;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 pub struct TestApp<'a> {
     pub view: Entity<PaneGroupView>,
@@ -44,6 +47,31 @@ impl<'a> TestApp<'a> {
                     });
                 });
             }
+        });
+        app
+    }
+
+    pub fn with_fixture(
+        fixture: &super::git_fixture::GitFixture,
+        cx: &'a mut TestAppContext,
+    ) -> Self {
+        let app = Self::new(cx);
+        let fixture_dir = fixture.dir().to_path_buf();
+        let changed_files: Vec<PathBuf> = fixture.changed_files().to_vec();
+        let view = app.view.clone();
+        app.cx.update(|_window, cx| {
+            view.update(cx, |pgv, cx| {
+                let new_worktree = Arc::new(Mutex::new(Worktree::new(fixture_dir.clone())));
+                pgv.app_state.worktree = new_worktree;
+                if let Some(stoat_entity) = pgv.active_stoat(cx) {
+                    stoat_entity.update(cx, |s, cx| {
+                        s.worktree = Arc::new(Mutex::new(Worktree::new(fixture_dir.clone())));
+                        if let Some(path) = changed_files.first() {
+                            let _ = s.load_file(path, cx);
+                        }
+                    });
+                }
+            });
         });
         app
     }
@@ -155,26 +183,164 @@ fn snapshot_editor(
         header.push_str(&format!(" ctx={}", key_context_label(key_ctx)));
     }
 
+    if stoat.read(cx).line_selection.is_some() {
+        return format_line_selection(stoat, &header, cx);
+    }
+
     match key_ctx {
         KeyContext::CommandPalette => format_command_palette(app_state, &header, cx),
         KeyContext::FileFinder => format_file_finder(app_state, &header, cx),
         KeyContext::BufferFinder => format_buffer_finder(app_state, &header, cx),
+        KeyContext::DiffReview => format_diff_review(stoat, &header, cx),
+        KeyContext::ConflictReview => format_conflict_review(stoat, &header, cx),
+        KeyContext::Git => format_git_status(app_state, &header, cx),
         _ => format_editor_buffer(stoat, &header, cx),
     }
 }
 
 fn format_editor_buffer(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+    let mut result = header.to_string();
+    result.push_str(&format_buffer_lines(stoat, cx));
+    result
+}
+
+fn format_diff_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+    let mut result = {
+        let s = stoat.read(cx);
+        let rs = &s.review_state;
+        let source = rs.source.display_name();
+        let file_count = rs.files.len();
+        let file_idx = rs.file_idx;
+        let hunk_idx = rs.hunk_idx;
+        let current_file = rs
+            .files
+            .get(file_idx)
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<none>".into());
+        let hunk_count = s
+            .active_buffer(cx)
+            .read(cx)
+            .diff()
+            .map(|d| d.hunks.len())
+            .unwrap_or(0);
+        let approved = rs
+            .files
+            .get(file_idx)
+            .and_then(|p| rs.approved_hunks.get(p))
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let follow = if rs.follow { " follow" } else { "" };
+
+        format!(
+            "{header}\nsource={source} file={current_file} ({}/{file_count}) hunk={}/{hunk_count} approved={approved}{follow}",
+            file_idx + 1,
+            hunk_idx + 1
+        )
+    };
+
+    result.push_str(&format_buffer_lines(stoat, cx));
+    result
+}
+
+fn format_line_selection(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+    let s = stoat.read(cx);
+    let ls = match &s.line_selection {
+        Some(ls) => ls,
+        None => return format!("{header}\n<no line selection>"),
+    };
+    let mut result = format!(
+        "{header}\nselected={}/{}",
+        ls.selected_count(),
+        ls.total_changeable_count()
+    );
+    for (i, line) in ls.hunk_lines.lines.iter().enumerate() {
+        let origin = match line.origin {
+            HunkLineOrigin::Context => ' ',
+            HunkLineOrigin::Addition => '+',
+            HunkLineOrigin::Deletion => '-',
+        };
+        let sel = if ls.selected[i] { "*" } else { " " };
+        let cur = if i == ls.cursor_line { ">" } else { " " };
+        result.push_str(&format!("\n{cur}{sel}{origin}{}", line.content.trim_end()));
+    }
+    result
+}
+
+fn format_git_status(app_state: &AppState, header: &str, _cx: &App) -> String {
+    let gs = &app_state.git_status;
+    let filter = gs.filter.display_name();
+    let mut result = format!(
+        "{header}\nfilter={filter} files={}/{}",
+        gs.filtered.len(),
+        gs.files.len()
+    );
+    for (i, entry) in gs.filtered.iter().enumerate() {
+        let marker = if i == gs.selected { ">" } else { " " };
+        let staged = if entry.staged { "S" } else { " " };
+        result.push_str(&format!(
+            "\n{marker}{staged} {} {}",
+            entry.status,
+            entry.path.display()
+        ));
+    }
+    result
+}
+
+fn format_conflict_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+    let mut result = {
+        let s = stoat.read(cx);
+        let cs = &s.conflict_state;
+        let file_count = cs.files.len();
+        let file_idx = cs.file_idx;
+        let conflict_idx = cs.conflict_idx;
+        let current_file = cs
+            .files
+            .get(file_idx)
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<none>".into());
+        let conflict_count = s.active_buffer(cx).read(cx).conflicts().len();
+        let resolved = cs.resolutions.len();
+
+        format!(
+            "{header}\nfile={current_file} ({}/{file_count}) conflict={}/{conflict_count} resolved={resolved}",
+            file_idx + 1,
+            conflict_idx + 1
+        )
+    };
+
+    result.push_str(&format_buffer_lines(stoat, cx));
+    result
+}
+
+fn format_buffer_lines(stoat: &Entity<Stoat>, cx: &App) -> String {
     let s = stoat.read(cx);
     let buffer_item = s.active_buffer(cx);
     let buffer = buffer_item.read(cx).buffer().read(cx);
     let text = buffer.text();
+    let selections = s.active_selections(cx);
 
-    let cursor_pos = s.cursor_position();
-    let cursor_offset = super::point_to_offset(&text, cursor_pos);
+    let marked_text = if selections.iter().all(|sel| sel.is_empty()) {
+        let offsets: Vec<usize> = selections
+            .iter()
+            .map(|sel| super::point_to_offset(&text, sel.head()))
+            .collect();
+        cursor_notation::format(&text, &offsets, &[])
+    } else {
+        let notation_sels: Vec<cursor_notation::Selection> = selections
+            .iter()
+            .filter(|sel| !sel.is_empty())
+            .map(|sel| cursor_notation::Selection {
+                range: super::point_to_offset(&text, sel.start)
+                    ..super::point_to_offset(&text, sel.end),
+                cursor_at_start: sel.reversed,
+            })
+            .collect();
+        cursor_notation::format(&text, &[], &notation_sels)
+    };
 
-    let marked_text = cursor_notation::format(&text, &[cursor_offset], &[]);
-
-    let mut result = header.to_string();
+    let mut result = String::new();
     if marked_text.is_empty() {
         result.push_str("\n  1:|");
     } else {
@@ -314,138 +480,5 @@ fn key_context_label(ctx: KeyContext) -> &'static str {
         KeyContext::HelpModal => "HelpModal",
         KeyContext::AboutModal => "AboutModal",
         KeyContext::Claude => "Claude",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[gpui::test]
-    fn new_empty(cx: &mut TestAppContext) {
-        let mut app = TestApp::new(cx);
-        insta::assert_snapshot!(app.snapshot_layout(), @"[editor*]");
-    }
-
-    #[gpui::test]
-    fn new_with_text_snapshot(cx: &mut TestAppContext) {
-        let mut app = TestApp::new_with_text("hello world", cx);
-        insta::assert_snapshot!(app.snapshot_active());
-    }
-
-    #[gpui::test]
-    fn insert_and_escape(cx: &mut TestAppContext) {
-        let mut app = TestApp::new_with_text("hello world", cx);
-
-        app.type_input("i");
-        insta::assert_snapshot!("after-i", app.snapshot_active());
-
-        app.type_input("Hi ");
-        insta::assert_snapshot!("after-typing", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("after-escape", app.snapshot_active());
-    }
-
-    #[gpui::test]
-    fn claude_command_palette_typing(cx: &mut TestAppContext) {
-        let mut app = TestApp::new(cx);
-
-        app.type_input("<Space>l");
-        app.flush();
-        insta::assert_snapshot!("open-claude", app.snapshot_layout());
-        insta::assert_snapshot!("claude-initial", app.snapshot_active());
-
-        app.type_input("i");
-        insta::assert_snapshot!("insert-mode", app.snapshot_active());
-
-        app.type_input("foo");
-        insta::assert_snapshot!("typed-foo", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("escaped-insert", app.snapshot_active());
-
-        app.type_input(":");
-        app.flush();
-        insta::assert_snapshot!("command-palette", app.snapshot_active());
-
-        app.type_input("test");
-        insta::assert_snapshot!("palette-typing", app.snapshot_active());
-    }
-
-    #[gpui::test]
-    fn claude_escape_then_pane_switch(cx: &mut TestAppContext) {
-        let mut app = TestApp::new_with_text("original", cx);
-
-        app.type_input("<Space>l");
-        app.flush();
-        insta::assert_snapshot!("layout", app.snapshot_layout());
-
-        app.type_input("i");
-        app.type_input("hello");
-        insta::assert_snapshot!("claude-typing", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("after-first-esc", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("after-second-esc", app.snapshot_active());
-
-        app.type_input("<Space>ah");
-        app.flush();
-        insta::assert_snapshot!("switched-to-editor", app.snapshot_active());
-
-        app.type_input("iworld<Esc>");
-        insta::assert_snapshot!("editor-typing", app.snapshot_active());
-    }
-
-    #[gpui::test]
-    fn claude_overlay_dismiss_restores_context(cx: &mut TestAppContext) {
-        let mut app = TestApp::new(cx);
-
-        app.type_input("<Space>l");
-        app.flush();
-        insta::assert_snapshot!("claude-open", app.snapshot_active());
-
-        app.type_input(":");
-        app.flush();
-        insta::assert_snapshot!("palette-open", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        app.flush();
-        insta::assert_snapshot!("palette-dismissed", app.snapshot_active());
-
-        app.type_input("i");
-        insta::assert_snapshot!("restored-insert", app.snapshot_active());
-    }
-
-    #[gpui::test]
-    fn claude_input_focus_transitions(cx: &mut TestAppContext) {
-        let mut app = TestApp::new(cx);
-
-        app.type_input("<Space>l");
-        app.flush();
-        insta::assert_snapshot!("initial", app.snapshot_active());
-
-        app.type_input("i");
-        insta::assert_snapshot!("focus-input-1", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("input-normal-1", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("unfocus-input-1", app.snapshot_active());
-
-        app.type_input("i");
-        insta::assert_snapshot!("focus-input-2", app.snapshot_active());
-
-        app.type_input("hello");
-        insta::assert_snapshot!("typed-hello", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("input-normal-2", app.snapshot_active());
-
-        app.type_input("<Esc>");
-        insta::assert_snapshot!("unfocus-input-2", app.snapshot_active());
     }
 }

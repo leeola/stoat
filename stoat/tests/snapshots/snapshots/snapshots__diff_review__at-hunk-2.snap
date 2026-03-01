@@ -1,0 +1,28 @@
+---
+source: stoat/tests/snapshots/diff_review.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=diff_review ctx=DiffReview
+source=All Changes file=file.txt (1/1) hunk=2/2 approved=0
+  1:|1 this is line one
+  2:2 this is line two
+  3:3 this is line three
+  4:4 this is line four
+  5:5 this is line five
+  6:6 this is line six
+  7:7 this is line seven
+  8:8 this is line eight
+  9:9 this is line nine
+ 10:21 this is line twenty-one
+ 11:22 this is line twenty-two
+ 12:23 this is line twenty-three
+ 13:24 this is line twenty-four
+ 14:25 this is line twenty-five
+ 15:26 this is line twenty-six
+ 16:27 this is line twenty-seven
+ 17:28 this is line twenty-eight
+ 18:29 this is line twenty-nine
+ 19:30 this is line thirty
+ 20:31 this is line thirty-one
+ 21:32 this is line thirty-two
+ 22:33 this is line thirty-three

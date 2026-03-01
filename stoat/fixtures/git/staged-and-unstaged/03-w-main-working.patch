@@ -1,0 +1,11 @@
+diff --git a/file.txt b/file.txt
+index abcdef0..fedcba0 100644
+--- a/file.txt
++++ b/file.txt
+@@ -14,3 +14,6 @@
+ 18 this is line eighteen
+ 19 this is line nineteen
+ 20 this is line twenty
++21 added in working tree
++22 also added in working tree
++23 third working tree line

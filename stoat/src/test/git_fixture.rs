@@ -63,4 +63,21 @@ mod tests {
         let commit_count = log.lines().count();
         assert_eq!(commit_count, 2);
     }
+
+    #[test]
+    fn load_staged_and_unstaged() {
+        let fixture = GitFixture::load("staged-and-unstaged");
+        assert!(!fixture.changed_files().is_empty());
+        let staged = fixture.git(&["diff", "--cached", "--name-only"]);
+        assert!(staged.contains("file.txt"));
+        let unstaged = fixture.git(&["diff", "--name-only"]);
+        assert!(unstaged.contains("file.txt"));
+    }
+
+    #[test]
+    fn load_multi_file_diff() {
+        let fixture = GitFixture::load("multi-file-diff");
+        let changed = fixture.changed_files();
+        assert!(changed.len() >= 2);
+    }
 }

@@ -53,7 +53,6 @@ fn diagnostic_set_stores_diagnostics() {
 #[test]
 fn diagnostic_set_removes_by_server() {
     let buffer = create_buffer("line 0\nline 1\n");
-    let snapshot = buffer.snapshot();
 
     let mut set = DiagnosticSet::new();
 

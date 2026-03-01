@@ -199,7 +199,7 @@ impl ClaudeCode {
             self.process = Some(new_process);
             info!("{} completed successfully", context);
         } else {
-            anyhow::bail!("No active process for {}", context);
+            anyhow::bail!("No active process for {context}");
         }
 
         Ok(())

@@ -1,0 +1,7 @@
+---
+source: stoat/tests/snapshots/git_status.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=git_status ctx=Git
+filter=Unstaged files=1/2
+>  M file.txt

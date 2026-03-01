@@ -1,0 +1,35 @@
+use gpui::TestAppContext;
+use stoat::test::app::TestApp;
+
+#[gpui::test]
+fn new_empty(cx: &mut TestAppContext) {
+    let mut app = TestApp::new(cx);
+    insta::assert_snapshot!(app.snapshot_layout(), @"[editor*]");
+}
+
+#[gpui::test]
+fn new_with_text_snapshot(cx: &mut TestAppContext) {
+    let mut app = TestApp::new_with_text("hello world", cx);
+    insta::assert_snapshot!(app.snapshot_active());
+}
+
+#[gpui::test]
+fn insert_and_escape(cx: &mut TestAppContext) {
+    let mut app = TestApp::new_with_text("hello world", cx);
+
+    app.type_input("i");
+    insta::assert_snapshot!("after-i", app.snapshot_active());
+
+    app.type_input("Hi ");
+    insta::assert_snapshot!("after-typing", app.snapshot_active());
+
+    app.type_input("<Esc>");
+    insta::assert_snapshot!("after-escape", app.snapshot_active());
+}
+
+#[gpui::test]
+fn visual_selection(cx: &mut TestAppContext) {
+    let mut app = TestApp::new_with_text("hello world", cx);
+    app.type_input("viw");
+    insta::assert_snapshot!(app.snapshot_active());
+}

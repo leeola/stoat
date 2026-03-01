@@ -1,0 +1,15 @@
+diff --git a/file.txt b/file.txt
+index 1234567..abcdef0 100644
+--- a/file.txt
++++ b/file.txt
+@@ -2,10 +2,6 @@
+ 2 this is line two
+ 3 this is line three
+ 4 this is line four
+-5 this is line five
+-6 this is line six
+-7 this is line seven
+-8 this is line eight
+ 9 this is line nine
+ 10 this is line ten
+ 11 this is line eleven

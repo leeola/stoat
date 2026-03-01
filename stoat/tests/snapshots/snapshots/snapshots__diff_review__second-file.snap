@@ -1,0 +1,16 @@
+---
+source: stoat/tests/snapshots/diff_review.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=diff_review ctx=DiffReview
+source=All Changes file=beta.txt (2/2) hunk=1/1 approved=0
+  1:|beta line 1
+  2:beta line 2
+  3:beta line 3
+  4:beta line 4
+  5:beta line 5
+  6:beta line 6
+  7:beta line 7 modified
+  8:beta line 8
+  9:beta line 9
+ 10:beta line 10

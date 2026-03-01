@@ -50,7 +50,7 @@ pub mod syntax;
 #[cfg(feature = "dev-tools")]
 pub mod dev_tools;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dev-tools"))]
 pub mod test;
 
 #[cfg(test)]

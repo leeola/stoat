@@ -1,0 +1,25 @@
+diff --git a/alpha.txt b/alpha.txt
+index 1234567..abcdef0 100644
+--- a/alpha.txt
++++ b/alpha.txt
+@@ -1,6 +1,6 @@
+ alpha line 1
+ alpha line 2
+-alpha line 3
++alpha line 3 modified
+ alpha line 4
+ alpha line 5
+ alpha line 6
+diff --git a/beta.txt b/beta.txt
+index 2345678..bcdef01 100644
+--- a/beta.txt
++++ b/beta.txt
+@@ -4,7 +4,7 @@
+ beta line 4
+ beta line 5
+ beta line 6
+-beta line 7
++beta line 7 modified
+ beta line 8
+ beta line 9
+ beta line 10

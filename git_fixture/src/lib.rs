@@ -8,10 +8,14 @@ use std::{
 use tempfile::TempDir;
 
 /// Run a git command in `dir`, returning stdout on success.
+///
+/// Sets `GIT_COMMITTER_DATE` to a fixed epoch so commit hashes are deterministic
+/// across runs, enabling reproducible snapshot tests.
 pub fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
+        .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00+00:00")
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
 
@@ -201,6 +205,7 @@ fn merge_no_fail(repo_dir: &Path, branch: &str) -> Result<()> {
     let output = Command::new("git")
         .args(["merge", branch])
         .current_dir(repo_dir)
+        .env("GIT_COMMITTER_DATE", "2024-01-01T00:00:00+00:00")
         .output()
         .context("running git merge")?;
 

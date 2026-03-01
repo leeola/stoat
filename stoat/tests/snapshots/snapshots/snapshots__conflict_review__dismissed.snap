@@ -1,0 +1,37 @@
+---
+source: stoat/tests/snapshots/conflict_review.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=normal
+  1:|[settings]
+  2:<<<<<<< HEAD
+  3:ours-name-one
+  4:ours-name-two
+  5:ours-name-three
+  6:||||||| 08b77ea
+  7:name = default
+  8:=======
+  9:theirs-name
+ 10:>>>>>>> theirs
+ 11:[database]
+ 12:<<<<<<< HEAD
+ 13:ours-host
+ 14:||||||| 08b77ea
+ 15:host = localhost
+ 16:=======
+ 17:theirs-host-one
+ 18:theirs-host-two
+ 19:>>>>>>> theirs
+ 20:[logging]
+ 21:<<<<<<< HEAD
+ 22:ours-level-one
+ 23:ours-level-two
+ 24:||||||| 08b77ea
+ 25:level = info
+ 26:=======
+ 27:theirs-level-one
+ 28:theirs-level-two
+ 29:theirs-level-three
+ 30:theirs-level-four
+ 31:>>>>>>> theirs
+ 32:done

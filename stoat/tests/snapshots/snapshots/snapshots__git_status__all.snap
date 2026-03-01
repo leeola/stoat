@@ -1,0 +1,8 @@
+---
+source: stoat/tests/snapshots/git_status.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=git_status ctx=Git
+filter=All files=2/2
+>S M file.txt
+   M file.txt
