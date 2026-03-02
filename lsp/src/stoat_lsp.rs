@@ -26,6 +26,7 @@ pub mod diagnostic;
 pub mod diagnostic_set;
 pub mod manager;
 pub mod protocol;
+pub mod response;
 pub mod transport;
 
 // Make test utilities available for both unit and integration tests

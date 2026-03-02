@@ -532,6 +532,22 @@ impl<'a> TestStoat<'a> {
             && !keystroke.modifiers.shift
             && !keystroke.modifiers.platform;
 
+        // Rename interceptor
+        if self
+            .cx
+            .read_entity(&self.entity, |s, _| s.rename_pending.is_some())
+        {
+            let key = keystroke
+                .key_char
+                .as_deref()
+                .unwrap_or(keystroke.key.as_str());
+            let key = key.to_string();
+            let consumed = self.update(|s, cx| s.handle_rename_key(&key, cx));
+            if consumed {
+                return;
+            }
+        }
+
         // Select-regex interceptor
         if self
             .cx

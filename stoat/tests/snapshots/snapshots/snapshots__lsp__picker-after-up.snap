@@ -1,0 +1,11 @@
+---
+source: stoat/tests/snapshots/lsp.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=symbol_picker ctx=SymbolPicker
+input: "|"
+  fn      main
+> struct  Config
+  fn      process
+  const   MAX_SIZE
+  trait   Handler

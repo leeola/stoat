@@ -51,13 +51,15 @@ pub enum KeyContext {
     AboutModal,
     /// Claude chat context
     Claude,
+    /// Symbol picker modal context
+    SymbolPicker,
 }
 
 impl KeyContext {
     pub fn is_text_input_overlay(&self) -> bool {
         matches!(
             self,
-            Self::CommandPalette | Self::FileFinder | Self::BufferFinder
+            Self::CommandPalette | Self::FileFinder | Self::BufferFinder | Self::SymbolPicker
         )
     }
 
@@ -76,6 +78,7 @@ impl KeyContext {
             Self::HelpModal => "HelpModal",
             Self::AboutModal => "AboutModal",
             Self::Claude => "Claude",
+            Self::SymbolPicker => "SymbolPicker",
         }
     }
 
@@ -95,6 +98,7 @@ impl KeyContext {
             "HelpModal" => Ok(Self::HelpModal),
             "AboutModal" => Ok(Self::AboutModal),
             "Claude" => Ok(Self::Claude),
+            "SymbolPicker" => Ok(Self::SymbolPicker),
             _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }
@@ -201,6 +205,20 @@ pub enum StoatEvent {
     Action { name: String, args: Vec<String> },
     /// A file was opened (used to trigger deferred LSP startup)
     FileOpened { language: Language },
+    /// Temporary status bar message (auto-clears after ~3 seconds)
+    FlashMessage(String),
+    /// Symbols loaded from LSP for picker UI
+    SymbolsLoaded {
+        symbols: Vec<crate::app_state::SymbolEntry>,
+        source: crate::app_state::SymbolPickerSource,
+    },
+}
+
+/// State for a pending LSP rename operation.
+#[derive(Clone, Debug)]
+pub struct RenamePendingState {
+    pub old_name: String,
+    pub new_name: String,
 }
 
 /// Main editor entity.
@@ -283,6 +301,9 @@ pub struct Stoat {
     /// the buffer_finder input buffer from AppState. It allows edit actions to route
     /// to the buffer finder input while maintaining architectural separation.
     pub(crate) buffer_finder_input_ref: Option<Entity<Buffer>>,
+
+    /// Temporary reference to symbol_picker input buffer (set when entering SymbolPicker context)
+    pub(crate) symbol_picker_input_ref: Option<Entity<Buffer>>,
 
     // Help modal state
     pub(crate) help_modal_previous_mode: Option<String>,
@@ -370,6 +391,10 @@ pub struct Stoat {
 
     /// When set, the next printable key triggers a find-char operation in the given direction.
     pub(crate) find_char_pending: Option<crate::actions::FindCharMode>,
+
+    /// When set, rename mode is active: keystrokes accumulate a new name.
+    /// Contains (original_word, accumulated_input).
+    pub(crate) rename_pending: Option<RenamePendingState>,
 
     /// When set, keystrokes accumulate into a regex pattern for sub-selection.
     pub(crate) select_regex_pending: Option<String>,
@@ -513,6 +538,7 @@ impl Stoat {
             file_finder_input_ref: None,
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
+            symbol_picker_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -537,6 +563,7 @@ impl Stoat {
             compiled_keymap,
             pending_count: None,
             replace_pending: false,
+            rename_pending: None,
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,
@@ -602,6 +629,7 @@ impl Stoat {
             file_finder_input_ref: None,
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
+            symbol_picker_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -629,6 +657,7 @@ impl Stoat {
             compiled_keymap: self.compiled_keymap.clone(),
             pending_count: None,
             replace_pending: false,
+            rename_pending: None,
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,
@@ -852,6 +881,11 @@ impl Stoat {
     /// For multi-cursor support, use [`SelectionsCollection::select`].
     pub fn set_cursor_position(&mut self, position: Point) {
         self.cursor.move_to(position);
+    }
+
+    /// Emit a flash message to the status bar (auto-clears after ~3 seconds).
+    pub fn flash(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
+        cx.emit(StoatEvent::FlashMessage(msg.into()));
     }
 
     /// Get current selection (legacy single-cursor API).
@@ -1797,6 +1831,7 @@ impl Stoat {
             file_finder_input_ref: None,
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
+            symbol_picker_input_ref: None,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -1821,6 +1856,7 @@ impl Stoat {
             compiled_keymap: self.compiled_keymap.clone(),
             pending_count: None,
             replace_pending: false,
+            rename_pending: None,
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,

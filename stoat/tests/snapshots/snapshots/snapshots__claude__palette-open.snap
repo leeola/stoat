@@ -9,6 +9,7 @@ input: "|"
   BufferFinderNext
   BufferFinderPrev
   BufferFinderSelect
+  CenterScreen
   CommandPaletteDismiss
   CommandPaletteExecute
   CommandPaletteNext
@@ -29,6 +30,7 @@ input: "|"
   DiffReviewRevertHunk
   DiffReviewToggleApproval
   DiffReviewToggleFollow
+  DumpEnv
   EnterGitFilterMode
   EnterInsertMode
   EnterNormalMode
@@ -61,9 +63,19 @@ input: "|"
   GitUnstageAll
   GitUnstageFile
   GitUnstageHunk
+  GotoNextDiagnostic
   GotoNextHunk
+  GotoPrevDiagnostic
   GotoPrevHunk
   HelpModalDismiss
+  LspCodeAction
+  LspGotoDefinition
+  LspGotoImplementation
+  LspGotoTypeDefinition
+  LspHover
+  LspRenameSymbol
+  LspSymbolPicker
+  LspWorkspaceSymbolPicker
   MoveDown
   MoveLeft
   MoveNextLongWordStart

@@ -41,7 +41,7 @@ pub fn lsp_range_to_anchors(range: &LspRange, snapshot: &BufferSnapshot) -> Resu
 ///
 /// LSP uses UTF-16 code units for column offsets, buffers use UTF-8 bytes.
 /// Clamps out-of-bounds positions to valid ranges.
-fn lsp_position_to_point(pos: &LspPosition, snapshot: &BufferSnapshot) -> Result<Point> {
+pub fn lsp_position_to_point(pos: &LspPosition, snapshot: &BufferSnapshot) -> Result<Point> {
     let line = pos.line;
     let utf16_column = pos.character;
 

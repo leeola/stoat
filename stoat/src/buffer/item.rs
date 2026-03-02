@@ -352,4 +352,11 @@ impl BufferItem {
             .iter()
             .flat_map(move |(_, diag_set)| diag_set.diagnostics_for_row(row, snapshot))
     }
+
+    /// Iterate all diagnostics across all servers.
+    pub fn all_diagnostics(&self) -> impl Iterator<Item = &BufferDiagnostic> {
+        self.diagnostics
+            .iter()
+            .flat_map(|(_, diag_set)| diag_set.iter())
+    }
 }

@@ -99,8 +99,6 @@ impl Stoat {
                 let len = snapshot.len();
 
                 if len > 0 {
-                    // Delete last character from input buffer
-                    // Find char boundary to handle multi-byte UTF-8 characters
                     let text = snapshot.text();
                     let mut char_boundary = len.saturating_sub(1);
                     while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
@@ -110,10 +108,27 @@ impl Stoat {
                     input_buffer.update(cx, |buffer, _| {
                         buffer.edit([(char_boundary..len, "")]);
                     });
+                }
+            }
+            return;
+        }
 
-                    // FIXME: Filtering moved to PaneGroupView
-                    // (will be triggered by PaneGroupView observing buffer changes or through
-                    // event)
+        // Route to symbol picker input buffer if in symbol_picker mode
+        if self.mode == "symbol_picker" {
+            if let Some(input_buffer) = &self.symbol_picker_input_ref {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let len = snapshot.len();
+
+                if len > 0 {
+                    let text = snapshot.text();
+                    let mut char_boundary = len.saturating_sub(1);
+                    while char_boundary > 0 && !text.is_char_boundary(char_boundary) {
+                        char_boundary -= 1;
+                    }
+
+                    input_buffer.update(cx, |buffer, _| {
+                        buffer.edit([(char_boundary..len, "")]);
+                    });
                 }
             }
             return;

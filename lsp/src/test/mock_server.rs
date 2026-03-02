@@ -34,6 +34,8 @@ struct MockLspServerInner {
     behavior: MockBehavior,
     /// Buffered notifications (simple Vec for testing)
     notification_buffer: Vec<String>,
+    /// Programmed responses for specific methods (method -> JSON result value)
+    responses: HashMap<String, serde_json::Value>,
 }
 
 /// Pre-configured behavioral presets.
@@ -90,8 +92,17 @@ impl MockLspServer {
                 diagnostics: HashMap::new(),
                 behavior: MockBehavior::RustAnalyzer,
                 notification_buffer: Vec::new(),
+                responses: HashMap::new(),
             })),
         }
+    }
+
+    /// Program a response for a specific LSP method.
+    ///
+    /// The value is returned as the `result` field of the JSON-RPC response.
+    pub fn with_response(self, method: impl Into<String>, result: serde_json::Value) -> Self {
+        self.inner.lock().responses.insert(method.into(), result);
+        self
     }
 
     /// Add diagnostics for a file.
@@ -261,6 +272,14 @@ impl LspTransport for MockLspServer {
                             "capabilities": {
                                 "textDocumentSync": 1,
                                 "diagnosticProvider": true,
+                                "hoverProvider": true,
+                                "definitionProvider": true,
+                                "typeDefinitionProvider": true,
+                                "implementationProvider": true,
+                                "codeActionProvider": true,
+                                "renameProvider": true,
+                                "documentSymbolProvider": true,
+                                "workspaceSymbolProvider": true
                             },
                             "serverInfo": {
                                 "name": "mock-lsp",
@@ -269,7 +288,14 @@ impl LspTransport for MockLspServer {
                         });
                         Response::success(req.id, result)
                     },
-                    _ => Response::success(req.id, json!(null)),
+                    method => {
+                        let inner = self.inner.lock();
+                        if let Some(result) = inner.responses.get(method) {
+                            Response::success(req.id, result.clone())
+                        } else {
+                            Response::success(req.id, json!(null))
+                        }
+                    },
                 };
 
                 Ok(response.to_json()?)

@@ -189,6 +189,21 @@ actions!(
     ]
 );
 
+// Symbol picker actions
+actions!(
+    stoat,
+    [
+        /// Move to next symbol in picker
+        SymbolPickerNext,
+        /// Move to previous symbol in picker
+        SymbolPickerPrev,
+        /// Select current symbol in picker
+        SymbolPickerSelect,
+        /// Dismiss symbol picker
+        SymbolPickerDismiss,
+    ]
+);
+
 // Command palette actions
 actions!(
     stoat,
@@ -496,6 +511,35 @@ actions!(
         ToggleMinimap,
         /// Show minimap on scroll
         ShowMinimapOnScroll,
+        /// Center viewport on cursor line
+        CenterScreen,
+    ]
+);
+
+// LSP actions
+actions!(
+    stoat,
+    [
+        /// Go to next diagnostic
+        GotoNextDiagnostic,
+        /// Go to previous diagnostic
+        GotoPrevDiagnostic,
+        /// Show hover information for symbol under cursor
+        LspHover,
+        /// Show code actions for current context
+        LspCodeAction,
+        /// Rename symbol under cursor
+        LspRenameSymbol,
+        /// Go to definition of symbol under cursor
+        LspGotoDefinition,
+        /// Go to type definition of symbol under cursor
+        LspGotoTypeDefinition,
+        /// Go to implementation of symbol under cursor
+        LspGotoImplementation,
+        /// Open document symbol picker
+        LspSymbolPicker,
+        /// Open workspace symbol picker
+        LspWorkspaceSymbolPicker,
     ]
 );
 
@@ -1038,6 +1082,32 @@ action_metadata!(
     hidden
 );
 
+// Symbol picker actions
+action_metadata!(
+    SymbolPickerNext,
+    "next symbol",
+    "Move to the next symbol in the symbol picker",
+    hidden
+);
+action_metadata!(
+    SymbolPickerPrev,
+    "prev symbol",
+    "Move to the previous symbol in the symbol picker",
+    hidden
+);
+action_metadata!(
+    SymbolPickerSelect,
+    "select symbol",
+    "Navigate to the selected symbol",
+    hidden
+);
+action_metadata!(
+    SymbolPickerDismiss,
+    "dismiss picker",
+    "Close the symbol picker",
+    hidden
+);
+
 // Command palette actions
 action_metadata!(
     OpenCommandPalette,
@@ -1437,6 +1507,63 @@ action_metadata!(
     ShowMinimapOnScroll,
     "minimap on scroll",
     "Show minimap temporarily when scrolling more than 5 lines"
+);
+action_metadata!(
+    CenterScreen,
+    "center screen",
+    "Center the viewport on the cursor line"
+);
+
+// LSP actions
+action_metadata!(
+    GotoNextDiagnostic,
+    "next diagnostic",
+    "Go to next diagnostic"
+);
+action_metadata!(
+    GotoPrevDiagnostic,
+    "prev diagnostic",
+    "Go to previous diagnostic"
+);
+action_metadata!(
+    LspHover,
+    "hover",
+    "Show hover information for symbol under cursor"
+);
+action_metadata!(
+    LspCodeAction,
+    "code action",
+    "Show code actions for current context"
+);
+action_metadata!(
+    LspRenameSymbol,
+    "rename symbol",
+    "Rename symbol under cursor"
+);
+action_metadata!(
+    LspGotoDefinition,
+    "goto definition",
+    "Go to definition of symbol under cursor"
+);
+action_metadata!(
+    LspGotoTypeDefinition,
+    "goto type definition",
+    "Go to type definition of symbol under cursor"
+);
+action_metadata!(
+    LspGotoImplementation,
+    "goto implementation",
+    "Go to implementation of symbol under cursor"
+);
+action_metadata!(
+    LspSymbolPicker,
+    "symbol picker",
+    "Open document symbol picker"
+);
+action_metadata!(
+    LspWorkspaceSymbolPicker,
+    "workspace symbol picker",
+    "Open workspace symbol picker"
 );
 
 // Help actions
@@ -1952,6 +2079,24 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         BufferFinderDismiss::action_name(),
     );
 
+    // Symbol picker actions
+    names.insert(
+        TypeId::of::<SymbolPickerNext>(),
+        SymbolPickerNext::action_name(),
+    );
+    names.insert(
+        TypeId::of::<SymbolPickerPrev>(),
+        SymbolPickerPrev::action_name(),
+    );
+    names.insert(
+        TypeId::of::<SymbolPickerSelect>(),
+        SymbolPickerSelect::action_name(),
+    );
+    names.insert(
+        TypeId::of::<SymbolPickerDismiss>(),
+        SymbolPickerDismiss::action_name(),
+    );
+
     // Pane management actions
     names.insert(TypeId::of::<SplitUp>(), SplitUp::action_name());
     names.insert(TypeId::of::<SplitDown>(), SplitDown::action_name());
@@ -1981,6 +2126,43 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     names.insert(
         TypeId::of::<ShowMinimapOnScroll>(),
         ShowMinimapOnScroll::action_name(),
+    );
+    names.insert(TypeId::of::<CenterScreen>(), CenterScreen::action_name());
+
+    // LSP actions
+    names.insert(
+        TypeId::of::<GotoNextDiagnostic>(),
+        GotoNextDiagnostic::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GotoPrevDiagnostic>(),
+        GotoPrevDiagnostic::action_name(),
+    );
+    names.insert(TypeId::of::<LspHover>(), LspHover::action_name());
+    names.insert(TypeId::of::<LspCodeAction>(), LspCodeAction::action_name());
+    names.insert(
+        TypeId::of::<LspRenameSymbol>(),
+        LspRenameSymbol::action_name(),
+    );
+    names.insert(
+        TypeId::of::<LspGotoDefinition>(),
+        LspGotoDefinition::action_name(),
+    );
+    names.insert(
+        TypeId::of::<LspGotoTypeDefinition>(),
+        LspGotoTypeDefinition::action_name(),
+    );
+    names.insert(
+        TypeId::of::<LspGotoImplementation>(),
+        LspGotoImplementation::action_name(),
+    );
+    names.insert(
+        TypeId::of::<LspSymbolPicker>(),
+        LspSymbolPicker::action_name(),
+    );
+    names.insert(
+        TypeId::of::<LspWorkspaceSymbolPicker>(),
+        LspWorkspaceSymbolPicker::action_name(),
     );
 
     // Help actions
@@ -2471,6 +2653,24 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         BufferFinderDismiss::description(),
     );
 
+    // Symbol picker actions
+    descriptions.insert(
+        TypeId::of::<SymbolPickerNext>(),
+        SymbolPickerNext::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<SymbolPickerPrev>(),
+        SymbolPickerPrev::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<SymbolPickerSelect>(),
+        SymbolPickerSelect::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<SymbolPickerDismiss>(),
+        SymbolPickerDismiss::description(),
+    );
+
     // Pane management actions
     descriptions.insert(TypeId::of::<SplitUp>(), SplitUp::description());
     descriptions.insert(TypeId::of::<SplitDown>(), SplitDown::description());
@@ -2500,6 +2700,43 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
     descriptions.insert(
         TypeId::of::<ShowMinimapOnScroll>(),
         ShowMinimapOnScroll::description(),
+    );
+    descriptions.insert(TypeId::of::<CenterScreen>(), CenterScreen::description());
+
+    // LSP actions
+    descriptions.insert(
+        TypeId::of::<GotoNextDiagnostic>(),
+        GotoNextDiagnostic::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GotoPrevDiagnostic>(),
+        GotoPrevDiagnostic::description(),
+    );
+    descriptions.insert(TypeId::of::<LspHover>(), LspHover::description());
+    descriptions.insert(TypeId::of::<LspCodeAction>(), LspCodeAction::description());
+    descriptions.insert(
+        TypeId::of::<LspRenameSymbol>(),
+        LspRenameSymbol::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<LspGotoDefinition>(),
+        LspGotoDefinition::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<LspGotoTypeDefinition>(),
+        LspGotoTypeDefinition::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<LspGotoImplementation>(),
+        LspGotoImplementation::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<LspSymbolPicker>(),
+        LspSymbolPicker::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<LspWorkspaceSymbolPicker>(),
+        LspWorkspaceSymbolPicker::description(),
     );
 
     // Help actions
@@ -2970,6 +3207,24 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         BufferFinderDismiss::help_text(),
     );
 
+    // Symbol picker actions
+    help.insert(
+        TypeId::of::<SymbolPickerNext>(),
+        SymbolPickerNext::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SymbolPickerPrev>(),
+        SymbolPickerPrev::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SymbolPickerSelect>(),
+        SymbolPickerSelect::help_text(),
+    );
+    help.insert(
+        TypeId::of::<SymbolPickerDismiss>(),
+        SymbolPickerDismiss::help_text(),
+    );
+
     // Pane management actions
     help.insert(TypeId::of::<SplitUp>(), SplitUp::help_text());
     help.insert(TypeId::of::<SplitDown>(), SplitDown::help_text());
@@ -2996,6 +3251,43 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<ShowMinimapOnScroll>(),
         ShowMinimapOnScroll::help_text(),
+    );
+    help.insert(TypeId::of::<CenterScreen>(), CenterScreen::help_text());
+
+    // LSP actions
+    help.insert(
+        TypeId::of::<GotoNextDiagnostic>(),
+        GotoNextDiagnostic::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GotoPrevDiagnostic>(),
+        GotoPrevDiagnostic::help_text(),
+    );
+    help.insert(TypeId::of::<LspHover>(), LspHover::help_text());
+    help.insert(TypeId::of::<LspCodeAction>(), LspCodeAction::help_text());
+    help.insert(
+        TypeId::of::<LspRenameSymbol>(),
+        LspRenameSymbol::help_text(),
+    );
+    help.insert(
+        TypeId::of::<LspGotoDefinition>(),
+        LspGotoDefinition::help_text(),
+    );
+    help.insert(
+        TypeId::of::<LspGotoTypeDefinition>(),
+        LspGotoTypeDefinition::help_text(),
+    );
+    help.insert(
+        TypeId::of::<LspGotoImplementation>(),
+        LspGotoImplementation::help_text(),
+    );
+    help.insert(
+        TypeId::of::<LspSymbolPicker>(),
+        LspSymbolPicker::help_text(),
+    );
+    help.insert(
+        TypeId::of::<LspWorkspaceSymbolPicker>(),
+        LspWorkspaceSymbolPicker::help_text(),
     );
 
     // Help actions
@@ -3126,6 +3418,7 @@ pub fn hidden(action: &dyn Action) -> bool {
 
 mod about_modal;
 mod buffer_finder;
+mod center_screen;
 mod command_line;
 mod command_palette;
 mod command_palette_v2;
@@ -3134,6 +3427,7 @@ mod file_finder;
 mod git;
 mod help_modal;
 mod help_overlay;
+pub(crate) mod lsp;
 mod minimap;
 mod mode;
 #[allow(clippy::module_inception)]
@@ -3144,4 +3438,5 @@ mod scroll;
 mod select;
 mod set_key_context;
 mod set_mode;
-mod write_file;
+mod symbol_picker;
+pub(crate) mod write_file;

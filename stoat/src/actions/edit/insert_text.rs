@@ -90,9 +90,19 @@ impl Stoat {
                 input_buffer.update(cx, |buffer, _| {
                     buffer.edit([(end_offset..end_offset, text)]);
                 });
+            }
+            return;
+        }
 
-                // FIXME: Filtering moved to PaneGroupView
-                // (will be triggered by PaneGroupView observing buffer changes or through event)
+        // Route to symbol picker input buffer if in SymbolPicker context
+        if self.key_context == KeyContext::SymbolPicker {
+            if let Some(input_buffer) = &self.symbol_picker_input_ref {
+                let snapshot = input_buffer.read(cx).snapshot();
+                let end_offset = snapshot.len();
+
+                input_buffer.update(cx, |buffer, _| {
+                    buffer.edit([(end_offset..end_offset, text)]);
+                });
             }
             return;
         }

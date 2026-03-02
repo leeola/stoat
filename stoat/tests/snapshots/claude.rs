@@ -5,7 +5,7 @@ use stoat::test::app::TestApp;
 fn command_palette_typing(cx: &mut TestAppContext) {
     let mut app = TestApp::new(cx);
 
-    app.type_input("<Space>l");
+    app.type_input("<Space>o");
     app.flush();
     insta::assert_snapshot!("open-claude", app.snapshot_layout());
     insta::assert_snapshot!("claude-initial", app.snapshot_active());
@@ -31,7 +31,7 @@ fn command_palette_typing(cx: &mut TestAppContext) {
 fn escape_then_pane_switch(cx: &mut TestAppContext) {
     let mut app = TestApp::new_with_text("original", cx);
 
-    app.type_input("<Space>l");
+    app.type_input("<Space>o");
     app.flush();
     insta::assert_snapshot!("layout", app.snapshot_layout());
 
@@ -57,7 +57,7 @@ fn escape_then_pane_switch(cx: &mut TestAppContext) {
 fn overlay_dismiss_restores_context(cx: &mut TestAppContext) {
     let mut app = TestApp::new(cx);
 
-    app.type_input("<Space>l");
+    app.type_input("<Space>o");
     app.flush();
     insta::assert_snapshot!("claude-open", app.snapshot_active());
 
@@ -77,7 +77,7 @@ fn overlay_dismiss_restores_context(cx: &mut TestAppContext) {
 fn input_focus_transitions(cx: &mut TestAppContext) {
     let mut app = TestApp::new(cx);
 
-    app.type_input("<Space>l");
+    app.type_input("<Space>o");
     app.flush();
     insta::assert_snapshot!("initial", app.snapshot_active());
 

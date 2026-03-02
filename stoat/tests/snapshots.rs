@@ -12,3 +12,5 @@ mod editor;
 mod git_status;
 #[path = "snapshots/line_selection.rs"]
 mod line_selection;
+#[path = "snapshots/lsp.rs"]
+mod lsp;

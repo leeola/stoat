@@ -28,6 +28,7 @@ use crate::{
     worktree::Worktree, BufferItem,
 };
 use gpui::{AppContext, Entity, Task};
+use lsp_types::SymbolKind;
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::HashMap,
@@ -187,6 +188,34 @@ pub struct CommandLine {
     pub previous_key_context: Option<KeyContext>,
 }
 
+/// Entry in the symbol picker list.
+#[derive(Clone, Debug)]
+pub struct SymbolEntry {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub range_start: lsp_types::Position,
+    pub file_uri: Option<lsp_types::Uri>,
+}
+
+/// Source of symbols in the picker (document vs workspace).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SymbolPickerSource {
+    Document,
+    Workspace,
+}
+
+/// Symbol picker state.
+#[derive(Default)]
+pub struct SymbolPicker {
+    pub input: Option<Entity<Buffer>>,
+    pub symbols: Vec<SymbolEntry>,
+    pub filtered: Vec<SymbolEntry>,
+    pub selected: usize,
+    pub previous_mode: Option<String>,
+    pub previous_key_context: Option<KeyContext>,
+    pub source: Option<SymbolPickerSource>,
+}
+
 /// Git status state.
 ///
 /// Contains all state for the git status modal which displays modified
@@ -296,6 +325,8 @@ pub struct AppState {
     pub command_palette_v2: Option<Entity<crate::command_palette_v2::CommandPaletteV2>>,
     /// Command line modal state
     pub command_line: CommandLine,
+    /// Symbol picker modal state
+    pub symbol_picker: SymbolPicker,
     /// Git status modal state
     pub git_status: GitStatus,
     /// LSP manager for language server coordination
@@ -420,6 +451,7 @@ impl AppState {
             command_palette: CommandPalette::default(),
             command_palette_v2: None,
             command_line: CommandLine::default(),
+            symbol_picker: SymbolPicker::default(),
             git_status: GitStatus {
                 files: git_status_files.clone(),
                 filtered: git_status_files,
@@ -927,6 +959,45 @@ impl AppState {
         self.buffer_finder.buffers.clear();
         self.buffer_finder.filtered.clear();
         self.buffer_finder.selected = 0;
+
+        (prev_mode, prev_ctx)
+    }
+
+    /// Open symbol picker modal with the given symbols.
+    pub fn open_symbol_picker(
+        &mut self,
+        symbols: Vec<SymbolEntry>,
+        source: SymbolPickerSource,
+        current_mode: String,
+        current_key_context: KeyContext,
+        cx: &mut gpui::App,
+    ) {
+        use std::num::NonZeroU64;
+        use text::BufferId;
+
+        self.symbol_picker.previous_mode = Some(current_mode);
+        self.symbol_picker.previous_key_context = Some(current_key_context);
+        self.symbol_picker.source = Some(source);
+
+        let buffer_id = BufferId::from(NonZeroU64::new(5).unwrap());
+        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        self.symbol_picker.input = Some(input_buffer);
+
+        self.symbol_picker.symbols = symbols.clone();
+        self.symbol_picker.filtered = symbols;
+        self.symbol_picker.selected = 0;
+    }
+
+    /// Dismiss symbol picker and restore previous mode/context.
+    pub fn dismiss_symbol_picker(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.symbol_picker.previous_mode.take();
+        let prev_ctx = self.symbol_picker.previous_key_context.take();
+
+        self.symbol_picker.input = None;
+        self.symbol_picker.symbols.clear();
+        self.symbol_picker.filtered.clear();
+        self.symbol_picker.selected = 0;
+        self.symbol_picker.source = None;
 
         (prev_mode, prev_ctx)
     }

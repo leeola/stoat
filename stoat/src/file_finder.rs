@@ -3,7 +3,11 @@
 //! Combines data types, async loading logic, and rendering components for the file/buffer finder.
 //! Following Zed's pattern where a feature combines state and UI in one module.
 
-use crate::syntax::{HighlightMap, HighlightedChunks, SyntaxTheme};
+use crate::{
+    actions::lsp::symbol_picker::symbol_kind_label,
+    app_state::SymbolEntry,
+    syntax::{HighlightMap, HighlightedChunks, SyntaxTheme},
+};
 use gpui::{
     div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
     FontStyle, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
@@ -125,6 +129,8 @@ pub enum FinderMode {
     Files,
     /// Search for open buffers
     Buffers,
+    /// Search for symbols
+    Symbols,
 }
 
 /// Unified finder modal renderer for files and buffers.
@@ -202,12 +208,38 @@ impl Finder {
         }
     }
 
+    /// Create a new symbol finder renderer with the given state.
+    pub fn new_symbol_finder(
+        query: String,
+        symbols: Vec<SymbolEntry>,
+        selected: usize,
+        scroll_handle: ScrollHandle,
+    ) -> Self {
+        let items = symbols
+            .iter()
+            .map(|entry| {
+                let kind = symbol_kind_label(entry.kind);
+                format!("{kind:<6}  {}", entry.name)
+            })
+            .collect();
+
+        Self {
+            mode: FinderMode::Symbols,
+            query,
+            items,
+            selected,
+            preview: None,
+            scroll_handle,
+        }
+    }
+
     /// Render the input box showing the current query.
     fn render_input(&self) -> impl IntoElement {
         let query = self.query.clone();
         let placeholder = match self.mode {
             FinderMode::Files => "Type to search files...",
             FinderMode::Buffers => "Type to search buffers...",
+            FinderMode::Symbols => "Type to search symbols...",
         };
 
         div()

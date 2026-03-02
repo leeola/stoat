@@ -63,7 +63,7 @@ fn convert_line_endings(text: &str, line_ending: LineEnding) -> String {
 /// # Returns
 ///
 /// `Ok(())` if write succeeds, or `Err(String)` if the write operation fails
-fn write_file_internal(
+pub(crate) fn write_buffer_to_disk(
     buffer_item: &Entity<BufferItem>,
     file_path: &PathBuf,
     cx: &mut Context<Stoat>,
@@ -167,7 +167,7 @@ impl Stoat {
         let buffer_item = self.active_buffer(cx);
 
         // Write using shared implementation
-        write_file_internal(&buffer_item, &file_path, cx)?;
+        write_buffer_to_disk(&buffer_item, &file_path, cx)?;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -236,7 +236,7 @@ impl Stoat {
             }
 
             // Write buffer using shared implementation
-            write_file_internal(&buffer_item, &file_path, cx)?;
+            write_buffer_to_disk(&buffer_item, &file_path, cx)?;
             wrote_any = true;
         }
 

@@ -537,6 +537,161 @@ impl LspManager {
         self.inner.lock().servers.keys().copied().collect()
     }
 
+    /// Send `textDocument/hover` request.
+    pub fn hover(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        position: lsp_types::Position,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": position.line, "character": position.character }
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/definition` request.
+    pub fn goto_definition(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        position: lsp_types::Position,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": position.line, "character": position.character }
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/typeDefinition` request.
+    pub fn goto_type_definition(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        position: lsp_types::Position,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/typeDefinition",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": position.line, "character": position.character }
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/implementation` request.
+    pub fn goto_implementation(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        position: lsp_types::Position,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/implementation",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": position.line, "character": position.character }
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/codeAction` request.
+    pub fn code_action(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        range: lsp_types::Range,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "range": {
+                        "start": { "line": range.start.line, "character": range.start.character },
+                        "end": { "line": range.end.line, "character": range.end.character }
+                    },
+                    "context": { "diagnostics": diagnostics }
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/rename` request.
+    pub fn rename(
+        &self,
+        server_id: ServerId,
+        uri: Uri,
+        position: lsp_types::Position,
+        new_name: &str,
+    ) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() },
+                    "position": { "line": position.line, "character": position.character },
+                    "newName": new_name
+                }
+            }),
+        )
+    }
+
+    /// Send `textDocument/documentSymbol` request.
+    pub fn document_symbols(&self, server_id: ServerId, uri: Uri) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/documentSymbol",
+                "params": {
+                    "textDocument": { "uri": uri.as_str() }
+                }
+            }),
+        )
+    }
+
+    /// Send `workspace/symbol` request.
+    pub fn workspace_symbols(&self, server_id: ServerId, query: &str) -> Result<RequestHandle> {
+        self.request(
+            server_id,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "workspace/symbol",
+                "params": {
+                    "query": query
+                }
+            }),
+        )
+    }
+
     /// Handle a notification from a language server.
     fn handle_notification(
         inner: &Arc<Mutex<LspManagerInner>>,

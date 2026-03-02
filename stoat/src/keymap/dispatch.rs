@@ -12,6 +12,20 @@ use stoat_config::ActionExpr;
 /// Returns `false` if the key was unmatched and the caller should handle its own
 /// insert-mode text input.
 pub fn handle_key_common(stoat: &Entity<Stoat>, event: &KeyDownEvent, cx: &mut App) -> bool {
+    // Rename interceptor: when rename is pending, keys go to rename handler
+    if stoat.read(cx).rename_pending.is_some() {
+        let key = event
+            .keystroke
+            .key_char
+            .as_deref()
+            .unwrap_or(event.keystroke.key.as_str());
+        let key = key.to_string();
+        let consumed = stoat.update(cx, |s, cx| s.handle_rename_key(&key, cx));
+        if consumed {
+            return true;
+        }
+    }
+
     let compiled_key = CompiledKey::from_keystroke(&event.keystroke);
 
     let matched_action = {
@@ -28,7 +42,10 @@ pub fn handle_key_common(stoat: &Entity<Stoat>, event: &KeyDownEvent, cx: &mut A
             dispatch_editor_action(stoat, &action, cx) || dispatch_pane_action(stoat, &action, cx);
 
         if dispatched {
-            let is_transient = mode_before == "goto" || mode_before == "buffer";
+            let is_transient = mode_before == "goto"
+                || mode_before == "buffer"
+                || mode_before == "lsp"
+                || mode_before == "view";
             if is_transient && stoat.read(cx).mode() == mode_before {
                 stoat.update(cx, |s, cx| s.set_mode_by_name("normal", cx));
             }
@@ -93,6 +110,23 @@ pub fn dispatch_editor_action<C: AppContext>(
         },
         "HalfPageUp" => ed!(stoat, cx, |s, cx| s.half_page_up(cx)),
         "HalfPageDown" => ed!(stoat, cx, |s, cx| s.half_page_down(cx)),
+        "CenterScreen" => ed!(stoat, cx, |s, cx| s.center_screen(cx)),
+
+        "GotoNextDiagnostic" => ed!(stoat, cx, |s, cx| s.goto_next_diagnostic(cx)),
+        "GotoPrevDiagnostic" => ed!(stoat, cx, |s, cx| s.goto_prev_diagnostic(cx)),
+
+        "LspGotoDefinition" => ed!(stoat, cx, |s, cx| s.lsp_goto_definition(cx)),
+        "LspGotoTypeDefinition" => ed!(stoat, cx, |s, cx| s.lsp_goto_type_definition(cx)),
+        "LspGotoImplementation" => ed!(stoat, cx, |s, cx| s.lsp_goto_implementation(cx)),
+
+        "LspHover" => ed!(stoat, cx, |s, cx| s.lsp_hover(cx)),
+
+        "LspCodeAction" => ed!(stoat, cx, |s, cx| s.lsp_code_action(cx)),
+
+        "LspRenameSymbol" => ed!(stoat, cx, |s, cx| s.lsp_rename_symbol(cx)),
+
+        "LspSymbolPicker" => ed!(stoat, cx, |s, cx| s.lsp_symbol_picker(cx)),
+        "LspWorkspaceSymbolPicker" => ed!(stoat, cx, |s, cx| s.lsp_workspace_symbol_picker(cx)),
 
         "DeleteLeft" => ed!(stoat, cx, |s, cx| s.delete_left(cx)),
         "DeleteRight" => ed!(stoat, cx, |s, cx| s.delete_right(cx)),
@@ -320,6 +354,11 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "BufferFinderPrev"
             | "BufferFinderSelect"
             | "BufferFinderDismiss"
+            // Symbol picker
+            | "SymbolPickerNext"
+            | "SymbolPickerPrev"
+            | "SymbolPickerSelect"
+            | "SymbolPickerDismiss"
             // Command palette
             | "OpenCommandPalette"
             | "CommandPaletteNext"

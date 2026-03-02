@@ -22,11 +22,13 @@ input: "test|"
   SelectToLineEnd
   DiffReviewToggleApproval
   GitStageFile
+  GotoNextDiagnostic
   GitStatusSelect
   CommandPaletteExecute
   GitStatusSetFilterAll
   OpenGitStatus
   SplitLeft
+  GotoPrevDiagnostic
   GitStatusSetFilterUnstaged
   GitStatusSetFilterUnstagedWithUntracked
   GitUnstageHunk
@@ -36,11 +38,13 @@ input: "test|"
   SelectRight
   SelectUp
   GitStatusCycleFilter
+  DumpEnv
   MoveToFileEnd
   MoveToLineEnd
   GitStatusSetFilterUntracked
   DeleteToEndOfLine
   DiffReviewResetProgress
+  CenterScreen
   EnterInsertMode
   GitUnstageFile
   ToggleMinimap
@@ -58,3 +62,4 @@ input: "test|"
   MoveWordRight
   WriteFile
   CommandPaletteDismiss
+  LspCodeAction

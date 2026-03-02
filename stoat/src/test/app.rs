@@ -108,6 +108,30 @@ impl<'a> TestApp<'a> {
         });
     }
 
+    /// Inject symbols into the symbol picker and open it (bypasses LSP).
+    pub fn inject_symbols(
+        &mut self,
+        symbols: Vec<crate::app_state::SymbolEntry>,
+        source: crate::app_state::SymbolPickerSource,
+    ) {
+        let view = self.view.clone();
+        self.cx.update(|window, cx| {
+            view.update(cx, |pgv, cx| {
+                pgv.handle_open_symbol_picker(symbols, source, window, cx);
+            });
+        });
+    }
+
+    /// Access the active Stoat entity for direct manipulation in tests.
+    pub fn with_stoat(&mut self, f: impl FnOnce(&Entity<Stoat>, &mut App)) {
+        let view = self.view.clone();
+        self.cx.update(|_window, cx| {
+            if let Some(stoat) = view.read(cx).active_stoat(cx) {
+                f(&stoat, cx);
+            }
+        });
+    }
+
     pub fn snapshot_active(&mut self) -> String {
         let view = self.view.clone();
         self.cx.update(|window, cx| {
@@ -182,6 +206,9 @@ fn snapshot_editor(
     if key_ctx != KeyContext::TextEditor {
         header.push_str(&format!(" ctx={}", key_context_label(key_ctx)));
     }
+    if let Some(flash) = &app_state.flash_message {
+        header.push_str(&format!(" flash=\"{flash}\""));
+    }
 
     if stoat.read(cx).line_selection.is_some() {
         return format_line_selection(stoat, &header, cx);
@@ -191,6 +218,7 @@ fn snapshot_editor(
         KeyContext::CommandPalette => format_command_palette(app_state, &header, cx),
         KeyContext::FileFinder => format_file_finder(app_state, &header, cx),
         KeyContext::BufferFinder => format_buffer_finder(app_state, &header, cx),
+        KeyContext::SymbolPicker => format_symbol_picker(app_state, &header, cx),
         KeyContext::DiffReview => format_diff_review(stoat, &header, cx),
         KeyContext::ConflictReview => format_conflict_review(stoat, &header, cx),
         KeyContext::Git => format_git_status(app_state, &header, cx),
@@ -391,6 +419,29 @@ fn format_file_finder(app_state: &AppState, header: &str, cx: &App) -> String {
     result
 }
 
+fn format_symbol_picker(app_state: &AppState, header: &str, cx: &App) -> String {
+    use crate::actions::lsp::symbol_picker::symbol_kind_label;
+
+    let input_text = app_state
+        .symbol_picker
+        .input
+        .as_ref()
+        .map(|buf| buf.read(cx).text())
+        .unwrap_or_default();
+
+    let mut result = format!("{header}\ninput: \"{input_text}|\"");
+    for (i, entry) in app_state.symbol_picker.filtered.iter().enumerate() {
+        let marker = if i == app_state.symbol_picker.selected {
+            "> "
+        } else {
+            "  "
+        };
+        let kind = symbol_kind_label(entry.kind);
+        result.push_str(&format!("\n{marker}{kind:<6}  {}", entry.name));
+    }
+    result
+}
+
 fn format_buffer_finder(app_state: &AppState, header: &str, cx: &App) -> String {
     let input_text = app_state
         .buffer_finder
@@ -480,5 +531,6 @@ fn key_context_label(ctx: KeyContext) -> &'static str {
         KeyContext::HelpModal => "HelpModal",
         KeyContext::AboutModal => "AboutModal",
         KeyContext::Claude => "Claude",
+        KeyContext::SymbolPicker => "SymbolPicker",
     }
 }

@@ -59,6 +59,18 @@ pub fn default_modes() -> HashMap<String, Mode> {
         "about_modal".into(),
         Mode::with_previous("about_modal", "ABOUT", "normal", false),
     );
+    modes.insert(
+        "lsp".into(),
+        Mode::with_previous("lsp", "LSP", "normal", false),
+    );
+    modes.insert(
+        "view".into(),
+        Mode::with_previous("view", "VIEW", "normal", false),
+    );
+    modes.insert(
+        "symbol_picker".into(),
+        Mode::with_previous("symbol_picker", "SYMBOL PICKER", "normal", false),
+    );
 
     modes
 }
@@ -97,6 +109,10 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
         KeyContextMeta::new("about_modal".into()),
     );
     contexts.insert(KeyContext::Claude, KeyContextMeta::new("normal".into()));
+    contexts.insert(
+        KeyContext::SymbolPicker,
+        KeyContextMeta::new("symbol_picker".into()),
+    );
 
     contexts
 }

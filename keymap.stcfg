@@ -101,6 +101,9 @@ on key {
             : -> OpenCommandPalette();
             ctrl-; -> OpenCommandPaletteV2();
 
+            # View mode
+            z -> SetMode(view);
+
             # Help
             ? -> OpenHelpOverlay();
         }
@@ -202,6 +205,27 @@ on key {
             d -> CloseBuffer();
         }
 
+        # LSP Mode (transient - auto-reverts to normal after action)
+        mode == "lsp" {
+            escape -> SetMode(normal);
+            w -> GotoNextDiagnostic();
+            W -> GotoPrevDiagnostic();
+            i -> LspHover();
+            a -> LspCodeAction();
+            r -> LspRenameSymbol();
+            j -> LspGotoDefinition();
+            k -> LspGotoTypeDefinition();
+            t -> LspGotoImplementation();
+            s -> LspSymbolPicker();
+            S -> LspWorkspaceSymbolPicker();
+        }
+
+        # View Mode (transient - auto-reverts to normal after action)
+        mode == "view" {
+            escape -> SetMode(normal);
+            z -> CenterScreen();
+        }
+
     }
 
     # Pane Mode (global - works from any focus context)
@@ -243,7 +267,8 @@ on key {
         d -> ToggleDiffHunk();
         r -> OpenDiffReview();
         x -> OpenConflictReview();
-        l -> OpenClaudeChat();
+        l -> SetMode(lsp);
+        o -> OpenClaudeChat();
     }
 
     # Claude Context
@@ -282,6 +307,17 @@ on key {
         ctrl-n -> BufferFinderNext();
         backspace -> DeleteLeft();
         enter -> BufferFinderSelect();
+    }
+
+    # SymbolPicker Context
+    focus == "SymbolPicker" {
+        escape -> SymbolPickerDismiss();
+        up -> SymbolPickerPrev();
+        down -> SymbolPickerNext();
+        ctrl-p -> SymbolPickerPrev();
+        ctrl-n -> SymbolPickerNext();
+        backspace -> DeleteLeft();
+        enter -> SymbolPickerSelect();
     }
 
     # CommandPalette Context

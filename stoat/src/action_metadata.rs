@@ -306,6 +306,21 @@ static REGISTRY: LazyLock<ActionMetadataRegistry> = LazyLock::new(|| {
     // Claude actions (1)
     registry.register::<crate::actions::OpenClaudeChat>();
 
+    // View/scroll actions (1)
+    registry.register::<crate::actions::CenterScreen>();
+
+    // LSP actions (10)
+    registry.register::<crate::actions::GotoNextDiagnostic>();
+    registry.register::<crate::actions::GotoPrevDiagnostic>();
+    registry.register::<crate::actions::LspHover>();
+    registry.register::<crate::actions::LspCodeAction>();
+    registry.register::<crate::actions::LspRenameSymbol>();
+    registry.register::<crate::actions::LspGotoDefinition>();
+    registry.register::<crate::actions::LspGotoTypeDefinition>();
+    registry.register::<crate::actions::LspGotoImplementation>();
+    registry.register::<crate::actions::LspSymbolPicker>();
+    registry.register::<crate::actions::LspWorkspaceSymbolPicker>();
+
     registry
 });
 

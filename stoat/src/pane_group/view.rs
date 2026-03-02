@@ -137,6 +137,7 @@ pub struct PaneGroupView {
     command_palette_scroll: ScrollHandle,
     buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
+    symbol_picker_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
     minimap_view: Entity<EditorView>,
@@ -274,6 +275,29 @@ impl PaneGroupView {
                         this.app_state
                             .ensure_lsp_for_language(*language, cx.weak_entity(), cx);
                     },
+                    StoatEvent::SymbolsLoaded { symbols, source } => {
+                        this.pending_actions
+                            .push(("__symbols_loaded__".into(), vec![]));
+                        // Store temporarily in app_state for the pending action handler
+                        this.app_state.symbol_picker.symbols = symbols.clone();
+                        this.app_state.symbol_picker.source = Some(*source);
+                        cx.notify();
+                    },
+                    StoatEvent::FlashMessage(msg) => {
+                        this.app_state.flash_message = Some(msg.clone());
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(3))
+                                .await;
+                            this.update(cx, |this, cx| {
+                                this.app_state.flash_message = None;
+                                cx.notify();
+                            })
+                            .ok();
+                        })
+                        .detach();
+                        cx.notify();
+                    },
                     _ => {},
                 },
             );
@@ -289,6 +313,7 @@ impl PaneGroupView {
             command_palette_scroll: ScrollHandle::new(),
             buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
+            symbol_picker_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
             minimap_visibility: MinimapVisibility::AlwaysVisible,
@@ -492,6 +517,20 @@ impl PaneGroupView {
                 "BufferFinderPrev" => self.handle_buffer_finder_prev(window, cx),
                 "BufferFinderSelect" => self.handle_buffer_finder_select(window, cx),
                 "BufferFinderDismiss" => self.handle_buffer_finder_dismiss(window, cx),
+                "SymbolPickerNext" => self.handle_symbol_picker_next(window, cx),
+                "SymbolPickerPrev" => self.handle_symbol_picker_prev(window, cx),
+                "SymbolPickerSelect" => self.handle_symbol_picker_select(window, cx),
+                "SymbolPickerDismiss" => self.handle_symbol_picker_dismiss(window, cx),
+                "__symbols_loaded__" => {
+                    let symbols = std::mem::take(&mut self.app_state.symbol_picker.symbols);
+                    let source = self
+                        .app_state
+                        .symbol_picker
+                        .source
+                        .take()
+                        .unwrap_or(crate::app_state::SymbolPickerSource::Document);
+                    self.handle_open_symbol_picker(symbols, source, window, cx);
+                },
                 "OpenGitStatus" => self.handle_open_git_status(window, cx),
                 "GitStatusNext" => self.handle_git_status_next(window, cx),
                 "GitStatusPrev" => self.handle_git_status_prev(window, cx),
@@ -684,6 +723,37 @@ impl PaneGroupView {
             self.app_state.file_finder.filtered = matches
                 .into_iter()
                 .map(|(matched_str, _score)| PathBuf::from(matched_str))
+                .collect();
+        }
+    }
+
+    fn filter_symbol_picker(&mut self, query: &str) {
+        use nucleo_matcher::{
+            pattern::{CaseMatching, Normalization, Pattern},
+            Matcher,
+        };
+
+        let all_symbols = &self.app_state.symbol_picker.symbols;
+
+        if query.is_empty() {
+            self.app_state.symbol_picker.filtered = all_symbols.clone();
+        } else {
+            let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+            let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+
+            let candidates: Vec<String> = all_symbols.iter().map(|s| s.name.clone()).collect();
+            let candidate_refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+            let mut matches = pattern.match_list(candidate_refs, &mut matcher);
+            matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+            self.app_state.symbol_picker.filtered = matches
+                .into_iter()
+                .filter_map(|(matched_str, _score)| {
+                    candidates
+                        .iter()
+                        .position(|s| s.as_str() == matched_str)
+                        .and_then(|idx| all_symbols.get(idx).cloned())
+                })
                 .collect();
         }
     }
@@ -1322,6 +1392,27 @@ impl Render for PaneGroupView {
             None
         };
 
+        // Extract symbol picker data from workspace if in SymbolPicker context
+        let symbol_picker_data = if key_context == KeyContext::SymbolPicker {
+            let query = self
+                .app_state
+                .symbol_picker
+                .input
+                .as_ref()
+                .map(|buffer| buffer.read(cx).snapshot().text())
+                .unwrap_or_default();
+
+            self.filter_symbol_picker(&query);
+
+            Some((
+                query,
+                self.app_state.symbol_picker.filtered.clone(),
+                self.app_state.symbol_picker.selected,
+            ))
+        } else {
+            None
+        };
+
         // Extract git status data from workspace if in Git context
         let git_status_data = if key_context == KeyContext::Git {
             Some((
@@ -1509,6 +1600,18 @@ impl Render for PaneGroupView {
                                 buffers,
                                 selected,
                                 self.buffer_finder_scroll.clone(),
+                            ))
+                        } else {
+                            div
+                        }
+                    })
+                    .when(key_context == KeyContext::SymbolPicker, |div| {
+                        if let Some((query, symbols, selected)) = symbol_picker_data {
+                            div.child(Finder::new_symbol_finder(
+                                query,
+                                symbols,
+                                selected,
+                                self.symbol_picker_scroll.clone(),
                             ))
                         } else {
                             div
