@@ -29,16 +29,20 @@ pub mod cursor_notation;
 pub mod git_fixture;
 
 use crate::{
+    app_state::{LspState, LspStatus},
     buffer::item::BufferItem,
+    environment::ProjectEnvironment,
     keymap::{
         compiled::{CompiledKey, CompiledKeymap},
         dispatch::dispatch_editor_action,
     },
-    stoat::KeyContext,
+    stoat::{KeyContext, StoatEvent},
     Stoat,
 };
-use gpui::{App, AppContext, Context, Entity, TestAppContext};
-use std::{path::PathBuf, sync::Arc};
+use gpui::{App, AppContext, Context, Entity, Subscription, TestAppContext};
+use parking_lot::RwLock;
+use std::{path::PathBuf, sync::Arc, time::Duration};
+use stoat_lsp::LspManager;
 use text::Point;
 
 /// Wrapper around [`Entity<Stoat>`] that provides test-oriented helper methods.
@@ -78,6 +82,10 @@ pub struct TestStoat<'a> {
     cx: &'a mut TestAppContext,
     temp_dir: Option<tempfile::TempDir>,
     repo_path: Option<PathBuf>,
+    lsp_state: Option<LspState>,
+    project_env: Option<Arc<RwLock<Option<ProjectEnvironment>>>>,
+    flash_messages: Arc<parking_lot::Mutex<Vec<String>>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl<'a> TestStoat<'a> {
@@ -118,6 +126,10 @@ impl<'a> TestStoat<'a> {
             cx,
             temp_dir: None,
             repo_path: None,
+            lsp_state: None,
+            project_env: None,
+            flash_messages: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            _subscriptions: Vec::new(),
         }
     }
 
@@ -494,6 +506,158 @@ impl<'a> TestStoat<'a> {
         );
     }
 
+    /// Enable LSP support: creates an [`LspManager`], pre-populates the project
+    /// environment, and subscribes to [`StoatEvent::FileOpened`] so that loading
+    /// a Rust file automatically starts rust-analyzer.
+    pub fn with_lsp(mut self) -> Self {
+        let lsp_manager = Arc::new(LspManager::new(
+            self.cx.background_executor.clone(),
+            Duration::from_secs(30),
+        ));
+        let lsp_state = LspState::default();
+        let project_env: Arc<RwLock<Option<ProjectEnvironment>>> =
+            Arc::new(RwLock::new(Some(ProjectEnvironment::from_current())));
+
+        self.cx.update_entity(&self.entity, |s, _cx| {
+            s.lsp_manager = Some(lsp_manager.clone());
+        });
+
+        self.subscribe_flash_messages();
+
+        let lsp_mgr = lsp_manager.clone();
+        let lsp_st = lsp_state.clone();
+        let proj_env = project_env.clone();
+        let entity_for_open = self.entity.clone();
+        let open_sub = self.cx.update(|cx| {
+            cx.subscribe(&entity_for_open, move |entity, event: &StoatEvent, cx| {
+                if let StoatEvent::FileOpened { language } = event {
+                    if !matches!(language, stoat_text::Language::Rust) {
+                        return;
+                    }
+                    if !lsp_mgr.active_servers().is_empty() {
+                        return;
+                    }
+                    let lsp_mgr = lsp_mgr.clone();
+                    let lsp_st = lsp_st.clone();
+                    let proj_env = proj_env.clone();
+                    let entity = entity.clone();
+                    cx.spawn(async move |cx| {
+                        if let Err(e) = start_lsp(entity, lsp_mgr, lsp_st, proj_env, cx).await {
+                            tracing::error!("LSP startup failed: {e}");
+                        }
+                    })
+                    .detach();
+                }
+            })
+        });
+
+        self.lsp_state = Some(lsp_state);
+        self.project_env = Some(project_env);
+        self._subscriptions.push(open_sub);
+        self
+    }
+
+    /// Enable LSP support with a pre-configured mock server.
+    ///
+    /// Injects the given transport into the [`LspManager`] and subscribes to
+    /// flash message events. No real server process is spawned.
+    pub fn with_mock_lsp(mut self, transport: Arc<dyn stoat_lsp::LspTransport>) -> Self {
+        let lsp_manager = Arc::new(LspManager::new(
+            self.cx.background_executor.clone(),
+            Duration::from_secs(5),
+        ));
+
+        let server_id = lsp_manager.add_server("mock-lsp", transport);
+        // Initialize mock server capabilities so requests route correctly
+        lsp_manager.start_listener(server_id).unwrap();
+
+        self.cx.update_entity(&self.entity, |s, _cx| {
+            s.lsp_manager = Some(lsp_manager.clone());
+        });
+
+        self.subscribe_flash_messages();
+        self
+    }
+
+    fn subscribe_flash_messages(&mut self) {
+        let flash_msgs = self.flash_messages.clone();
+        let entity = self.entity.clone();
+        let sub = self.cx.update(|cx| {
+            cx.subscribe(&entity, move |_entity, event: &StoatEvent, _cx| {
+                if let StoatEvent::FlashMessage(msg) = event {
+                    flash_msgs.lock().push(msg.clone());
+                }
+            })
+        });
+        self._subscriptions.push(sub);
+    }
+
+    /// Poll until LSP status becomes [`LspStatus::Ready`] or timeout expires.
+    pub async fn await_lsp_ready(&mut self, timeout: Duration) {
+        let lsp_state = self
+            .lsp_state
+            .as_ref()
+            .expect("with_lsp() not called")
+            .clone();
+        let start = std::time::Instant::now();
+        loop {
+            self.cx.run_until_parked();
+            if *lsp_state.status.read() == LspStatus::Ready {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "await_lsp_ready timed out after {timeout:?}, status: {:?}",
+                    *lsp_state.status.read()
+                );
+            }
+            self.cx
+                .background_executor
+                .timer(Duration::from_millis(200))
+                .await;
+        }
+    }
+
+    /// Return the most recent flash message, if any.
+    pub fn last_flash(&self) -> Option<String> {
+        self.flash_messages.lock().last().cloned()
+    }
+
+    /// Poll until a flash message appears or timeout expires.
+    pub async fn await_flash(&mut self, timeout: Duration) -> Option<String> {
+        let start = std::time::Instant::now();
+        loop {
+            self.cx.run_until_parked();
+            if let Some(msg) = self.last_flash() {
+                return Some(msg);
+            }
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            self.cx
+                .background_executor
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    }
+
+    /// Yield to both foreground and background executors for the given duration.
+    pub async fn wait(&mut self, duration: Duration) {
+        self.cx.background_executor.timer(duration).await;
+        self.cx.run_until_parked();
+    }
+
+    /// Load a file into the editor by path (relative to worktree root).
+    pub fn load_file(&mut self, path: &std::path::Path) {
+        let abs_path = self
+            .cx
+            .read_entity(&self.entity, |s, _| s.worktree.lock().root().join(path));
+        self.update(|s, cx| {
+            s.load_file(&abs_path, cx)
+                .unwrap_or_else(|e| panic!("load_file({}) failed: {e}", abs_path.display()));
+        });
+    }
+
     /// Reverse-lookup an action name in the compiled keymap, then feed the
     /// resulting keystroke through the full [`type_key`](Self::type_key) pipeline.
     ///
@@ -729,6 +893,107 @@ fn test_keymap() -> Arc<CompiledKeymap> {
             .map(|c| CompiledKeymap::compile(&c))
             .unwrap_or_else(|| CompiledKeymap { bindings: vec![] }),
     )
+}
+
+/// Spawn rust-analyzer, perform initialize/initialized handshake, and send
+/// `didOpen` for all open Rust buffers. Mirrors [`AppState::ensure_lsp_for_language`]
+/// without requiring a full [`AppState`].
+async fn start_lsp(
+    stoat: Entity<Stoat>,
+    lsp_manager: Arc<LspManager>,
+    lsp_state: LspState,
+    project_env: Arc<RwLock<Option<ProjectEnvironment>>>,
+    cx: &mut gpui::AsyncApp,
+) -> anyhow::Result<()> {
+    *lsp_state.status.write() = LspStatus::Initializing;
+
+    let env = project_env
+        .read()
+        .clone()
+        .unwrap_or_else(ProjectEnvironment::from_current);
+
+    let rust_analyzer_path = match env.path() {
+        Some(path) => which::which_in("rust-analyzer", Some(path), ".")?,
+        None => which::which("rust-analyzer")?,
+    };
+
+    let transport = stoat_lsp::StdioTransport::spawn(
+        rust_analyzer_path,
+        vec![],
+        Some(env.vars().clone()),
+        cx.background_executor().clone(),
+    )?;
+
+    let server_id = lsp_manager.add_server("rust-analyzer", Arc::new(transport));
+
+    let root_dir = cx.update(|cx| {
+        let s = stoat.read(cx);
+        s.worktree.lock().root().to_path_buf()
+    })?;
+
+    let init_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+            "processId": std::process::id(),
+            "rootUri": format!("file://{}", root_dir.display()),
+            "capabilities": {
+                "textDocument": {
+                    "hover": { "contentFormat": ["markdown", "plaintext"] },
+                    "publishDiagnostics": {
+                        "relatedInformation": true,
+                        "versionSupport": true,
+                    }
+                },
+                "window": {
+                    "workDoneProgress": true,
+                }
+            },
+        }
+    });
+
+    lsp_manager.request(server_id, init_request)?.await?;
+    lsp_manager
+        .notify(
+            server_id,
+            serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+        )
+        .await?;
+    lsp_manager.start_listener(server_id)?;
+
+    *lsp_state.status.write() = LspStatus::Ready;
+
+    // Send didOpen for all open Rust buffers
+    let paths_and_texts: Vec<(PathBuf, String)> = cx.update(|cx| {
+        let s = stoat.read(cx);
+        let root = s.worktree.lock().root().to_path_buf();
+        let buffer_store = s.buffer_store.read(cx);
+        buffer_store
+            .buffer_paths()
+            .into_iter()
+            .filter_map(|path| {
+                let item = buffer_store.get_buffer_by_path(&path)?;
+                let item_read = item.read(cx);
+                if item_read.language() != stoat_text::Language::Rust {
+                    return None;
+                }
+                let abs_path = root.join(&path);
+                let text = item_read.buffer().read(cx).text();
+                Some((abs_path, text))
+            })
+            .collect()
+    })?;
+
+    for (path, text) in paths_and_texts {
+        let uri_str = format!("file://{}", path.display());
+        if let Ok(uri) = uri_str.parse::<lsp_types::Uri>() {
+            let _ = lsp_manager
+                .did_open(server_id, uri, "rust".to_string(), 1, text)
+                .await;
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert absolute byte offset to Point (row, column).

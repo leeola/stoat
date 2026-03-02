@@ -1,9 +1,11 @@
 use crate::{
-    app_state::AppState,
+    app_state::{AppState, LspStatus},
     claude::{state::ChatMessage, view::ClaudeView},
     content_view::{PaneContent, ViewType},
+    environment::ProjectEnvironment,
     git::diff::HunkLineOrigin,
     input_simulator::parse_input_sequence,
+    keymap::dispatch::dispatch_editor_action,
     pane::{Member, PaneId},
     pane_group::view::PaneGroupView,
     stoat::KeyContext,
@@ -13,7 +15,8 @@ use crate::{
 };
 use gpui::{App, Axis, Entity, TestAppContext, VisualTestContext, Window};
 use parking_lot::Mutex;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use stoat_config::{Action, ActionExpr};
 
 pub struct TestApp<'a> {
     pub view: Entity<PaneGroupView>,
@@ -153,6 +156,82 @@ impl<'a> TestApp<'a> {
                 None => format!("[empty] pane={pane_id}"),
             }
         })
+    }
+
+    /// Dispatch a named action through the editor action pipeline.
+    pub fn type_action(&mut self, action_name: &str) {
+        let view = self.view.clone();
+        let action = ActionExpr::Single(Action {
+            name: action_name.to_string(),
+            args: vec![],
+        });
+        self.cx.update(|_window, cx| {
+            if let Some(stoat) = view.read(cx).active_stoat(cx) {
+                dispatch_editor_action(&stoat, &action, cx);
+            }
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Pre-populate project_env from the current process environment
+    /// so `ensure_lsp_for_language` doesn't block waiting for shell capture.
+    pub fn set_project_env_from_current(&mut self) {
+        let view = self.view.clone();
+        self.cx.update(|_window, cx| {
+            let pgv = view.read(cx);
+            *pgv.app_state.project_env.write() = Some(ProjectEnvironment::from_current());
+        });
+    }
+
+    /// Read the current flash message (where hover/LSP results appear).
+    pub fn flash_message(&mut self) -> Option<String> {
+        let view = self.view.clone();
+        self.cx
+            .update(|_window, cx| view.read(cx).app_state.flash_message.clone())
+    }
+
+    /// Poll until a flash message appears or timeout expires.
+    pub async fn await_flash_message(&mut self, timeout: Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            self.cx.run_until_parked();
+            if self.flash_message().is_some() {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                return;
+            }
+            self.cx
+                .background_executor
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    }
+
+    /// Poll until LSP status becomes `Ready` or timeout expires.
+    pub async fn await_lsp_ready(&mut self, timeout: Duration) {
+        let lsp_state = {
+            let view = self.view.clone();
+            self.cx
+                .update(|_window, cx| view.read(cx).app_state.lsp_state.clone())
+        };
+        let start = std::time::Instant::now();
+        loop {
+            self.cx.run_until_parked();
+            if *lsp_state.status.read() == LspStatus::Ready {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "await_lsp_ready timed out after {timeout:?}, status: {:?}",
+                    *lsp_state.status.read()
+                );
+            }
+            self.cx
+                .background_executor
+                .timer(Duration::from_millis(200))
+                .await;
+        }
     }
 }
 

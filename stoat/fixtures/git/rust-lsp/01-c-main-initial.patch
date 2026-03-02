@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:00 +0000
+Subject: [PATCH] initial commit
+
+---
+ Cargo.toml  |  6 ++++++
+ src/main.rs | 24 ++++++++++++++++++++++++
+ 2 files changed, 30 insertions(+)
+ create mode 100644 Cargo.toml
+ create mode 100644 src/main.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,6 @@
++[package]
++name = "test_proj"
++version = "0.1.0"
++edition = "2021"
++
++[dependencies]
+diff --git a/src/main.rs b/src/main.rs
+new file mode 100644
+index 0000000..abcdef0
+--- /dev/null
++++ b/src/main.rs
+@@ -0,0 +1,24 @@
++/// A greeter that holds a name.
++pub struct Greeter {
++    name: String,
++}
++
++impl Greeter {
++    /// Create a new greeter for the given name.
++    pub fn new(name: &str) -> Self {
++        Self {
++            name: name.to_string(),
++        }
++    }
++
++    /// Return a greeting message.
++    pub fn greet(&self) -> String {
++        format!("Hello, {}!", self.name)
++    }
++}
++
++fn main() {
++    let g = Greeter::new("world");
++    let msg = g.greet();
++    println!("{msg}");
++}
+--
+2.39.0
+

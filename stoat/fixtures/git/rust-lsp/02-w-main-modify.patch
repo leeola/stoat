@@ -1,0 +1,11 @@
+diff --git a/src/main.rs b/src/main.rs
+index abcdef0..1234567 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -20,5 +20,6 @@
+ fn main() {
+     let g = Greeter::new("world");
+     let msg = g.greet();
++    let _name = &g.name;
+     println!("{msg}");
+ }

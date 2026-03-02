@@ -58,6 +58,13 @@ impl ProjectEnvironment {
         }
     }
 
+    /// Build from the current process environment.
+    pub fn from_current() -> Self {
+        Self {
+            vars: Arc::new(std::env::vars().collect()),
+        }
+    }
+
     pub fn vars(&self) -> &HashMap<String, String> {
         &self.vars
     }
