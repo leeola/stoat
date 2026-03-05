@@ -102,6 +102,38 @@ impl<'a> HeadlessStoat<'a> {
         }
     }
 
+    pub fn new_with_text(text: &str, cx: &'a mut TestAppContext) -> Self {
+        let app = Self::new(cx);
+        let text = text.to_string();
+        let view = app.view.clone();
+        app.cx.update(|_window, cx| {
+            if let Some(stoat) = view.read(cx).active_stoat(cx) {
+                stoat.update(cx, |s, cx| {
+                    let buffer_item = s.active_buffer(cx);
+                    let buffer = buffer_item.read(cx).buffer().clone();
+                    let len = buffer.read(cx).len();
+                    buffer.update(cx, |buf, _| {
+                        buf.edit([(0..len, text.as_str())]);
+                    });
+                });
+            }
+        });
+        app
+    }
+
+    pub fn inject_symbols(
+        &mut self,
+        symbols: Vec<crate::app_state::SymbolEntry>,
+        source: crate::app_state::SymbolPickerSource,
+    ) {
+        let view = self.view.clone();
+        self.cx.update(|window, cx| {
+            view.update(cx, |pgv, cx| {
+                pgv.handle_open_symbol_picker(symbols, source, window, cx);
+            });
+        });
+    }
+
     // -- Input methods --
 
     pub fn type_input(&mut self, input: &str) {

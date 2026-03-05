@@ -2,7 +2,7 @@ use gpui::TestAppContext;
 use lsp_types::{Position, SymbolKind};
 use stoat::{
     app_state::{SymbolEntry, SymbolPickerSource},
-    test::app::TestApp,
+    test::headless::HeadlessStoat,
 };
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, DiagnosticSeverity};
 use text::{Bias, Point};
@@ -26,7 +26,10 @@ fn test_symbols() -> Vec<SymbolEntry> {
     ]
 }
 
-fn inject_diagnostics(app: &mut TestApp, diags: Vec<(Point, Point, DiagnosticSeverity, &str)>) {
+fn inject_diagnostics(
+    app: &mut HeadlessStoat,
+    diags: Vec<(Point, Point, DiagnosticSeverity, &str)>,
+) {
     app.with_stoat(|stoat, cx| {
         stoat.update(cx, |s, cx| {
             let buffer_item = s.active_buffer(cx);
@@ -54,7 +57,7 @@ fn inject_diagnostics(app: &mut TestApp, diags: Vec<(Point, Point, DiagnosticSev
 
 #[gpui::test]
 fn diagnostic_next(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("aaa\nbbb\nccc\nddd\neee", cx);
+    let mut app = HeadlessStoat::new_with_text("aaa\nbbb\nccc\nddd\neee", cx);
 
     inject_diagnostics(
         &mut app,
@@ -90,7 +93,7 @@ fn diagnostic_next(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn diagnostic_prev(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("aaa\nbbb\nccc\nddd\neee", cx);
+    let mut app = HeadlessStoat::new_with_text("aaa\nbbb\nccc\nddd\neee", cx);
 
     inject_diagnostics(
         &mut app,
@@ -124,7 +127,7 @@ fn diagnostic_prev(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn diagnostic_no_diagnostics(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("clean code", cx);
+    let mut app = HeadlessStoat::new_with_text("clean code", cx);
 
     insta::assert_snapshot!("before", app.snapshot_active());
 
@@ -137,14 +140,14 @@ fn diagnostic_no_diagnostics(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn hover_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.type_input("<Space>li");
     insta::assert_snapshot!(app.snapshot_active());
 }
 
 #[gpui::test]
 fn goto_definition_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     // j = goto definition in lsp mode
     app.type_input("<Space>lj");
     insta::assert_snapshot!(app.snapshot_active());
@@ -152,28 +155,28 @@ fn goto_definition_no_lsp(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn code_action_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.type_input("<Space>la");
     insta::assert_snapshot!(app.snapshot_active());
 }
 
 #[gpui::test]
 fn rename_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.type_input("<Space>lr");
     insta::assert_snapshot!(app.snapshot_active());
 }
 
 #[gpui::test]
 fn symbol_picker_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.type_input("<Space>ls");
     insta::assert_snapshot!(app.snapshot_active());
 }
 
 #[gpui::test]
 fn workspace_symbol_picker_no_lsp(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.type_input("<Space>lS");
     insta::assert_snapshot!(app.snapshot_active());
 }
@@ -183,14 +186,14 @@ fn workspace_symbol_picker_no_lsp(cx: &mut TestAppContext) {
 #[gpui::test]
 fn symbol_picker_open(cx: &mut TestAppContext) {
     let text = "fn main() {\n    println!(\"hello\");\n}\nstruct Config {\n    name: String,\n}\n\nfn process() {\n    todo!()\n}\n\nconst MAX_SIZE: usize = 100;\n\ntrait Handler {\n    fn handle(&self);\n}";
-    let mut app = TestApp::new_with_text(text, cx);
+    let mut app = HeadlessStoat::new_with_text(text, cx);
     app.inject_symbols(test_symbols(), SymbolPickerSource::Document);
     insta::assert_snapshot!("picker-open", app.snapshot_active());
 }
 
 #[gpui::test]
 fn symbol_picker_navigate(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.inject_symbols(test_symbols(), SymbolPickerSource::Document);
 
     // Move down twice
@@ -204,7 +207,7 @@ fn symbol_picker_navigate(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn symbol_picker_filter(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.inject_symbols(test_symbols(), SymbolPickerSource::Document);
 
     app.type_input("ma");
@@ -214,7 +217,7 @@ fn symbol_picker_filter(cx: &mut TestAppContext) {
 #[gpui::test]
 fn symbol_picker_select(cx: &mut TestAppContext) {
     let text = "fn main() {\n    println!(\"hello\");\n}\nstruct Config {\n    name: String,\n}";
-    let mut app = TestApp::new_with_text(text, cx);
+    let mut app = HeadlessStoat::new_with_text(text, cx);
     app.inject_symbols(test_symbols(), SymbolPickerSource::Document);
 
     // Select second item (Config at line 3)
@@ -224,7 +227,7 @@ fn symbol_picker_select(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn symbol_picker_dismiss(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.inject_symbols(test_symbols(), SymbolPickerSource::Document);
 
     app.type_input("<Esc>");
@@ -233,7 +236,7 @@ fn symbol_picker_dismiss(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn symbol_picker_empty(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("fn main() {}", cx);
+    let mut app = HeadlessStoat::new_with_text("fn main() {}", cx);
     app.inject_symbols(vec![], SymbolPickerSource::Document);
     insta::assert_snapshot!("picker-empty", app.snapshot_active());
 }
@@ -244,13 +247,11 @@ fn symbol_picker_empty(cx: &mut TestAppContext) {
 fn workspace_edit_current_file(cx: &mut TestAppContext) {
     use lsp_types::{Range, TextEdit, Uri, WorkspaceEdit};
     use std::collections::HashMap;
-    use stoat::test::git_fixture::GitFixture;
 
-    let fixture = GitFixture::load("multi-file-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("multi-file-diff", cx);
 
     let file_uri = {
-        let alpha_path = fixture.dir().join("alpha.txt");
+        let alpha_path = app.root().join("alpha.txt");
         format!("file://{}", alpha_path.display())
             .parse::<Uri>()
             .unwrap()

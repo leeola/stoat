@@ -1,10 +1,9 @@
 use gpui::TestAppContext;
-use stoat::test::{app::TestApp, git_fixture::GitFixture};
+use stoat::test::headless::HeadlessStoat;
 
 #[gpui::test]
 fn open_git_status(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>g");
     app.flush();
@@ -13,8 +12,7 @@ fn open_git_status(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn navigate_files(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("multi-file-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("multi-file-diff", cx);
 
     app.type_input("<Space>g");
     app.flush();
@@ -29,8 +27,7 @@ fn navigate_files(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cycle_filter(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("staged-and-unstaged");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
     app.type_input("<Space>g");
     app.flush();
@@ -47,8 +44,7 @@ fn cycle_filter(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn dismiss_restores(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>g");
     app.flush();

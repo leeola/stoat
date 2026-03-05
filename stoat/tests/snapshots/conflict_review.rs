@@ -1,10 +1,9 @@
 use gpui::TestAppContext;
-use stoat::test::{app::TestApp, git_fixture::GitFixture};
+use stoat::test::headless::HeadlessStoat;
 
 #[gpui::test]
 fn open_conflict_review(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();
@@ -13,8 +12,7 @@ fn open_conflict_review(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn accept_ours(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();
@@ -26,8 +24,7 @@ fn accept_ours(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn accept_theirs(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();
@@ -38,8 +35,7 @@ fn accept_theirs(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn accept_both(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();
@@ -50,8 +46,7 @@ fn accept_both(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn navigate_conflicts(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();
@@ -66,8 +61,7 @@ fn navigate_conflicts(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn dismiss_conflict_review(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("merge-conflict");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
     app.type_input("<Space>x");
     app.flush();

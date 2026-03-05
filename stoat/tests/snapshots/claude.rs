@@ -1,9 +1,9 @@
 use gpui::TestAppContext;
-use stoat::test::app::TestApp;
+use stoat::test::headless::HeadlessStoat;
 
 #[gpui::test]
 fn command_palette_typing(cx: &mut TestAppContext) {
-    let mut app = TestApp::new(cx);
+    let mut app = HeadlessStoat::new(cx);
 
     app.type_input("<Space>o");
     app.flush();
@@ -29,7 +29,7 @@ fn command_palette_typing(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn escape_then_pane_switch(cx: &mut TestAppContext) {
-    let mut app = TestApp::new_with_text("original", cx);
+    let mut app = HeadlessStoat::new_with_text("original", cx);
 
     app.type_input("<Space>o");
     app.flush();
@@ -55,7 +55,7 @@ fn escape_then_pane_switch(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn overlay_dismiss_restores_context(cx: &mut TestAppContext) {
-    let mut app = TestApp::new(cx);
+    let mut app = HeadlessStoat::new(cx);
 
     app.type_input("<Space>o");
     app.flush();
@@ -75,7 +75,7 @@ fn overlay_dismiss_restores_context(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn input_focus_transitions(cx: &mut TestAppContext) {
-    let mut app = TestApp::new(cx);
+    let mut app = HeadlessStoat::new(cx);
 
     app.type_input("<Space>o");
     app.flush();

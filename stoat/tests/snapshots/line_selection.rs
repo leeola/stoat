@@ -6,12 +6,11 @@
 // stage/unstage), not DiffReviewEnterLineSelect (line selection mode).
 
 use gpui::TestAppContext;
-use stoat::test::{app::TestApp, git_fixture::GitFixture};
+use stoat::test::headless::HeadlessStoat;
 
 #[gpui::test]
 fn stage_line_in_diff_review(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();

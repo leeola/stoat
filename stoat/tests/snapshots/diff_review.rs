@@ -1,10 +1,9 @@
 use gpui::TestAppContext;
-use stoat::test::{app::TestApp, git_fixture::GitFixture};
+use stoat::test::headless::HeadlessStoat;
 
 #[gpui::test]
 fn open_basic_diff(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -13,8 +12,7 @@ fn open_basic_diff(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn navigate_hunks(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -29,8 +27,7 @@ fn navigate_hunks(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn approve_hunk(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -41,8 +38,7 @@ fn approve_hunk(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn approve_all_dismisses(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -56,8 +52,7 @@ fn approve_all_dismisses(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cycle_comparison_mode(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -75,8 +70,7 @@ fn cycle_comparison_mode(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn dismiss_restores_mode(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -88,8 +82,7 @@ fn dismiss_restores_mode(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn follow_toggle(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("basic-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -104,8 +97,7 @@ fn follow_toggle(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn cross_file_navigation(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("multi-file-diff");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("multi-file-diff", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -117,8 +109,7 @@ fn cross_file_navigation(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn staged_comparison(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("staged-and-unstaged");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
     app.type_input("<Space>r");
     app.flush();
@@ -130,8 +121,7 @@ fn staged_comparison(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn unstaged_comparison(cx: &mut TestAppContext) {
-    let fixture = GitFixture::load("staged-and-unstaged");
-    let mut app = TestApp::with_fixture(&fixture, cx);
+    let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
     app.type_input("<Space>r");
     app.flush();
