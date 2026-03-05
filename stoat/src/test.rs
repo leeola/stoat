@@ -27,6 +27,7 @@
 pub mod app;
 pub mod cursor_notation;
 pub mod git_fixture;
+pub mod headless;
 
 use crate::{
     app_state::{LspState, LspStatus},

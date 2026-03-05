@@ -66,7 +66,13 @@ fn run_with_paths_impl(
             move |window, cx| {
                 // Create PaneGroupView (handles workspace, stoat, and editor initialization)
                 let pane_group_view = cx.new(|cx| {
-                    PaneGroupView::new(config.clone(), paths.clone(), compiled_keymap.clone(), cx)
+                    PaneGroupView::new(
+                        config.clone(),
+                        paths.clone(),
+                        compiled_keymap.clone(),
+                        std::env::current_dir().unwrap_or_default(),
+                        cx,
+                    )
                 });
 
                 // Setup LSP progress tracking to enable automatic UI updates

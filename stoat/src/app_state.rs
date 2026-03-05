@@ -308,6 +308,8 @@ impl GitStatus {
 /// let pane_group = cx.new(|cx| PaneGroupView::new(workspace, cx));
 /// ```
 pub struct AppState {
+    /// Project root directory
+    pub root: PathBuf,
     /// File system tree for navigation
     pub worktree: Arc<Mutex<Worktree>>,
     /// Central buffer management (tracks all open buffers)
@@ -370,13 +372,13 @@ impl AppState {
     /// ```rust,ignore
     /// let workspace = AppState::new(cx);
     /// ```
-    pub fn new(cx: &mut gpui::App) -> Self {
-        let worktree = Arc::new(Mutex::new(Worktree::new(PathBuf::from("."))));
+    pub fn new(root: PathBuf, cx: &mut gpui::App) -> Self {
+        let worktree = Arc::new(Mutex::new(Worktree::new(root.clone())));
         let buffer_store = cx.new(|_| BufferStore::new());
 
         // Initialize git status for status bar
         let (branch_info, git_status_files, dirty_count) =
-            if let Ok(repo) = crate::git::repository::Repository::open(std::path::Path::new(".")) {
+            if let Ok(repo) = crate::git::repository::Repository::open(&root) {
                 let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
                 let status_files = crate::git::status::gather_git_status(repo.inner())
                     .unwrap_or_else(|_| Vec::new());
@@ -389,7 +391,7 @@ impl AppState {
         let project_env: Arc<RwLock<Option<ProjectEnvironment>>> = Arc::new(RwLock::new(None));
         {
             let project_env = project_env.clone();
-            let project_dir = std::env::current_dir().unwrap_or_default();
+            let project_dir = root.clone();
             cx.spawn(async move |_cx| {
                 let env = ProjectEnvironment::capture(&project_dir).await;
                 *project_env.write() = Some(env);
@@ -444,6 +446,7 @@ impl AppState {
         }
 
         Self {
+            root,
             worktree,
             buffer_store,
             file_finder: FileFinder::default(),
@@ -621,6 +624,7 @@ impl AppState {
         let lsp_state = self.lsp_state.clone();
         let buffer_store = self.buffer_store.clone();
         let project_env = self.project_env.clone();
+        let root = self.root.clone();
 
         *lsp_state.status.write() = LspStatus::Starting;
 
@@ -658,7 +662,7 @@ impl AppState {
                 "method": "initialize",
                 "params": {
                     "processId": std::process::id(),
-                    "rootUri": format!("file://{}", std::env::current_dir()?.display()),
+                    "rootUri": format!("file://{}", root.display()),
                     "capabilities": {
                         "textDocument": {
                             "publishDiagnostics": {
@@ -688,7 +692,7 @@ impl AppState {
 
             lsp_manager.start_listener(server_id)?;
 
-            *lsp_state.root_dir.write() = std::env::current_dir().ok();
+            *lsp_state.root_dir.write() = Some(root.clone());
             *lsp_state.status.write() = LspStatus::Ready;
             tracing::debug!("LSP ready");
 

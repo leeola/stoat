@@ -27,8 +27,9 @@ impl<'a> TestApp<'a> {
     pub fn new(cx: &'a mut TestAppContext) -> Self {
         let keymap = super::test_keymap();
         let config = crate::config::Config::default();
-        let (view, cx) =
-            cx.add_window_view(|_window, cx| PaneGroupView::new(config, vec![], keymap, cx));
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            PaneGroupView::new(config, vec![], keymap, PathBuf::from("."), cx)
+        });
         cx.update(|window, cx| {
             view.read(cx).focus_active_editor(window, cx);
         });
@@ -235,7 +236,7 @@ impl<'a> TestApp<'a> {
     }
 }
 
-fn format_member(
+pub(crate) fn format_member(
     member: &Member,
     pane_contents: &HashMap<PaneId, PaneContent>,
     active_pane: PaneId,
@@ -271,7 +272,7 @@ fn format_member(
     }
 }
 
-fn snapshot_editor(
+pub(crate) fn snapshot_editor(
     stoat: &Entity<Stoat>,
     pane_id: PaneId,
     app_state: &AppState,
@@ -305,13 +306,13 @@ fn snapshot_editor(
     }
 }
 
-fn format_editor_buffer(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+pub(crate) fn format_editor_buffer(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     let mut result = header.to_string();
     result.push_str(&format_buffer_lines(stoat, cx));
     result
 }
 
-fn format_diff_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+pub(crate) fn format_diff_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     let mut result = {
         let s = stoat.read(cx);
         let rs = &s.review_state;
@@ -350,7 +351,7 @@ fn format_diff_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     result
 }
 
-fn format_line_selection(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+pub(crate) fn format_line_selection(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     let s = stoat.read(cx);
     let ls = match &s.line_selection {
         Some(ls) => ls,
@@ -374,7 +375,7 @@ fn format_line_selection(stoat: &Entity<Stoat>, header: &str, cx: &App) -> Strin
     result
 }
 
-fn format_git_status(app_state: &AppState, header: &str, _cx: &App) -> String {
+pub(crate) fn format_git_status(app_state: &AppState, header: &str, _cx: &App) -> String {
     let gs = &app_state.git_status;
     let filter = gs.filter.display_name();
     let mut result = format!(
@@ -394,7 +395,7 @@ fn format_git_status(app_state: &AppState, header: &str, _cx: &App) -> String {
     result
 }
 
-fn format_conflict_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+pub(crate) fn format_conflict_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     let mut result = {
         let s = stoat.read(cx);
         let cs = &s.conflict_state;
@@ -421,7 +422,7 @@ fn format_conflict_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> Stri
     result
 }
 
-fn format_buffer_lines(stoat: &Entity<Stoat>, cx: &App) -> String {
+pub(crate) fn format_buffer_lines(stoat: &Entity<Stoat>, cx: &App) -> String {
     let s = stoat.read(cx);
     let buffer_item = s.active_buffer(cx);
     let buffer = buffer_item.read(cx).buffer().read(cx);
@@ -458,7 +459,7 @@ fn format_buffer_lines(stoat: &Entity<Stoat>, cx: &App) -> String {
     result
 }
 
-fn format_command_palette(app_state: &AppState, header: &str, cx: &App) -> String {
+pub(crate) fn format_command_palette(app_state: &AppState, header: &str, cx: &App) -> String {
     let input_text = app_state
         .command_palette
         .input
@@ -478,7 +479,7 @@ fn format_command_palette(app_state: &AppState, header: &str, cx: &App) -> Strin
     result
 }
 
-fn format_file_finder(app_state: &AppState, header: &str, cx: &App) -> String {
+pub(crate) fn format_file_finder(app_state: &AppState, header: &str, cx: &App) -> String {
     let input_text = app_state
         .file_finder
         .input
@@ -498,7 +499,7 @@ fn format_file_finder(app_state: &AppState, header: &str, cx: &App) -> String {
     result
 }
 
-fn format_symbol_picker(app_state: &AppState, header: &str, cx: &App) -> String {
+pub(crate) fn format_symbol_picker(app_state: &AppState, header: &str, cx: &App) -> String {
     use crate::actions::lsp::symbol_picker::symbol_kind_label;
 
     let input_text = app_state
@@ -521,7 +522,7 @@ fn format_symbol_picker(app_state: &AppState, header: &str, cx: &App) -> String 
     result
 }
 
-fn format_buffer_finder(app_state: &AppState, header: &str, cx: &App) -> String {
+pub(crate) fn format_buffer_finder(app_state: &AppState, header: &str, cx: &App) -> String {
     let input_text = app_state
         .buffer_finder
         .input
@@ -546,7 +547,7 @@ fn format_buffer_finder(app_state: &AppState, header: &str, cx: &App) -> String 
     result
 }
 
-fn snapshot_claude(
+pub(crate) fn snapshot_claude(
     claude_view: &Entity<ClaudeView>,
     pane_id: PaneId,
     app_state: &AppState,
@@ -596,7 +597,7 @@ fn snapshot_claude(
     }
 }
 
-fn key_context_label(ctx: KeyContext) -> &'static str {
+pub(crate) fn key_context_label(ctx: KeyContext) -> &'static str {
     match ctx {
         KeyContext::TextEditor => "TextEditor",
         KeyContext::Git => "Git",

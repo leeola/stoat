@@ -175,10 +175,11 @@ impl PaneGroupView {
         config: crate::Config,
         initial_paths: Vec<std::path::PathBuf>,
         compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
+        root: PathBuf,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         // Create workspace state first (this creates worktree and buffer_store)
-        let app_state = crate::app_state::AppState::new(cx);
+        let app_state = crate::app_state::AppState::new(root, cx);
 
         // Create initial Stoat using workspace's shared resources
         let initial_stoat = cx.new(|cx| {
