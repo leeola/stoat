@@ -1,5 +1,7 @@
 #![cfg(feature = "dev-tools")]
 
+#[path = "snapshots/blame.rs"]
+mod blame;
 #[path = "snapshots/claude.rs"]
 mod claude;
 #[path = "snapshots/conflict_review.rs"]

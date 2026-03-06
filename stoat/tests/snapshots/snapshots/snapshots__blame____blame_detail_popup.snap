@@ -1,0 +1,15 @@
+---
+source: stoat/tests/snapshots/blame.rs
+assertion_line: 52
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=blame_review ctx=BlameReview
+ e055165b | line one by alice
+ b8ae3556 | line two modified by bob
+>b8ae3556 | line three modified by bob
+ e055165b | line four by alice
+ e055165b | line five by alice
+ c43f7c14 | line six by alice
+ c43f7c14 | line seven by alice
+ c43f7c14 | line eight by alice
+[detail] hash=b8ae3556 author=Bob date=2024-01-02 summary=bob modifies lines 2-3

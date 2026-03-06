@@ -305,6 +305,7 @@ pub(crate) fn snapshot_editor(
         KeyContext::SymbolPicker => format_symbol_picker(app_state, &header, cx),
         KeyContext::DiffReview => format_diff_review(stoat, &header, cx),
         KeyContext::ConflictReview => format_conflict_review(stoat, &header, cx),
+        KeyContext::BlameReview => format_blame_review(stoat, &header, cx),
         KeyContext::Git => format_git_status(app_state, &header, cx),
         _ => format_editor_buffer(stoat, &header, cx),
     }
@@ -443,6 +444,59 @@ pub(crate) fn format_conflict_review(stoat: &Entity<Stoat>, header: &str, cx: &A
     };
 
     result.push_str(&format_buffer_lines(stoat, cx));
+    result
+}
+
+pub(crate) fn format_blame_review(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
+    let s = stoat.read(cx);
+    let bs = &s.blame_state;
+
+    let mut columns = String::new();
+    if bs.show_author {
+        columns.push_str(" +author");
+    }
+    if bs.show_date {
+        columns.push_str(" +date");
+    }
+
+    let mut result = format!("{header}{columns}");
+
+    if let Some(data) = &bs.data {
+        let buffer_item = s.active_buffer(cx);
+        let text = buffer_item.read(cx).buffer().read(cx).text();
+        let cursor_row = s.cursor_position().row as usize;
+
+        for (line_idx, line_text) in text.lines().enumerate() {
+            let entry_idx = data.line_to_entry.get(line_idx).copied().unwrap_or(0);
+            let entry = &data.entries[entry_idx];
+
+            let mut annotation = entry.short_hash.clone();
+            if bs.show_author {
+                annotation.push(' ');
+                annotation.push_str(&entry.author_name);
+            }
+            if bs.show_date {
+                annotation.push(' ');
+                annotation.push_str(&entry.date_display);
+            }
+
+            let cursor_mark = if line_idx == cursor_row { ">" } else { " " };
+            result.push_str(&format!("\n{cursor_mark}{annotation} | {line_text}"));
+        }
+
+        if bs.popup_visible {
+            if let Some(popup_line) = bs.popup_line {
+                if let Some(&eidx) = data.line_to_entry.get(popup_line as usize) {
+                    let e = &data.entries[eidx];
+                    result.push_str(&format!(
+                        "\n[detail] hash={} author={} date={} summary={}",
+                        e.short_hash, e.author_name, e.date_display, e.summary
+                    ));
+                }
+            }
+        }
+    }
+
     result
 }
 
@@ -636,5 +690,6 @@ pub(crate) fn key_context_label(ctx: KeyContext) -> &'static str {
         KeyContext::AboutModal => "AboutModal",
         KeyContext::Claude => "Claude",
         KeyContext::SymbolPicker => "SymbolPicker",
+        KeyContext::BlameReview => "BlameReview",
     }
 }

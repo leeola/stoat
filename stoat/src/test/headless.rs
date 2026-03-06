@@ -348,6 +348,19 @@ impl<'a> HeadlessStoat<'a> {
         });
     }
 
+    pub fn blame_line_to_entry(&mut self) -> Option<Vec<usize>> {
+        let view = self.view.clone();
+        self.cx.update(|_window, cx| {
+            view.read(cx).active_stoat(cx).and_then(|s| {
+                s.read(cx)
+                    .blame_state
+                    .data
+                    .as_ref()
+                    .map(|d| d.line_to_entry.clone())
+            })
+        })
+    }
+
     pub fn view(&self) -> &Entity<PaneGroupView> {
         &self.view
     }

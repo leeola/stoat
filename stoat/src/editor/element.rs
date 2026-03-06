@@ -869,9 +869,18 @@ impl Element for EditorElement {
             }
         }
 
+        // Compute blame column annotations if blame mode is active
+        let (blame_column_width, shaped_blame_annotations) = if !is_minimap {
+            self.compute_blame_annotations(bounds, &line_layouts, &gutter_font, window, cx)
+        } else {
+            (Pixels::ZERO, Vec::new())
+        };
+
         EditorPrepaintState {
             line_layouts,
             gutter_width,
+            blame_column_width,
+            shaped_blame_annotations,
             diagnostics_by_row,
             gutter_font,
             shaped_line_numbers,
@@ -927,7 +936,10 @@ impl Element for EditorElement {
         // Register mouse click handler for cursor positioning
         if !is_minimap {
             let view = self.view.clone();
-            let text_content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
+            let text_content_x = bounds.origin.x
+                + prepaint.gutter_width
+                + prepaint.blame_column_width
+                + self.style.padding;
             let text_area_y = bounds.origin.y + self.style.padding;
             let line_height = self.style.line_height;
             let line_layouts: Vec<_> = prepaint
@@ -1044,7 +1056,10 @@ impl Element for EditorElement {
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
 
         // Pre-compute content X position (constant for all lines)
-        let content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
+        let content_x = bounds.origin.x
+            + prepaint.gutter_width
+            + prepaint.blame_column_width
+            + self.style.padding;
 
         // Paint all pre-shaped lines (includes both buffer rows and phantom rows)
         for layout in &prepaint.line_layouts {
@@ -1112,11 +1127,17 @@ impl Element for EditorElement {
             // Paint line numbers in gutter
             self.paint_line_numbers(prepaint, window, cx);
 
+            // Paint blame annotations
+            self.paint_blame_annotations(prepaint, window, cx);
+
             // Paint cursor on top of text
             self.paint_cursor(prepaint, window);
 
             // Paint hover popup on top of everything
             self.paint_hover(bounds, prepaint, window, cx);
+
+            // Paint blame detail popup
+            self.paint_blame_detail(bounds, prepaint, window, cx);
         }
     }
 }
@@ -1203,6 +1224,248 @@ impl EditorElement {
                 border_widths: 0.0.into(),
                 border_style: gpui::BorderStyle::default(),
             });
+        }
+    }
+
+    fn compute_blame_annotations(
+        &self,
+        bounds: Bounds<Pixels>,
+        line_layouts: &[ShapedLineLayout],
+        gutter_font: &Font,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (Pixels, Vec<(gpui::ShapedLine, Pixels, Pixels)>) {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        if !stoat.blame_state.active {
+            return (Pixels::ZERO, Vec::new());
+        }
+        let data = match &stoat.blame_state.data {
+            Some(d) => d,
+            None => return (Pixels::ZERO, Vec::new()),
+        };
+
+        let show_author = stoat.blame_state.show_author;
+        let show_date = stoat.blame_state.show_date;
+
+        let blame_font_size = self.style.font_size * 0.85;
+        let dim_color = Hsla {
+            h: self.style.text_color.h,
+            s: self.style.text_color.s * 0.5,
+            l: self.style.text_color.l,
+            a: self.style.text_color.a * 0.6,
+        };
+
+        let mut max_width = Pixels::ZERO;
+        let mut annotations = Vec::new();
+        let mut prev_entry_idx: Option<usize> = None;
+
+        let x_pos = bounds.origin.x + self.style.padding;
+
+        for layout in line_layouts {
+            let Some(buffer_row) = layout.buffer_row else {
+                prev_entry_idx = None;
+                continue;
+            };
+
+            let entry_idx = data.line_to_entry.get(buffer_row as usize).copied();
+
+            let show_this_line = entry_idx != prev_entry_idx;
+            prev_entry_idx = entry_idx;
+
+            let text = if show_this_line {
+                if let Some(idx) = entry_idx {
+                    let entry = &data.entries[idx];
+                    let mut s = entry.short_hash.clone();
+                    if show_author {
+                        s.push(' ');
+                        s.push_str(&entry.author_name);
+                    }
+                    if show_date {
+                        s.push(' ');
+                        s.push_str(&entry.date_display);
+                    }
+                    s
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            if text.is_empty() {
+                continue;
+            }
+
+            let shared = SharedString::from(text.clone());
+            let run = TextRun {
+                len: shared.len(),
+                font: gutter_font.clone(),
+                color: dim_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+
+            let shaped = window
+                .text_system()
+                .shape_line(shared, blame_font_size, &[run], None);
+            let w = shaped.width + px(8.0);
+            if w > max_width {
+                max_width = w;
+            }
+            annotations.push((shaped, x_pos, layout.y_position));
+        }
+
+        (max_width, annotations)
+    }
+
+    fn paint_blame_annotations(
+        &self,
+        prepaint: &EditorPrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for (shaped, x, y) in &prepaint.shaped_blame_annotations {
+            let _ = shaped.paint(point(*x, *y), self.style.line_height, window, cx);
+        }
+    }
+
+    fn paint_blame_detail(
+        &self,
+        editor_bounds: Bounds<Pixels>,
+        prepaint: &EditorPrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        if !stoat.blame_state.popup_visible {
+            return;
+        }
+        let data = match &stoat.blame_state.data {
+            Some(d) => d,
+            None => return,
+        };
+        let popup_line = match stoat.blame_state.popup_line {
+            Some(l) => l as usize,
+            None => return,
+        };
+        let entry_idx = match data.line_to_entry.get(popup_line) {
+            Some(&idx) => idx,
+            None => return,
+        };
+        let entry = &data.entries[entry_idx];
+
+        let cursor_bounds = match prepaint.cursor_layouts.first() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let line_height = self.style.line_height;
+        let font = Font {
+            family: SharedString::from("Menlo"),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+        let font_size = px(stoat.config().buffer_font_size);
+        let text_color = self.style.text_color;
+        let dim_color = Hsla {
+            h: text_color.h,
+            s: text_color.s * 0.5,
+            l: text_color.l,
+            a: text_color.a * 0.7,
+        };
+        let padding = px(8.0);
+
+        let bg_color = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.15,
+            a: 0.95,
+        };
+        let border_color = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.35,
+            a: 1.0,
+        };
+
+        let lines_text = [
+            format!("commit {}", entry.short_hash),
+            format!("Author: {}", entry.author_name),
+            format!("Date:   {}", entry.date_display),
+            String::new(),
+            entry.summary.clone(),
+        ];
+
+        let mut shaped_lines = Vec::new();
+        let mut total_height = padding * 2.0;
+        let mut max_line_width = Pixels::ZERO;
+
+        for (i, line_text) in lines_text.iter().enumerate() {
+            if line_text.is_empty() {
+                total_height += line_height * 0.5;
+                continue;
+            }
+            let color = if i == 0 { text_color } else { dim_color };
+            let shared = SharedString::from(line_text.clone());
+            let run = TextRun {
+                len: shared.len(),
+                font: font.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window
+                .text_system()
+                .shape_line(shared, font_size, &[run], None);
+            if shaped.width > max_line_width {
+                max_line_width = shaped.width;
+            }
+            total_height += line_height;
+            shaped_lines.push((i, shaped));
+        }
+
+        let popup_width = max_line_width + padding * 2.0;
+        let popup_x = (cursor_bounds.origin.x - popup_width * 0.5)
+            .max(editor_bounds.origin.x)
+            .min(editor_bounds.origin.x + editor_bounds.size.width - popup_width);
+        let popup_y = cursor_bounds.origin.y - total_height - px(4.0);
+        let popup_y = if popup_y < editor_bounds.origin.y {
+            cursor_bounds.origin.y + line_height + px(4.0)
+        } else {
+            popup_y
+        };
+
+        let popup_bounds = Bounds {
+            origin: point(popup_x, popup_y),
+            size: size(popup_width, total_height),
+        };
+
+        window.paint_quad(gpui::PaintQuad {
+            bounds: popup_bounds,
+            corner_radii: px(4.0).into(),
+            background: bg_color.into(),
+            border_color: border_color.into(),
+            border_widths: px(1.0).into(),
+            border_style: gpui::BorderStyle::default(),
+        });
+
+        let mut y = popup_y + padding;
+        let mut shaped_idx = 0;
+        for i in 0..lines_text.len() {
+            if lines_text[i].is_empty() {
+                y += line_height * 0.5;
+                continue;
+            }
+            if shaped_idx < shaped_lines.len() && shaped_lines[shaped_idx].0 == i {
+                let shaped = &shaped_lines[shaped_idx].1;
+                let _ = shaped.paint(point(popup_x + padding, y), line_height, window, cx);
+                y += line_height;
+                shaped_idx += 1;
+            }
         }
     }
 
@@ -1721,6 +1984,10 @@ pub struct EditorPrepaintState {
     pub line_layouts: Vec<ShapedLineLayout>,
     /// Gutter width for positioning
     pub gutter_width: Pixels,
+    /// Blame column width (non-zero when blame mode is active)
+    pub blame_column_width: Pixels,
+    /// Pre-shaped blame annotations: (shaped_line, x_position, y_position)
+    pub shaped_blame_annotations: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Diagnostics by buffer row (for gutter icons)
     pub diagnostics_by_row: HashMap<u32, Vec<BufferDiagnostic>>,
     /// Gutter font (reused across paint functions)

@@ -263,12 +263,19 @@ on key {
         a -> SetMode(pane);
         p -> OpenFileFinder();
         b -> SetMode(buffer);
-        g -> OpenGitStatus();
+        g -> SetMode(git);
         d -> ToggleDiffHunk();
-        r -> OpenDiffReview();
-        x -> OpenConflictReview();
         l -> SetMode(lsp);
         o -> OpenClaudeChat();
+    }
+
+    # Git Mode (transient - auto-reverts to normal after action)
+    mode == "git" {
+        escape -> SetMode(normal);
+        s -> OpenGitStatus();
+        b -> OpenGitBlame();
+        r -> OpenDiffReview();
+        x -> OpenConflictReview();
     }
 
     # Claude Context
@@ -409,6 +416,26 @@ on key {
             up -> ConflictPrevConflict();
             q -> ConflictReviewDismiss();
             v -> ConflictToggleView();
+            ? -> OpenHelpOverlay();
+        }
+    }
+
+    # BlameReview Context
+    focus == "BlameReview" {
+        mode == "blame_review" {
+            escape -> SetKeyContext(TextEditor);
+            j -> MoveDown();
+            k -> MoveUp();
+            h -> MoveLeft();
+            l -> MoveRight();
+            G -> MoveToFileEnd();
+            g -> SetMode(goto);
+            ctrl-d -> HalfPageDown();
+            ctrl-u -> HalfPageUp();
+            a -> BlameToggleAuthor();
+            d -> BlameToggleDate();
+            i -> BlameShowDetail();
+            q -> BlameDismiss();
             ? -> OpenHelpOverlay();
         }
     }

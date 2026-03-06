@@ -68,6 +68,14 @@ pub fn default_modes() -> HashMap<String, Mode> {
         Mode::with_previous("view", "VIEW", "normal", false),
     );
     modes.insert(
+        "git".into(),
+        Mode::with_previous("git", "GIT", "normal", false),
+    );
+    modes.insert(
+        "blame_review".into(),
+        Mode::with_previous("blame_review", "BLAME", "normal", false),
+    );
+    modes.insert(
         "symbol_picker".into(),
         Mode::with_previous("symbol_picker", "SYMBOL PICKER", "normal", false),
     );
@@ -112,6 +120,10 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
     contexts.insert(
         KeyContext::SymbolPicker,
         KeyContextMeta::new("symbol_picker".into()),
+    );
+    contexts.insert(
+        KeyContext::BlameReview,
+        KeyContextMeta::new("blame_review".into()),
     );
 
     contexts

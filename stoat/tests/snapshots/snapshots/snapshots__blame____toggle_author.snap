@@ -1,0 +1,14 @@
+---
+source: stoat/tests/snapshots/blame.rs
+assertion_line: 20
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=blame_review ctx=BlameReview +author
+>e055165b Alice | line one by alice
+ b8ae3556 Bob | line two modified by bob
+ b8ae3556 Bob | line three modified by bob
+ e055165b Alice | line four by alice
+ e055165b Alice | line five by alice
+ c43f7c14 Alice | line six by alice
+ c43f7c14 Alice | line seven by alice
+ c43f7c14 Alice | line eight by alice

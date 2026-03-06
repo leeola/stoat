@@ -5,7 +5,7 @@ use stoat::test::headless::HeadlessStoat;
 fn open_git_status(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>g");
+    app.type_input("<Space>gs");
     app.flush();
     insta::assert_snapshot!(app.snapshot_active());
 }
@@ -14,7 +14,7 @@ fn open_git_status(cx: &mut TestAppContext) {
 fn navigate_files(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("multi-file-diff", cx);
 
-    app.type_input("<Space>g");
+    app.type_input("<Space>gs");
     app.flush();
     insta::assert_snapshot!("initial", app.snapshot_active());
 
@@ -29,7 +29,7 @@ fn navigate_files(cx: &mut TestAppContext) {
 fn cycle_filter(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
-    app.type_input("<Space>g");
+    app.type_input("<Space>gs");
     app.flush();
     insta::assert_snapshot!("all", app.snapshot_active());
 
@@ -46,7 +46,7 @@ fn cycle_filter(cx: &mut TestAppContext) {
 fn dismiss_restores(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>g");
+    app.type_input("<Space>gs");
     app.flush();
     insta::assert_snapshot!("git-status-open", app.snapshot_active());
 

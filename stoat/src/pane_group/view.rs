@@ -553,6 +553,7 @@ impl PaneGroupView {
                 },
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
                 "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
+                "OpenGitBlame" => self.handle_open_git_blame(window, cx),
                 "OpenHelpOverlay" => self.handle_open_help_overlay(window, cx),
                 "OpenHelpModal" => self.handle_open_help_modal(window, cx),
                 "HelpModalDismiss" => self.handle_help_modal_dismiss(window, cx),

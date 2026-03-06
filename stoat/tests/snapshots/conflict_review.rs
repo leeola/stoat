@@ -5,7 +5,7 @@ use stoat::test::headless::HeadlessStoat;
 fn open_conflict_review(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
     insta::assert_snapshot!(app.snapshot_active());
 }
@@ -14,7 +14,7 @@ fn open_conflict_review(cx: &mut TestAppContext) {
 fn accept_ours(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
     insta::assert_snapshot!("before", app.snapshot_active());
 
@@ -26,7 +26,7 @@ fn accept_ours(cx: &mut TestAppContext) {
 fn accept_theirs(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
 
     app.type_input("t");
@@ -37,7 +37,7 @@ fn accept_theirs(cx: &mut TestAppContext) {
 fn accept_both(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
 
     app.type_input("b");
@@ -48,7 +48,7 @@ fn accept_both(cx: &mut TestAppContext) {
 fn navigate_conflicts(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
     insta::assert_snapshot!("initial", app.snapshot_active());
 
@@ -63,7 +63,7 @@ fn navigate_conflicts(cx: &mut TestAppContext) {
 fn dismiss_conflict_review(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("merge-conflict", cx);
 
-    app.type_input("<Space>x");
+    app.type_input("<Space>gx");
     app.flush();
     insta::assert_snapshot!("in-review", app.snapshot_active());
 

@@ -5,7 +5,7 @@ use stoat::test::headless::HeadlessStoat;
 fn open_basic_diff(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!(app.snapshot_active());
 }
@@ -14,7 +14,7 @@ fn open_basic_diff(cx: &mut TestAppContext) {
 fn navigate_hunks(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("at-hunk-1", app.snapshot_active());
 
@@ -29,7 +29,7 @@ fn navigate_hunks(cx: &mut TestAppContext) {
 fn approve_hunk(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
 
     app.type_input("a");
@@ -40,7 +40,7 @@ fn approve_hunk(cx: &mut TestAppContext) {
 fn approve_all_dismisses(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
 
     app.type_input("a");
@@ -54,7 +54,7 @@ fn approve_all_dismisses(cx: &mut TestAppContext) {
 fn cycle_comparison_mode(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("all-changes", app.snapshot_active());
 
@@ -72,7 +72,7 @@ fn cycle_comparison_mode(cx: &mut TestAppContext) {
 fn dismiss_restores_mode(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("in-review", app.snapshot_active());
 
@@ -84,7 +84,7 @@ fn dismiss_restores_mode(cx: &mut TestAppContext) {
 fn follow_toggle(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("follow-off", app.snapshot_active());
 
@@ -99,7 +99,7 @@ fn follow_toggle(cx: &mut TestAppContext) {
 fn cross_file_navigation(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("multi-file-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("first-file", app.snapshot_active());
 
@@ -111,7 +111,7 @@ fn cross_file_navigation(cx: &mut TestAppContext) {
 fn staged_comparison(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
 
     // Cycle to Staged (All -> Unstaged -> Staged)
@@ -123,7 +123,7 @@ fn staged_comparison(cx: &mut TestAppContext) {
 fn unstaged_comparison(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("staged-and-unstaged", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
 
     // Cycle to Unstaged

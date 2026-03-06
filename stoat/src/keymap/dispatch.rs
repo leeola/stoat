@@ -45,7 +45,8 @@ pub fn handle_key_common(stoat: &Entity<Stoat>, event: &KeyDownEvent, cx: &mut A
             let is_transient = mode_before == "goto"
                 || mode_before == "buffer"
                 || mode_before == "lsp"
-                || mode_before == "view";
+                || mode_before == "view"
+                || mode_before == "git";
             if is_transient && stoat.read(cx).mode() == mode_before {
                 stoat.update(cx, |s, cx| s.set_mode_by_name("normal", cx));
             }
@@ -287,6 +288,11 @@ pub fn dispatch_editor_action<C: AppContext>(
             });
         },
 
+        "BlameToggleAuthor" => ed!(stoat, cx, |s, cx| s.blame_toggle_author(cx)),
+        "BlameToggleDate" => ed!(stoat, cx, |s, cx| s.blame_toggle_date(cx)),
+        "BlameShowDetail" => ed!(stoat, cx, |s, cx| s.blame_show_detail(cx)),
+        "BlameDismiss" => ed!(stoat, cx, |s, cx| s.blame_dismiss(cx)),
+
         "ConflictAcceptOurs" => ed!(stoat, cx, |s, cx| s.conflict_accept_ours(cx)),
         "ConflictAcceptTheirs" => ed!(stoat, cx, |s, cx| s.conflict_accept_theirs(cx)),
         "ConflictAcceptBoth" => ed!(stoat, cx, |s, cx| s.conflict_accept_both(cx)),
@@ -396,6 +402,8 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "OpenDiffReview"
             // Conflict review (open from pane level)
             | "OpenConflictReview"
+            // Blame (open from pane level)
+            | "OpenGitBlame"
             // Command line
             | "ShowCommandLine"
             | "CommandLineDismiss"

@@ -12,7 +12,7 @@ use stoat::test::headless::HeadlessStoat;
 fn stage_line_in_diff_review(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("basic-diff", cx);
 
-    app.type_input("<Space>r");
+    app.type_input("<Space>gr");
     app.flush();
     insta::assert_snapshot!("before-stage", app.snapshot_active());
 

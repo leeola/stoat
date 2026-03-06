@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bob <bob@test.com>
+Date: Tue, 2 Jan 2024 00:00:00 +0000
+Subject: [PATCH] bob modifies lines 2-3
+
+---
+ example.txt | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/example.txt b/example.txt
+index 1234567..abcdef0 100644
+--- a/example.txt
++++ b/example.txt
+@@ -1,5 +1,5 @@
+ line one by alice
+-line two by alice
+-line three by alice
++line two modified by bob
++line three modified by bob
+ line four by alice
+ line five by alice
+--
+2.39.0
+

@@ -54,6 +54,8 @@ pub enum KeyContext {
     Claude,
     /// Symbol picker modal context
     SymbolPicker,
+    /// Blame review mode context
+    BlameReview,
 }
 
 impl KeyContext {
@@ -80,6 +82,7 @@ impl KeyContext {
             Self::AboutModal => "AboutModal",
             Self::Claude => "Claude",
             Self::SymbolPicker => "SymbolPicker",
+            Self::BlameReview => "BlameReview",
         }
     }
 
@@ -100,6 +103,7 @@ impl KeyContext {
             "AboutModal" => Ok(Self::AboutModal),
             "Claude" => Ok(Self::Claude),
             "SymbolPicker" => Ok(Self::SymbolPicker),
+            "BlameReview" => Ok(Self::BlameReview),
             _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }
@@ -317,6 +321,9 @@ pub struct Stoat {
     // Diff review state
     pub(crate) diff_review_previous_mode: Option<String>,
     pub(crate) review_state: crate::git::diff_review::DiffReviewState,
+
+    // Blame review state
+    pub(crate) blame_state: crate::git::blame::BlameState,
 
     // Conflict review state
     pub(crate) conflict_review_previous_mode: Option<String>,
@@ -548,6 +555,7 @@ impl Stoat {
             about_modal_previous_key_context: None,
             diff_review_previous_mode: None,
             review_state: crate::git::diff_review::DiffReviewState::default(),
+            blame_state: crate::git::blame::BlameState::default(),
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
@@ -643,6 +651,7 @@ impl Stoat {
                 source: self.review_state.source,
                 ..Default::default()
             },
+            blame_state: crate::git::blame::BlameState::default(),
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
@@ -1419,6 +1428,12 @@ impl Stoat {
         let new_snapshot = buffer_item_entity.read(cx).buffer().read(cx).snapshot();
         self.selections = SelectionsCollection::new(&new_snapshot);
 
+        if self.blame_state.active {
+            self.blame_state = crate::git::blame::BlameState::default();
+            self.key_context = KeyContext::TextEditor;
+            self.mode = "normal".to_string();
+        }
+
         cx.notify();
 
         // Drop initial buffer if it's still empty
@@ -1846,6 +1861,7 @@ impl Stoat {
             about_modal_previous_key_context: None,
             diff_review_previous_mode: None,
             review_state: crate::git::diff_review::DiffReviewState::default(),
+            blame_state: crate::git::blame::BlameState::default(),
             conflict_review_previous_mode: None,
             conflict_state: crate::git::conflict::ConflictReviewState::default(),
             conflict_view_kind: crate::git::conflict::ConflictViewKind::default(),
