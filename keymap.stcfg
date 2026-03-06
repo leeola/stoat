@@ -423,15 +423,16 @@ on key {
     # BlameReview Context
     focus == "BlameReview" {
         mode == "blame_review" {
-            escape -> SetKeyContext(TextEditor);
+            escape -> BlameDismiss();
             j -> MoveDown();
             k -> MoveUp();
             h -> MoveLeft();
             l -> MoveRight();
             G -> MoveToFileEnd();
-            g -> SetMode(goto);
             ctrl-d -> HalfPageDown();
             ctrl-u -> HalfPageUp();
+            ctrl-f -> FullPageDown();
+            ctrl-b -> FullPageUp();
             a -> BlameToggleAuthor();
             d -> BlameToggleDate();
             i -> BlameShowDetail();
