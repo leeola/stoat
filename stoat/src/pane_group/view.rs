@@ -1655,7 +1655,7 @@ impl Render for PaneGroupView {
                     })
                     .when(key_context == KeyContext::BlameCommitDiff, |div| {
                         if let Some(ref bcd) = self.app_state.blame_commit_diff {
-                            use crate::git::diff_modal::{DiffModal, DiffModalFileEntry};
+                            use crate::git::diff_summary::{DiffSummary, DiffSummaryFileEntry};
                             let title = format!("Commit {}", bcd.short_hash);
                             let metadata = vec![
                                 format!("Author: {}", bcd.author_name),
@@ -1663,15 +1663,16 @@ impl Render for PaneGroupView {
                                 String::new(),
                                 bcd.summary.clone(),
                             ];
-                            let files: Vec<DiffModalFileEntry> = bcd
+                            let files: Vec<DiffSummaryFileEntry> = bcd
                                 .files
                                 .iter()
-                                .map(|f| DiffModalFileEntry {
+                                .map(|f| DiffSummaryFileEntry {
                                     path: f.path.clone(),
                                     status: f.status.clone(),
+                                    staged: None,
                                 })
                                 .collect();
-                            div.child(DiffModal::new(
+                            div.child(DiffSummary::new(
                                 title,
                                 metadata,
                                 files,

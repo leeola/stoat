@@ -458,7 +458,7 @@ pub async fn load_git_diff(repo_path: &Path, file_path: &Path) -> Option<DiffPre
 
 /// Git status modal renderer.
 ///
-/// Delegates to [`DiffModal`](crate::git::diff_modal::DiffModal) for shared rendering.
+/// Delegates to [`DiffSummary`](crate::git::diff_summary::DiffSummary) for shared rendering.
 #[derive(IntoElement)]
 pub struct GitStatus {
     filtered: Vec<GitStatusEntry>,
@@ -496,7 +496,7 @@ impl GitStatus {
 
 impl RenderOnce for GitStatus {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        use crate::git::diff_modal::{DiffModal, DiffModalFileEntry};
+        use crate::git::diff_summary::{DiffSummary, DiffSummaryFileEntry};
 
         let title = if self.filter == GitStatusFilter::All {
             format!("Git Status - {} files", self.total_count)
@@ -534,16 +534,17 @@ impl RenderOnce for GitStatus {
             }
         }
 
-        let modal_files: Vec<DiffModalFileEntry> = self
+        let modal_files: Vec<DiffSummaryFileEntry> = self
             .filtered
             .iter()
-            .map(|e| DiffModalFileEntry {
+            .map(|e| DiffSummaryFileEntry {
                 path: e.path.clone(),
-                status: e.status_display(),
+                status: e.status.clone(),
+                staged: Some(e.staged),
             })
             .collect();
 
-        DiffModal::new(
+        DiffSummary::new(
             title,
             metadata_lines,
             modal_files,

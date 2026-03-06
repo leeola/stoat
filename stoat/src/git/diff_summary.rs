@@ -7,29 +7,30 @@ use gpui::{
 };
 use std::path::PathBuf;
 
-/// A file entry displayed in the diff modal.
+/// A file entry displayed in the diff summary.
 #[derive(Clone, Debug)]
-pub struct DiffModalFileEntry {
+pub struct DiffSummaryFileEntry {
     pub path: PathBuf,
     pub status: String,
+    pub staged: Option<bool>,
 }
 
-/// Unified diff modal component shared by git status and blame commit diff.
+/// Unified diff summary component shared by git status and blame commit diff.
 #[derive(IntoElement)]
-pub struct DiffModal {
+pub struct DiffSummary {
     title: String,
     metadata_lines: Vec<String>,
-    files: Vec<DiffModalFileEntry>,
+    files: Vec<DiffSummaryFileEntry>,
     selected: usize,
     preview: Option<DiffPreviewData>,
     scroll_handle: ScrollHandle,
 }
 
-impl DiffModal {
+impl DiffSummary {
     pub fn new(
         title: String,
         metadata_lines: Vec<String>,
-        files: Vec<DiffModalFileEntry>,
+        files: Vec<DiffSummaryFileEntry>,
         selected: usize,
         preview: Option<DiffPreviewData>,
         scroll_handle: ScrollHandle,
@@ -116,6 +117,12 @@ impl DiffModal {
                     _ => rgb(0xd4d4d4),
                 };
 
+                let display = match entry.staged {
+                    Some(true) => format!("{} ", entry.status),
+                    Some(false) => format!(" {}", entry.status),
+                    None => entry.status.clone(),
+                };
+
                 div()
                     .flex()
                     .gap_2()
@@ -127,8 +134,8 @@ impl DiffModal {
                             .text_color(status_color)
                             .text_size(px(11.0))
                             .font_weight(FontWeight::BOLD)
-                            .w(px(16.0))
-                            .child(entry.status.clone()),
+                            .w(px(24.0))
+                            .child(display),
                     )
                     .child(
                         div()
@@ -144,7 +151,7 @@ impl DiffModal {
     }
 }
 
-impl RenderOnce for DiffModal {
+impl RenderOnce for DiffSummary {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
