@@ -90,21 +90,12 @@ impl Element for EditorElement {
 
         let snapshot_start = Instant::now();
         // Batch reads to reduce lock overhead
-        let (
-            buffer_snapshot,
-            highlight_captures,
-            highlight_map,
-            is_in_diff_review,
-            display_map_entity,
-            diff,
-        ) = {
+        let (buffer_snapshot, highlight_map, is_in_diff_review, display_map_entity, diff) = {
             let stoat = self.view.read(cx).stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
             let buffer_item_read = buffer_item.read(cx);
 
             let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot();
-            let source = buffer_item_read.buffer().read(cx).text();
-            let highlight_captures = buffer_item_read.highlight_captures(0..source.len(), &source);
             let highlight_map = buffer_item_read
                 .highlight_map()
                 .cloned()
@@ -115,7 +106,6 @@ impl Element for EditorElement {
 
             (
                 buffer_snapshot,
-                highlight_captures,
                 highlight_map,
                 is_in_diff_review,
                 display_map_entity,
@@ -237,6 +227,21 @@ impl Element for EditorElement {
                 buffer_snapshot.len()
             } else {
                 buffer_snapshot.point_to_offset(text::Point::new(max_buffer_row + 1, 0))
+            };
+
+            // Margin for syntax constructs spanning many lines (block comments,
+            // multi-line strings) that start above the viewport.
+            let highlight_margin_rows = 200u32;
+            let margin_row = min_buffer_row.saturating_sub(highlight_margin_rows);
+            let highlight_byte_start =
+                buffer_snapshot.point_to_offset(text::Point::new(margin_row, 0));
+
+            let highlight_captures = {
+                let stoat = self.view.read(cx).stoat.read(cx);
+                let buffer_item = stoat.active_buffer(cx);
+                let buffer_item_read = buffer_item.read(cx);
+                let source = buffer_item_read.buffer().read(cx).text();
+                buffer_item_read.highlight_captures(highlight_byte_start..end_offset, &source)
             };
 
             // Create one HighlightedChunks iterator for entire visible buffer range
