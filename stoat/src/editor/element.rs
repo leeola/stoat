@@ -148,11 +148,20 @@ impl Element for EditorElement {
             }
         });
 
+        // Compute blame column width (zero when inactive or minimap)
+        let blame_column_width = if !is_minimap {
+            self.compute_blame_column_width(&gutter_font, window, cx)
+        } else {
+            Pixels::ZERO
+        };
+
         // Calculate gutter width (minimap has no gutter)
+        // Blame column is part of the gutter so all content positioning works automatically
         let gutter_width = if is_minimap {
             Pixels::ZERO
         } else {
             self.calculate_gutter_width(max_point.row + 1, &gutter_font, window, cx)
+                + blame_column_width
         };
 
         // Calculate visible display row range
@@ -869,17 +878,23 @@ impl Element for EditorElement {
             }
         }
 
-        // Compute blame column annotations if blame mode is active
-        let (blame_column_width, shaped_blame_annotations) = if !is_minimap {
-            self.compute_blame_annotations(bounds, &line_layouts, &gutter_font, window, cx)
+        // Shape blame annotations for visible lines (width already computed above)
+        let shaped_blame_annotations = if !is_minimap {
+            self.shape_blame_annotations(
+                bounds,
+                &line_layouts,
+                &gutter_font,
+                blame_column_width,
+                window,
+                cx,
+            )
         } else {
-            (Pixels::ZERO, Vec::new())
+            Vec::new()
         };
 
         EditorPrepaintState {
             line_layouts,
             gutter_width,
-            blame_column_width,
             shaped_blame_annotations,
             diagnostics_by_row,
             gutter_font,
@@ -936,10 +951,7 @@ impl Element for EditorElement {
         // Register mouse click handler for cursor positioning
         if !is_minimap {
             let view = self.view.clone();
-            let text_content_x = bounds.origin.x
-                + prepaint.gutter_width
-                + prepaint.blame_column_width
-                + self.style.padding;
+            let text_content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
             let text_area_y = bounds.origin.y + self.style.padding;
             let line_height = self.style.line_height;
             let line_layouts: Vec<_> = prepaint
@@ -1056,10 +1068,7 @@ impl Element for EditorElement {
         let mut line_positions: Vec<(u32, Pixels)> = Vec::new();
 
         // Pre-compute content X position (constant for all lines)
-        let content_x = bounds.origin.x
-            + prepaint.gutter_width
-            + prepaint.blame_column_width
-            + self.style.padding;
+        let content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
 
         // Paint all pre-shaped lines (includes both buffer rows and phantom rows)
         for layout in &prepaint.line_layouts {
@@ -1227,21 +1236,83 @@ impl EditorElement {
         }
     }
 
-    fn compute_blame_annotations(
+    fn compute_blame_column_width(
+        &self,
+        gutter_font: &Font,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Pixels {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        if !stoat.blame_state.active {
+            return Pixels::ZERO;
+        }
+        let data = match &stoat.blame_state.data {
+            Some(d) => d,
+            None => return Pixels::ZERO,
+        };
+
+        let show_author = stoat.blame_state.show_author;
+        let show_date = stoat.blame_state.show_date;
+
+        let mut widest_text = String::new();
+        for entry in &data.entries {
+            let mut s = entry.short_hash.clone();
+            if show_author {
+                s.push(' ');
+                s.push_str(&entry.author_name);
+            }
+            if show_date {
+                s.push(' ');
+                s.push_str(&entry.date_display);
+            }
+            if s.len() > widest_text.len() {
+                widest_text = s;
+            }
+        }
+
+        if widest_text.is_empty() {
+            return Pixels::ZERO;
+        }
+
+        let blame_font_size = self.style.font_size * 0.85;
+        let dim_color = Hsla {
+            h: self.style.text_color.h,
+            s: self.style.text_color.s * 0.5,
+            l: self.style.text_color.l,
+            a: self.style.text_color.a * 0.6,
+        };
+        let shared = SharedString::from(widest_text);
+        let run = TextRun {
+            len: shared.len(),
+            font: gutter_font.clone(),
+            color: dim_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = window
+            .text_system()
+            .shape_line(shared, blame_font_size, &[run], None);
+        shaped.width + px(12.0)
+    }
+
+    fn shape_blame_annotations(
         &self,
         bounds: Bounds<Pixels>,
         line_layouts: &[ShapedLineLayout],
         gutter_font: &Font,
+        column_width: Pixels,
         window: &mut Window,
         cx: &mut App,
-    ) -> (Pixels, Vec<(gpui::ShapedLine, Pixels, Pixels)>) {
-        let stoat = self.view.read(cx).stoat.read(cx);
-        if !stoat.blame_state.active {
-            return (Pixels::ZERO, Vec::new());
+    ) -> Vec<(gpui::ShapedLine, Pixels, Pixels)> {
+        if column_width == Pixels::ZERO {
+            return Vec::new();
         }
+
+        let stoat = self.view.read(cx).stoat.read(cx);
         let data = match &stoat.blame_state.data {
             Some(d) => d,
-            None => return (Pixels::ZERO, Vec::new()),
+            None => return Vec::new(),
         };
 
         let show_author = stoat.blame_state.show_author;
@@ -1255,10 +1326,8 @@ impl EditorElement {
             a: self.style.text_color.a * 0.6,
         };
 
-        let mut max_width = Pixels::ZERO;
         let mut annotations = Vec::new();
         let mut prev_entry_idx: Option<usize> = None;
-
         let x_pos = bounds.origin.x + self.style.padding;
 
         for layout in line_layouts {
@@ -1268,35 +1337,28 @@ impl EditorElement {
             };
 
             let entry_idx = data.line_to_entry.get(buffer_row as usize).copied();
-
             let show_this_line = entry_idx != prev_entry_idx;
             prev_entry_idx = entry_idx;
 
-            let text = if show_this_line {
-                if let Some(idx) = entry_idx {
-                    let entry = &data.entries[idx];
-                    let mut s = entry.short_hash.clone();
-                    if show_author {
-                        s.push(' ');
-                        s.push_str(&entry.author_name);
-                    }
-                    if show_date {
-                        s.push(' ');
-                        s.push_str(&entry.date_display);
-                    }
-                    s
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
-
-            if text.is_empty() {
+            if !show_this_line {
                 continue;
             }
+            let Some(idx) = entry_idx else {
+                continue;
+            };
 
-            let shared = SharedString::from(text.clone());
+            let entry = &data.entries[idx];
+            let mut text = entry.short_hash.clone();
+            if show_author {
+                text.push(' ');
+                text.push_str(&entry.author_name);
+            }
+            if show_date {
+                text.push(' ');
+                text.push_str(&entry.date_display);
+            }
+
+            let shared = SharedString::from(text);
             let run = TextRun {
                 len: shared.len(),
                 font: gutter_font.clone(),
@@ -1305,18 +1367,13 @@ impl EditorElement {
                 underline: None,
                 strikethrough: None,
             };
-
             let shaped = window
                 .text_system()
                 .shape_line(shared, blame_font_size, &[run], None);
-            let w = shaped.width + px(8.0);
-            if w > max_width {
-                max_width = w;
-            }
             annotations.push((shaped, x_pos, layout.y_position));
         }
 
-        (max_width, annotations)
+        annotations
     }
 
     fn paint_blame_annotations(
@@ -1984,8 +2041,6 @@ pub struct EditorPrepaintState {
     pub line_layouts: Vec<ShapedLineLayout>,
     /// Gutter width for positioning
     pub gutter_width: Pixels,
-    /// Blame column width (non-zero when blame mode is active)
-    pub blame_column_width: Pixels,
     /// Pre-shaped blame annotations: (shaped_line, x_position, y_position)
     pub shaped_blame_annotations: Vec<(gpui::ShapedLine, Pixels, Pixels)>,
     /// Diagnostics by buffer row (for gutter icons)
