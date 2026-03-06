@@ -16,10 +16,10 @@ use crate::{
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
     FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
-    SharedString, Style, TextRun, UnderlineStyle, Window,
+    SharedString, Style, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine,
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
-use stoat_lsp::BufferDiagnostic;
+use stoat_lsp::{response::HoverBlockKind, BufferDiagnostic};
 use text::{BufferSnapshot, ToPoint};
 
 pub struct EditorElement {
@@ -1024,6 +1024,9 @@ impl Element for EditorElement {
 
             // Paint cursor on top of text
             self.paint_cursor(prepaint, window);
+
+            // Paint hover popup on top of everything
+            self.paint_hover(bounds, prepaint, window, cx);
         }
     }
 }
@@ -1131,6 +1134,152 @@ impl EditorElement {
                 border_widths: 0.0.into(),
                 border_style: gpui::BorderStyle::default(),
             });
+        }
+    }
+
+    fn paint_hover(
+        &self,
+        editor_bounds: Bounds<Pixels>,
+        prepaint: &EditorPrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let stoat = self.view.read(cx).stoat.read(cx);
+        if !stoat.hover_state.visible || stoat.hover_state.blocks.is_empty() {
+            return;
+        }
+
+        let primary_cursor = match prepaint.cursor_layouts.first() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let line_height = self.style.line_height;
+        let font = Font {
+            family: SharedString::from(stoat.config().buffer_font_family.clone()),
+            features: Default::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
+        let font_size = px(stoat.config().buffer_font_size);
+        let text_color = self.style.text_color;
+        let padding = px(8.0);
+        let max_width = editor_bounds.size.width * 0.5;
+        let max_lines = 10u32;
+
+        let bg_color = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.15,
+            a: 0.95,
+        };
+        let border_color = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.35,
+            a: 1.0,
+        };
+        let doc_color = Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.65,
+            a: 1.0,
+        };
+        let wrap_width = max_width - padding * 2.0;
+        let mut wrapped_lines: Vec<WrappedLine> = Vec::new();
+        let mut visual_line_count: usize = 0;
+
+        for block in &stoat.hover_state.blocks {
+            if visual_line_count >= max_lines as usize {
+                break;
+            }
+            let (color, weight) = match &block.kind {
+                HoverBlockKind::Code { .. } => (text_color, FontWeight::MEDIUM),
+                HoverBlockKind::Markdown | HoverBlockKind::PlainText => {
+                    (doc_color, FontWeight::NORMAL)
+                },
+            };
+            let block_font = Font {
+                weight,
+                ..font.clone()
+            };
+            let text = SharedString::from(block.text.clone());
+            let run = TextRun {
+                len: text.len(),
+                font: block_font,
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            if let Ok(lines) =
+                window
+                    .text_system()
+                    .shape_text(text, font_size, &[run], Some(wrap_width), None)
+            {
+                for line in lines {
+                    visual_line_count += line.wrap_boundaries.len() + 1;
+                    wrapped_lines.push(line);
+                    if visual_line_count >= max_lines as usize {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if wrapped_lines.is_empty() {
+            return;
+        }
+
+        let content_width = wrapped_lines
+            .iter()
+            .map(|l| l.width())
+            .fold(Pixels::ZERO, |a, b| a.max(b));
+        let popup_width = content_width + padding * 2.0;
+        let popup_height = line_height * visual_line_count as f32 + padding * 2.0;
+
+        let cursor_top = primary_cursor.origin.y;
+        let popup_y = if cursor_top - popup_height - px(4.0) >= editor_bounds.origin.y {
+            cursor_top - popup_height - px(4.0)
+        } else {
+            primary_cursor.origin.y + line_height + px(4.0)
+        };
+
+        let popup_x = primary_cursor
+            .origin
+            .x
+            .max(editor_bounds.origin.x)
+            .min(editor_bounds.origin.x + editor_bounds.size.width - popup_width);
+
+        let popup_bounds = Bounds {
+            origin: point(popup_x, popup_y),
+            size: size(popup_width, popup_height),
+        };
+
+        // Border
+        window.paint_quad(gpui::PaintQuad {
+            bounds: popup_bounds,
+            corner_radii: gpui::Corners::all(px(4.0)),
+            background: bg_color.into(),
+            border_color,
+            border_widths: gpui::Edges::all(px(1.0)),
+            border_style: gpui::BorderStyle::default(),
+        });
+
+        let text_x = popup_bounds.origin.x + padding;
+        let mut text_y = popup_bounds.origin.y + padding;
+        for wrapped in &wrapped_lines {
+            let visual_lines = wrapped.wrap_boundaries.len() + 1;
+            let _ = wrapped.paint(
+                point(text_x, text_y),
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            text_y += line_height * visual_lines as f32;
         }
     }
 

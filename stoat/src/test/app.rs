@@ -17,6 +17,7 @@ use gpui::{App, Axis, Entity, TestAppContext, VisualTestContext, Window};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use stoat_config::{Action, ActionExpr};
+use stoat_lsp::response::HoverBlockKind;
 
 pub struct TestApp<'a> {
     pub view: Entity<PaneGroupView>,
@@ -286,6 +287,9 @@ pub(crate) fn snapshot_editor(
     if key_ctx != KeyContext::TextEditor {
         header.push_str(&format!(" ctx={}", key_context_label(key_ctx)));
     }
+    if s.hover_state.visible {
+        header.push_str(" hover=visible");
+    }
     if let Some(flash) = &app_state.flash_message {
         header.push_str(&format!(" flash=\"{flash}\""));
     }
@@ -308,6 +312,26 @@ pub(crate) fn snapshot_editor(
 
 pub(crate) fn format_editor_buffer(stoat: &Entity<Stoat>, header: &str, cx: &App) -> String {
     let mut result = header.to_string();
+    let s = stoat.read(cx);
+    if s.hover_state.visible && !s.hover_state.blocks.is_empty() {
+        result.push_str("\nhover:");
+        for block in &s.hover_state.blocks {
+            let kind_label = match &block.kind {
+                HoverBlockKind::PlainText => "text".to_string(),
+                HoverBlockKind::Markdown => "md".to_string(),
+                HoverBlockKind::Code { language } => {
+                    if language.is_empty() {
+                        "code".to_string()
+                    } else {
+                        language.clone()
+                    }
+                },
+            };
+            for line in block.text.lines() {
+                result.push_str(&format!("\n  [{kind_label}] {line}"));
+            }
+        }
+    }
     result.push_str(&format_buffer_lines(stoat, cx));
     result
 }

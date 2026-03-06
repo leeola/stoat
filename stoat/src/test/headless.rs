@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use stoat_config::{Action, ActionExpr};
+use stoat_lsp::response::HoverBlock;
 use tempfile::TempDir;
 
 pub struct HeadlessStoat<'a> {
@@ -255,6 +256,49 @@ impl<'a> HeadlessStoat<'a> {
                 .timer(Duration::from_millis(200))
                 .await;
         }
+    }
+
+    // -- Hover --
+
+    pub fn hover_visible(&mut self) -> bool {
+        let view = self.view.clone();
+        self.cx.update(|_window, cx| {
+            view.read(cx)
+                .active_stoat(cx)
+                .map(|s| s.read(cx).hover_state.visible)
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn hover_blocks(&mut self) -> Vec<HoverBlock> {
+        let view = self.view.clone();
+        self.cx.update(|_window, cx| {
+            view.read(cx)
+                .active_stoat(cx)
+                .map(|s| s.read(cx).hover_state.blocks.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    pub async fn await_hover(&mut self, timeout: Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            self.cx.run_until_parked();
+            if self.hover_visible() {
+                return;
+            }
+            if start.elapsed() >= timeout {
+                panic!("await_hover timed out after {timeout:?}");
+            }
+            self.cx
+                .background_executor
+                .timer(Duration::from_millis(100))
+                .await;
+        }
+    }
+
+    pub async fn sleep(&mut self, duration: Duration) {
+        self.cx.background_executor.timer(duration).await;
     }
 
     // -- File I/O --

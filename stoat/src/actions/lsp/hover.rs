@@ -35,10 +35,12 @@ impl Stoat {
                     continue;
                 };
 
-                if let Ok(Some(text)) = stoat_lsp::response::parse_hover_response(&response) {
-                    let truncated = truncate_hover(&text, 200);
-                    this.update(cx, |_, cx| {
-                        cx.emit(StoatEvent::FlashMessage(truncated));
+                if let Ok(Some(blocks)) = stoat_lsp::response::parse_hover_blocks(&response) {
+                    let summary = truncate_hover(&blocks[0].text, 200);
+                    this.update(cx, |stoat, cx| {
+                        stoat.hover_state.blocks = blocks;
+                        stoat.hover_state.visible = true;
+                        cx.emit(StoatEvent::FlashMessage(summary));
                     })
                     .ok();
                     return;

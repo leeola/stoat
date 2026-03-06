@@ -8,6 +8,7 @@ use crate::{
     cursor::CursorManager,
     git::{diff::BufferDiff, repository::Repository},
     history::{AppStateHistory, AppStateSnapshot, SelectionHistory, SelectionHistoryEntry},
+    hover::HoverState,
     scroll::ScrollPosition,
     selections::SelectionsCollection,
     worktree::Worktree,
@@ -396,6 +397,8 @@ pub struct Stoat {
     /// Contains (original_word, accumulated_input).
     pub(crate) rename_pending: Option<RenamePendingState>,
 
+    pub(crate) hover_state: HoverState,
+
     /// When set, keystrokes accumulate into a regex pattern for sub-selection.
     pub(crate) select_regex_pending: Option<String>,
 
@@ -564,6 +567,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
+            hover_state: HoverState::default(),
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,
@@ -658,6 +662,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
+            hover_state: HoverState::default(),
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,
@@ -881,6 +886,7 @@ impl Stoat {
     /// For multi-cursor support, use [`SelectionsCollection::select`].
     pub fn set_cursor_position(&mut self, position: Point) {
         self.cursor.move_to(position);
+        self.hover_state.dismiss();
     }
 
     /// Emit a flash message to the status bar (auto-clears after ~3 seconds).
@@ -914,6 +920,7 @@ impl Stoat {
     /// Set mode
     pub fn set_mode(&mut self, mode: &str) {
         self.mode = mode.to_string();
+        self.hover_state.dismiss();
     }
 
     /// Sync mode field with AppState's mode for current KeyContext.
@@ -1167,6 +1174,7 @@ impl Stoat {
     ///
     /// Scrolls the viewport to ensure the cursor is visible with padding above and below.
     pub fn ensure_cursor_visible(&mut self, cx: &mut App) {
+        self.hover_state.dismiss();
         let Some(viewport_lines) = self.viewport_lines else {
             return;
         };
@@ -1857,6 +1865,7 @@ impl Stoat {
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
+            hover_state: HoverState::default(),
             find_char_pending: None,
             select_regex_pending: None,
             select_regex_base_selections: None,

@@ -20,6 +20,7 @@ pub mod environment;
 pub mod file_finder;
 pub mod git;
 pub mod history;
+pub mod hover;
 pub mod index;
 pub mod inline_editor;
 pub mod input_simulator;

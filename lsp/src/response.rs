@@ -3,8 +3,21 @@
 use anyhow::{Context, Result};
 use lsp_types::{
     CodeActionOrCommand, DocumentSymbol, DocumentSymbolResponse, GotoDefinitionResponse, Hover,
-    HoverContents, Location, MarkedString, SymbolInformation, WorkspaceEdit,
+    HoverContents, Location, MarkedString, MarkupKind, SymbolInformation, WorkspaceEdit,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HoverBlockKind {
+    PlainText,
+    Markdown,
+    Code { language: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HoverBlock {
+    pub text: String,
+    pub kind: HoverBlockKind,
+}
 
 /// Extract hover text from an LSP hover response.
 pub fn parse_hover_response(json: &str) -> Result<Option<String>> {
@@ -15,6 +28,67 @@ pub fn parse_hover_response(json: &str) -> Result<Option<String>> {
     }
     let hover: Hover = serde_json::from_value(result.clone()).context("Invalid Hover object")?;
     Ok(Some(hover_contents_to_string(&hover.contents)))
+}
+
+/// Parse structured hover blocks from an LSP hover response, preserving language and content type.
+pub fn parse_hover_blocks(json: &str) -> Result<Option<Vec<HoverBlock>>> {
+    let envelope: serde_json::Value = serde_json::from_str(json).context("Invalid hover JSON")?;
+    let result = &envelope["result"];
+    if result.is_null() {
+        return Ok(None);
+    }
+    let hover: Hover = serde_json::from_value(result.clone()).context("Invalid Hover object")?;
+    let blocks = hover_contents_to_blocks(&hover.contents);
+    if blocks.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(blocks))
+}
+
+fn hover_contents_to_blocks(contents: &HoverContents) -> Vec<HoverBlock> {
+    match contents {
+        HoverContents::Scalar(s) => {
+            let block = marked_string_to_block(s);
+            if block.text.is_empty() {
+                vec![]
+            } else {
+                vec![block]
+            }
+        },
+        HoverContents::Array(arr) => arr
+            .iter()
+            .map(marked_string_to_block)
+            .filter(|b| !b.text.is_empty())
+            .collect(),
+        HoverContents::Markup(markup) => {
+            if markup.value.is_empty() {
+                return vec![];
+            }
+            let kind = match markup.kind {
+                MarkupKind::Markdown => HoverBlockKind::Markdown,
+                MarkupKind::PlainText => HoverBlockKind::PlainText,
+            };
+            vec![HoverBlock {
+                text: markup.value.clone(),
+                kind,
+            }]
+        },
+    }
+}
+
+fn marked_string_to_block(s: &MarkedString) -> HoverBlock {
+    match s {
+        MarkedString::String(text) => HoverBlock {
+            text: text.clone(),
+            kind: HoverBlockKind::Markdown,
+        },
+        MarkedString::LanguageString(ls) => HoverBlock {
+            text: ls.value.clone(),
+            kind: HoverBlockKind::Code {
+                language: ls.language.clone(),
+            },
+        },
+    }
 }
 
 /// Parse a goto (definition/typeDefinition/implementation) response into locations.
@@ -231,5 +305,84 @@ mod tests {
     fn workspace_symbols_null() {
         let json = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
         assert!(parse_workspace_symbols(json).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hover_blocks_markup_markdown() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":{"kind":"markdown","value":"**fn** `main()`\n\nEntry point"}}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, HoverBlockKind::Markdown);
+        assert_eq!(blocks[0].text, "**fn** `main()`\n\nEntry point");
+    }
+
+    #[test]
+    fn hover_blocks_markup_plaintext() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":{"kind":"plaintext","value":"simple text"}}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, HoverBlockKind::PlainText);
+        assert_eq!(blocks[0].text, "simple text");
+    }
+
+    #[test]
+    fn hover_blocks_null_result() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+        assert!(parse_hover_blocks(json).unwrap().is_none());
+    }
+
+    #[test]
+    fn hover_blocks_scalar_string() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":"hover markdown"}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, HoverBlockKind::Markdown);
+    }
+
+    #[test]
+    fn hover_blocks_scalar_language_string() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":{"language":"rust","value":"fn main()"}}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0].kind,
+            HoverBlockKind::Code {
+                language: "rust".into()
+            }
+        );
+        assert_eq!(blocks[0].text, "fn main()");
+    }
+
+    #[test]
+    fn hover_blocks_array() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"language":"rust","value":"fn main()"},{"language":"","value":"docs here"}]}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[0].kind,
+            HoverBlockKind::Code {
+                language: "rust".into()
+            }
+        );
+        assert_eq!(
+            blocks[1].kind,
+            HoverBlockKind::Code {
+                language: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn hover_blocks_array_filters_empty() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"contents":[{"language":"rust","value":"fn main()"},{"language":"","value":""}]}}"#;
+        let blocks = parse_hover_blocks(json).unwrap().unwrap();
+        assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn hover_blocks_empty_markup() {
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"contents":{"kind":"markdown","value":""}}}"#;
+        assert!(parse_hover_blocks(json).unwrap().is_none());
     }
 }
