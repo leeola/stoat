@@ -1,0 +1,7 @@
+---
+source: stoat/tests/snapshots/blame.rs
+expression: app.snapshot_active()
+---
+[editor] pane=0 mode=blame_commit_diff ctx=BlameCommitDiff
+commit=b8ae3556 author=Bob date=2024-01-02
+summary=bob modifies lines 2-3

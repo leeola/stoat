@@ -137,6 +137,7 @@ pub struct PaneGroupView {
     command_palette_scroll: ScrollHandle,
     buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
+    blame_commit_diff_scroll: ScrollHandle,
     symbol_picker_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
@@ -314,6 +315,7 @@ impl PaneGroupView {
             command_palette_scroll: ScrollHandle::new(),
             buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
+            blame_commit_diff_scroll: ScrollHandle::new(),
             symbol_picker_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
@@ -554,6 +556,12 @@ impl PaneGroupView {
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
                 "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
                 "OpenGitBlame" => self.handle_open_git_blame(window, cx),
+                "BlameOpenCommitDiff" => self.handle_blame_open_commit_diff(window, cx),
+                "BlameCommitDiffNext" => self.handle_blame_commit_diff_next(window, cx),
+                "BlameCommitDiffPrev" => self.handle_blame_commit_diff_prev(window, cx),
+                "BlameCommitDiffDismiss" => {
+                    self.handle_blame_commit_diff_dismiss(window, cx);
+                },
                 "OpenHelpOverlay" => self.handle_open_help_overlay(window, cx),
                 "OpenHelpModal" => self.handle_open_help_modal(window, cx),
                 "HelpModalDismiss" => self.handle_help_modal_dismiss(window, cx),
@@ -1645,8 +1653,37 @@ impl Render for PaneGroupView {
                             div
                         }
                     })
+                    .when(key_context == KeyContext::BlameCommitDiff, |div| {
+                        if let Some(ref bcd) = self.app_state.blame_commit_diff {
+                            use crate::git::diff_modal::{DiffModal, DiffModalFileEntry};
+                            let title = format!("Commit {}", bcd.short_hash);
+                            let metadata = vec![
+                                format!("Author: {}", bcd.author_name),
+                                format!("Date:   {}", bcd.date_display),
+                                String::new(),
+                                bcd.summary.clone(),
+                            ];
+                            let files: Vec<DiffModalFileEntry> = bcd
+                                .files
+                                .iter()
+                                .map(|f| DiffModalFileEntry {
+                                    path: f.path.clone(),
+                                    status: f.status.clone(),
+                                })
+                                .collect();
+                            div.child(DiffModal::new(
+                                title,
+                                metadata,
+                                files,
+                                bcd.selected,
+                                bcd.preview.clone(),
+                                self.blame_commit_diff_scroll.clone(),
+                            ))
+                        } else {
+                            div
+                        }
+                    })
                     .when(key_context == KeyContext::HelpModal, |div| {
-                        // Render help modal when in HelpModal context
                         div.child(HelpModal::new())
                     })
                     .when(key_context == KeyContext::AboutModal, |div| {

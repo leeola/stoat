@@ -76,6 +76,10 @@ pub fn default_modes() -> HashMap<String, Mode> {
         Mode::with_previous("blame_review", "BLAME", "normal", false),
     );
     modes.insert(
+        "blame_commit_diff".into(),
+        Mode::with_previous("blame_commit_diff", "COMMIT DIFF", "blame_review", false),
+    );
+    modes.insert(
         "symbol_picker".into(),
         Mode::with_previous("symbol_picker", "SYMBOL PICKER", "normal", false),
     );
@@ -124,6 +128,10 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
     contexts.insert(
         KeyContext::BlameReview,
         KeyContextMeta::new("blame_review".into()),
+    );
+    contexts.insert(
+        KeyContext::BlameCommitDiff,
+        KeyContextMeta::new("blame_commit_diff".into()),
     );
 
     contexts

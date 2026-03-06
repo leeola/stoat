@@ -290,7 +290,6 @@ pub fn dispatch_editor_action<C: AppContext>(
 
         "BlameToggleAuthor" => ed!(stoat, cx, |s, cx| s.blame_toggle_author(cx)),
         "BlameToggleDate" => ed!(stoat, cx, |s, cx| s.blame_toggle_date(cx)),
-        "BlameShowDetail" => ed!(stoat, cx, |s, cx| s.blame_show_detail(cx)),
         "BlameDismiss" => ed!(stoat, cx, |s, cx| s.blame_dismiss(cx)),
 
         "ConflictAcceptOurs" => ed!(stoat, cx, |s, cx| s.conflict_accept_ours(cx)),
@@ -404,6 +403,10 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "OpenConflictReview"
             // Blame (open from pane level)
             | "OpenGitBlame"
+            | "BlameOpenCommitDiff"
+            | "BlameCommitDiffNext"
+            | "BlameCommitDiffPrev"
+            | "BlameCommitDiffDismiss"
             // Command line
             | "ShowCommandLine"
             | "CommandLineDismiss"

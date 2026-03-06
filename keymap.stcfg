@@ -435,9 +435,19 @@ on key {
             ctrl-b -> FullPageUp();
             a -> BlameToggleAuthor();
             d -> BlameToggleDate();
-            i -> BlameShowDetail();
+            i -> BlameOpenCommitDiff();
             q -> BlameDismiss();
             ? -> OpenHelpOverlay();
+        }
+    }
+
+    # BlameCommitDiff Context
+    focus == "BlameCommitDiff" {
+        mode == "blame_commit_diff" {
+            j -> BlameCommitDiffNext();
+            k -> BlameCommitDiffPrev();
+            q -> BlameCommitDiffDismiss();
+            escape -> BlameCommitDiffDismiss();
         }
     }
 

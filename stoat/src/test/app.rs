@@ -306,6 +306,7 @@ pub(crate) fn snapshot_editor(
         KeyContext::DiffReview => format_diff_review(stoat, &header, cx),
         KeyContext::ConflictReview => format_conflict_review(stoat, &header, cx),
         KeyContext::BlameReview => format_blame_review(stoat, &header, cx),
+        KeyContext::BlameCommitDiff => format_blame_commit_diff(app_state, &header),
         KeyContext::Git => format_git_status(app_state, &header, cx),
         _ => format_editor_buffer(stoat, &header, cx),
     }
@@ -483,17 +484,34 @@ pub(crate) fn format_blame_review(stoat: &Entity<Stoat>, header: &str, cx: &App)
             let cursor_mark = if line_idx == cursor_row { ">" } else { " " };
             result.push_str(&format!("\n{cursor_mark}{annotation} | {line_text}"));
         }
+    }
 
-        if bs.popup_visible {
-            if let Some(popup_line) = bs.popup_line {
-                if let Some(&eidx) = data.line_to_entry.get(popup_line as usize) {
-                    let e = &data.entries[eidx];
-                    result.push_str(&format!(
-                        "\n[detail] hash={} author={} date={} summary={}",
-                        e.short_hash, e.author_name, e.date_display, e.summary
-                    ));
-                }
-            }
+    result
+}
+
+pub(crate) fn format_blame_commit_diff(app_state: &AppState, header: &str) -> String {
+    let Some(ref bcd) = app_state.blame_commit_diff else {
+        return format!("{header}\n(no commit diff data)");
+    };
+
+    let mut result = format!(
+        "{header}\ncommit={} author={} date={}\nsummary={}",
+        bcd.short_hash, bcd.author_name, bcd.date_display, bcd.summary
+    );
+
+    for (i, file) in bcd.files.iter().enumerate() {
+        let marker = if i == bcd.selected { ">" } else { " " };
+        result.push_str(&format!(
+            "\n{marker} {} {}",
+            file.status,
+            file.path.display()
+        ));
+    }
+
+    if let Some(ref preview) = bcd.preview {
+        result.push_str("\n[preview]");
+        for line in preview.text().lines().take(20) {
+            result.push_str(&format!("\n{line}"));
         }
     }
 
@@ -691,5 +709,6 @@ pub(crate) fn key_context_label(ctx: KeyContext) -> &'static str {
         KeyContext::Claude => "Claude",
         KeyContext::SymbolPicker => "SymbolPicker",
         KeyContext::BlameReview => "BlameReview",
+        KeyContext::BlameCommitDiff => "BlameCommitDiff",
     }
 }

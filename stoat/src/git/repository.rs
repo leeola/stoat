@@ -40,6 +40,13 @@ use std::{
 };
 use thiserror::Error;
 
+/// A file changed in a specific commit, with its path and status indicator.
+#[derive(Clone, Debug)]
+pub struct CommitFileChange {
+    pub path: PathBuf,
+    pub status: String,
+}
+
 /// Errors that can occur during git operations.
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -327,6 +334,113 @@ impl Repository {
         }
 
         Ok(paths)
+    }
+
+    /// List files changed in a specific commit (compared to its parent).
+    ///
+    /// For root commits (no parent), diffs against an empty tree.
+    pub fn commit_files_by_oid(&self, oid_hex: &str) -> Result<Vec<CommitFileChange>, GitError> {
+        let oid = git2::Oid::from_str(oid_hex)
+            .map_err(|e| GitError::GitOperationFailed(format!("Invalid OID: {e}")))?;
+        let commit = self
+            .repo
+            .find_commit(oid)
+            .map_err(|e| GitError::GitOperationFailed(format!("Commit not found: {e}")))?;
+
+        let commit_tree = commit
+            .tree()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get tree: {e}")))?;
+
+        let parent_tree = match commit.parent(0) {
+            Ok(parent) => Some(parent.tree().map_err(|e| {
+                GitError::GitOperationFailed(format!("Failed to get parent tree: {e}"))
+            })?),
+            Err(_) => None,
+        };
+
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), None)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create diff: {e}")))?;
+
+        let mut files = Vec::new();
+        for delta_idx in 0..diff.deltas().len() {
+            if let Some(delta) = diff.get_delta(delta_idx) {
+                let path = delta
+                    .new_file()
+                    .path()
+                    .unwrap_or_else(|| std::path::Path::new(""))
+                    .to_path_buf();
+                let status = match delta.status() {
+                    git2::Delta::Added => "A",
+                    git2::Delta::Deleted => "D",
+                    git2::Delta::Modified => "M",
+                    git2::Delta::Renamed => "R",
+                    git2::Delta::Copied => "C",
+                    _ => "?",
+                }
+                .to_string();
+                files.push(CommitFileChange { path, status });
+            }
+        }
+
+        Ok(files)
+    }
+
+    /// Return unified diff patch text for one file in a specific commit.
+    pub fn commit_file_diff(&self, oid_hex: &str, file_path: &Path) -> Result<String, GitError> {
+        let oid = git2::Oid::from_str(oid_hex)
+            .map_err(|e| GitError::GitOperationFailed(format!("Invalid OID: {e}")))?;
+        let commit = self
+            .repo
+            .find_commit(oid)
+            .map_err(|e| GitError::GitOperationFailed(format!("Commit not found: {e}")))?;
+
+        let commit_tree = commit
+            .tree()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get tree: {e}")))?;
+
+        let parent_tree = match commit.parent(0) {
+            Ok(parent) => Some(parent.tree().map_err(|e| {
+                GitError::GitOperationFailed(format!("Failed to get parent tree: {e}"))
+            })?),
+            Err(_) => None,
+        };
+
+        let mut opts = git2::DiffOptions::new();
+        opts.pathspec(file_path);
+
+        let diff = self
+            .repo
+            .diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create diff: {e}")))?;
+
+        let mut patch_text = String::new();
+        diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+            let origin = line.origin();
+            let content = std::str::from_utf8(line.content()).unwrap_or("");
+            match origin {
+                '+' | '-' | ' ' => {
+                    patch_text.push(origin);
+                    patch_text.push_str(content);
+                },
+                'H' => {
+                    patch_text.push_str("@@ ");
+                    patch_text.push_str(content);
+                },
+                'F' => {
+                    patch_text.push_str("diff --git ");
+                    patch_text.push_str(content);
+                },
+                _ => {
+                    patch_text.push_str(content);
+                },
+            }
+            true
+        })
+        .map_err(|e| GitError::GitOperationFailed(format!("Failed to print diff: {e}")))?;
+
+        Ok(patch_text)
     }
 
     /// Get a reference to the inner git2 repository.
@@ -707,5 +821,119 @@ mod tests {
             .expect("Should list changed files");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], PathBuf::from("a.txt"));
+    }
+
+    fn get_head_oid(path: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn commit_files_by_oid_initial_commit() {
+        let (_dir, path) = create_test_repo();
+
+        fs::write(path.join("a.txt"), "hello\n").unwrap();
+        fs::write(path.join("b.txt"), "world\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let oid = get_head_oid(&path);
+        let repo = Repository::open(&path).unwrap();
+        let files = repo.commit_files_by_oid(&oid).unwrap();
+
+        assert_eq!(files.len(), 2);
+        let paths: Vec<_> = files
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.contains(&"a.txt".to_string()));
+        assert!(paths.contains(&"b.txt".to_string()));
+        assert!(files.iter().all(|f| f.status == "A"));
+    }
+
+    #[test]
+    fn commit_files_by_oid_second_commit() {
+        let (_dir, path) = create_test_repo();
+
+        fs::write(path.join("a.txt"), "hello\n").unwrap();
+        fs::write(path.join("b.txt"), "world\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        fs::write(path.join("a.txt"), "changed\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "modify a"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let oid = get_head_oid(&path);
+        let repo = Repository::open(&path).unwrap();
+        let files = repo.commit_files_by_oid(&oid).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, PathBuf::from("a.txt"));
+        assert_eq!(files[0].status, "M");
+    }
+
+    #[test]
+    fn commit_file_diff_shows_patch() {
+        let (_dir, path) = create_test_repo();
+
+        fs::write(path.join("a.txt"), "line1\nline2\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        fs::write(path.join("a.txt"), "line1\nmodified\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "modify"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+
+        let oid = get_head_oid(&path);
+        let repo = Repository::open(&path).unwrap();
+        let diff = repo.commit_file_diff(&oid, Path::new("a.txt")).unwrap();
+
+        assert!(diff.contains("-line2"));
+        assert!(diff.contains("+modified"));
     }
 }

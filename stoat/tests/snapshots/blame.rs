@@ -42,13 +42,25 @@ fn toggle_both(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn blame_detail_popup(cx: &mut TestAppContext) {
+fn blame_open_commit_diff(cx: &mut TestAppContext) {
     let mut app = HeadlessStoat::with_fixture("blame-test", cx);
 
     app.type_input("<Space>gb");
     app.flush();
     app.type_input("jj");
     app.type_input("i");
+    insta::assert_snapshot!(app.snapshot_active());
+}
+
+#[gpui::test]
+fn blame_commit_diff_dismiss(cx: &mut TestAppContext) {
+    let mut app = HeadlessStoat::with_fixture("blame-test", cx);
+
+    app.type_input("<Space>gb");
+    app.flush();
+    app.type_input("jj");
+    app.type_input("i");
+    app.type_input("q");
     insta::assert_snapshot!(app.snapshot_active());
 }
 

@@ -2,6 +2,7 @@ use crate::git::repository::{GitError, Repository};
 use std::{collections::HashMap, path::Path};
 
 pub struct BlameEntry {
+    pub full_oid: String,
     pub short_hash: String,
     pub author_name: String,
     pub timestamp: i64,
@@ -20,8 +21,6 @@ pub struct BlameState {
     pub data: Option<BlameData>,
     pub show_author: bool,
     pub show_date: bool,
-    pub popup_visible: bool,
-    pub popup_line: Option<u32>,
 }
 
 impl Default for BlameState {
@@ -31,8 +30,6 @@ impl Default for BlameState {
             data: None,
             show_author: false,
             show_date: false,
-            popup_visible: false,
-            popup_line: None,
         }
     }
 }
@@ -102,10 +99,12 @@ pub fn blame_file(repo: &Repository, path: &Path) -> Result<BlameData, GitError>
                 Err(_) => (String::new(), String::new()),
             };
 
+            let full_oid = format!("{}", oid);
             let short_hash = format!("{:.8}", oid);
 
             let idx = entries.len();
             entries.push(BlameEntry {
+                full_oid,
                 short_hash,
                 author_name,
                 timestamp,
@@ -180,6 +179,8 @@ mod tests {
         assert_eq!(data.line_to_entry.len(), 3);
         assert_eq!(data.entries[0].author_name, "Alice");
         assert!(data.entries[0].summary.contains("initial"));
+        assert_eq!(data.entries[0].full_oid.len(), 40);
+        assert!(data.entries[0].short_hash.len() <= 8);
     }
 
     #[test]

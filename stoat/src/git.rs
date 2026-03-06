@@ -4,8 +4,10 @@
 //! and diff review functionality.
 
 pub mod blame;
+pub mod commit_diff;
 pub mod conflict;
 pub mod diff;
+pub mod diff_modal;
 pub mod diff_review;
 pub mod line_selection;
 pub mod repository;

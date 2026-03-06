@@ -56,6 +56,8 @@ pub enum KeyContext {
     SymbolPicker,
     /// Blame review mode context
     BlameReview,
+    /// Blame commit diff modal context
+    BlameCommitDiff,
 }
 
 impl KeyContext {
@@ -83,6 +85,7 @@ impl KeyContext {
             Self::Claude => "Claude",
             Self::SymbolPicker => "SymbolPicker",
             Self::BlameReview => "BlameReview",
+            Self::BlameCommitDiff => "BlameCommitDiff",
         }
     }
 
@@ -104,6 +107,7 @@ impl KeyContext {
             "Claude" => Ok(Self::Claude),
             "SymbolPicker" => Ok(Self::SymbolPicker),
             "BlameReview" => Ok(Self::BlameReview),
+            "BlameCommitDiff" => Ok(Self::BlameCommitDiff),
             _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }

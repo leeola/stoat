@@ -244,6 +244,22 @@ pub struct GitStatus {
     pub dirty_count: usize,
 }
 
+/// Blame commit diff modal state.
+///
+/// Shows the diff of a specific commit (from blame), listing all files
+/// changed in that commit with a diff preview panel.
+pub struct BlameCommitDiff {
+    pub commit_oid: String,
+    pub short_hash: String,
+    pub author_name: String,
+    pub date_display: String,
+    pub summary: String,
+    pub files: Vec<crate::git::repository::CommitFileChange>,
+    pub selected: usize,
+    pub preview: Option<crate::git::status::DiffPreviewData>,
+    pub preview_task: Option<Task<()>>,
+}
+
 impl GitStatus {
     /// Filter files based on the current filter setting.
     ///
@@ -331,6 +347,8 @@ pub struct AppState {
     pub symbol_picker: SymbolPicker,
     /// Git status modal state
     pub git_status: GitStatus,
+    /// Blame commit diff modal state
+    pub blame_commit_diff: Option<BlameCommitDiff>,
     /// LSP manager for language server coordination
     ///
     /// Manages language server processes and routes diagnostics to buffers.
@@ -462,6 +480,7 @@ impl AppState {
                 dirty_count,
                 ..Default::default()
             },
+            blame_commit_diff: None,
             lsp_manager,
             lsp_state,
             project_env,
