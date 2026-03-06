@@ -11,12 +11,14 @@ use crate::{
         diff::{BufferDiff, DiffHunkStatus},
     },
     gutter::{DisplayRow, GutterLayout},
+    stoat::KeyContext,
     syntax::HighlightedChunks,
 };
 use gpui::{
     point, px, relative, size, App, Bounds, Element, ElementId, Entity, Font, FontStyle,
-    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, Pixels,
-    SharedString, Style, TextAlign, TextRun, UnderlineStyle, Window, WrappedLine,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton,
+    MouseDownEvent, Pixels, SharedString, Style, TextAlign, TextRun, UnderlineStyle, Window,
+    WrappedLine,
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use stoat_lsp::{response::HoverBlockKind, BufferDiagnostic};
@@ -919,6 +921,89 @@ impl Element for EditorElement {
             let view = self.view.clone();
             window.on_next_frame(move |_, cx| {
                 view.update(cx, |_, cx| cx.notify());
+            });
+        }
+
+        // Register mouse click handler for cursor positioning
+        if !is_minimap {
+            let view = self.view.clone();
+            let text_content_x = bounds.origin.x + prepaint.gutter_width + self.style.padding;
+            let text_area_y = bounds.origin.y + self.style.padding;
+            let line_height = self.style.line_height;
+            let line_layouts: Vec<_> = prepaint
+                .line_layouts
+                .iter()
+                .map(|l| (l.buffer_row, l.y_position, l.shaped.clone()))
+                .collect();
+
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, cx| {
+                if !phase.bubble() {
+                    return;
+                }
+                if event.button != MouseButton::Left {
+                    return;
+                }
+
+                let pos = event.position;
+                if pos.x < text_content_x
+                    || pos.y < text_area_y
+                    || pos.x > bounds.origin.x + bounds.size.width
+                    || pos.y > bounds.origin.y + bounds.size.height
+                {
+                    return;
+                }
+
+                let clicked_layout = line_layouts
+                    .iter()
+                    .find(|(_, y, _)| pos.y >= *y && pos.y < *y + line_height);
+
+                let (buffer_row, column) = if let Some((buffer_row, _, shaped)) = clicked_layout {
+                    let Some(buffer_row) = buffer_row else {
+                        return;
+                    };
+                    let local_x = (pos.x - text_content_x).max(px(0.));
+                    let col = shaped.closest_index_for_x(local_x) as u32;
+                    (*buffer_row, col)
+                } else {
+                    return;
+                };
+
+                let point = text::Point::new(buffer_row, column);
+
+                view.update(cx, |editor_view, cx| {
+                    let stoat_entity = editor_view.stoat.clone();
+
+                    if stoat_entity.read(cx).key_context() != KeyContext::TextEditor {
+                        return;
+                    }
+
+                    stoat_entity.update(cx, |stoat, cx| {
+                        let mode = stoat.mode().to_string();
+                        if mode == "visual" || mode == "visual_line" {
+                            stoat.set_mode("normal");
+                        }
+
+                        stoat.set_cursor_position(point);
+                        let snapshot = stoat
+                            .active_buffer(cx)
+                            .read(cx)
+                            .buffer()
+                            .read(cx)
+                            .snapshot();
+                        let id = stoat.selections.next_id();
+                        stoat.selections.select(
+                            vec![text::Selection {
+                                id,
+                                start: point,
+                                end: point,
+                                reversed: false,
+                                goal: text::SelectionGoal::None,
+                            }],
+                            &snapshot,
+                        );
+                    });
+                    cx.notify();
+                });
             });
         }
 
