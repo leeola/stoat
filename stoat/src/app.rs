@@ -72,6 +72,7 @@ fn run_with_paths_impl(
                         paths.clone(),
                         compiled_keymap.clone(),
                         std::env::current_dir().unwrap_or_default(),
+                        crate::services::Services::production(),
                         cx,
                     )
                 });
@@ -80,6 +81,7 @@ fn run_with_paths_impl(
                 pane_group_view.update(cx, |this, cx| {
                     this.app_state
                         .setup_lsp_progress_tracking(pane_group_view.downgrade(), cx);
+                    this.app_state.capture_project_env(cx);
 
                     // Trigger deferred LSP startup for the initially loaded file (if any).
                     // The FileOpened event from load_file() fires before subscriptions exist,

@@ -8,8 +8,8 @@
 use crate::git::{
     diff::{BufferDiff, DiffHunk, DiffHunkStatus, HunkLineOrigin},
     line_selection::LineSelection,
+    provider::GitRepo,
 };
-use git2::{ApplyLocation, Diff, Repository};
 use std::path::Path;
 use text::{BufferSnapshot, ToPoint};
 
@@ -151,29 +151,24 @@ pub(super) fn generate_partial_hunk_patch(
     Ok(patch)
 }
 
-/// Apply a unified diff patch via libgit2.
+/// Apply a unified diff patch via the [`GitRepo`] abstraction.
 ///
 /// When `reverse` is true, the patch is reversed (swapping additions/deletions
 /// and header fields) before application, used for unstaging or reverting.
 /// The `location` parameter controls where the patch is applied (Index or WorkDir).
 pub(super) fn apply_patch(
     patch: &str,
-    repo_dir: &Path,
+    repo: &dyn GitRepo,
     reverse: bool,
-    location: ApplyLocation,
+    location: crate::git::provider::ApplyLocation,
 ) -> Result<(), String> {
-    let repo = Repository::open(repo_dir).map_err(|e| format!("Failed to open repository: {e}"))?;
-
-    let patch_bytes = if reverse {
+    let patch_str = if reverse {
         reverse_patch(patch)
     } else {
         patch.to_string()
     };
 
-    let diff = Diff::from_buffer(patch_bytes.as_bytes())
-        .map_err(|e| format!("Failed to parse patch: {e}"))?;
-
-    repo.apply(&diff, location, None)
+    repo.apply_diff(&patch_str, false, location)
         .map_err(|e| format!("Failed to apply patch: {e}"))?;
 
     Ok(())

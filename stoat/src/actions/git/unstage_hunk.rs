@@ -6,7 +6,7 @@
 //! [`git_unstage_file`](crate::Stoat::git_unstage_file) for unstaging entire files and
 //! [`git_unstage_all`](crate::Stoat::git_unstage_all) for unstaging all changes.
 
-use crate::{git::repository::Repository, stoat::Stoat};
+use crate::stoat::Stoat;
 use git2::DiffOptions;
 use gpui::Context;
 
@@ -42,8 +42,6 @@ impl Stoat {
             .ok_or_else(|| "No file path set for current buffer".to_string())?
             .clone();
 
-        let repo_dir = self.worktree_root_abs();
-
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
@@ -61,8 +59,11 @@ impl Stoat {
             (hunk.old_start, hunk.old_start + hunk.old_lines)
         };
 
-        let repo =
-            Repository::discover(&file_path).map_err(|e| format!("Repository not found: {e}"))?;
+        let repo = self
+            .services
+            .git
+            .discover(&file_path)
+            .map_err(|e| format!("Repository not found: {e}"))?;
         let head_content = repo.head_content(&file_path).unwrap_or_default();
         let index_content = repo.index_content(&file_path).unwrap_or_default();
 
@@ -131,9 +132,9 @@ impl Stoat {
 
             super::hunk_patch::apply_patch(
                 &patch_str,
-                &repo_dir,
+                &*repo,
                 true,
-                git2::ApplyLocation::Index,
+                crate::git::provider::ApplyLocation::Index,
             )?;
         }
 

@@ -29,7 +29,14 @@ impl<'a> TestApp<'a> {
         let keymap = super::test_keymap();
         let config = crate::config::Config::default();
         let (view, cx) = cx.add_window_view(|_window, cx| {
-            PaneGroupView::new(config, vec![], keymap, PathBuf::from("."), cx)
+            PaneGroupView::new(
+                config,
+                vec![],
+                keymap,
+                PathBuf::from("."),
+                crate::services::Services::fake(),
+                cx,
+            )
         });
         cx.update(|window, cx| {
             let handle = view.read(cx).active_editor_focus_handle(cx);

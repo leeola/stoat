@@ -6,11 +6,12 @@
 use crate::{
     buffer::{item::BufferItem, store::BufferStore},
     cursor::CursorManager,
-    git::{diff::BufferDiff, repository::Repository},
+    git::diff::BufferDiff,
     history::{AppStateHistory, AppStateSnapshot, SelectionHistory, SelectionHistoryEntry},
     hover::HoverState,
     scroll::ScrollPosition,
     selections::SelectionsCollection,
+    services::Services,
     worktree::Worktree,
 };
 use gpui::{App, AppContext, Context, Entity, EventEmitter, WeakEntity};
@@ -395,6 +396,9 @@ pub struct Stoat {
     /// Compiled keymap from stcfg configuration, shared across all views.
     pub(crate) compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
 
+    /// IO services (filesystem, git provider) -- injectable for testing.
+    pub(crate) services: Arc<Services>,
+
     /// Accumulating count prefix for multiplied actions (e.g., `5j` = move down 5 lines).
     pub(crate) pending_count: Option<u32>,
 
@@ -461,6 +465,7 @@ impl Stoat {
         buffer_store: Entity<BufferStore>,
         lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
         compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
+        services: Arc<Services>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self::new_with_text(
@@ -469,6 +474,7 @@ impl Stoat {
             buffer_store,
             lsp_manager,
             compiled_keymap,
+            services,
             "",
             cx,
         )
@@ -481,6 +487,7 @@ impl Stoat {
         buffer_store: Entity<BufferStore>,
         lsp_manager: Option<Arc<stoat_lsp::LspManager>>,
         compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
+        services: Arc<Services>,
         initial_text: &str,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -576,6 +583,7 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap,
+            services,
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
@@ -672,6 +680,7 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            services: self.services.clone(),
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
@@ -1093,7 +1102,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(e) => {
                 tracing::error!(
@@ -1105,7 +1114,6 @@ impl Stoat {
             },
         };
 
-        // Use git2's diff API to count hunks efficiently
         let hunk_counts = match repo.count_hunks_by_file(self.review_comparison_mode()) {
             Ok(counts) => counts,
             Err(e) => {
@@ -1376,7 +1384,7 @@ impl Stoat {
 
         // Compute git diff and staged row ranges
         buffer_item_entity.update(cx, |item, cx| {
-            if let Ok(repo) = Repository::discover(path) {
+            if let Ok(repo) = self.services.git.discover(path) {
                 if let Ok(head_content) = repo.head_content(path) {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
                     let buffer_id = buffer_snapshot.remote_id();
@@ -1636,7 +1644,7 @@ impl Stoat {
     )> {
         use crate::git::diff_review::DiffComparisonMode;
 
-        let repo = Repository::discover(path).ok()?;
+        let repo = self.services.git.discover(path).ok()?;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         let buffer_id = buffer_snapshot.remote_id();
@@ -1882,6 +1890,7 @@ impl Stoat {
             select_next_state: None,
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
+            services: self.services.clone(),
             pending_count: None,
             replace_pending: false,
             rename_pending: None,

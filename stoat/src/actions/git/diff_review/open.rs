@@ -54,9 +54,9 @@ impl Stoat {
 
         // Use worktree root to discover repository
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path).ok() {
-            Some(repo) => repo,
-            None => {
+        let repo = match self.services.git.discover(&root_path) {
+            Ok(repo) => repo,
+            Err(_) => {
                 debug!("No git repository found");
                 return;
             },
@@ -133,7 +133,7 @@ impl Stoat {
 
         // No existing state - start fresh review session
         // Scan git status to get list of modified files
-        let entries = match crate::git::status::gather_git_status(repo.inner()) {
+        let entries = match repo.gather_status() {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::error!("Failed to gather git status: {}", e);

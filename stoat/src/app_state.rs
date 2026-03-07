@@ -24,8 +24,8 @@
 //! See [`MULTI_VIEW_ARCHITECTURE.md`](../../MULTI_VIEW_ARCHITECTURE.md) for details.
 
 use crate::{
-    buffer::store::BufferStore, environment::ProjectEnvironment, stoat::KeyContext,
-    worktree::Worktree, BufferItem,
+    buffer::store::BufferStore, environment::ProjectEnvironment, services::Services,
+    stoat::KeyContext, worktree::Worktree, BufferItem,
 };
 use gpui::{AppContext, Entity, Task};
 use lsp_types::SymbolKind;
@@ -373,6 +373,8 @@ pub struct AppState {
     pub project_env: Arc<RwLock<Option<ProjectEnvironment>>>,
     /// Temporary flash message displayed in the status bar (replaces file path for ~3 seconds).
     pub flash_message: Option<String>,
+    /// IO services (filesystem, git provider) -- injectable for testing.
+    pub services: Arc<Services>,
 }
 
 impl AppState {
@@ -390,16 +392,15 @@ impl AppState {
     /// ```rust,ignore
     /// let workspace = AppState::new(cx);
     /// ```
-    pub fn new(root: PathBuf, cx: &mut gpui::App) -> Self {
+    pub fn new(root: PathBuf, services: Arc<Services>, cx: &mut gpui::App) -> Self {
         let worktree = Arc::new(Mutex::new(Worktree::new(root.clone())));
         let buffer_store = cx.new(|_| BufferStore::new());
 
         // Initialize git status for status bar
         let (branch_info, git_status_files, dirty_count) =
-            if let Ok(repo) = crate::git::repository::Repository::open(&root) {
-                let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
-                let status_files = crate::git::status::gather_git_status(repo.inner())
-                    .unwrap_or_else(|_| Vec::new());
+            if let Ok(repo) = services.git.open(&root) {
+                let branch_info = repo.gather_branch_info();
+                let status_files = repo.gather_status().unwrap_or_else(|_| Vec::new());
                 let dirty_count = status_files.len();
                 (branch_info, status_files, dirty_count)
             } else {
@@ -407,15 +408,6 @@ impl AppState {
             };
 
         let project_env: Arc<RwLock<Option<ProjectEnvironment>>> = Arc::new(RwLock::new(None));
-        {
-            let project_env = project_env.clone();
-            let project_dir = root.clone();
-            cx.spawn(async move |_cx| {
-                let env = ProjectEnvironment::capture(&project_dir).await;
-                *project_env.write() = Some(env);
-            })
-            .detach();
-        }
 
         let lsp_manager = Arc::new(stoat_lsp::LspManager::new(
             cx.background_executor().clone(),
@@ -484,7 +476,22 @@ impl AppState {
             text_editor_mode: "normal".to_string(),
             inline_editor_mode: "normal".to_string(),
             flash_message: None,
+            services,
         }
+    }
+
+    /// Spawn async task to capture the shell environment for LSP and subprocess use.
+    ///
+    /// Runs `smol::process::Command` which creates OS threads -- must NOT be called
+    /// from GPUI test contexts.
+    pub fn capture_project_env(&self, cx: &mut gpui::App) {
+        let project_env = self.project_env.clone();
+        let project_dir = self.root.clone();
+        cx.spawn(async move |_cx| {
+            let env = ProjectEnvironment::capture(&project_dir).await;
+            *project_env.write() = Some(env);
+        })
+        .detach();
     }
 
     /// Set up LSP progress tracking tasks.
@@ -1028,10 +1035,9 @@ impl AppState {
     /// the status bar and git state current after external git operations.
     pub fn refresh_git_status(&mut self) {
         let root_path = self.worktree.lock().root().to_path_buf();
-        if let Ok(repo) = crate::git::repository::Repository::discover(&root_path) {
-            let branch_info = crate::git::status::gather_git_branch_info(repo.inner());
-            let status_files =
-                crate::git::status::gather_git_status(repo.inner()).unwrap_or_default();
+        if let Ok(repo) = self.services.git.discover(&root_path) {
+            let branch_info = repo.gather_branch_info();
+            let status_files = repo.gather_status().unwrap_or_default();
             self.git_status.dirty_count = status_files.len();
             self.git_status.branch_info = branch_info;
             self.git_status.files = status_files;

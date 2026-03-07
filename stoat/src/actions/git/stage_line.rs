@@ -10,7 +10,6 @@ use crate::{
     git::{
         diff::{extract_hunk_lines, BufferDiff, DiffHunkStatus, HunkLineOrigin},
         line_selection::LineSelection,
-        repository::Repository,
     },
     stoat::Stoat,
 };
@@ -31,7 +30,6 @@ impl Stoat {
             .ok_or_else(|| "No file path set for current buffer".to_string())?
             .clone();
 
-        let repo_dir = self.worktree_root_abs();
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
@@ -52,8 +50,11 @@ impl Stoat {
             .start
             .to_point(&buffer_snapshot)
             .row;
-        let repo =
-            Repository::discover(&file_path).map_err(|e| format!("Repository not found: {e}"))?;
+        let repo = self
+            .services
+            .git
+            .discover(&file_path)
+            .map_err(|e| format!("Repository not found: {e}"))?;
         let index_content = repo.index_content(&file_path).unwrap_or_default();
 
         let buffer_text = buffer_snapshot.text();
@@ -83,7 +84,7 @@ impl Stoat {
         if line_is_staged {
             self.unstage_line(
                 &file_path,
-                &repo_dir,
+                &*repo,
                 cursor_row,
                 is_deletion,
                 display_hunk.old_start,
@@ -93,7 +94,7 @@ impl Stoat {
         } else {
             self.stage_line(
                 &file_path,
-                &repo_dir,
+                &*repo,
                 cursor_row,
                 is_deletion,
                 display_start,
@@ -127,7 +128,7 @@ impl Stoat {
     fn stage_line(
         &self,
         file_path: &std::path::Path,
-        repo_dir: &std::path::Path,
+        repo: &dyn crate::git::provider::GitRepo,
         cursor_row: u32,
         is_deletion: bool,
         display_start: u32,
@@ -176,7 +177,12 @@ impl Stoat {
         }
 
         let patch = super::hunk_patch::generate_partial_hunk_patch(&selection, file_path)?;
-        super::hunk_patch::apply_patch(&patch, repo_dir, false, git2::ApplyLocation::Index)?;
+        super::hunk_patch::apply_patch(
+            &patch,
+            repo,
+            false,
+            crate::git::provider::ApplyLocation::Index,
+        )?;
         Ok(())
     }
 
@@ -184,15 +190,13 @@ impl Stoat {
     fn unstage_line(
         &self,
         file_path: &std::path::Path,
-        repo_dir: &std::path::Path,
+        repo: &dyn crate::git::provider::GitRepo,
         cursor_row: u32,
         is_deletion: bool,
         display_old_start: u32,
         display_old_end: u32,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let repo =
-            Repository::discover(file_path).map_err(|e| format!("Repository not found: {e}"))?;
         let head_content = repo.head_content(file_path).unwrap_or_default();
         let index_content = repo.index_content(file_path).unwrap_or_default();
 
@@ -242,7 +246,12 @@ impl Stoat {
         }
 
         let patch_str = super::hunk_patch::generate_partial_hunk_patch(&selection, file_path)?;
-        super::hunk_patch::apply_patch(&patch_str, repo_dir, true, git2::ApplyLocation::Index)?;
+        super::hunk_patch::apply_patch(
+            &patch_str,
+            repo,
+            true,
+            crate::git::provider::ApplyLocation::Index,
+        )?;
         Ok(())
     }
 }

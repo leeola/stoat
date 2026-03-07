@@ -26,6 +26,7 @@ impl PaneGroupView {
                     self.app_state.buffer_store.clone(),
                     Some(self.app_state.lsp_manager.clone()),
                     self.compiled_keymap.clone(),
+                    self.app_state.services.clone(),
                     cx,
                 )
             })

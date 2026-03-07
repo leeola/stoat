@@ -3,7 +3,7 @@ use crate::{
     command::{overlay::CommandOverlay, palette::CommandPalette},
     editor::view::EditorView,
     file_finder::Finder,
-    git::{status::GitStatus, watcher::GitChangeKind},
+    git::status::GitStatus,
     modal::{about::AboutModal, help::HelpModal},
     pane::{Member, PaneAxis, PaneGroup, PaneId, SplitDirection},
     pane_group::element::pane_axis,
@@ -156,7 +156,7 @@ pub struct PaneGroupView {
     /// access)
     pub(crate) pending_actions: Vec<(String, Vec<String>)>,
     activation_observer_set: bool,
-    _git_watcher: Option<notify::RecommendedWatcher>,
+    _git_watcher: Option<Box<dyn std::any::Any + Send>>,
     pub(crate) hidden_claude: Option<(Entity<ClaudeState>, Entity<ClaudeView>)>,
 }
 
@@ -177,10 +177,11 @@ impl PaneGroupView {
         initial_paths: Vec<std::path::PathBuf>,
         compiled_keymap: Arc<crate::keymap::compiled::CompiledKeymap>,
         root: PathBuf,
+        services: Arc<crate::services::Services>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         // Create workspace state first (this creates worktree and buffer_store)
-        let app_state = crate::app_state::AppState::new(root, cx);
+        let app_state = crate::app_state::AppState::new(root, services, cx);
 
         // Create initial Stoat using workspace's shared resources
         let initial_stoat = cx.new(|cx| {
@@ -190,6 +191,7 @@ impl PaneGroupView {
                 app_state.buffer_store.clone(),
                 Some(app_state.lsp_manager.clone()),
                 compiled_keymap.clone(),
+                app_state.services.clone(),
                 cx,
             );
 
@@ -992,64 +994,67 @@ impl Render for PaneGroupView {
             self.stoat_subscriptions.push(sub);
 
             // Start git filesystem watcher + polling debounce task
-            let (sender, receiver) = smol::channel::bounded::<GitChangeKind>(64);
             let root = self.app_state.worktree.lock().root().to_path_buf();
-            self._git_watcher = crate::git::watcher::start_watching(&root, sender);
+            let watch_result = self.app_state.services.fs.watch_git(&root);
 
-            cx.spawn(async move |this, cx| {
-                let mut last_index_mtime: Option<SystemTime> = None;
-                let poll_interval = Duration::from_secs(2);
-                let debounce = Duration::from_millis(300);
+            if let Some((receiver, watcher_handle)) = watch_result {
+                self._git_watcher = Some(watcher_handle);
 
-                loop {
-                    let event = futures::future::select(
-                        Box::pin(receiver.recv()),
-                        Box::pin(smol::Timer::after(poll_interval)),
-                    )
-                    .await;
+                cx.spawn(async move |this, cx| {
+                    let mut last_index_mtime: Option<SystemTime> = None;
+                    let poll_interval = Duration::from_secs(2);
+                    let debounce = Duration::from_millis(300);
 
-                    let is_poll = matches!(event, futures::future::Either::Right(_));
+                    loop {
+                        let event = futures::future::select(
+                            Box::pin(receiver.recv()),
+                            Box::pin(smol::Timer::after(poll_interval)),
+                        )
+                        .await;
 
-                    if is_poll && !git_index_changed(&root, &mut last_index_mtime) {
-                        let follow_active = this.update(cx, |this, cx| {
-                            this.active_editor()
-                                .map(|e| {
-                                    let editor = e.read(cx);
-                                    let stoat = editor.stoat.read(cx);
-                                    stoat.mode() == "diff_review" && stoat.review_state.follow
-                                })
-                                .unwrap_or(false)
-                        });
-                        if !matches!(follow_active, Ok(true)) {
-                            continue;
-                        }
-                    }
+                        let is_poll = matches!(event, futures::future::Either::Right(_));
 
-                    smol::Timer::after(debounce).await;
-                    while receiver.try_recv().is_ok() {}
-
-                    let ok = this.update(cx, |this, cx| {
-                        this.app_state.refresh_git_status();
-                        if let Some(editor) = this.active_editor().cloned() {
-                            editor.update(cx, |editor, cx| {
-                                editor.stoat.update(cx, |stoat, cx| {
-                                    if stoat.mode() == "diff_review" {
-                                        stoat.refresh_review_state(cx);
-                                    } else {
-                                        stoat.reload_if_changed_on_disk(cx);
-                                        stoat.refresh_git_diff(cx);
-                                    }
-                                });
+                        if is_poll && !git_index_changed(&root, &mut last_index_mtime) {
+                            let follow_active = this.update(cx, |this, cx| {
+                                this.active_editor()
+                                    .map(|e| {
+                                        let editor = e.read(cx);
+                                        let stoat = editor.stoat.read(cx);
+                                        stoat.mode() == "diff_review" && stoat.review_state.follow
+                                    })
+                                    .unwrap_or(false)
                             });
+                            if !matches!(follow_active, Ok(true)) {
+                                continue;
+                            }
                         }
-                        cx.notify();
-                    });
-                    if ok.is_err() {
-                        break;
+
+                        smol::Timer::after(debounce).await;
+                        while receiver.try_recv().is_ok() {}
+
+                        let ok = this.update(cx, |this, cx| {
+                            this.app_state.refresh_git_status();
+                            if let Some(editor) = this.active_editor().cloned() {
+                                editor.update(cx, |editor, cx| {
+                                    editor.stoat.update(cx, |stoat, cx| {
+                                        if stoat.mode() == "diff_review" {
+                                            stoat.refresh_review_state(cx);
+                                        } else {
+                                            stoat.reload_if_changed_on_disk(cx);
+                                            stoat.refresh_git_diff(cx);
+                                        }
+                                    });
+                                });
+                            }
+                            cx.notify();
+                        });
+                        if ok.is_err() {
+                            break;
+                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+            } // end if let Some((receiver, watcher_handle))
         }
 
         // Process any pending actions from StoatEvent::Action subscriptions

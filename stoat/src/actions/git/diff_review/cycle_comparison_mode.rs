@@ -23,17 +23,17 @@ impl Stoat {
         debug!("Cycling diff source: {old_source:?} -> {new_source:?} (mode={new_mode:?})");
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
 
         if new_source.is_commit() && !old_source.is_commit() {
-            self.enter_last_commit_source(&repo, cx);
+            self.enter_last_commit_source(&*repo, cx);
         } else if !new_source.is_commit() && old_source.is_commit() {
-            self.exit_last_commit_source(&repo, cx);
+            self.exit_last_commit_source(&*repo, cx);
         } else {
-            self.recompute_current_file_diff(&repo, new_mode, cx);
+            self.recompute_current_file_diff(&*repo, new_mode, cx);
         }
 
         cx.emit(crate::stoat::StoatEvent::Changed);
@@ -41,7 +41,7 @@ impl Stoat {
 
     fn enter_last_commit_source(
         &mut self,
-        repo: &crate::git::repository::Repository,
+        repo: &dyn crate::git::provider::GitRepo,
         cx: &mut Context<Self>,
     ) {
         let file_paths = match repo.commit_changed_files() {
@@ -102,10 +102,10 @@ impl Stoat {
 
     fn exit_last_commit_source(
         &mut self,
-        repo: &crate::git::repository::Repository,
+        repo: &dyn crate::git::provider::GitRepo,
         cx: &mut Context<Self>,
     ) {
-        let entries = match crate::git::status::gather_git_status(repo.inner()) {
+        let entries = match repo.gather_status() {
             Ok(entries) => entries,
             Err(_) => return,
         };
@@ -144,7 +144,7 @@ impl Stoat {
 
     fn recompute_current_file_diff(
         &mut self,
-        repo: &crate::git::repository::Repository,
+        repo: &dyn crate::git::provider::GitRepo,
         new_mode: crate::git::diff_review::DiffComparisonMode,
         cx: &mut Context<Self>,
     ) {

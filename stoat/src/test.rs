@@ -103,12 +103,14 @@ impl<'a> TestStoat<'a> {
 
             // Create Stoat with test text directly (avoids buffer edit after creation)
             let compiled_keymap = test_keymap();
+            let services = crate::services::Services::fake();
             let stoat = Stoat::new_with_text(
                 crate::config::Config::default(),
                 worktree,
                 buffer_store,
                 None,
                 compiled_keymap,
+                services,
                 text,
                 cx,
             );
@@ -363,11 +365,12 @@ impl<'a> TestStoat<'a> {
         self.temp_dir = Some(temp_dir);
         self.repo_path = Some(repo_path.clone());
 
-        // Update the Stoat's worktree to point to the temp repo
+        // Update the Stoat's worktree and services to use real git
         self.update(|s, _cx| {
             s.worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
                 repo_path,
             )));
+            s.services = crate::services::Services::production();
         });
 
         self
@@ -382,6 +385,7 @@ impl<'a> TestStoat<'a> {
             s.worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
                 fixture.dir().to_path_buf(),
             )));
+            s.services = crate::services::Services::production();
         });
         self
     }

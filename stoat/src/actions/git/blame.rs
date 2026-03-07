@@ -17,7 +17,7 @@ impl Stoat {
         };
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => {
                 tracing::debug!("No git repository found");
@@ -25,7 +25,7 @@ impl Stoat {
             },
         };
 
-        let data = match crate::git::blame::blame_file(&repo, &file_path) {
+        let data = match repo.blame_file(&file_path) {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!("Blame failed: {e}");
@@ -141,13 +141,15 @@ impl PaneGroupView {
         });
 
         let oid_for_preview = oid.clone();
+        let git = self.app_state.services.git.clone();
+        let git2 = self.app_state.services.git.clone();
         self.app_state
             .blame_commit_diff
             .as_mut()
             .unwrap()
             .preview_task = Some(cx.spawn(async move |this, cx| {
             if let Some(files) =
-                crate::git::commit_diff::load_commit_files(root_path.clone(), oid).await
+                crate::git::commit_diff::load_commit_files(git, root_path.clone(), oid).await
             {
                 let first_file_path = files.first().map(|f| f.path.clone());
                 let _ = this.update(cx, |pane_group, cx| {
@@ -159,6 +161,7 @@ impl PaneGroupView {
 
                 if let Some(file_path) = first_file_path {
                     if let Some(preview) = crate::git::commit_diff::load_commit_file_diff(
+                        git2,
                         root_path,
                         oid_for_preview,
                         file_path,
@@ -242,10 +245,11 @@ impl PaneGroupView {
 
         let root_path = self.app_state.worktree.lock().root().to_path_buf();
         let oid = bcd.commit_oid.clone();
+        let git = self.app_state.services.git.clone();
 
         bcd.preview_task = Some(cx.spawn(async move |this, cx| {
             if let Some(preview) =
-                crate::git::commit_diff::load_commit_file_diff(root_path, oid, file_path).await
+                crate::git::commit_diff::load_commit_file_diff(git, root_path, oid, file_path).await
             {
                 let _ = this.update(cx, |pane_group, cx| {
                     if let Some(ref mut bcd) = pane_group.app_state.blame_commit_diff {

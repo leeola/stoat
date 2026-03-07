@@ -47,6 +47,7 @@ git_fixture = { path = "../git_fixture" }
 
 [features]
 dev-tools = ["gpui/test-support"]
+test-support = ["gpui/test-support", "stoat_lsp/test-support"]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

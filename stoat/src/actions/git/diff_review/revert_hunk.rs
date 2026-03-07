@@ -15,8 +15,6 @@ impl Stoat {
             .ok_or_else(|| "No file path set".to_string())?
             .clone();
 
-        let repo_dir = self.worktree_root_abs();
-
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
@@ -39,11 +37,17 @@ impl Stoat {
             &file_path,
         )?;
 
+        let repo_dir = self.worktree_root_abs();
+        let repo = self
+            .services
+            .git
+            .open(&repo_dir)
+            .map_err(|e| format!("Failed to open repository: {e}"))?;
         super::super::hunk_patch::apply_patch(
             &patch,
-            &repo_dir,
+            &*repo,
             true,
-            git2::ApplyLocation::WorkDir,
+            crate::git::provider::ApplyLocation::WorkDir,
         )?;
 
         tracing::info!("Reverted hunk at row {cursor_row} in {:?}", file_path);

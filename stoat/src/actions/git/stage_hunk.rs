@@ -6,10 +6,7 @@
 //! staging entire files and [`git_stage_all`](crate::Stoat::git_stage_all) for staging all
 //! changes.
 
-use crate::{
-    git::{diff::BufferDiff, repository::Repository},
-    stoat::Stoat,
-};
+use crate::{git::diff::BufferDiff, stoat::Stoat};
 use gpui::Context;
 use text::ToPoint;
 
@@ -81,8 +78,6 @@ impl Stoat {
             .ok_or_else(|| "No file path set for current buffer".to_string())?
             .clone();
 
-        let repo_dir = self.worktree_root_abs();
-
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
@@ -103,8 +98,11 @@ impl Stoat {
         };
 
         // Compute working-vs-index diff to generate a patch with the correct base
-        let repo =
-            Repository::discover(&file_path).map_err(|e| format!("Repository not found: {e}"))?;
+        let repo = self
+            .services
+            .git
+            .discover(&file_path)
+            .map_err(|e| format!("Repository not found: {e}"))?;
         let index_content = repo.index_content(&file_path).unwrap_or_default();
         let buffer_id = buffer_snapshot.remote_id();
         let stage_diff = BufferDiff::new(buffer_id, index_content, &buffer_snapshot)
@@ -124,7 +122,12 @@ impl Stoat {
                 &buffer_snapshot,
                 &file_path,
             )?;
-            super::hunk_patch::apply_patch(&patch, &repo_dir, false, git2::ApplyLocation::Index)?;
+            super::hunk_patch::apply_patch(
+                &patch,
+                &*repo,
+                false,
+                crate::git::provider::ApplyLocation::Index,
+            )?;
         }
 
         if let Some((new_diff, staged_rows, staged_hunk_indices)) =

@@ -35,16 +35,21 @@ impl Stoat {
             .clone();
 
         let repo_dir = self.worktree_root_abs();
+        let repo = self
+            .services
+            .git
+            .open(&repo_dir)
+            .map_err(|e| format!("Failed to open repository: {e}"))?;
 
         let patch = super::super::hunk_patch::generate_partial_hunk_patch(selection, &file_path)?;
 
         let (location, actual_reverse) = if self.review_state.source.is_commit() {
-            (git2::ApplyLocation::WorkDir, true)
+            (crate::git::provider::ApplyLocation::WorkDir, true)
         } else {
-            (git2::ApplyLocation::Index, reverse)
+            (crate::git::provider::ApplyLocation::Index, reverse)
         };
 
-        super::super::hunk_patch::apply_patch(&patch, &repo_dir, actual_reverse, location)?;
+        super::super::hunk_patch::apply_patch(&patch, &*repo, actual_reverse, location)?;
 
         let action = if reverse { "Unstaged" } else { "Staged" };
         tracing::info!(

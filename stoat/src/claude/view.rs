@@ -43,6 +43,7 @@ impl ClaudeView {
             let worktree = s.worktree.clone();
             let buffer_store = s.buffer_store.clone();
             let compiled_keymap = s.compiled_keymap.clone();
+            let services = s.services.clone();
 
             let mut style = EditorStyle::new(&config);
             style.show_line_numbers = false;
@@ -57,6 +58,7 @@ impl ClaudeView {
                     buffer_store,
                     None,
                     compiled_keymap,
+                    services,
                     "",
                     cx,
                 )

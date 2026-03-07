@@ -112,7 +112,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -205,7 +205,7 @@ impl Stoat {
         }
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -297,7 +297,7 @@ impl Stoat {
     /// Capture current per-file hunk counts into [`DiffReviewState::last_hunk_snapshot`].
     pub(crate) fn refresh_review_hunk_snapshot(&mut self) {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -345,7 +345,7 @@ impl Stoat {
     /// modified file's new hunks.
     pub(crate) fn refresh_review_state(&mut self, cx: &mut Context<Self>) {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match crate::git::repository::Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => return,
         };
@@ -356,7 +356,7 @@ impl Stoat {
                 Err(_) => return,
             }
         } else {
-            let entries = match crate::git::status::gather_git_status(repo.inner()) {
+            let entries = match repo.gather_status() {
                 Ok(entries) => entries,
                 Err(_) => return,
             };

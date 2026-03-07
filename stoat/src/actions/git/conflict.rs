@@ -1,9 +1,5 @@
 use crate::{
-    git::{
-        conflict::{resolve_conflict, ConflictReviewState, ConflictSide, ConflictViewKind},
-        repository::Repository,
-        status::gather_git_status,
-    },
+    git::conflict::{resolve_conflict, ConflictReviewState, ConflictSide, ConflictViewKind},
     pane_group::view::PaneGroupView,
     stoat::{KeyContext, Stoat, StoatEvent},
 };
@@ -22,7 +18,7 @@ impl Stoat {
         self.conflict_review_previous_mode = Some(self.mode.clone());
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(repo) => repo,
             Err(_) => {
                 debug!("No git repository found");
@@ -70,7 +66,7 @@ impl Stoat {
         }
 
         // Fresh scan: gather conflicted files
-        let entries = match gather_git_status(repo.inner()) {
+        let entries = match repo.gather_status() {
             Ok(entries) => entries,
             Err(e) => {
                 tracing::error!("Failed to gather git status: {e}");
@@ -172,7 +168,7 @@ impl Stoat {
     /// offsets remain valid through the sequence of edits.
     fn apply_resolutions(&mut self, cx: &mut Context<Self>) {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => return,
         };
@@ -292,7 +288,7 @@ impl Stoat {
 
     fn advance_to_next_conflicted_file(&mut self, cx: &mut Context<Self>) -> bool {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -333,7 +329,7 @@ impl Stoat {
 
     fn advance_to_prev_conflicted_file(&mut self, cx: &mut Context<Self>) -> bool {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -367,7 +363,7 @@ impl Stoat {
 
     fn advance_to_first_conflicted_file(&mut self, cx: &mut Context<Self>) -> bool {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -396,7 +392,7 @@ impl Stoat {
 
     fn advance_to_last_conflicted_file(&mut self, cx: &mut Context<Self>) -> bool {
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match Repository::discover(&root_path) {
+        let repo = match self.services.git.discover(&root_path) {
             Ok(r) => r,
             Err(_) => return false,
         };

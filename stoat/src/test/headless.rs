@@ -36,7 +36,14 @@ impl<'a> HeadlessStoat<'a> {
 
         let root_for_view = root.clone();
         let (view, cx) = cx.add_window_view(|_window, cx| {
-            PaneGroupView::new(config, vec![], keymap, root_for_view, cx)
+            PaneGroupView::new(
+                config,
+                vec![],
+                keymap,
+                root_for_view,
+                crate::services::Services::fake(),
+                cx,
+            )
         });
 
         cx.update(|_window, cx| {
@@ -81,7 +88,14 @@ impl<'a> HeadlessStoat<'a> {
             .into_iter()
             .collect::<Vec<_>>();
         let (view, cx) = cx.add_window_view(|_window, cx| {
-            PaneGroupView::new(config, initial_paths, keymap, root_for_view, cx)
+            PaneGroupView::new(
+                config,
+                initial_paths,
+                keymap,
+                root_for_view,
+                crate::services::Services::fake(),
+                cx,
+            )
         });
 
         cx.update(|_window, cx| {

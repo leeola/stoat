@@ -73,7 +73,7 @@ impl EditorView {
 
     /// Rebuild the 3 sub-editors from current buffer + resolution state.
     pub(crate) fn rebuild_merge_state(&mut self, cx: &mut Context<'_, Self>) {
-        let (content, language, config, worktree, buffer_store, compiled_keymap) = {
+        let (content, language, config, worktree, buffer_store, compiled_keymap, services) = {
             let stoat = self.stoat.read(cx);
             let buffer_item = stoat.active_buffer(cx);
             let text = buffer_item.read(cx).buffer().read(cx).text();
@@ -86,6 +86,7 @@ impl EditorView {
             let worktree = stoat.worktree.clone();
             let buffer_store = stoat.buffer_store.clone();
             let compiled_keymap = stoat.compiled_keymap.clone();
+            let services = stoat.services.clone();
             (
                 content,
                 language,
@@ -93,6 +94,7 @@ impl EditorView {
                 worktree,
                 buffer_store,
                 compiled_keymap,
+                services,
             )
         };
 
@@ -106,6 +108,7 @@ impl EditorView {
             let worktree = worktree.clone();
             let buffer_store = buffer_store.clone();
             let compiled_keymap = compiled_keymap.clone();
+            let services = services.clone();
             let merge_style = merge_style.clone();
 
             let sub_stoat = cx.new(|cx| {
@@ -115,6 +118,7 @@ impl EditorView {
                     buffer_store,
                     None,
                     compiled_keymap,
+                    services,
                     text,
                     cx,
                 );

@@ -10,6 +10,7 @@ pub mod diff;
 pub mod diff_review;
 pub mod diff_summary;
 pub mod line_selection;
+pub mod provider;
 pub mod repository;
 pub mod status;
 pub mod watcher;
