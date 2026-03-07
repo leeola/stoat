@@ -37,11 +37,15 @@ fn run_with_paths_impl(
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::with_platform(Rc::new(MacPlatform::new(false))).run(move |cx: &mut App| {
-        let discovered = crate::paths::discover(&std::env::current_dir().unwrap_or_default());
+        let discovered = crate::paths::discover(
+            &std::env::current_dir().unwrap_or_default(),
+            &crate::fs::RealFs,
+        );
 
         let config = crate::Config::load_with_overrides(
             config_path.as_deref(),
             discovered.config_path.as_deref(),
+            &crate::fs::RealFs,
         )
         .unwrap_or_default();
 

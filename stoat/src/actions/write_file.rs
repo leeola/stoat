@@ -231,7 +231,7 @@ impl Stoat {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[gpui::test]
     fn writes_buffer_to_disk(cx: &mut TestAppContext) {
@@ -384,10 +384,8 @@ mod tests {
 
     #[gpui::test]
     fn atomic_write_no_temp_files_left_behind(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("atomic_test.txt");
-        let parent_dir = file_path.parent().unwrap();
-
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/atomic_test.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -395,56 +393,45 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        // Count files in directory - should only be our target file
-        let entries: Vec<_> = std::fs::read_dir(parent_dir)
-            .expect("Failed to read directory")
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().is_file()
-                    && e.file_name()
-                        .to_str()
-                        .map(|s| !s.starts_with('.'))
-                        .unwrap_or(false)
-            })
-            .collect();
+        stoat.update(|s, _cx| {
+            let parent = file_path.parent().unwrap();
+            let entries = s.services.fs.read_dir(parent).unwrap();
+            let file_entries: Vec<_> = entries.iter().filter(|e| e.is_file).collect();
+            assert_eq!(file_entries.len(), 1, "Should have exactly 1 file");
+            assert_eq!(file_entries[0].path, file_path);
 
-        // Should only have our target file, no leftover temp files
-        assert_eq!(
-            entries.len(),
-            1,
-            "Expected 1 file (target), found {} files",
-            entries.len()
-        );
-        assert_eq!(entries[0].file_name(), file_path.file_name().unwrap());
-
-        // Verify content is correct
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "Atomic write test");
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "Atomic write test");
+        });
     }
 
     #[gpui::test]
     fn detects_conflict_when_file_modified_externally(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("conflict_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/conflict_test.txt");
 
-        // Create initial file
-        std::fs::write(&file_path, "Initial content").expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Initial content");
+        });
 
-        // Load the file (this sets saved_mtime)
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
         stoat.update(|s, cx| s.insert_text(" - buffer change", cx));
 
-        // Sleep briefly to ensure mtime changes
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "External modification");
+        });
 
-        // Modify file externally
-        std::fs::write(&file_path, "External modification")
-            .expect("Failed to modify file externally");
-
-        // Check for conflict
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
@@ -458,23 +445,24 @@ mod tests {
 
     #[gpui::test]
     fn no_conflict_when_buffer_clean(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("no_conflict_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/no_conflict_test.txt");
 
-        // Create and load file
-        std::fs::write(&file_path, "Initial content").expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Initial content");
+        });
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Sleep briefly to ensure mtime changes
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "External modification");
+        });
 
-        // Modify file externally (but buffer is clean)
-        std::fs::write(&file_path, "External modification")
-            .expect("Failed to modify file externally");
-
-        // No conflict because buffer has no unsaved changes
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
@@ -488,22 +476,26 @@ mod tests {
 
     #[gpui::test]
     fn write_clears_conflict_flag(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("clear_conflict_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/clear_conflict_test.txt");
 
-        // Create and load file
-        std::fs::write(&file_path, "Initial content").expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Initial content");
+        });
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
         stoat.update(|s, cx| s.insert_text(" - modified", cx));
 
-        // Sleep and modify externally (create conflict)
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(&file_path, "External change").expect("Failed to modify externally");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "External change");
+        });
 
-        // Verify conflict exists
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
@@ -516,7 +508,6 @@ mod tests {
 
         stoat.update(|s, cx| s.write_file(cx).unwrap());
 
-        // Verify conflict is cleared
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
@@ -530,14 +521,15 @@ mod tests {
 
     #[gpui::test]
     fn preserves_unix_line_endings(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("unix_endings.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/unix_endings.txt");
 
-        // Create file with Unix line endings
-        let unix_content = "Line 1\nLine 2\nLine 3\n";
-        std::fs::write(&file_path, unix_content).expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Line 1\nLine 2\nLine 3\n");
+        });
 
-        // Load file (should detect Unix line endings)
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
@@ -547,32 +539,28 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        // Verify line endings are still Unix (LF only)
-        let bytes = std::fs::read(&file_path).expect("Failed to read file");
-        let contents = String::from_utf8(bytes.clone()).expect("Invalid UTF-8");
-
-        assert!(!contents.contains("\r\n"), "Should not contain CRLF");
-        assert!(contents.contains('\n'), "Should contain LF");
-
-        // Verify no carriage returns at all
-        assert!(!bytes.contains(&b'\r'), "Should not contain any CR bytes");
+        stoat.update(|s, _cx| {
+            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            assert!(!bytes.contains(&b'\r'), "Should not contain any CR bytes");
+            assert!(bytes.contains(&b'\n'), "Should contain LF");
+        });
     }
 
     #[gpui::test]
     fn preserves_windows_line_endings(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("windows_endings.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/windows_endings.txt");
 
-        // Create file with Windows line endings
-        let windows_content = "Line 1\r\nLine 2\r\nLine 3\r\n";
-        std::fs::write(&file_path, windows_content).expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Line 1\r\nLine 2\r\nLine 3\r\n");
+        });
 
-        // Load file (should detect Windows line endings)
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
 
-        // Verify line ending was detected as Windows
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert_eq!(
@@ -587,31 +575,30 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        // Verify line endings are still Windows (CRLF)
-        let bytes = std::fs::read(&file_path).expect("Failed to read file");
-        let contents = String::from_utf8(bytes).expect("Invalid UTF-8");
-
-        assert!(contents.contains("\r\n"), "Should contain CRLF");
-
-        // Count line endings to verify all are CRLF
-        let lf_count = contents.matches('\n').count();
-        let crlf_count = contents.matches("\r\n").count();
-        assert_eq!(
-            lf_count, crlf_count,
-            "All LF should be preceded by CR (all CRLF)"
-        );
+        stoat.update(|s, _cx| {
+            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            let contents = String::from_utf8(bytes).expect("Invalid UTF-8");
+            assert!(contents.contains("\r\n"), "Should contain CRLF");
+            let lf_count = contents.matches('\n').count();
+            let crlf_count = contents.matches("\r\n").count();
+            assert_eq!(
+                lf_count, crlf_count,
+                "All LF should be preceded by CR (all CRLF)"
+            );
+        });
     }
 
     #[gpui::test]
     fn converts_mixed_line_endings_to_detected_style(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("mixed_endings.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/mixed_endings.txt");
 
-        // Create file with Unix line endings (first detected wins)
-        let unix_content = "Line 1\nLine 2\nLine 3\n";
-        std::fs::write(&file_path, unix_content).expect("Failed to create file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Line 1\nLine 2\nLine 3\n");
+        });
 
-        // Load file
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
         });
@@ -621,12 +608,13 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        // Verify all line endings are Unix
-        let bytes = std::fs::read(&file_path).expect("Failed to read file");
-        assert!(
-            !bytes.contains(&b'\r'),
-            "Should not contain any CR after normalization"
-        );
+        stoat.update(|s, _cx| {
+            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            assert!(
+                !bytes.contains(&b'\r'),
+                "Should not contain any CR after normalization"
+            );
+        });
     }
 
     #[gpui::test]
@@ -671,17 +659,16 @@ mod tests {
 
     #[gpui::test]
     fn write_all_skips_clean_buffers(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let mut stoat = Stoat::test(cx);
 
-        let file1 = repo_path.join("clean.txt");
-        let file2 = repo_path.join("modified.txt");
+        let file1 = PathBuf::from("/fake/clean.txt");
+        let file2 = PathBuf::from("/fake/modified.txt");
 
-        // Create initial files
-        std::fs::write(&file1, "Clean content").unwrap();
-        std::fs::write(&file2, "Initial").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_fs().insert_file(&file1, "Clean content");
+            s.services.fake_fs().insert_file(&file2, "Initial");
+        });
 
-        // Load first file (will remain clean)
         stoat.update(|s, cx| {
             s.load_file(&file1, cx).unwrap();
         });
@@ -692,29 +679,25 @@ mod tests {
             s.insert_text(" - modified", cx);
         });
 
-        // Get mtime of clean file before write_all
-        let file1_mtime_before = std::fs::metadata(&file1).unwrap().modified().unwrap();
+        let file1_mtime_before =
+            stoat.update(|s, _cx| s.services.fs.metadata(&file1).unwrap().modified.unwrap());
 
-        // Sleep to ensure mtime would change if file was written
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Write all
         stoat.update(|s, cx| {
             s.write_all(cx).unwrap();
         });
 
-        // Verify clean file was not rewritten (mtime unchanged)
-        let file1_mtime_after = std::fs::metadata(&file1).unwrap().modified().unwrap();
-        assert_eq!(
-            file1_mtime_before, file1_mtime_after,
-            "Clean buffer should not be rewritten"
-        );
+        stoat.update(|s, _cx| {
+            let file1_mtime_after = s.services.fs.metadata(&file1).unwrap().modified.unwrap();
+            assert_eq!(
+                file1_mtime_before, file1_mtime_after,
+                "Clean buffer should not be rewritten"
+            );
 
-        // Verify modified file was written
-        assert_eq!(
-            std::fs::read_to_string(&file2).unwrap(),
-            "Initial - modified"
-        );
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file2).unwrap(),
+                "Initial - modified"
+            );
+        });
     }
 
     #[gpui::test]
@@ -755,14 +738,15 @@ mod tests {
 
     #[gpui::test]
     fn write_all_uses_atomic_writes(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let mut stoat = Stoat::test(cx);
 
-        let file1 = repo_path.join("atomic1.txt");
-        let file2 = repo_path.join("atomic2.txt");
+        let file1 = PathBuf::from("/fake/atomic1.txt");
+        let file2 = PathBuf::from("/fake/atomic2.txt");
 
-        std::fs::write(&file1, "").unwrap();
-        std::fs::write(&file2, "").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_fs().insert_file(&file1, "");
+            s.services.fake_fs().insert_file(&file2, "");
+        });
 
         stoat.update(|s, cx| {
             s.load_file(&file1, cx).unwrap();
@@ -775,42 +759,41 @@ mod tests {
 
         stoat.update(|s, cx| s.write_all(cx).unwrap());
 
-        // Verify no temp files left behind
-        let entries: Vec<_> = std::fs::read_dir(&repo_path)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path().is_file()
-                    && e.file_name()
-                        .to_str()
-                        .map(|s| !s.starts_with('.'))
-                        .unwrap_or(false)
-            })
-            .collect();
+        stoat.update(|s, _cx| {
+            let entries = s.services.fs.read_dir(Path::new("/fake")).unwrap();
+            let file_entries: Vec<_> = entries.iter().filter(|e| e.is_file).collect();
+            assert_eq!(
+                file_entries.len(),
+                2,
+                "Should have exactly 2 files (no temp files)"
+            );
 
-        // Should only have our two target files
-        assert_eq!(
-            entries.len(),
-            2,
-            "Should have exactly 2 files (no temp files)"
-        );
-
-        // Verify content is correct
-        assert_eq!(std::fs::read_to_string(&file1).unwrap(), "Atomic 1");
-        assert_eq!(std::fs::read_to_string(&file2).unwrap(), "Atomic 2");
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file1).unwrap(),
+                "Atomic 1"
+            );
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file2).unwrap(),
+                "Atomic 2"
+            );
+        });
     }
 
     #[gpui::test]
     fn write_all_preserves_line_endings_per_buffer(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let mut stoat = Stoat::test(cx);
 
-        let unix_file = repo_path.join("unix.txt");
-        let windows_file = repo_path.join("windows.txt");
+        let unix_file = PathBuf::from("/fake/unix.txt");
+        let windows_file = PathBuf::from("/fake/windows.txt");
 
-        // Create files with different line endings
-        std::fs::write(&unix_file, "Line 1\nLine 2\n").unwrap();
-        std::fs::write(&windows_file, "Line 1\r\nLine 2\r\n").unwrap();
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&unix_file, "Line 1\nLine 2\n");
+            s.services
+                .fake_fs()
+                .insert_file(&windows_file, "Line 1\r\nLine 2\r\n");
+        });
 
         stoat.update(|s, cx| {
             s.load_file(&unix_file, cx).unwrap();
@@ -823,24 +806,25 @@ mod tests {
 
         stoat.update(|s, cx| s.write_all(cx).unwrap());
 
-        // Verify Unix file still has Unix line endings
-        let unix_bytes = std::fs::read(&unix_file).unwrap();
-        assert!(
-            !unix_bytes.contains(&b'\r'),
-            "Unix file should have LF only"
-        );
+        stoat.update(|s, _cx| {
+            let unix_bytes = s.services.fs.read_bytes(&unix_file, usize::MAX).unwrap();
+            assert!(
+                !unix_bytes.contains(&b'\r'),
+                "Unix file should have LF only"
+            );
 
-        // Verify Windows file still has Windows line endings
-        let windows_content = std::fs::read_to_string(&windows_file).unwrap();
-        assert!(
-            windows_content.contains("\r\n"),
-            "Windows file should have CRLF"
-        );
-        let lf_count = windows_content.matches('\n').count();
-        let crlf_count = windows_content.matches("\r\n").count();
-        assert_eq!(
-            lf_count, crlf_count,
-            "All LF should be CRLF in Windows file"
-        );
+            let windows_bytes = s.services.fs.read_bytes(&windows_file, usize::MAX).unwrap();
+            let windows_content = String::from_utf8(windows_bytes).unwrap();
+            assert!(
+                windows_content.contains("\r\n"),
+                "Windows file should have CRLF"
+            );
+            let lf_count = windows_content.matches('\n').count();
+            let crlf_count = windows_content.matches("\r\n").count();
+            assert_eq!(
+                lf_count, crlf_count,
+                "All LF should be CRLF in Windows file"
+            );
+        });
     }
 }
