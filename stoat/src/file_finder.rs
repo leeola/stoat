@@ -12,11 +12,11 @@ use gpui::{
     div, point, prelude::FluentBuilder, px, relative, rgb, rgba, App, Bounds, Element, Font,
     FontStyle, FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
     LayoutId, PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window,
+    StatefulInteractiveElement, Style, Styled, TextAlign, TextRun, Window,
 };
 use std::path::{Path, PathBuf};
 use stoat_text::{HighlightCapture, Language, Parser};
-use text::{Buffer, BufferId};
+use text::{Buffer, BufferId, ReplicaId};
 
 /// Preview data for file finder.
 ///
@@ -405,11 +405,11 @@ impl Element for PreviewElement {
             }
         }
         let buffer = Buffer::new(
-            0,
+            ReplicaId::LOCAL,
             BufferId::new(1).expect("BufferId::new(1) should never fail"),
             preview_text.to_string(),
         );
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         let (captures, highlight_map) = match preview {
             PreviewData::Highlighted {
@@ -548,7 +548,14 @@ impl Element for PreviewElement {
         let line_height = px(18.0);
         for line in &layout.lines {
             line.shaped
-                .paint(line.position, line_height, window, cx)
+                .paint(
+                    line.position,
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
                 .unwrap_or_else(|err| {
                     eprintln!("Failed to paint preview line: {err:?}");
                 });

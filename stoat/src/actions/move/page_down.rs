@@ -25,7 +25,7 @@ impl Stoat {
 
         let buffer_item = self.active_buffer(cx);
         let buffer = buffer_item.read(cx).buffer();
-        let buffer_snapshot = buffer.read(cx).snapshot();
+        let buffer_snapshot = buffer.read(cx).snapshot().clone();
 
         // Get DisplaySnapshot for display-space operations
         let display_snapshot = self.display_map(cx).update(cx, |dm, cx| dm.snapshot(cx));

@@ -8,7 +8,7 @@ use gpui::{
     Window,
 };
 use std::num::NonZeroU64;
-use text::{Buffer, BufferId};
+use text::{Buffer, BufferId, ReplicaId};
 
 /// Inline editor for modal inputs.
 ///
@@ -38,7 +38,7 @@ impl InlineEditor {
         let id = NEXT_INLINE_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let buffer_id = BufferId::from(NonZeroU64::new(id).expect("BufferId overflow"));
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
 
         Self {
             buffer,

@@ -197,7 +197,7 @@ impl Fold {
 /// Summary for a fold subtree.
 ///
 /// Tracks the range spanned by folds in a SumTree node for efficient querying.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FoldSummary {
     /// Start anchor of the first fold in this subtree.
     pub start: Anchor,
@@ -215,6 +215,18 @@ pub struct FoldSummary {
     pub count: usize,
 }
 
+impl Default for FoldSummary {
+    fn default() -> Self {
+        Self {
+            start: Anchor::MIN,
+            end: Anchor::MIN,
+            min_start: Anchor::MIN,
+            max_end: Anchor::MIN,
+            count: 0,
+        }
+    }
+}
+
 impl sum_tree::Summary for FoldSummary {
     type Context<'a> = &'a text::BufferSnapshot;
 
@@ -228,8 +240,8 @@ impl sum_tree::Summary for FoldSummary {
                 *self = other.clone();
             } else {
                 self.end = other.end;
-                self.min_start = self.min_start.min(&other.min_start, buffer);
-                self.max_end = self.max_end.max(&other.max_end, buffer);
+                self.min_start = *self.min_start.min(&other.min_start, buffer);
+                self.max_end = *self.max_end.max(&other.max_end, buffer);
                 self.count += other.count;
             }
         }

@@ -37,7 +37,7 @@ impl PaneGroupView {
 
             if let Some(palette) = &self.app_state.command_palette_v2 {
                 let input_focus = palette.read(cx).input().read(cx).focus_handle(cx);
-                window.focus(&input_focus);
+                window.focus(&input_focus, cx);
             }
 
             cx.notify();

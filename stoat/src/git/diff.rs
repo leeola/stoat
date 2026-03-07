@@ -623,11 +623,15 @@ pub fn extract_hunk_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use text::Buffer;
+    use text::{Buffer, ReplicaId};
 
     fn create_buffer(text: &str) -> Buffer {
         use std::num::NonZeroU64;
-        Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text)
+        Buffer::new(
+            ReplicaId::LOCAL,
+            BufferId::from(NonZeroU64::new(1).unwrap()),
+            text,
+        )
     }
 
     #[test]

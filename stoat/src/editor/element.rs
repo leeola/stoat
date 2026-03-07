@@ -97,7 +97,7 @@ impl Element for EditorElement {
             let buffer_item = stoat.active_buffer(cx);
             let buffer_item_read = buffer_item.read(cx);
 
-            let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot();
+            let buffer_snapshot = buffer_item_read.buffer().read(cx).snapshot().clone();
             let highlight_map = buffer_item_read
                 .highlight_map()
                 .cloned()
@@ -1081,6 +1081,8 @@ impl Element for EditorElement {
             if let Err(e) = layout.shaped.paint_background(
                 point(content_x, layout.y_position),
                 line_height,
+                TextAlign::Left,
+                None,
                 window,
                 cx,
             ) {
@@ -1093,11 +1095,14 @@ impl Element for EditorElement {
             }
 
             // Then paint text on top
-            if let Err(e) =
-                layout
-                    .shaped
-                    .paint(point(content_x, layout.y_position), line_height, window, cx)
-            {
+            if let Err(e) = layout.shaped.paint(
+                point(content_x, layout.y_position),
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
                 tracing::error!(
                     "Failed to paint display row {} (buffer row {:?}): {:?}",
                     layout.display_row,
@@ -1121,7 +1126,14 @@ impl Element for EditorElement {
 
             // Paint line selection indicators (overdraws diff symbols for the active hunk)
             for (shaped, x, y) in &prepaint.line_select_indicators {
-                let _ = shaped.paint(point(*x, *y), line_height, window, cx);
+                let _ = shaped.paint(
+                    point(*x, *y),
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
 
             // Paint diagnostic icons in gutter
@@ -1157,7 +1169,14 @@ impl EditorElement {
         cx: &mut App,
     ) {
         for (shaped, x, y) in &prepaint.shaped_line_numbers {
-            if let Err(e) = shaped.paint(point(*x, *y), self.style.line_height, window, cx) {
+            if let Err(e) = shaped.paint(
+                point(*x, *y),
+                self.style.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            ) {
                 tracing::error!("Failed to paint line number: {:?}", e);
             }
         }
@@ -1171,7 +1190,14 @@ impl EditorElement {
         cx: &mut App,
     ) {
         for (shaped, x, y) in &prepaint.shaped_diff_symbols {
-            let _ = shaped.paint(point(*x, *y), self.style.line_height, window, cx);
+            let _ = shaped.paint(
+                point(*x, *y),
+                self.style.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
 
@@ -1380,7 +1406,14 @@ impl EditorElement {
         cx: &mut App,
     ) {
         for (shaped, x, y) in &prepaint.shaped_blame_annotations {
-            let _ = shaped.paint(point(*x, *y), self.style.line_height, window, cx);
+            let _ = shaped.paint(
+                point(*x, *y),
+                self.style.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
 

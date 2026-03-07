@@ -19,10 +19,10 @@ impl PaneGroupView {
 
             if self.app_state.command_line.input.is_none() {
                 use std::num::NonZeroU64;
-                use text::{Buffer, BufferId};
+                use text::{Buffer, BufferId, ReplicaId};
 
                 let buffer_id = BufferId::from(NonZeroU64::new(4).unwrap());
-                let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+                let input_buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
                 self.app_state.command_line.input = Some(input_buffer);
             }
         }

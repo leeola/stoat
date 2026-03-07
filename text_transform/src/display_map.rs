@@ -303,7 +303,7 @@ use text::{subscription::Subscription, Anchor, Buffer, BufferSnapshot, Edit, Poi
 /// Uses async WrapMap for non-blocking soft wrapping.
 pub struct DisplayMap {
     buffer: Entity<Buffer>,
-    buffer_subscription: Subscription,
+    buffer_subscription: Subscription<usize>,
     buffer_version: usize,
 
     // Mutable layer holders
@@ -340,7 +340,7 @@ impl DisplayMap {
         let buffer_subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
 
         // Get initial buffer snapshot for layer initialization
-        let buffer_snapshot = buffer.read(cx).snapshot();
+        let buffer_snapshot = buffer.read(cx).snapshot().clone();
 
         // Initialize all layers
         let inlay_map = crate::inlay_map::InlayMap::new(buffer_snapshot.clone());
@@ -352,7 +352,7 @@ impl DisplayMap {
             WrapMap::new(tab_snapshot, font.clone(), font_size, wrap_width, cx);
 
         let block_map = crate::block_map::BlockMap::new(wrap_snapshot);
-        let crease_map = crate::crease_map::CreaseMap::new(buffer_snapshot);
+        let crease_map = crate::crease_map::CreaseMap::new(buffer_snapshot.clone());
 
         Self {
             buffer,
@@ -378,7 +378,7 @@ impl DisplayMap {
     /// The snapshot is cheap to clone and can be used across threads.
     pub fn snapshot(&mut self, cx: &mut App) -> DisplaySnapshot {
         // Get current buffer snapshot first to check if buffer has changed
-        let buffer_snapshot = self.buffer.read(cx).snapshot();
+        let buffer_snapshot = self.buffer.read(cx).snapshot().clone();
 
         // Consume accumulated edits from subscription
         let edits = self.buffer_subscription.consume().into_inner();
@@ -420,7 +420,7 @@ impl DisplayMap {
             self.block_map.sync(wrap_snapshot, wrap_edits.into_inner());
 
         // Update crease map with new buffer
-        self.crease_map.set_buffer(buffer_snapshot);
+        self.crease_map.set_buffer(buffer_snapshot.clone());
 
         // Only increment version if there were actual edits
         if !edits.is_empty() {

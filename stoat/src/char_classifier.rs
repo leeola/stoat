@@ -514,11 +514,11 @@ impl CharClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use text::Buffer;
+    use text::{Buffer, ReplicaId};
 
     fn snapshot(text: &str) -> BufferSnapshot {
-        let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), text);
-        buffer.snapshot()
+        let buffer = Buffer::new(ReplicaId::LOCAL, text::BufferId::new(1).unwrap(), text);
+        buffer.snapshot().clone()
     }
 
     #[test]

@@ -354,10 +354,8 @@ impl PaneGroupView {
     /// This should be called after creating the [`PaneGroupView`] to establish the initial
     /// focus, ensuring keyboard input is routed to the active editor. Used by [`run_with_paths`]
     /// during app initialization.
-    pub fn focus_active_editor(&self, window: &mut Window, cx: &App) {
-        if let Some(editor) = self.active_editor() {
-            window.focus(&editor.read(cx).focus_handle(cx));
-        }
+    pub fn active_editor_focus_handle(&self, cx: &App) -> Option<gpui::FocusHandle> {
+        self.active_editor().map(|e| e.read(cx).focus_handle(cx))
     }
 
     /// Exit Pane mode if currently in it, returning to Normal mode.
@@ -393,16 +391,19 @@ impl PaneGroupView {
             Some(crate::content_view::PaneContent::Editor(editor)) => {
                 let stoat = editor.read(cx).stoat.clone();
                 stoat.update(cx, |s, _| s.set_key_context(KeyContext::TextEditor));
-                window.focus(&editor.read(cx).focus_handle(cx));
+                let handle = editor.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
             },
             Some(crate::content_view::PaneContent::Claude(claude)) => {
                 let stoat = claude.read(cx).stoat().clone();
                 stoat.update(cx, |s, _| s.set_key_context(KeyContext::Claude));
                 stoat.update(cx, |s, _| s.set_mode("normal"));
-                window.focus(&claude.read(cx).focus_handle(cx));
+                let handle = claude.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
             },
             Some(crate::content_view::PaneContent::Static(view)) => {
-                window.focus(&view.read(cx).focus_handle(cx));
+                let handle = view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
             },
             None => {},
         }

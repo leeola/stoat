@@ -75,7 +75,7 @@ impl BufferItem {
     }
 
     pub fn buffer_snapshot(&self, cx: &App) -> BufferSnapshot {
-        self.buffer.read(cx).snapshot()
+        self.buffer.read(cx).snapshot().clone()
     }
 
     pub fn display_buffer(

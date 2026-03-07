@@ -17,7 +17,7 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, WeakEntity};
 use parking_lot::Mutex;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use stoat_text::Language;
-use text::{Anchor, Buffer, BufferId, Point, Selection};
+use text::{Anchor, Buffer, BufferId, Point, ReplicaId, Selection};
 
 /// KeyContext for keybinding dispatch.
 ///
@@ -490,7 +490,7 @@ impl Stoat {
         let buffer_id = buffer_store.update(cx, |store, _cx| store.allocate_buffer_id());
 
         // Create initial buffer with specified text
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, initial_text));
+        let buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, initial_text));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer.clone(), Language::PlainText, cx));
 
         // Register buffer in BufferStore (weak ref) and store strong ref in open_buffers

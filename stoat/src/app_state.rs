@@ -41,7 +41,7 @@ use std::{
 };
 use stoat_lsp::DiagnosticSet;
 use stoat_text::Language;
-use text::Buffer;
+use text::{Buffer, ReplicaId};
 
 /// Maximum UI notification rate for LSP progress updates (milliseconds).
 ///
@@ -440,23 +440,20 @@ impl AppState {
                     let version = diagnostics_version.fetch_add(1, Ordering::SeqCst) + 1;
 
                     // Find BufferItem and update diagnostics on main thread
-                    let result: Result<Option<(Entity<BufferItem>, DiagnosticSet)>, _> =
-                        cx.update(|cx| {
-                            let buffer_item =
-                                buffer_store_clone.read(cx).get_buffer_by_path(&path)?;
-                            let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-                            let diag_set = lsp_manager.diagnostics_for_buffer(&path, &snapshot)?;
+                    let result: Option<(Entity<BufferItem>, DiagnosticSet)> = cx.update(|cx| {
+                        let buffer_item = buffer_store_clone.read(cx).get_buffer_by_path(&path)?;
+                        let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+                        let diag_set = lsp_manager.diagnostics_for_buffer(&path, &snapshot)?;
 
-                            Some((buffer_item.clone(), diag_set))
-                        });
-                    let result = result.ok().flatten();
+                        Some((buffer_item.clone(), diag_set))
+                    });
 
                     if let Some((buffer_item, diag_set)) = result {
-                        let _ = buffer_item
-                            .update(cx, |item, cx| {
+                        cx.update(|cx| {
+                            buffer_item.update(cx, |item, cx| {
                                 item.update_diagnostics(server_id, diag_set, version, cx);
-                            })
-                            .ok();
+                            });
+                        });
                     }
                 }
             })
@@ -734,7 +731,7 @@ impl AppState {
                         Some((path, language_id, text))
                     })
                     .collect()
-            })?;
+            });
 
             for (path, language_id, text) in paths_and_texts {
                 let uri_str = format!("file://{}", path.display());
@@ -799,7 +796,7 @@ impl AppState {
 
         // Create input buffer with BufferId 2 (following existing convention)
         let buffer_id = BufferId::from(NonZeroU64::new(2).unwrap());
-        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let input_buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
         self.file_finder.input = Some(input_buffer);
 
         // Scan worktree for files
@@ -869,7 +866,7 @@ impl AppState {
 
         // Create input buffer with BufferId 3 (following existing convention)
         let buffer_id = BufferId::from(NonZeroU64::new(3).unwrap());
-        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let input_buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
         self.command_palette.input = Some(input_buffer);
 
         // Initialize command palette state
@@ -950,7 +947,7 @@ impl AppState {
 
         // Create input buffer with BufferId 4 (following existing convention)
         let buffer_id = BufferId::from(NonZeroU64::new(4).unwrap());
-        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let input_buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
         self.buffer_finder.input = Some(input_buffer);
 
         // Get all open buffers from buffer_store (caller will update active/visible status)
@@ -1003,7 +1000,7 @@ impl AppState {
         self.symbol_picker.source = Some(source);
 
         let buffer_id = BufferId::from(NonZeroU64::new(5).unwrap());
-        let input_buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let input_buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
         self.symbol_picker.input = Some(input_buffer);
 
         self.symbol_picker.symbols = symbols.clone();

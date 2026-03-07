@@ -6,7 +6,7 @@
 use crate::render_stats::tracker::{is_render_stats_enabled, FrameTimer};
 use gpui::{
     point, px, size, App, Bounds, Element, Font, FontStyle, FontWeight, GlobalElementId, Hsla,
-    IntoElement, Pixels, SharedString, TextRun, Window,
+    IntoElement, Pixels, SharedString, TextAlign, TextRun, Window,
 };
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -116,7 +116,7 @@ impl RenderStatsOverlay {
             overlay_bounds.origin.x + OVERLAY_PADDING,
             overlay_bounds.origin.y + OVERLAY_PADDING,
         );
-        let _ = shaped_text.paint(text_origin, px(16.0), window, cx);
+        let _ = shaped_text.paint(text_origin, px(16.0), TextAlign::Left, None, window, cx);
 
         // Paint graph bars
         if !frame_times.is_empty() {
@@ -339,7 +339,7 @@ impl Element for RenderStatsOverlayElement {
             overlay_bounds.origin.x + OVERLAY_PADDING,
             overlay_bounds.origin.y + OVERLAY_PADDING,
         );
-        let _ = shaped_text.paint(text_origin, px(16.0), window, cx);
+        let _ = shaped_text.paint(text_origin, px(16.0), TextAlign::Left, None, window, cx);
 
         if !frame_times.is_empty() {
             let graph_origin_y = overlay_bounds.origin.y + px(16.0) + OVERLAY_PADDING * 2.0;

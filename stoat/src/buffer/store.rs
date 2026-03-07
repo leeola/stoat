@@ -8,7 +8,7 @@ use crate::buffer::item::BufferItem;
 use gpui::{App, AppContext, Entity, WeakEntity};
 use std::{collections::HashMap, num::NonZeroU64, path::PathBuf};
 use stoat_text::Language;
-use text::{Buffer, BufferId};
+use text::{Buffer, BufferId, ReplicaId};
 
 /// Buffer list entry for UI display.
 ///
@@ -134,7 +134,7 @@ impl BufferStore {
         // Create new buffer
         let buffer_id = self.allocate_buffer_id();
         tracing::trace!("open_buffer: buffer_id={:?}", buffer_id);
-        let buffer = cx.new(|_| Buffer::new(0, buffer_id, ""));
+        let buffer = cx.new(|_| Buffer::new(ReplicaId::LOCAL, buffer_id, ""));
         let buffer_item = cx.new(|cx| BufferItem::new(buffer, language, cx));
 
         // Store buffer with weak reference (strong ref must be held by caller)

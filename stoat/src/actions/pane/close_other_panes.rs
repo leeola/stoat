@@ -38,7 +38,8 @@ impl PaneGroupView {
             .get(&keep)
             .and_then(|content| content.as_editor())
         {
-            window.focus(&editor.read(cx).focus_handle(cx));
+            let handle = editor.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
         }
 
         self.update_minimap_to_active_pane(cx);

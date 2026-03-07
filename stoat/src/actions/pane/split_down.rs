@@ -47,7 +47,8 @@ impl PaneGroupView {
             "Split complete, focusing new pane"
         );
 
-        window.focus(&new_editor.read(cx).focus_handle(cx));
+        let handle = new_editor.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
 
         self.update_minimap_to_active_pane(cx);
 

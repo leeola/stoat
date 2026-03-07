@@ -32,7 +32,10 @@ impl<'a> TestApp<'a> {
             PaneGroupView::new(config, vec![], keymap, PathBuf::from("."), cx)
         });
         cx.update(|window, cx| {
-            view.read(cx).focus_active_editor(window, cx);
+            let handle = view.read(cx).active_editor_focus_handle(cx);
+            if let Some(handle) = handle {
+                window.focus(&handle, cx);
+            }
         });
         Self { view, cx }
     }

@@ -930,7 +930,7 @@ async fn start_lsp(
     let root_dir = cx.update(|cx| {
         let s = stoat.read(cx);
         s.worktree.lock().root().to_path_buf()
-    })?;
+    });
 
     let init_request = serde_json::json!({
         "jsonrpc": "2.0",
@@ -982,8 +982,8 @@ async fn start_lsp(
                 let text = item_read.buffer().read(cx).text();
                 Some((abs_path, text))
             })
-            .collect()
-    })?;
+            .collect::<Vec<_>>()
+    });
 
     for (path, text) in paths_and_texts {
         let uri_str = format!("file://{}", path.display());

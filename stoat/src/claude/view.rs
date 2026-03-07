@@ -160,7 +160,7 @@ impl ClaudeView {
             }
 
             if input_mode == "normal" && event.keystroke.key.as_str() == "escape" {
-                window.focus(&self.focus_handle);
+                window.focus(&self.focus_handle, cx);
                 cx.notify();
                 return;
             }
@@ -183,7 +183,7 @@ impl ClaudeView {
         let mode = self.stoat.read(cx).mode().to_string();
         if mode == "normal" && event.keystroke.key.as_str() == "i" {
             let input_handle = self.input_editor_view.read(cx).focus_handle.clone();
-            window.focus(&input_handle);
+            window.focus(&input_handle, cx);
             self.input_stoat.update(cx, |s, _| s.set_mode("insert"));
             cx.notify();
             return;

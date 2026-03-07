@@ -511,10 +511,8 @@ impl WrapMap {
                 (new_snapshot, edits)
             });
 
-            match cx
-                .background_executor()
-                .block_with_timeout(Duration::from_millis(5), task)
-            {
+            let executor = cx.foreground_executor().clone();
+            match executor.block_with_timeout(Duration::from_millis(5), task) {
                 Ok((snapshot, edits)) => {
                     self.snapshot = snapshot;
                     self.edits_since_sync = self.edits_since_sync.compose(&edits);
@@ -593,10 +591,8 @@ impl WrapMap {
                     (snapshot, edits)
                 });
 
-                match cx
-                    .background_executor()
-                    .block_with_timeout(Duration::from_millis(1), update_task)
-                {
+                let executor = cx.foreground_executor().clone();
+                match executor.block_with_timeout(Duration::from_millis(1), update_task) {
                     Ok((snapshot, output_edits)) => {
                         self.snapshot = snapshot;
                         self.edits_since_sync = self.edits_since_sync.compose(&output_edits);

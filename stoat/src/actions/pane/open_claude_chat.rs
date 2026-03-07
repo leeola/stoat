@@ -33,7 +33,8 @@ impl PaneGroupView {
                 let stoat = claude_view.read(cx).stoat().clone();
                 stoat.update(cx, |s, _| s.set_key_context(KeyContext::Claude));
                 stoat.update(cx, |s, _| s.set_mode("normal"));
-                window.focus(&claude_view.read(cx).focus_handle(cx));
+                let handle = claude_view.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
                 cx.notify();
             }
             return;
@@ -86,7 +87,8 @@ impl PaneGroupView {
 
         stoat.update(cx, |s, _| s.set_key_context(KeyContext::Claude));
         stoat.update(cx, |s, _| s.set_mode("normal"));
-        window.focus(&claude_view.read(cx).focus_handle(cx));
+        let handle = claude_view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
 
         state.update(cx, |s, cx| s.start(workdir, cx));
 
@@ -119,7 +121,8 @@ impl PaneGroupView {
         let stoat = view.read(cx).stoat().clone();
         stoat.update(cx, |s, _| s.set_key_context(KeyContext::Claude));
         stoat.update(cx, |s, _| s.set_mode("normal"));
-        window.focus(&view.read(cx).focus_handle(cx));
+        let handle = view.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
 
         self.exit_pane_mode(cx);
         cx.notify();
@@ -161,13 +164,16 @@ impl PaneGroupView {
                     if let Some(content) = self.pane_contents.get(&new_active) {
                         match content {
                             PaneContent::Editor(editor) => {
-                                window.focus(&editor.read(cx).focus_handle(cx));
+                                let handle = editor.read(cx).focus_handle(cx);
+                                window.focus(&handle, cx);
                             },
                             PaneContent::Claude(claude) => {
-                                window.focus(&claude.read(cx).focus_handle(cx));
+                                let handle = claude.read(cx).focus_handle(cx);
+                                window.focus(&handle, cx);
                             },
                             PaneContent::Static(static_view) => {
-                                window.focus(&static_view.read(cx).focus_handle(cx));
+                                let handle = static_view.read(cx).focus_handle(cx);
+                                window.focus(&handle, cx);
                             },
                         }
                     }

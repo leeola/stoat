@@ -585,16 +585,20 @@ mod tests {
     use super::*;
     use crate::git::diff::BufferDiff;
     use std::num::NonZeroU64;
-    use text::{Buffer, BufferId};
+    use text::{Buffer, BufferId, ReplicaId};
 
     fn create_buffer(text: &str) -> Buffer {
-        Buffer::new(0, BufferId::from(NonZeroU64::new(1).unwrap()), text)
+        Buffer::new(
+            ReplicaId::LOCAL,
+            BufferId::from(NonZeroU64::new(1).unwrap()),
+            text,
+        )
     }
 
     #[test]
     fn display_buffer_without_diff() {
         let buffer = create_buffer("line 1\nline 2\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         let display_buffer = DisplayBuffer::new(snapshot, None, true, None, None, None);
 
@@ -613,7 +617,7 @@ mod tests {
     #[test]
     fn display_buffer_with_added_hunk() {
         let buffer = create_buffer("line 1\nline 2\nnew line\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         // Base text without the added line
         let base_text = "line 1\nline 2\nline 3";
@@ -639,7 +643,7 @@ mod tests {
     #[test]
     fn display_buffer_with_deleted_hunk() {
         let buffer = create_buffer("line 1\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         // Base text with the deleted line
         let base_text = "line 1\nline 2\nline 3";
@@ -669,7 +673,7 @@ mod tests {
     #[test]
     fn display_buffer_with_modified_hunk() {
         let buffer = create_buffer("line 1\nmodified\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         // Base text with original line
         let base_text = "line 1\nline 2\nline 3";
@@ -703,7 +707,7 @@ mod tests {
     #[test]
     fn modified_line_shows_both_versions() {
         let buffer = create_buffer("line 1\nhello universe\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         // Base text with original mid-line content
         let base_text = "line 1\nhello world\nline 3";
@@ -763,7 +767,7 @@ mod tests {
     #[test]
     fn buffer_row_to_display_mapping() {
         let buffer = create_buffer("line 1\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         let base_text = "line 1\nline 2\nline 3";
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
@@ -794,7 +798,7 @@ mod tests {
     #[test]
     fn display_row_to_buffer_mapping() {
         let buffer = create_buffer("line 1\nline 3");
-        let snapshot = buffer.snapshot();
+        let snapshot = buffer.snapshot().clone();
 
         let base_text = "line 1\nline 2\nline 3";
         let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)

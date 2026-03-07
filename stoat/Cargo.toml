@@ -7,6 +7,7 @@ license-file = "../LICENSE"
 
 [dependencies]
 gpui = { workspace = true }
+gpui_macos = { workspace = true }
 text = { workspace = true }
 sum_tree = { workspace = true }
 clock = { workspace = true }

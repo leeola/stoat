@@ -3,7 +3,7 @@ use gpui::{
     div, point, prelude::FluentBuilder, px, rgb, rgba, App, Bounds, Element, Font, FontStyle,
     FontWeight, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     PaintQuad, ParentElement, Pixels, RenderOnce, ScrollHandle, ShapedLine, SharedString,
-    StatefulInteractiveElement, Style, Styled, TextRun, Window,
+    StatefulInteractiveElement, Style, Styled, TextAlign, TextRun, Window,
 };
 use std::path::PathBuf;
 
@@ -393,7 +393,14 @@ impl Element for DiffPreviewElement {
         let line_height = px(18.0);
         for line in &layout.lines {
             line.shaped
-                .paint(line.position, line_height, window, cx)
+                .paint(
+                    line.position,
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
                 .unwrap_or_else(|err| {
                     eprintln!("Failed to paint diff line: {err:?}");
                 });

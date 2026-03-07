@@ -27,7 +27,7 @@ impl PaneGroupView {
             }
 
             let editor_focus = editor.read(cx).focus_handle(cx);
-            window.focus(&editor_focus);
+            window.focus(&editor_focus, cx);
 
             cx.notify();
         }

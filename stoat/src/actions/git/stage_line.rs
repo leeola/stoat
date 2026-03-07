@@ -34,7 +34,7 @@ impl Stoat {
         let repo_dir = self.worktree_root_abs();
         let cursor_row = self.cursor.position().row;
         let buffer_item = self.active_buffer(cx);
-        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+        let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
 
         let diff = buffer_item
             .read(cx)
@@ -227,7 +227,7 @@ impl Stoat {
             selection.select_all();
         } else {
             let buffer_item = self.active_buffer(cx);
-            let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
+            let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
             let buffer_text = buffer_snapshot.text();
             let target_content = buffer_text
                 .lines()

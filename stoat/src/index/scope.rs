@@ -29,11 +29,21 @@ pub struct ScopeEntry {
     pub parent: Option<Anchor>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScopeSummary {
     pub range: Range<Anchor>,
     pub count: usize,
     pub max_depth: u16,
+}
+
+impl Default for ScopeSummary {
+    fn default() -> Self {
+        Self {
+            range: Anchor::MAX..Anchor::MAX,
+            count: 0,
+            max_depth: 0,
+        }
+    }
 }
 
 impl Item for ScopeEntry {
@@ -255,11 +265,11 @@ fn extract_rust_scopes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use text::Buffer;
+    use text::{Buffer, ReplicaId};
 
     fn parse_and_index(source: &str) -> (BufferSnapshot, ScopeIndex) {
-        let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
-        let snapshot = buffer.snapshot();
+        let buffer = Buffer::new(ReplicaId::LOCAL, text::BufferId::new(1).unwrap(), source);
+        let snapshot = buffer.snapshot().clone();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
         parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();

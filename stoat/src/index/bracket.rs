@@ -19,10 +19,19 @@ pub struct BracketEntry {
     pub kind: BracketKind,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BracketSummary {
     pub range: Range<Anchor>,
     pub count: usize,
+}
+
+impl Default for BracketSummary {
+    fn default() -> Self {
+        Self {
+            range: Anchor::MAX..Anchor::MAX,
+            count: 0,
+        }
+    }
 }
 
 impl Item for BracketEntry {
@@ -233,11 +242,11 @@ fn extract_bracket_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use text::Buffer;
+    use text::{Buffer, ReplicaId};
 
     fn parse_and_index(source: &str) -> (BufferSnapshot, BracketIndex) {
-        let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
-        let snapshot = buffer.snapshot();
+        let buffer = Buffer::new(ReplicaId::LOCAL, text::BufferId::new(1).unwrap(), source);
+        let snapshot = buffer.snapshot().clone();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
         parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();

@@ -812,7 +812,7 @@ impl<'a> Iterator for HighlightedChunks<'a> {
 mod tests {
     use super::*;
     use stoat_text::{HighlightQuery, Language, Parser};
-    use text::{Buffer, BufferId};
+    use text::{Buffer, BufferId, ReplicaId};
 
     #[test]
     fn highlight_map_prefix_matching() {
@@ -848,8 +848,12 @@ mod tests {
     #[test]
     fn highlighted_chunks_basic() {
         let source = "fn main() {}";
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
-        let snapshot = buffer.snapshot();
+        let buffer = Buffer::new(
+            ReplicaId::LOCAL,
+            BufferId::new(1).unwrap(),
+            source.to_string(),
+        );
+        let snapshot = buffer.snapshot().clone();
 
         let mut parser = Parser::new(Language::Rust).unwrap();
         parser.parse(source).unwrap();
@@ -875,8 +879,12 @@ mod tests {
     #[test]
     fn highlighted_chunks_plain_text() {
         let source = "hello world";
-        let buffer = Buffer::new(0, BufferId::new(1).unwrap(), source.to_string());
-        let snapshot = buffer.snapshot();
+        let buffer = Buffer::new(
+            ReplicaId::LOCAL,
+            BufferId::new(1).unwrap(),
+            source.to_string(),
+        );
+        let snapshot = buffer.snapshot().clone();
         let captures = vec![];
         let _theme = SyntaxTheme::monokai_dark();
         let highlight_map = HighlightMap::default();

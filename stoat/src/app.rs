@@ -1,6 +1,7 @@
 use crate::{keymap::compiled::CompiledKeymap, pane_group::PaneGroupView};
 use gpui::{prelude::*, px, size, App, Application, Bounds, WindowBounds, WindowOptions};
-use std::{path::Path, sync::Arc, time::Duration};
+use gpui_macos::MacPlatform;
+use std::{path::Path, rc::Rc, sync::Arc, time::Duration};
 
 #[cfg(debug_assertions)]
 pub fn run_with_paths(
@@ -35,7 +36,7 @@ fn run_with_paths_impl(
     background: bool,
     paths: Vec<std::path::PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Application::new().run(move |cx: &mut App| {
+    Application::with_platform(Rc::new(MacPlatform::new(false))).run(move |cx: &mut App| {
         let discovered = crate::paths::discover(&std::env::current_dir().unwrap_or_default());
 
         let config = crate::Config::load_with_overrides(
@@ -102,7 +103,10 @@ fn run_with_paths_impl(
                 // Focus the initial editor so input works immediately
                 // This must happen after PaneGroupView is created so the focus chain is
                 // established
-                pane_group_view.read(cx).focus_active_editor(window, cx);
+                let handle = pane_group_view.read(cx).active_editor_focus_handle(cx);
+                if let Some(handle) = handle {
+                    window.focus(&handle, cx);
+                }
 
                 // If input simulation was requested, schedule it for next frame
                 // This ensures view hierarchy is fully initialized before dispatching

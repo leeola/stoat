@@ -27,10 +27,19 @@ pub struct SymbolEntry {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SymbolSummary {
     pub range: Range<Anchor>,
     pub count: usize,
+}
+
+impl Default for SymbolSummary {
+    fn default() -> Self {
+        Self {
+            range: Anchor::MAX..Anchor::MAX,
+            count: 0,
+        }
+    }
 }
 
 impl Item for SymbolEntry {
@@ -291,11 +300,11 @@ fn extract_rust_symbols(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use text::Buffer;
+    use text::{Buffer, ReplicaId};
 
     fn parse_and_index(source: &str) -> (BufferSnapshot, SymbolIndex) {
-        let buffer = Buffer::new(0, text::BufferId::new(1).unwrap(), source);
-        let snapshot = buffer.snapshot();
+        let buffer = Buffer::new(ReplicaId::LOCAL, text::BufferId::new(1).unwrap(), source);
+        let snapshot = buffer.snapshot().clone();
         let mut parser = stoat_text::Parser::new(Language::Rust).unwrap();
         parser.parse(source).unwrap();
         let tree = parser.tree().unwrap();
