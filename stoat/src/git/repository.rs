@@ -642,217 +642,123 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, process::Command};
-
-    /// Helper to create a temporary git repository for testing.
-    fn create_test_repo() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let path = dir.path().to_path_buf();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to init git repo");
-
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to configure git");
-
-        Command::new("git")
-            .args(["config", "user.email", "test@example.com"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to configure git");
-
-        (dir, path)
-    }
+    use crate::{
+        fs::FakeFs,
+        git::provider::{FakeGitProvider, GitProvider},
+    };
+    use std::sync::Arc;
 
     #[test]
     fn discover_repository() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
 
-        let repo = Repository::discover(&path).expect("Should find repository");
-        // Canonicalize both paths for comparison (handles /var vs /private/var on macOS)
-        let expected = path.canonicalize().expect("Failed to canonicalize path");
-        let actual = repo
-            .workdir()
-            .canonicalize()
-            .expect("Failed to canonicalize workdir");
-        assert_eq!(actual, expected);
+        let repo = provider.discover(&workdir).unwrap();
+        assert_eq!(repo.workdir(), workdir);
     }
 
     #[test]
     fn discover_repository_not_found() {
-        let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let result = Repository::discover(dir.path());
-
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let result = provider.discover(Path::new("/no/repo"));
         assert!(matches!(result, Err(GitError::RepositoryNotFound(_))));
     }
 
     #[test]
     fn read_head_content() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        let file_path = workdir.join("test.txt");
+        provider.commit_file(&file_path, "hello world\n");
 
-        let file_path = path.join("test.txt");
-        fs::write(&file_path, "hello world\n").expect("Failed to write file");
-
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        let repo = Repository::open(&path).expect("Should open repository");
-        let content = repo
-            .head_content(&file_path)
-            .expect("Should read HEAD content");
-
+        let repo = provider.discover(&workdir).unwrap();
+        let content = repo.head_content(&file_path).unwrap();
         assert_eq!(content, "hello world\n");
     }
 
     #[test]
     fn read_head_content_file_not_found() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.commit_file(workdir.join("test.txt"), "hello\n");
 
-        let file_path = path.join("test.txt");
-        fs::write(&file_path, "hello\n").expect("Failed to write file");
-
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-
-        Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        let repo = Repository::open(&path).expect("Should open repository");
-
-        let missing_path = path.join("missing.txt");
+        let repo = provider.discover(&workdir).unwrap();
+        let missing_path = workdir.join("missing.txt");
         let result = repo.head_content(&missing_path);
-
         assert!(matches!(result, Err(GitError::FileNotFound(_))));
     }
 
     #[test]
     fn parent_content_returns_prior_version() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        let file_path = workdir.join("test.txt");
+        provider.set_parent_content(&file_path, "version 1\n");
+        provider.commit_file(&file_path, "version 2\n");
 
-        let file_path = path.join("test.txt");
-        fs::write(&file_path, "version 1\n").expect("Failed to write file");
-
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-        Command::new("git")
-            .args(["commit", "-m", "First commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        fs::write(&file_path, "version 2\n").expect("Failed to write file");
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-        Command::new("git")
-            .args(["commit", "-m", "Second commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        let repo = Repository::open(&path).expect("Should open repository");
-        let content = repo
-            .parent_content(&file_path)
-            .expect("Should read parent content");
+        let repo = provider.discover(&workdir).unwrap();
+        let content = repo.parent_content(&file_path).unwrap();
         assert_eq!(content, "version 1\n");
     }
 
     #[test]
     fn commit_changed_files_lists_modified() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.add_commit(
+            "abc123",
+            vec![CommitFileChange {
+                path: PathBuf::from("a.txt"),
+                status: "M".to_string(),
+            }],
+            HashMap::new(),
+        );
 
-        let file1 = path.join("a.txt");
-        let file2 = path.join("b.txt");
-        fs::write(&file1, "hello\n").expect("Failed to write file");
-        fs::write(&file2, "world\n").expect("Failed to write file");
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-        Command::new("git")
-            .args(["commit", "-m", "First commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        fs::write(&file1, "changed\n").expect("Failed to write file");
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git add");
-        Command::new("git")
-            .args(["commit", "-m", "Second commit"])
-            .current_dir(&path)
-            .output()
-            .expect("Failed to git commit");
-
-        let repo = Repository::open(&path).expect("Should open repository");
-        let files = repo
-            .commit_changed_files()
-            .expect("Should list changed files");
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0], PathBuf::from("a.txt"));
-    }
-
-    fn get_head_oid(path: &Path) -> String {
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(path)
-            .output()
-            .expect("git rev-parse");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
+        let repo = provider.discover(&workdir).unwrap();
+        let files = repo.commit_changed_files().unwrap();
+        assert_eq!(files, [PathBuf::from("a.txt")]);
     }
 
     #[test]
     fn commit_files_by_oid_initial_commit() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.add_commit(
+            "abc123",
+            vec![
+                CommitFileChange {
+                    path: PathBuf::from("a.txt"),
+                    status: "A".to_string(),
+                },
+                CommitFileChange {
+                    path: PathBuf::from("b.txt"),
+                    status: "A".to_string(),
+                },
+            ],
+            HashMap::new(),
+        );
 
-        fs::write(path.join("a.txt"), "hello\n").unwrap();
-        fs::write(path.join("b.txt"), "world\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        let oid = get_head_oid(&path);
-        let repo = Repository::open(&path).unwrap();
-        let files = repo.commit_files_by_oid(&oid).unwrap();
-
+        let repo = provider.discover(&workdir).unwrap();
+        let files = repo.commit_files_by_oid("abc123").unwrap();
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .iter()
@@ -865,37 +771,22 @@ mod tests {
 
     #[test]
     fn commit_files_by_oid_second_commit() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.add_commit(
+            "def456",
+            vec![CommitFileChange {
+                path: PathBuf::from("a.txt"),
+                status: "M".to_string(),
+            }],
+            HashMap::new(),
+        );
 
-        fs::write(path.join("a.txt"), "hello\n").unwrap();
-        fs::write(path.join("b.txt"), "world\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        fs::write(path.join("a.txt"), "changed\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "modify a"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        let oid = get_head_oid(&path);
-        let repo = Repository::open(&path).unwrap();
-        let files = repo.commit_files_by_oid(&oid).unwrap();
-
+        let repo = provider.discover(&workdir).unwrap();
+        let files = repo.commit_files_by_oid("def456").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, PathBuf::from("a.txt"));
         assert_eq!(files[0].status, "M");
@@ -903,36 +794,27 @@ mod tests {
 
     #[test]
     fn commit_file_diff_shows_patch() {
-        let (_dir, path) = create_test_repo();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        let mut diffs = HashMap::new();
+        diffs.insert(
+            PathBuf::from("a.txt"),
+            "@@ -1,2 +1,2 @@\n line1\n-line2\n+modified\n".to_string(),
+        );
+        provider.add_commit(
+            "abc123",
+            vec![CommitFileChange {
+                path: PathBuf::from("a.txt"),
+                status: "M".to_string(),
+            }],
+            diffs,
+        );
 
-        fs::write(path.join("a.txt"), "line1\nline2\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        fs::write(path.join("a.txt"), "line1\nmodified\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "modify"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-
-        let oid = get_head_oid(&path);
-        let repo = Repository::open(&path).unwrap();
-        let diff = repo.commit_file_diff(&oid, Path::new("a.txt")).unwrap();
-
+        let repo = provider.discover(&workdir).unwrap();
+        let diff = repo.commit_file_diff("abc123", Path::new("a.txt")).unwrap();
         assert!(diff.contains("-line2"));
         assert!(diff.contains("+modified"));
     }

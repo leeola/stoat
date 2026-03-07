@@ -1,6 +1,8 @@
+use crate::claude::provider::{ClaudeProvider, ClaudeSessionConfig};
 use gpui::{Context, EventEmitter};
 use smol::channel;
-use stoat_agent_claude_code::{ClaudeCode, PermissionMode, SdkMessage};
+use std::sync::Arc;
+use stoat_agent_claude_code::{PermissionMode, SdkMessage};
 
 pub enum ChatMessage {
     User(String),
@@ -40,43 +42,40 @@ impl ClaudeState {
         }
     }
 
-    pub fn start(&mut self, workdir: String, cx: &mut Context<Self>) {
-        let (stdin_tx, stdin_rx) = channel::bounded::<(String, PermissionMode)>(32);
-        self.stdin_tx = Some(stdin_tx);
+    pub fn start(
+        &mut self,
+        workdir: String,
+        provider: Arc<dyn ClaudeProvider>,
+        cx: &mut Context<Self>,
+    ) {
         let initial_mode = self.permission_mode.clone();
 
         let log_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("stoat/logs");
 
+        let config = ClaudeSessionConfig {
+            workdir,
+            permission_mode: initial_mode,
+            log_dir: Some(log_dir),
+        };
+
+        let session = match provider.create_session(config) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = ClaudeStatus::Idle;
+                self.messages
+                    .push(ChatMessage::Error(format!("Failed to start: {e}")));
+                cx.emit(ClaudeStateEvent::Updated);
+                cx.notify();
+                return;
+            },
+        };
+
+        self.stdin_tx = Some(session.stdin_tx);
+        let stdout_rx = session.stdout_rx;
+
         cx.spawn(async move |this, cx| {
-            let claude = ClaudeCode::builder()
-                .cwd(&workdir)
-                .log_dir(&log_dir)
-                .permission_mode(initial_mode)
-                .build()
-                .await;
-
-            let mut claude = match claude {
-                Ok(c) => c,
-                Err(e) => {
-                    this.update(cx, |state, cx| {
-                        state.status = ClaudeStatus::Idle;
-                        state
-                            .messages
-                            .push(ChatMessage::Error(format!("Failed to start: {e}")));
-                        cx.emit(ClaudeStateEvent::Updated);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                },
-            };
-
-            if let Some(p) = claude.log_file() {
-                tracing::info!("Claude Code log: {}", p.display());
-            }
-
             this.update(cx, |state, cx| {
                 state.status = ClaudeStatus::Idle;
                 cx.emit(ClaudeStateEvent::Updated);
@@ -84,59 +83,17 @@ impl ClaudeState {
             })
             .ok();
 
-            loop {
-                match claude
-                    .recv_any_message(std::time::Duration::from_millis(100))
-                    .await
-                {
-                    Ok(Some(msg)) => {
-                        let is_terminal = msg.is_terminal();
-                        this.update(cx, |state, cx| {
-                            Self::process_message(state, msg);
-                            if is_terminal {
-                                state.status = ClaudeStatus::Idle;
-                            }
-                            cx.emit(ClaudeStateEvent::Updated);
-                            cx.notify();
-                        })
-                        .ok();
-                    },
-                    Ok(None) => {},
-                    Err(_) => break,
-                }
-
-                match stdin_rx.try_recv() {
-                    Ok((text, desired_mode)) => {
-                        let current_mode = claude.permission_mode().cloned();
-                        if current_mode.as_ref() != Some(&desired_mode) {
-                            if let Err(e) = claude.switch_permission_mode(desired_mode).await {
-                                this.update(cx, |state, cx| {
-                                    state.messages.push(ChatMessage::Error(format!(
-                                        "Failed to switch permission mode: {e}"
-                                    )));
-                                    cx.emit(ClaudeStateEvent::Updated);
-                                    cx.notify();
-                                })
-                                .ok();
-                            }
-                        }
-                        this.update(cx, |state, cx| {
-                            state.status = ClaudeStatus::Responding;
-                            cx.emit(ClaudeStateEvent::Updated);
-                            cx.notify();
-                        })
-                        .ok();
-                        if claude.send_message(&text).await.is_err() {
-                            break;
-                        }
-                    },
-                    Err(channel::TryRecvError::Empty) => {},
-                    Err(channel::TryRecvError::Closed) => break,
-                }
-
-                if !claude.is_alive() {
-                    break;
-                }
+            while let Ok(msg) = stdout_rx.recv().await {
+                let is_terminal = msg.is_terminal();
+                this.update(cx, |state, cx| {
+                    Self::process_message(state, msg);
+                    if is_terminal {
+                        state.status = ClaudeStatus::Idle;
+                    }
+                    cx.emit(ClaudeStateEvent::Updated);
+                    cx.notify();
+                })
+                .ok();
             }
 
             this.update(cx, |state, cx| {
@@ -146,8 +103,6 @@ impl ClaudeState {
                 cx.notify();
             })
             .ok();
-
-            let _ = claude.shutdown();
         })
         .detach();
     }

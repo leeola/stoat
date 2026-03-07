@@ -1,6 +1,7 @@
 use crate::git::repository::{GitError, Repository};
 use std::{collections::HashMap, path::Path};
 
+#[derive(Clone)]
 pub struct BlameEntry {
     pub full_oid: String,
     pub short_hash: String,
@@ -11,6 +12,7 @@ pub struct BlameEntry {
     pub message: String,
 }
 
+#[derive(Clone)]
 pub struct BlameData {
     pub entries: Vec<BlameEntry>,
     pub line_to_entry: Vec<usize>,
@@ -130,103 +132,89 @@ pub fn blame_file(repo: &Repository, path: &Path) -> Result<BlameData, GitError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-
-    fn create_test_repo() -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let path = dir.path().to_path_buf();
-
-        Command::new("git")
-            .args(["init"])
-            .current_dir(&path)
-            .output()
-            .expect("git init");
-        Command::new("git")
-            .args(["config", "user.name", "Alice"])
-            .current_dir(&path)
-            .output()
-            .expect("config user.name");
-        Command::new("git")
-            .args(["config", "user.email", "alice@test.com"])
-            .current_dir(&path)
-            .output()
-            .expect("config user.email");
-
-        (dir, path)
-    }
+    use crate::{
+        fs::FakeFs,
+        git::provider::{FakeGitProvider, GitProvider},
+    };
+    use std::{path::PathBuf, sync::Arc};
 
     #[test]
     fn blame_single_commit() {
-        let (_dir, path) = create_test_repo();
-        let file = path.join("test.txt");
-        std::fs::write(&file, "line one\nline two\nline three\n").unwrap();
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
 
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
+        let file = workdir.join("test.txt");
+        let data = BlameData {
+            entries: vec![BlameEntry {
+                full_oid: "a".repeat(40),
+                short_hash: "a1b2c3d4".to_string(),
+                author_name: "Alice".to_string(),
+                timestamp: 1704067200,
+                date_display: "2024-01-01".to_string(),
+                summary: "initial".to_string(),
+                message: "initial".to_string(),
+            }],
+            line_to_entry: vec![0, 0, 0],
+        };
+        provider.set_blame_data(&file, data);
 
-        let repo = Repository::open(&path).unwrap();
-        let data = blame_file(&repo, &file).unwrap();
+        let repo = provider.discover(&workdir).unwrap();
+        let result = repo.blame_file(&file).unwrap();
 
-        assert_eq!(data.entries.len(), 1);
-        assert_eq!(data.line_to_entry.len(), 3);
-        assert_eq!(data.entries[0].author_name, "Alice");
-        assert!(data.entries[0].summary.contains("initial"));
-        assert_eq!(data.entries[0].full_oid.len(), 40);
-        assert!(data.entries[0].short_hash.len() <= 8);
+        assert_eq!(result.entries.len(), 1);
+        assert_eq!(result.line_to_entry.len(), 3);
+        assert_eq!(result.entries[0].author_name, "Alice");
+        assert!(result.entries[0].summary.contains("initial"));
+        assert_eq!(result.entries[0].full_oid.len(), 40);
+        assert!(result.entries[0].short_hash.len() <= 8);
     }
 
     #[test]
     fn blame_multiple_commits() {
-        let (_dir, path) = create_test_repo();
-        let file = path.join("test.txt");
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
 
-        std::fs::write(&file, "line one\nline two\nline three\n").unwrap();
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "first"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
+        let file = workdir.join("test.txt");
+        let data = BlameData {
+            entries: vec![
+                BlameEntry {
+                    full_oid: "a".repeat(40),
+                    short_hash: "a1b2c3d4".to_string(),
+                    author_name: "Alice".to_string(),
+                    timestamp: 1704067200,
+                    date_display: "2024-01-01".to_string(),
+                    summary: "first".to_string(),
+                    message: "first".to_string(),
+                },
+                BlameEntry {
+                    full_oid: "b".repeat(40),
+                    short_hash: "b1c2d3e4".to_string(),
+                    author_name: "Bob".to_string(),
+                    timestamp: 1704153600,
+                    date_display: "2024-01-02".to_string(),
+                    summary: "bob edit".to_string(),
+                    message: "bob edit".to_string(),
+                },
+            ],
+            line_to_entry: vec![0, 1, 0],
+        };
+        provider.set_blame_data(&file, data);
 
-        Command::new("git")
-            .args(["config", "user.name", "Bob"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
+        let repo = provider.discover(&workdir).unwrap();
+        let result = repo.blame_file(&file).unwrap();
 
-        std::fs::write(&file, "line one\nmodified by bob\nline three\n").unwrap();
-        Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "bob edit"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert_eq!(result.line_to_entry.len(), 3);
 
-        let repo = Repository::open(&path).unwrap();
-        let data = blame_file(&repo, &file).unwrap();
-
-        assert_eq!(data.entries.len(), 2);
-        assert_eq!(data.line_to_entry.len(), 3);
-
-        let line1_entry = &data.entries[data.line_to_entry[0]];
-        let line2_entry = &data.entries[data.line_to_entry[1]];
-        let line3_entry = &data.entries[data.line_to_entry[2]];
+        let line1_entry = &result.entries[result.line_to_entry[0]];
+        let line2_entry = &result.entries[result.line_to_entry[1]];
+        let line3_entry = &result.entries[result.line_to_entry[2]];
 
         assert_eq!(line1_entry.author_name, "Alice");
         assert_eq!(line2_entry.author_name, "Bob");

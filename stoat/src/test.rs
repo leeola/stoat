@@ -390,6 +390,95 @@ impl<'a> TestStoat<'a> {
         self
     }
 
+    /// Initialize a fake in-memory git repo. No real IO is performed.
+    pub fn init_fake_git(mut self) -> Self {
+        let workdir = PathBuf::from("/fake/repo");
+        self.update(|s, _cx| {
+            s.worktree = Arc::new(parking_lot::Mutex::new(crate::worktree::Worktree::new(
+                workdir.clone(),
+            )));
+            s.services.fake_git().set_exists(true);
+            s.services.fake_git().set_workdir(workdir);
+        });
+        self
+    }
+
+    /// Set committed state: head + index = content, file in FakeFs.
+    pub fn with_committed_file(&mut self, rel_path: &str, content: &str) -> &mut Self {
+        let abs = self.workdir().join(rel_path);
+        self.update(|s, _cx| {
+            s.services.fake_git().commit_file(&abs, content);
+            s.services.fake_fs().insert_file(&abs, content);
+        });
+        self
+    }
+
+    /// Set working tree change: updates FakeFs only (not index).
+    pub fn with_working_change(&mut self, rel_path: &str, content: &str) -> &mut Self {
+        let abs = self.workdir().join(rel_path);
+        self.update(|s, _cx| {
+            s.services.fake_fs().insert_file(&abs, content);
+        });
+        self
+    }
+
+    /// Set staged change: updates index_content + FakeFs.
+    pub fn with_staged_change(&mut self, rel_path: &str, content: &str) -> &mut Self {
+        let abs = self.workdir().join(rel_path);
+        self.update(|s, _cx| {
+            s.services.fake_git().set_index_content(&abs, content);
+            s.services.fake_fs().insert_file(&abs, content);
+        });
+        self
+    }
+
+    /// Load file into buffer and compute BufferDiff from fake git head_content.
+    pub fn load_and_diff(&mut self, rel_path: &str) -> &mut Self {
+        let abs = self.workdir().join(rel_path);
+        self.update(|s, cx| {
+            // Set file path and load content into buffer
+            s.current_file_path = Some(abs.clone());
+            let content = s.services.fs.read_to_string(&abs).unwrap_or_default();
+            let buffer_item = s.active_buffer(cx);
+            buffer_item.update(cx, |item, cx| {
+                item.buffer().update(cx, |buffer, _| {
+                    let len = buffer.len();
+                    buffer.edit([(0..len, content.as_str())]);
+                });
+            });
+
+            // Compute diff from head content
+            let head = s.services.fake_git().head_content(&abs).unwrap_or_default();
+            buffer_item.update(cx, |item, cx| {
+                let snapshot = item.buffer().read(cx).snapshot();
+                let diff = crate::git::diff::BufferDiff::new(
+                    item.buffer().read(cx).remote_id(),
+                    head,
+                    &snapshot,
+                )
+                .unwrap();
+                item.set_diff(Some(diff));
+            });
+        });
+        self
+    }
+
+    fn workdir(&self) -> PathBuf {
+        self.cx
+            .read_entity(&self.entity, |s, _| s.worktree.lock().root().to_path_buf())
+    }
+
+    /// Downcast accessor for [`FakeGitProvider`].
+    pub fn fake_git(&self) -> &crate::git::provider::FakeGitProvider {
+        // SAFETY: The test context keeps the entity alive, and Services is Arc-wrapped.
+        // We return a reference that borrows from self (via the Arc chain).
+        // This is safe because FakeGitProvider lives inside Arc<Services> which outlives self.
+        self.cx.read_entity(&self.entity, |s, _| {
+            let ptr = s.services.fake_git() as *const crate::git::provider::FakeGitProvider;
+            unsafe { &*ptr }
+        })
+    }
+
     /// Read from the active [`BufferItem`] without needing nested entity access.
     pub fn read_buffer<R>(&self, f: impl FnOnce(&BufferItem, &App) -> R) -> R {
         self.cx.read_entity(&self.entity, |s, cx| {
@@ -1240,13 +1329,62 @@ mod tests {
 
     #[gpui::test]
     fn fixture_load_file_read_buffer(cx: &mut TestAppContext) {
-        let fixture = git_fixture::GitFixture::load("basic-diff");
-        let mut stoat = Stoat::test(cx).use_fixture(&fixture);
-        stoat.update(|s, cx| {
-            s.load_file(&fixture.changed_files()[0], cx).unwrap();
-        });
+        let head: String = (1..=30)
+            .map(|i| format!("{i} this is line {}\n", number_word(i)))
+            .collect();
+        let mut working: String = (1..=9)
+            .map(|i| format!("{i} this is line {}\n", number_word(i)))
+            .collect();
+        for i in 21..=33 {
+            working.push_str(&format!("{i} this is line {}\n", number_word(i)));
+        }
+
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file.txt", &head)
+            .with_working_change("file.txt", &working)
+            .load_and_diff("file.txt");
 
         let hunk_count = stoat.read_buffer(|item, _cx| item.diff().map(|d| d.hunks.len()));
         assert!(hunk_count.is_some_and(|n| n > 0));
+    }
+
+    fn number_word(n: u32) -> &'static str {
+        match n {
+            1 => "one",
+            2 => "two",
+            3 => "three",
+            4 => "four",
+            5 => "five",
+            6 => "six",
+            7 => "seven",
+            8 => "eight",
+            9 => "nine",
+            10 => "ten",
+            11 => "eleven",
+            12 => "twelve",
+            13 => "thirteen",
+            14 => "fourteen",
+            15 => "fifteen",
+            16 => "sixteen",
+            17 => "seventeen",
+            18 => "eighteen",
+            19 => "nineteen",
+            20 => "twenty",
+            21 => "twenty-one",
+            22 => "twenty-two",
+            23 => "twenty-three",
+            24 => "twenty-four",
+            25 => "twenty-five",
+            26 => "twenty-six",
+            27 => "twenty-seven",
+            28 => "twenty-eight",
+            29 => "twenty-nine",
+            30 => "thirty",
+            31 => "thirty-one",
+            32 => "thirty-two",
+            33 => "thirty-three",
+            _ => "unknown",
+        }
     }
 }

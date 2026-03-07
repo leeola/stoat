@@ -441,23 +441,104 @@ impl PaneGroupView {
 #[cfg(test)]
 mod tests {
     use crate::{
-        git::conflict::{ConflictSide, ConflictViewKind},
+        git::{
+            conflict::{ConflictSide, ConflictViewKind},
+            status::GitStatusEntry,
+        },
         stoat::KeyContext,
-        test::git_fixture::GitFixture,
         Stoat,
     };
     use gpui::TestAppContext;
+    use std::path::PathBuf;
 
-    fn conflict_fixture(cx: &mut TestAppContext) -> (GitFixture, crate::test::TestStoat<'_>) {
-        let fixture = GitFixture::load("merge-conflict");
-        let mut stoat = Stoat::test(cx).use_fixture(&fixture);
+    const CONFIG_CONFLICT: &str = "\
+[settings]
+<<<<<<< HEAD
+ours-name-one
+ours-name-two
+ours-name-three
+=======
+theirs-name
+>>>>>>> theirs
+[database]
+<<<<<<< HEAD
+ours-host
+=======
+theirs-host-one
+theirs-host-two
+>>>>>>> theirs
+[logging]
+<<<<<<< HEAD
+ours-level-one
+ours-level-two
+=======
+theirs-level-one
+theirs-level-two
+theirs-level-three
+theirs-level-four
+>>>>>>> theirs
+done
+";
+
+    const FILE_CONFLICT: &str = "\
+header
+<<<<<<< HEAD
+ours alpha one
+ours alpha two
+=======
+theirs alpha one
+theirs alpha two
+theirs alpha three
+theirs alpha four
+theirs alpha five
+>>>>>>> theirs
+middle section
+<<<<<<< HEAD
+ours beta one
+ours beta two
+ours beta three
+ours beta four
+=======
+theirs beta one
+>>>>>>> theirs
+footer section
+<<<<<<< HEAD
+ours gamma one
+ours gamma two
+ours gamma three
+=======
+theirs gamma one
+theirs gamma two
+theirs gamma three
+>>>>>>> theirs
+end
+";
+
+    fn conflict_fixture(cx: &mut TestAppContext) -> crate::test::TestStoat<'_> {
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat.with_working_change("config.txt", CONFIG_CONFLICT);
+        stoat.with_working_change("file.txt", FILE_CONFLICT);
+        stoat.update(|s, _| {
+            s.services.fake_git().set_status(vec![
+                GitStatusEntry {
+                    path: PathBuf::from("config.txt"),
+                    status: "!".to_string(),
+                    staged: false,
+                },
+                GitStatusEntry {
+                    path: PathBuf::from("file.txt"),
+                    status: "!".to_string(),
+                    staged: false,
+                },
+            ]);
+        });
         stoat.update(|s, cx| s.open_conflict_review(cx));
-        (fixture, stoat)
+        stoat
     }
 
     #[gpui::test]
     fn open_conflict_review_enters_mode(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         assert_eq!(stoat.mode(), "conflict_review");
         let key_ctx = stoat.update(|s, _| s.key_context());
@@ -469,27 +550,24 @@ mod tests {
 
     #[gpui::test]
     fn accept_stores_resolution_metadata(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         stoat.update(|s, cx| s.conflict_accept_ours(cx));
 
-        // Buffer still has conflict markers (non-destructive)
         let text = stoat.buffer_text();
         assert!(text.contains("<<<<<<<"), "markers still present: {text}");
         assert_eq!(stoat.conflict_count(), 3);
 
-        // Resolution stored in metadata
         let resolution = stoat.update(|s, _| s.conflict_state.resolutions.get(&(0, 0)).copied());
         assert_eq!(resolution, Some(ConflictSide::Ours));
 
-        // Navigated to next conflict
         assert_eq!(stoat.conflict_position(), (0, 1));
         assert_eq!(stoat.mode(), "conflict_review");
     }
 
     #[gpui::test]
     fn accept_theirs_stores_resolution(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         stoat.update(|s, cx| s.conflict_accept_theirs(cx));
 
@@ -499,7 +577,7 @@ mod tests {
 
     #[gpui::test]
     fn accept_both_stores_resolution(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         stoat.update(|s, cx| s.conflict_accept_both(cx));
 
@@ -509,7 +587,7 @@ mod tests {
 
     #[gpui::test]
     fn resolve_all_and_dismiss(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         // 3 conflicts per file, 2 files = 6 total
         for _ in 0..6 {
@@ -522,25 +600,22 @@ mod tests {
         let dismissed = stoat.update(|s, _| s.conflict_review_previous_mode.is_none());
         assert!(dismissed);
 
-        // After dismiss, resolutions should have been applied to buffers
         let text = stoat.buffer_text();
         assert!(!text.contains("<<<<<<<"), "all markers resolved: {text}");
     }
 
     #[gpui::test]
     fn dismiss_applies_resolutions(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
         stoat.update(|s, cx| s.conflict_accept_ours(cx));
 
-        // Buffer still has markers before dismiss
         assert!(stoat.buffer_text().contains("<<<<<<<"));
 
         stoat.update(|s, cx| s.conflict_review_dismiss(cx));
 
         let text = stoat.buffer_text();
         assert!(text.contains("ours-name"), "resolved ours applied: {text}");
-        // Only 1 of 3 resolved, so markers remain for the other 2
         assert!(
             text.contains("<<<<<<<"),
             "unresolved markers remain: {text}"
@@ -549,13 +624,11 @@ mod tests {
 
     #[gpui::test]
     fn change_resolution(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
-        // Accept ours first
         stoat.update(|s, cx| s.conflict_accept_ours(cx));
         assert_eq!(stoat.conflict_position(), (0, 1));
 
-        // Navigate back and change to theirs
         stoat.update(|s, cx| s.conflict_prev_conflict(cx));
         assert_eq!(stoat.conflict_position(), (0, 0));
 
@@ -563,7 +636,6 @@ mod tests {
         let resolution = stoat.update(|s, _| s.conflict_state.resolutions.get(&(0, 0)).copied());
         assert_eq!(resolution, Some(ConflictSide::Theirs));
 
-        // Dismiss and verify theirs wins
         stoat.update(|s, cx| s.conflict_review_dismiss(cx));
         let text = stoat.buffer_text();
         assert!(text.contains("theirs-name"), "theirs applied: {text}");
@@ -572,9 +644,8 @@ mod tests {
 
     #[gpui::test]
     fn partial_resolution(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
 
-        // Resolve only the first of 3 conflicts
         stoat.update(|s, cx| s.conflict_accept_ours(cx));
         let count = stoat.update(|s, _| s.conflict_state.resolutions.len());
         assert_eq!(count, 1);
@@ -594,7 +665,7 @@ mod tests {
 
     #[gpui::test]
     fn toggle_conflict_view(cx: &mut TestAppContext) {
-        let (_fixture, mut stoat) = conflict_fixture(cx);
+        let mut stoat = conflict_fixture(cx);
         assert_eq!(
             stoat.update(|s, _| s.conflict_view_kind),
             ConflictViewKind::Merge

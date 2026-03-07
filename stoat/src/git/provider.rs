@@ -201,6 +201,8 @@ fn reverse_patch_text(patch: &str) -> String {
 // -- Fake implementations --
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+use crate::fs::FakeFs;
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use parking_lot::Mutex;
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use std::sync::Arc;
@@ -208,6 +210,14 @@ use std::sync::Arc;
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 pub struct FakeGitProvider {
     state: Arc<Mutex<FakeGitState>>,
+    fs: Arc<FakeFs>,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+pub struct FakeCommit {
+    pub oid: String,
+    pub changed_files: Vec<CommitFileChange>,
+    pub diffs: HashMap<PathBuf, String>,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
@@ -221,12 +231,14 @@ struct FakeGitState {
     hunk_counts: HashMap<PathBuf, usize>,
     staged_files: std::collections::HashSet<PathBuf>,
     applied_diffs: Vec<(String, ApplyLocation, bool)>,
+    blame_data: HashMap<PathBuf, BlameData>,
+    commit_history: Vec<FakeCommit>,
     exists: bool,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl FakeGitProvider {
-    pub fn empty() -> Self {
+    pub fn new(fs: Arc<FakeFs>) -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeGitState {
                 workdir: PathBuf::new(),
@@ -238,12 +250,15 @@ impl FakeGitProvider {
                 hunk_counts: HashMap::new(),
                 staged_files: std::collections::HashSet::new(),
                 applied_diffs: Vec::new(),
+                blame_data: HashMap::new(),
+                commit_history: Vec::new(),
                 exists: false,
             })),
+            fs,
         }
     }
 
-    pub fn with_repo(workdir: PathBuf) -> Self {
+    pub fn with_repo(workdir: PathBuf, fs: Arc<FakeFs>) -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeGitState {
                 workdir,
@@ -255,8 +270,11 @@ impl FakeGitProvider {
                 hunk_counts: HashMap::new(),
                 staged_files: std::collections::HashSet::new(),
                 applied_diffs: Vec::new(),
+                blame_data: HashMap::new(),
+                commit_history: Vec::new(),
                 exists: true,
             })),
+            fs,
         }
     }
 
@@ -301,6 +319,42 @@ impl FakeGitProvider {
         self.state.lock().hunk_counts = counts;
     }
 
+    /// Set head + index to same content (simulates committed state).
+    pub fn commit_file(&self, path: impl Into<PathBuf>, content: impl Into<String>) {
+        let path = path.into();
+        let content = content.into();
+        let mut state = self.state.lock();
+        state.head_files.insert(path.clone(), content.clone());
+        state.index_files.insert(path, content);
+    }
+
+    /// Read-back accessor for index content (test assertions).
+    pub fn index_content(&self, path: &Path) -> Option<String> {
+        self.state.lock().index_files.get(path).cloned()
+    }
+
+    /// Read-back accessor for head content (test assertions).
+    pub fn head_content(&self, path: &Path) -> Option<String> {
+        self.state.lock().head_files.get(path).cloned()
+    }
+
+    pub fn set_blame_data(&self, path: impl Into<PathBuf>, data: BlameData) {
+        self.state.lock().blame_data.insert(path.into(), data);
+    }
+
+    pub fn add_commit(
+        &self,
+        oid: &str,
+        files: Vec<CommitFileChange>,
+        diffs: HashMap<PathBuf, String>,
+    ) {
+        self.state.lock().commit_history.push(FakeCommit {
+            oid: oid.to_string(),
+            changed_files: files,
+            diffs,
+        });
+    }
+
     pub fn staged_files(&self) -> std::collections::HashSet<PathBuf> {
         self.state.lock().staged_files.clone()
     }
@@ -324,6 +378,7 @@ impl GitProvider for FakeGitProvider {
         Ok(Box::new(FakeGitRepo {
             workdir_path: state.workdir.clone(),
             state: self.state.clone(),
+            fs: self.fs.clone(),
         }))
     }
 
@@ -336,6 +391,7 @@ impl GitProvider for FakeGitProvider {
 struct FakeGitRepo {
     workdir_path: PathBuf,
     state: Arc<Mutex<FakeGitState>>,
+    fs: Arc<FakeFs>,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
@@ -379,30 +435,53 @@ impl GitRepo for FakeGitRepo {
         self.state.lock().branch_info.clone()
     }
 
-    fn blame_file(&self, _path: &Path) -> Result<BlameData, GitError> {
-        Ok(BlameData {
-            entries: Vec::new(),
-            line_to_entry: Vec::new(),
-        })
+    fn blame_file(&self, path: &Path) -> Result<BlameData, GitError> {
+        let state = self.state.lock();
+        state
+            .blame_data
+            .get(path)
+            .cloned()
+            .ok_or(GitError::FileNotFound(path.to_path_buf()))
     }
 
     fn count_hunks_by_file(
         &self,
-        _mode: DiffComparisonMode,
+        mode: DiffComparisonMode,
     ) -> Result<HashMap<PathBuf, usize>, GitError> {
-        Ok(self.state.lock().hunk_counts.clone())
+        let state = self.state.lock();
+        if !state.hunk_counts.is_empty() {
+            return Ok(state.hunk_counts.clone());
+        }
+        compute_hunk_counts(&state, &self.fs, &self.workdir_path, mode)
     }
 
     fn commit_changed_files(&self) -> Result<Vec<PathBuf>, GitError> {
-        Ok(Vec::new())
+        let state = self.state.lock();
+        Ok(state
+            .commit_history
+            .last()
+            .map(|c| c.changed_files.iter().map(|f| f.path.clone()).collect())
+            .unwrap_or_default())
     }
 
-    fn commit_files_by_oid(&self, _oid: &str) -> Result<Vec<CommitFileChange>, GitError> {
-        Ok(Vec::new())
+    fn commit_files_by_oid(&self, oid: &str) -> Result<Vec<CommitFileChange>, GitError> {
+        let state = self.state.lock();
+        Ok(state
+            .commit_history
+            .iter()
+            .find(|c| c.oid == oid)
+            .map(|c| c.changed_files.clone())
+            .unwrap_or_default())
     }
 
-    fn commit_file_diff(&self, _oid: &str, _path: &Path) -> Result<String, GitError> {
-        Ok(String::new())
+    fn commit_file_diff(&self, oid: &str, path: &Path) -> Result<String, GitError> {
+        let state = self.state.lock();
+        state
+            .commit_history
+            .iter()
+            .find(|c| c.oid == oid)
+            .and_then(|c| c.diffs.get(path).cloned())
+            .ok_or(GitError::FileNotFound(path.to_path_buf()))
     }
 
     fn apply_diff(
@@ -411,10 +490,40 @@ impl GitRepo for FakeGitRepo {
         reverse: bool,
         location: ApplyLocation,
     ) -> Result<(), GitError> {
-        self.state
-            .lock()
+        let mut state = self.state.lock();
+        state
             .applied_diffs
             .push((patch.to_string(), location, reverse));
+
+        let effective = if reverse {
+            reverse_patch_text(patch)
+        } else {
+            patch.to_string()
+        };
+
+        if let Some(file_path) = parse_filename_from_patch(&effective) {
+            let abs_path = state.workdir.join(&file_path);
+            let base = match location {
+                ApplyLocation::Index => state
+                    .index_files
+                    .get(&abs_path)
+                    .cloned()
+                    .unwrap_or_default(),
+                ApplyLocation::WorkDir => {
+                    self.fs.read_to_string_fake(&abs_path).unwrap_or_default()
+                },
+            };
+            let result = apply_unified_patch(&base, &effective)?;
+            match location {
+                ApplyLocation::Index => {
+                    state.index_files.insert(abs_path, result);
+                },
+                ApplyLocation::WorkDir => {
+                    drop(state);
+                    self.fs.insert_file(&abs_path, result);
+                },
+            }
+        }
         Ok(())
     }
 
@@ -443,4 +552,184 @@ impl GitRepo for FakeGitRepo {
         self.state.lock().staged_files.clear();
         Ok(())
     }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+fn parse_filename_from_patch(patch: &str) -> Option<PathBuf> {
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            return Some(PathBuf::from(rest));
+        }
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            if rest != "/dev/null" {
+                return Some(PathBuf::from(rest));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+fn apply_unified_patch(base: &str, patch: &str) -> Result<String, GitError> {
+    let base_lines: Vec<&str> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.lines().collect()
+    };
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut base_idx: usize = 0;
+
+    let patch_lines: Vec<&str> = patch.lines().collect();
+    let mut pi = 0;
+
+    while pi < patch_lines.len() {
+        let line = patch_lines[pi];
+        if line.starts_with("@@") {
+            break;
+        }
+        pi += 1;
+    }
+
+    while pi < patch_lines.len() {
+        let line = patch_lines[pi];
+
+        if let Some(hunk_header) = line.strip_prefix("@@") {
+            let (old_start, old_count) = parse_hunk_header(hunk_header)?;
+            // For pure additions (old_count=0), old_start is the anchor line;
+            // insert after it. For modifications, old_start is the first affected line.
+            let target = if old_count == 0 {
+                old_start as usize
+            } else {
+                (old_start as usize).saturating_sub(1)
+            };
+            while base_idx < target && base_idx < base_lines.len() {
+                result_lines.push(base_lines[base_idx].to_string());
+                base_idx += 1;
+            }
+            pi += 1;
+            continue;
+        }
+
+        if let Some(_content) = line.strip_prefix('-') {
+            base_idx += 1;
+        } else if let Some(content) = line.strip_prefix('+') {
+            result_lines.push(content.to_string());
+        } else if let Some(content) = line.strip_prefix(' ') {
+            result_lines.push(content.to_string());
+            base_idx += 1;
+        } else if line.starts_with('\\') {
+            // "\ No newline at end of file" -- skip
+        } else {
+            result_lines.push(line.to_string());
+            base_idx += 1;
+        }
+        pi += 1;
+    }
+
+    while base_idx < base_lines.len() {
+        result_lines.push(base_lines[base_idx].to_string());
+        base_idx += 1;
+    }
+
+    let mut result = result_lines.join("\n");
+    if base.ends_with('\n') || (!base.is_empty() && !result.is_empty()) {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+fn parse_hunk_header(header: &str) -> Result<(u32, u32), GitError> {
+    let err = || GitError::GitOperationFailed(format!("Failed to parse hunk header: @@{header}"));
+    let trimmed = header.trim();
+    let minus_part = trimmed
+        .strip_prefix('-')
+        .and_then(|s| s.split_whitespace().next())
+        .ok_or_else(err)?;
+    let parts: Vec<&str> = minus_part.split(',').collect();
+    let start: u32 = parts[0].parse().map_err(|_| err())?;
+    let count: u32 = if parts.len() > 1 {
+        parts[1].parse().map_err(|_| err())?
+    } else {
+        1
+    };
+    Ok((start, count))
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+fn compute_hunk_counts(
+    state: &FakeGitState,
+    fs: &FakeFs,
+    workdir: &Path,
+    mode: DiffComparisonMode,
+) -> Result<HashMap<PathBuf, usize>, GitError> {
+    use crate::git::diff_review::DiffComparisonMode;
+
+    let mut counts = HashMap::new();
+
+    let mut all_paths = std::collections::HashSet::new();
+    for p in state.head_files.keys() {
+        all_paths.insert(p.clone());
+    }
+    for p in state.index_files.keys() {
+        all_paths.insert(p.clone());
+    }
+    for p in fs.files() {
+        if p.starts_with(workdir) {
+            all_paths.insert(p);
+        }
+    }
+
+    for abs_path in &all_paths {
+        let rel_path = abs_path.strip_prefix(workdir).unwrap_or(abs_path);
+
+        let (old_content, new_content) = match mode {
+            DiffComparisonMode::WorkingVsHead => {
+                let old = state.head_files.get(abs_path).cloned().unwrap_or_default();
+                let new = fs.read_to_string_fake(abs_path).unwrap_or_default();
+                (old, new)
+            },
+            DiffComparisonMode::WorkingVsIndex => {
+                let old = state.index_files.get(abs_path).cloned().unwrap_or_default();
+                let new = fs.read_to_string_fake(abs_path).unwrap_or_default();
+                (old, new)
+            },
+            DiffComparisonMode::IndexVsHead => {
+                let old = state.head_files.get(abs_path).cloned().unwrap_or_default();
+                let new = state.index_files.get(abs_path).cloned().unwrap_or_default();
+                (old, new)
+            },
+            DiffComparisonMode::HeadVsParent => {
+                let old = state
+                    .parent_files
+                    .get(abs_path)
+                    .cloned()
+                    .unwrap_or_default();
+                let new = state.head_files.get(abs_path).cloned().unwrap_or_default();
+                (old, new)
+            },
+        };
+
+        if old_content == new_content {
+            continue;
+        }
+
+        let mut diff_opts = git2::DiffOptions::new();
+        diff_opts.context_lines(0);
+        let patch = git2::Patch::from_buffers(
+            old_content.as_bytes(),
+            None,
+            new_content.as_bytes(),
+            None,
+            Some(&mut diff_opts),
+        )
+        .map_err(|e| GitError::GitOperationFailed(format!("Patch::from_buffers failed: {e}")))?;
+
+        let num_hunks = patch.num_hunks();
+        if num_hunks > 0 {
+            counts.insert(rel_path.to_path_buf(), num_hunks);
+        }
+    }
+
+    Ok(counts)
 }

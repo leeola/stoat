@@ -286,13 +286,15 @@ impl PaneGroupView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::status::GitStatusEntry;
     use gpui::TestAppContext;
+    use std::path::PathBuf;
     use text::ToPoint;
 
     /// Helper: Assert that cursor is at the current hunk's start position.
     ///
-    /// This verifies the exact symptom of the bug: "no cursor" means cursor
-    /// goes to wrong position (like 0,0) instead of being at the hunk.
+    /// Verifies the cursor landed on the hunk row, not at a stale position
+    /// like (0,0).
     fn assert_cursor_at_hunk(stoat: &Stoat, cx: &gpui::App) {
         let buffer_item = stoat.active_buffer(cx);
         let diff = buffer_item.read(cx).diff().expect("Diff should be loaded");
@@ -319,44 +321,26 @@ mod tests {
 
     #[gpui::test]
     fn opens_diff_review_with_correct_state(cx: &mut TestAppContext) {
-        use std::process::Command;
-        use text::ToPoint;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_committed_file("file2.txt", "foo\nbar\nbaz\n")
+            .with_working_change("file1.txt", "line 1\nMODIFIED\nline 3\n")
+            .with_working_change("file2.txt", "foo\nbar\nADDED\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![
+                GitStatusEntry::new(PathBuf::from("file1.txt"), "M".into(), false),
+                GitStatusEntry::new(PathBuf::from("file2.txt"), "M".into(), false),
+            ]);
+        });
 
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        let file2 = repo_path.join("file2.txt");
-
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-        std::fs::write(&file2, "foo\nbar\nbaz\n").unwrap();
-
-        // Git add and commit
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify both files to create hunks
-        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap(); // 1 hunk at line 1
-        std::fs::write(&file2, "foo\nbar\nADDED\n").unwrap(); // 1 hunk at line 2
-
-        // Open diff review
         stoat.update(|s, cx| {
             s.open_diff_review(cx);
 
-            // Verify mode and context
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.key_context, crate::stoat::KeyContext::DiffReview);
 
-            // Verify file list contains both files
             assert_eq!(s.review_state.files.len(), 2);
             let file_names: Vec<String> = s
                 .review_state
@@ -367,21 +351,17 @@ mod tests {
             assert!(file_names.contains(&"file1.txt".to_string()));
             assert!(file_names.contains(&"file2.txt".to_string()));
 
-            // Verify current position (first file, first hunk)
             assert_eq!(s.review_state.file_idx, 0);
             assert_eq!(s.review_state.hunk_idx, 0);
 
-            // Verify active buffer loaded correctly
             let buffer_item = s.active_buffer(cx);
             let diff = buffer_item
                 .read(cx)
                 .diff()
                 .expect("Diff should be loaded for first file");
 
-            // Verify hunk count for first file
             assert_eq!(diff.hunks.len(), 1, "First file should have 1 hunk");
 
-            // Verify cursor position at hunk start
             let hunk = &diff.hunks[0];
             let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
             let hunk_start_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
@@ -391,7 +371,6 @@ mod tests {
                 "Cursor should be at start of first hunk (row {hunk_start_row})"
             );
 
-            // Verify no approvals yet
             assert!(
                 s.review_state.approved_hunks.is_empty(),
                 "No hunks should be approved initially"
@@ -401,43 +380,25 @@ mod tests {
 
     #[gpui::test]
     fn switches_to_staged_mode_and_navigates(cx: &mut TestAppContext) {
-        use std::process::Command;
-        use text::ToPoint;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nMODIFIED\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify file and stage changes (no unstaged changes - working tree = index)
-        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                true,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review in default WorkingVsHead mode
             s.open_diff_review(cx);
 
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.review_state.files.len(), 1);
 
-            // Verify initial state in WorkingVsHead mode
             let buffer_item = s.active_buffer(cx);
             let diff_before = buffer_item.read(cx).diff().expect("Diff should be loaded");
             let hunk_count_before = diff_before.hunks.len();
@@ -456,21 +417,18 @@ mod tests {
                 "Cursor should be at hunk start in WorkingVsHead mode"
             );
 
-            // Switch to IndexVsHead mode (staged changes only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
-            // Cycle again to IndexVsHead
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
-            // Verify diff is still present after switching to IndexVsHead
             let buffer_item_after = s.active_buffer(cx);
             let diff_after = buffer_item_after
                 .read(cx)
@@ -483,7 +441,6 @@ mod tests {
                 "Should still have 1 hunk in IndexVsHead mode (staged changes)"
             );
 
-            // Verify cursor is at hunk start
             let cursor_after_switch = s.cursor_position();
             let hunk_start_after = {
                 let buffer_snapshot = buffer_item_after.read(cx).buffer().read(cx).snapshot();
@@ -497,16 +454,12 @@ mod tests {
                 "Cursor should be at hunk start after switching to IndexVsHead"
             );
 
-            // Now press next hunk - this should work without issues
             s.diff_review_next_hunk(cx);
 
-            // Verify we're still in diff review mode
             assert_eq!(s.mode(), "diff_review");
 
-            // Verify cursor is still valid (either at same hunk or next file's first hunk)
             let _cursor_after_next = s.cursor_position();
 
-            // Verify diff is still loaded
             let buffer_after_next = s.active_buffer(cx);
             let diff_final = buffer_after_next.read(cx).diff();
             assert!(
@@ -518,41 +471,24 @@ mod tests {
 
     #[gpui::test]
     fn indexed_mode_wraparound_cursor_position(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nMODIFIED\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify file and stage changes (working tree = index for now)
-        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                true,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review in default mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.review_state.files.len(), 1);
 
-            // Cycle to IndexVsHead mode
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
@@ -560,16 +496,12 @@ mod tests {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
-            // Verify cursor is at hunk before pressing next
             assert_cursor_at_hunk(s, cx);
 
-            // Press next - with only 1 file and 1 hunk, this wraps around
             s.diff_review_next_hunk(cx);
 
-            // BUG CHECK: Cursor should still be at hunk start, not at Point(0,0)
             assert_cursor_at_hunk(s, cx);
 
-            // Verify we're still at file 0, hunk 0 (wrapped around)
             assert_eq!(s.review_state.file_idx, 0);
             assert_eq!(s.review_state.hunk_idx, 0);
         });
@@ -577,43 +509,24 @@ mod tests {
 
     #[gpui::test]
     fn indexed_mode_with_working_tree_changes(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nSTAGED\nline 3\n")
+            .with_working_change("file1.txt", "line 1\nWORKING\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify and stage: line 2 -> STAGED
-        std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Further modify working tree: STAGED -> WORKING (unstaged change)
-        std::fs::write(&file1, "line 1\nWORKING\nline 3\n").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                false,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review in default WorkingVsHead mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // In WorkingVsHead mode, buffer should contain "WORKING"
             let buffer_item = s.active_buffer(cx);
             let buffer_text = buffer_item.read(cx).buffer().read(cx).text();
             assert!(
@@ -621,7 +534,6 @@ mod tests {
                 "Buffer should contain working tree content in WorkingVsHead mode"
             );
 
-            // Cycle to IndexVsHead mode
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
@@ -629,7 +541,6 @@ mod tests {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
-            // BUG CHECK: In IndexVsHead mode, buffer should contain "STAGED", not "WORKING"
             let buffer_item_after = s.active_buffer(cx);
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
@@ -641,10 +552,8 @@ mod tests {
                 "Buffer should NOT contain working tree content (WORKING) in IndexVsHead mode"
             );
 
-            // BUG CHECK: Cursor should be at hunk start
             assert_cursor_at_hunk(s, cx);
 
-            // BUG CHECK: Diff should show index vs HEAD (STAGED vs line 2), not working vs HEAD
             let diff = buffer_item_after
                 .read(cx)
                 .diff()
@@ -655,43 +564,24 @@ mod tests {
 
     #[gpui::test]
     fn indexed_mode_next_with_different_working_tree(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nSTAGED\nline 3\n")
+            .with_working_change("file1.txt", "line 1\nWORKING\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify and stage: line 2 -> STAGED
-        std::fs::write(&file1, "line 1\nSTAGED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Further modify working tree: STAGED -> WORKING (unstaged change)
-        std::fs::write(&file1, "line 1\nWORKING\nline 3\n").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                false,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // Cycle to IndexVsHead mode
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
@@ -699,7 +589,6 @@ mod tests {
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
 
-            // Verify initial state is correct
             assert_cursor_at_hunk(s, cx);
             let buffer_item_before = s.active_buffer(cx);
             let buffer_text_before = buffer_item_before.read(cx).buffer().read(cx).text();
@@ -708,10 +597,8 @@ mod tests {
                 "Buffer should contain STAGED before navigation"
             );
 
-            // Press next - this wraps around and reloads the file
             s.diff_review_next_hunk(cx);
 
-            // BUG CHECK: After wraparound, buffer should STILL contain "STAGED", not "WORKING"
             let buffer_item_after = s.active_buffer(cx);
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
@@ -723,10 +610,8 @@ mod tests {
                 "Buffer should NOT contain working tree content (WORKING) after wraparound"
             );
 
-            // BUG CHECK: Cursor should still be at hunk start after wraparound
             assert_cursor_at_hunk(s, cx);
 
-            // BUG CHECK: Diff should still be valid with correct hunks
             let diff_after = buffer_item_after
                 .read(cx)
                 .diff()
@@ -741,40 +626,23 @@ mod tests {
 
     #[gpui::test]
     fn unstaged_mode_with_no_unstaged_changes(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nMODIFIED\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify and stage - NO unstaged changes (working tree = index)
-        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                true,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review in default WorkingVsHead mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // Verify we have a diff in WorkingVsHead mode
             let buffer_item_before = s.active_buffer(cx);
             let diff_before = buffer_item_before.read(cx).diff();
             assert!(diff_before.is_some(), "Should have diff in WorkingVsHead mode");
@@ -784,38 +652,28 @@ mod tests {
                 "Should have 1 hunk in WorkingVsHead"
             );
 
-            // Cursor should be at hunk
             assert_cursor_at_hunk(s, cx);
             let cursor_before_switch = s.cursor_position();
-            // Cursor is at hunk, which should be row 1 (line 2 modified)
             assert!(
                 cursor_before_switch.row >= 1,
                 "Cursor should be at hunk (row >= 1) before switching modes"
             );
 
-            // Cycle to WorkingVsIndex mode (unstaged only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
-            // BUG A: Diff should be cleared (no unstaged changes)
-            // Since working tree = index, there are no unstaged changes
             let buffer_item_after = s.active_buffer(cx);
             let diff_after = buffer_item_after.read(cx).diff();
 
-            // EXPECTED: diff should be None or have 0 hunks
-            // ACTUAL: diff still has old hunks from WorkingVsHead
             assert!(
                 diff_after.is_none() || diff_after.unwrap().hunks.is_empty(),
                 "Diff should be cleared in WorkingVsIndex when no unstaged changes, but has {} hunks",
                 diff_after.map(|d| d.hunks.len()).unwrap_or(0)
             );
 
-            // BUG C: Cursor should be reset to file start when there are no hunks
-            // EXPECTED: cursor at Point(0, 0) (file start)
-            // ACTUAL: cursor stays at old hunk position (row 1)
             let cursor_after_switch = s.cursor_position();
             assert_eq!(
                 cursor_after_switch.row, 0,
@@ -832,54 +690,31 @@ mod tests {
 
     #[gpui::test]
     fn unstaged_mode_next_with_no_hunks(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("file1.txt", "line 1\nline 2\nline 3\n")
+            .with_staged_change("file1.txt", "line 1\nMODIFIED\nline 3\n");
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create initial committed state
-        let file1 = repo_path.join("file1.txt");
-        std::fs::write(&file1, "line 1\nline 2\nline 3\n").unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify and stage - NO unstaged changes (working tree = index)
-        std::fs::write(&file1, "line 1\nMODIFIED\nline 3\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("file1.txt"),
+                "M".into(),
+                true,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review and cycle to WorkingVsIndex mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // Cycle to WorkingVsIndex mode (unstaged only)
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
 
-            // At this point: Bug A and Bug C from previous test
-            // Note: we're in WorkingVsIndex mode with 0 hunks, cursor is at stale position
-
-            // Now press next (j) to move to next hunk
             s.diff_review_next_hunk(cx);
 
-            // BUG A: Diff should STILL be cleared (no unstaged changes)
-            // After pressing next, load_next_file wraps around but should not show hunks
             let buffer_item_after_next = s.active_buffer(cx);
             let diff_after_next = buffer_item_after_next.read(cx).diff();
 
@@ -889,9 +724,6 @@ mod tests {
                 diff_after_next.map(|d| d.hunks.len()).unwrap_or(0)
             );
 
-            // BUG B: Cursor should be reset to file start after pressing next in mode with no hunks
-            // EXPECTED: cursor at Point(0, 0) (file start)
-            // ACTUAL: cursor stays at stale position or becomes invalid
             let cursor_after_next = s.cursor_position();
             assert_eq!(
                 cursor_after_next.row, 0,
@@ -908,55 +740,33 @@ mod tests {
 
     #[gpui::test]
     fn indexed_mode_has_broken_syntax_highlighting(cx: &mut TestAppContext) {
-        use std::process::Command;
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file(
+                "example.rs",
+                "fn main() {\n    println!(\"hello\");\n    let x = 42;\n}\n",
+            )
+            .with_staged_change(
+                "example.rs",
+                "fn main() {\n    println!(\"STAGED\");\n    let x = 42;\n}\n",
+            )
+            .with_working_change(
+                "example.rs",
+                "fn main() {\n    println!(\"WORKING\");\n    let x = 42;\n}\n",
+            );
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap();
-
-        // Create a Rust file with clear syntax that needs highlighting
-        let file1 = repo_path.join("example.rs");
-        std::fs::write(
-            &file1,
-            "fn main() {\n    println!(\"hello\");\n    let x = 42;\n}\n",
-        )
-        .unwrap();
-
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "Initial"])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Modify and stage: change line 2
-        std::fs::write(
-            &file1,
-            "fn main() {\n    println!(\"STAGED\");\n    let x = 42;\n}\n",
-        )
-        .unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(repo_path)
-            .output()
-            .unwrap();
-
-        // Further modify working tree: STAGED -> WORKING
-        std::fs::write(
-            &file1,
-            "fn main() {\n    println!(\"WORKING\");\n    let x = 42;\n}\n",
-        )
-        .unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_status(vec![GitStatusEntry::new(
+                PathBuf::from("example.rs"),
+                "M".into(),
+                false,
+            )]);
+        });
 
         stoat.update(|s, cx| {
-            // Open diff review in WorkingVsHead mode
             s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
-            // In WorkingVsHead mode, verify parse tree exists for syntax highlighting
             let buffer_item_before = s.active_buffer(cx);
             let source_before = buffer_item_before.read(cx).buffer().read(cx).text();
             let captures_before = buffer_item_before
@@ -968,7 +778,6 @@ mod tests {
                 "Should have highlight captures in WorkingVsHead mode"
             );
 
-            // Cycle to IndexVsHead mode
             s.diff_review_cycle_comparison_mode(cx);
             s.diff_review_cycle_comparison_mode(cx);
             assert_eq!(
@@ -978,14 +787,12 @@ mod tests {
 
             let buffer_item_after = s.active_buffer(cx);
 
-            // Verify buffer contains index content (STAGED)
             let buffer_text = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
                 buffer_text.contains("STAGED"),
                 "Buffer should contain index content (STAGED)"
             );
 
-            // Highlights are computed on-demand from the tree, so they're always in sync
             let captures_after = buffer_item_after
                 .read(cx)
                 .highlight_captures(0..buffer_text.len(), &buffer_text);

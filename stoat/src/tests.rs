@@ -1347,12 +1347,9 @@ fn table_driven_selections(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn test_with_git_repo(cx: &mut TestAppContext) {
-    let mut stoat = Stoat::test(cx).init_git();
+    let mut stoat = Stoat::test(cx).init_fake_git();
 
-    // Verify git repository was initialized by checking .git directory exists
     stoat.update(|s, _cx| {
-        // For now, just verify the test setup works
-        // Future: Add file writing and git operations here
         assert_eq!(s.mode(), "normal");
     });
 }

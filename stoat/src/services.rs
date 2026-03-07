@@ -1,4 +1,5 @@
 use crate::{
+    claude::provider::{ClaudeProvider, RealClaudeProvider},
     fs::{Fs, RealFs},
     git::provider::{GitProvider, RealGitProvider},
 };
@@ -7,6 +8,7 @@ use std::sync::Arc;
 pub struct Services {
     pub fs: Arc<dyn Fs>,
     pub git: Arc<dyn GitProvider>,
+    pub claude: Arc<dyn ClaudeProvider>,
 }
 
 impl Services {
@@ -14,16 +16,21 @@ impl Services {
         Arc::new(Self {
             fs: Arc::new(RealFs),
             git: Arc::new(RealGitProvider),
+            claude: Arc::new(RealClaudeProvider),
         })
     }
 
     #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
     pub fn fake() -> Arc<Self> {
-        use crate::{fs::FakeFs, git::provider::FakeGitProvider};
+        use crate::{
+            claude::provider::FakeClaudeProvider, fs::FakeFs, git::provider::FakeGitProvider,
+        };
 
+        let fs = Arc::new(FakeFs::new());
         Arc::new(Self {
-            fs: Arc::new(FakeFs::new()),
-            git: Arc::new(FakeGitProvider::empty()),
+            git: Arc::new(FakeGitProvider::new(fs.clone())),
+            fs,
+            claude: Arc::new(FakeClaudeProvider::new()),
         })
     }
 
@@ -41,5 +48,13 @@ impl Services {
             .as_any()
             .downcast_ref::<crate::git::provider::FakeGitProvider>()
             .expect("Services::fake_git() called on non-fake Services")
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+    pub fn fake_claude(&self) -> &crate::claude::provider::FakeClaudeProvider {
+        self.claude
+            .as_any()
+            .downcast_ref::<crate::claude::provider::FakeClaudeProvider>()
+            .expect("Services::fake_claude() called on non-fake Services")
     }
 }

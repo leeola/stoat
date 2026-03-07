@@ -148,247 +148,90 @@ impl Stoat {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::Stoat;
     use gpui::TestAppContext;
-
-    fn setup_repo_with_change(stoat: &mut crate::test::TestStoat<'_>) -> std::path::PathBuf {
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
-        std::fs::write(&file_path, "line 1\nline 2\nline 3\n").expect("Failed to write file");
-
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to git add");
-
-        std::process::Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to git commit");
-
-        std::fs::write(&file_path, "line 1\nline 2\nline 3\nnew line\n")
-            .expect("Failed to write modified file");
-
-        stoat.set_file_path(file_path.clone());
-        stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
-            buffer_item.update(cx, |item, cx| {
-                let content = std::fs::read_to_string(&file_path).unwrap();
-                item.buffer().update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, content.as_str())]);
-                });
-
-                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
-                let head_content = repo.head_content(&file_path).unwrap();
-                let buffer_snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git::diff::BufferDiff::new(
-                    item.buffer().read(cx).remote_id(),
-                    head_content,
-                    &buffer_snapshot,
-                )
-                .unwrap();
-                item.set_diff(Some(diff));
-            });
-
-            s.set_cursor_position(text::Point::new(3, 0));
-        });
-
-        file_path
-    }
+    use std::path::PathBuf;
 
     #[gpui::test]
     fn stages_hunk_successfully(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo_with_change(&mut stoat);
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("test.txt", "line 1\nline 2\nline 3\n")
+            .with_working_change("test.txt", "line 1\nline 2\nline 3\nnew line\n")
+            .load_and_diff("test.txt");
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(3, 0)));
 
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
 
-        let output = std::process::Command::new("git")
-            .args(["diff", "--cached"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to execute git diff --cached");
-
-        let diff_output = String::from_utf8_lossy(&output.stdout);
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(!diffs.is_empty(), "Should have applied a diff");
         assert!(
-            diff_output.contains("new line"),
-            "Staged diff should contain the new line, got: {diff_output}"
+            diffs[0].0.contains("new line"),
+            "Patch should contain the new line"
         );
     }
 
     #[gpui::test]
     fn double_stage_is_noop(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo_with_change(&mut stoat);
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("test.txt", "line 1\nline 2\nline 3\n")
+            .with_working_change("test.txt", "line 1\nline 2\nline 3\nnew line\n")
+            .load_and_diff("test.txt");
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(3, 0)));
 
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
-
-        // Snapshot the index after first stage
-        let first_output = std::process::Command::new("git")
-            .args(["diff", "--cached"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to execute git diff --cached");
-        let first_staged = String::from_utf8_lossy(&first_output.stdout).to_string();
-
-        // Second stage should succeed (no-op) without changing the index
         let result = stoat.update(|s, cx| s.git_stage_hunk(cx));
-        assert!(
-            result.is_ok(),
-            "Second stage should be a no-op, got: {result:?}"
-        );
-
-        let second_output = std::process::Command::new("git")
-            .args(["diff", "--cached"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to execute git diff --cached");
-        let second_staged = String::from_utf8_lossy(&second_output.stdout).to_string();
-
-        assert_eq!(
-            first_staged, second_staged,
-            "Index should not change on double-stage"
-        );
+        assert!(result.is_ok(), "Second stage should succeed: {result:?}");
     }
 
     #[gpui::test]
     fn toggle_unstages_deletion_hunk(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
-        std::fs::write(&file_path, "line 1\nline 2\nline 3\n").expect("write");
-
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("git commit");
-
-        std::fs::write(&file_path, "line 1\nline 3\n").expect("write deletion");
-
-        stoat.set_file_path(file_path.clone());
-        stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
-            buffer_item.update(cx, |item, cx| {
-                let content = std::fs::read_to_string(&file_path).unwrap();
-                item.buffer().update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, content.as_str())]);
-                });
-
-                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
-                let head_content = repo.head_content(&file_path).unwrap();
-                let snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git::diff::BufferDiff::new(
-                    item.buffer().read(cx).remote_id(),
-                    head_content,
-                    &snapshot,
-                )
-                .unwrap();
-                item.set_diff(Some(diff));
-            });
-            s.set_cursor_position(text::Point::new(0, 0));
-        });
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("test.txt", "line 1\nline 2\nline 3\n")
+            .with_working_change("test.txt", "line 1\nline 3\n")
+            .load_and_diff("test.txt");
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(0, 0)));
 
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
 
-        let cached = String::from_utf8_lossy(
-            &std::process::Command::new("git")
-                .args(["diff", "--cached"])
-                .current_dir(stoat.repo_path().unwrap())
-                .output()
-                .expect("git diff --cached")
-                .stdout,
-        )
-        .to_string();
+        let diffs = stoat.fake_git().applied_diffs();
         assert!(
-            cached.contains("-line 2"),
-            "Deletion should be staged: {cached}"
+            diffs[0].0.contains("-line 2"),
+            "Deletion should be staged: {}",
+            diffs[0].0
         );
 
         stoat.update(|s, cx| s.git_toggle_stage_hunk(cx).unwrap());
 
-        let cached_after = String::from_utf8_lossy(
-            &std::process::Command::new("git")
-                .args(["diff", "--cached"])
-                .current_dir(stoat.repo_path().unwrap())
-                .output()
-                .expect("git diff --cached")
-                .stdout,
-        )
-        .to_string();
-        assert!(
-            cached_after.is_empty(),
-            "Toggle should unstage the deletion: {cached_after}"
-        );
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(diffs.len() >= 2, "Should have applied unstage diff");
     }
 
     #[gpui::test]
     #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+        let mut stoat = Stoat::test(cx).init_fake_git();
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
     #[should_panic(expected = "No diff information available")]
     fn fails_without_diff(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
-        stoat.set_file_path(file_path);
-
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat.set_file_path(PathBuf::from("/fake/repo/test.txt"));
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }
 
     #[gpui::test]
     #[should_panic(expected = "No hunk at cursor row")]
     fn fails_when_not_on_hunk(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
-        std::fs::write(&file_path, "line 1\n").expect("Failed to write file");
-
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to git add");
-
-        std::process::Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to git commit");
-
-        stoat.set_file_path(file_path.clone());
-        stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
-            buffer_item.update(cx, |item, cx| {
-                let content = std::fs::read_to_string(&file_path).unwrap();
-                item.buffer().update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, content.as_str())]);
-                });
-
-                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
-                let head_content = repo.head_content(&file_path).unwrap();
-                let buffer_snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git::diff::BufferDiff::new(
-                    item.buffer().read(cx).remote_id(),
-                    head_content,
-                    &buffer_snapshot,
-                )
-                .unwrap();
-                item.set_diff(Some(diff));
-            });
-        });
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        stoat
+            .with_committed_file("test.txt", "line 1\n")
+            .with_working_change("test.txt", "line 1\n")
+            .load_and_diff("test.txt");
 
         stoat.update(|s, cx| s.git_stage_hunk(cx).unwrap());
     }

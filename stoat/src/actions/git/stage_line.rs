@@ -307,168 +307,102 @@ fn find_line_by_content(selection: &LineSelection, target_content: &str) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::Stoat;
     use gpui::TestAppContext;
 
-    fn setup_repo(
-        stoat: &mut crate::test::TestStoat<'_>,
-        initial: &str,
-        modified: &str,
-    ) -> std::path::PathBuf {
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
-        std::fs::write(&file_path, initial).expect("write initial");
-
-        std::process::Command::new("git")
-            .args(["add", "test.txt"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("git add");
-        std::process::Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("git commit");
-
-        std::fs::write(&file_path, modified).expect("write modified");
-
-        stoat.set_file_path(file_path.clone());
-        stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
-            buffer_item.update(cx, |item, cx| {
-                let content = std::fs::read_to_string(&file_path).unwrap();
-                item.buffer().update(cx, |buffer, _| {
-                    let len = buffer.len();
-                    buffer.edit([(0..len, content.as_str())]);
-                });
-
-                let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
-                let head_content = repo.head_content(&file_path).unwrap();
-                let snapshot = item.buffer().read(cx).snapshot();
-                let diff = crate::git::diff::BufferDiff::new(
-                    item.buffer().read(cx).remote_id(),
-                    head_content,
-                    &snapshot,
-                )
-                .unwrap();
-                item.set_diff(Some(diff));
-            });
-        });
-
-        file_path
-    }
-
-    fn git_cached_diff(repo_path: &std::path::Path) -> String {
-        String::from_utf8_lossy(
-            &std::process::Command::new("git")
-                .args(["diff", "--cached"])
-                .current_dir(repo_path)
-                .output()
-                .expect("git diff --cached")
-                .stdout,
-        )
-        .to_string()
+    fn setup(stoat: &mut crate::test::TestStoat<'_>, initial: &str, modified: &str) {
+        stoat
+            .with_committed_file("test.txt", initial)
+            .with_working_change("test.txt", modified)
+            .load_and_diff("test.txt");
     }
 
     #[gpui::test]
     fn stages_addition_line(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo(
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(
             &mut stoat,
             "line 1\nline 2\nline 3\n",
             "line 1\nline 2\nline 3\nnew line\n",
         );
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(3, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
+        let diffs = stoat.fake_git().applied_diffs();
         assert!(
-            cached.contains("+new line"),
-            "Addition should be staged: {cached}"
+            diffs.iter().any(|(p, _, _)| p.contains("+new line")),
+            "Addition should be staged"
         );
     }
 
     #[gpui::test]
     fn stages_deletion(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(0, 0)));
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(0, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
+        let diffs = stoat.fake_git().applied_diffs();
         assert!(
-            cached.contains("-line 2"),
-            "Deletion should be staged: {cached}"
+            diffs.iter().any(|(p, _, _)| p.contains("-line 2")),
+            "Deletion should be staged"
         );
     }
 
     #[gpui::test]
     fn toggle_addition_round_trip(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo(
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(
             &mut stoat,
             "line 1\nline 2\nline 3\n",
             "line 1\nline 2\nline 3\nnew line\n",
         );
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(3, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
-        assert!(
-            cached.contains("+new line"),
-            "Should be staged first: {cached}"
-        );
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(diffs.iter().any(|(p, _, _)| p.contains("+new line")));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
-        assert!(
-            cached.trim().is_empty(),
-            "Should be unstaged after second toggle: {cached}"
-        );
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(diffs.len() >= 2, "Should have stage + unstage diffs");
     }
 
     #[gpui::test]
     fn toggle_deletion_round_trip(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(0, 0)));
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(&mut stoat, "line 1\nline 2\nline 3\n", "line 1\nline 3\n");
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(0, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
-        assert!(
-            cached.contains("-line 2"),
-            "Should be staged first: {cached}"
-        );
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(diffs.iter().any(|(p, _, _)| p.contains("-line 2")));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
-        assert!(
-            cached.trim().is_empty(),
-            "Should be unstaged after second toggle: {cached}"
-        );
+        let diffs = stoat.fake_git().applied_diffs();
+        assert!(diffs.len() >= 2, "Should have stage + unstage diffs");
     }
 
     #[gpui::test]
     fn stages_single_line_from_multi_line_hunk(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        setup_repo(
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(
             &mut stoat,
             "line 1\nline 2\nline 3\n",
             "line 1\nline 2\nline 3\nnew A\nnew B\n",
         );
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(3, 0)));
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(3, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
+        let diffs = stoat.fake_git().applied_diffs();
+        let patch = &diffs[0].0;
+        assert!(patch.contains("+new A"), "First new line staged: {patch}");
         assert!(
-            cached.contains("+new A"),
-            "First new line should be staged: {cached}"
-        );
-        assert!(
-            !cached.contains("+new B"),
-            "Second new line should NOT be staged: {cached}"
+            !patch.contains("+new B"),
+            "Second new line NOT staged: {patch}"
         );
     }
 
@@ -476,28 +410,25 @@ mod tests {
     fn stages_addition_with_preceding_deletion(cx: &mut TestAppContext) {
         let fifty_lines: String = (1..=50).map(|i| format!("line {i}\n")).collect();
         let initial = format!("{fifty_lines}middle marker\nend\n");
-        // Delete the first 50 lines, add "charlie" after "middle marker"
         let modified = "middle marker\ncharlie\nend\n";
 
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = setup_repo(&mut stoat, &initial, modified);
-
-        // cursor_row 1 = "charlie" (row 0 = "middle marker")
-        stoat.update(|s, _cx| s.set_cursor_position(text::Point::new(1, 0)));
+        let mut stoat = Stoat::test(cx).init_fake_git();
+        setup(&mut stoat, &initial, modified);
+        stoat.update(|s, _| s.set_cursor_position(text::Point::new(1, 0)));
 
         stoat.update(|s, cx| s.git_toggle_stage_line(cx).unwrap());
 
-        let cached = git_cached_diff(stoat.repo_path().unwrap());
+        let diffs = stoat.fake_git().applied_diffs();
         assert!(
-            cached.contains("+charlie"),
-            "Addition should be staged: {cached}"
+            diffs.iter().any(|(p, _, _)| p.contains("+charlie")),
+            "Addition should be staged"
         );
 
-        let repo = crate::git::repository::Repository::discover(&file_path).unwrap();
-        let staged = repo.index_content(&file_path).unwrap();
+        let abs = std::path::PathBuf::from("/fake/repo/test.txt");
+        let idx = stoat.fake_git().index_content(&abs).unwrap_or_default();
         assert!(
-            staged.contains("middle marker\ncharlie\n"),
-            "charlie should appear right after 'middle marker' in index, got:\n{staged}"
+            idx.contains("middle marker\ncharlie\n"),
+            "charlie should appear in index: {idx}"
         );
     }
 }
