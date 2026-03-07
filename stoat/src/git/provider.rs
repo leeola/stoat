@@ -200,27 +200,31 @@ fn reverse_patch_text(patch: &str) -> String {
 
 // -- Fake implementations --
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use parking_lot::Mutex;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 pub struct FakeGitProvider {
     state: Arc<Mutex<FakeGitState>>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 struct FakeGitState {
     workdir: PathBuf,
     head_files: HashMap<PathBuf, String>,
     index_files: HashMap<PathBuf, String>,
+    parent_files: HashMap<PathBuf, String>,
     status_entries: Vec<GitStatusEntry>,
     branch_info: Option<GitBranchInfo>,
+    hunk_counts: HashMap<PathBuf, usize>,
+    staged_files: std::collections::HashSet<PathBuf>,
+    applied_diffs: Vec<(String, ApplyLocation, bool)>,
     exists: bool,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl FakeGitProvider {
     pub fn empty() -> Self {
         Self {
@@ -228,8 +232,12 @@ impl FakeGitProvider {
                 workdir: PathBuf::new(),
                 head_files: HashMap::new(),
                 index_files: HashMap::new(),
+                parent_files: HashMap::new(),
                 status_entries: Vec::new(),
                 branch_info: None,
+                hunk_counts: HashMap::new(),
+                staged_files: std::collections::HashSet::new(),
+                applied_diffs: Vec::new(),
                 exists: false,
             })),
         }
@@ -241,8 +249,12 @@ impl FakeGitProvider {
                 workdir,
                 head_files: HashMap::new(),
                 index_files: HashMap::new(),
+                parent_files: HashMap::new(),
                 status_entries: Vec::new(),
                 branch_info: None,
+                hunk_counts: HashMap::new(),
+                staged_files: std::collections::HashSet::new(),
+                applied_diffs: Vec::new(),
                 exists: true,
             })),
         }
@@ -277,9 +289,28 @@ impl FakeGitProvider {
     pub fn set_branch_info(&self, info: Option<GitBranchInfo>) {
         self.state.lock().branch_info = info;
     }
+
+    pub fn set_parent_content(&self, path: impl Into<PathBuf>, content: impl Into<String>) {
+        self.state
+            .lock()
+            .parent_files
+            .insert(path.into(), content.into());
+    }
+
+    pub fn set_hunk_counts(&self, counts: HashMap<PathBuf, usize>) {
+        self.state.lock().hunk_counts = counts;
+    }
+
+    pub fn staged_files(&self) -> std::collections::HashSet<PathBuf> {
+        self.state.lock().staged_files.clone()
+    }
+
+    pub fn applied_diffs(&self) -> Vec<(String, ApplyLocation, bool)> {
+        self.state.lock().applied_diffs.clone()
+    }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl GitProvider for FakeGitProvider {
     fn as_any(&self) -> &dyn Any {
         self
@@ -301,13 +332,13 @@ impl GitProvider for FakeGitProvider {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 struct FakeGitRepo {
     workdir_path: PathBuf,
     state: Arc<Mutex<FakeGitState>>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl GitRepo for FakeGitRepo {
     fn workdir(&self) -> &Path {
         &self.workdir_path
@@ -331,8 +362,13 @@ impl GitRepo for FakeGitRepo {
             .ok_or(GitError::FileNotFound(path.to_path_buf()))
     }
 
-    fn parent_content(&self, _path: &Path) -> Result<String, GitError> {
-        Ok(String::new())
+    fn parent_content(&self, path: &Path) -> Result<String, GitError> {
+        let state = self.state.lock();
+        state
+            .parent_files
+            .get(path)
+            .cloned()
+            .ok_or(GitError::FileNotFound(path.to_path_buf()))
     }
 
     fn gather_status(&self) -> Result<Vec<GitStatusEntry>, GitStatusError> {
@@ -354,7 +390,7 @@ impl GitRepo for FakeGitRepo {
         &self,
         _mode: DiffComparisonMode,
     ) -> Result<HashMap<PathBuf, usize>, GitError> {
-        Ok(HashMap::new())
+        Ok(self.state.lock().hunk_counts.clone())
     }
 
     fn commit_changed_files(&self) -> Result<Vec<PathBuf>, GitError> {
@@ -371,26 +407,40 @@ impl GitRepo for FakeGitRepo {
 
     fn apply_diff(
         &self,
-        _patch: &str,
-        _reverse: bool,
-        _location: ApplyLocation,
+        patch: &str,
+        reverse: bool,
+        location: ApplyLocation,
     ) -> Result<(), GitError> {
+        self.state
+            .lock()
+            .applied_diffs
+            .push((patch.to_string(), location, reverse));
         Ok(())
     }
 
-    fn stage_file(&self, _path: &Path) -> Result<(), GitError> {
+    fn stage_file(&self, path: &Path) -> Result<(), GitError> {
+        self.state.lock().staged_files.insert(path.to_path_buf());
         Ok(())
     }
 
-    fn unstage_file(&self, _path: &Path) -> Result<(), GitError> {
+    fn unstage_file(&self, path: &Path) -> Result<(), GitError> {
+        self.state.lock().staged_files.remove(path);
         Ok(())
     }
 
     fn stage_all(&self) -> Result<(), GitError> {
+        let mut state = self.state.lock();
+        let all_paths: Vec<PathBuf> = state
+            .status_entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        state.staged_files.extend(all_paths);
         Ok(())
     }
 
     fn unstage_all(&self) -> Result<(), GitError> {
+        self.state.lock().staged_files.clear();
         Ok(())
     }
 }

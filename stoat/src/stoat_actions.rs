@@ -313,6 +313,7 @@ impl Stoat {
         old_snapshot: &std::collections::HashMap<std::path::PathBuf, usize>,
         new_counts: &std::collections::HashMap<std::path::PathBuf, usize>,
         workdir: &std::path::Path,
+        fs: &dyn crate::fs::Fs,
     ) -> Option<std::path::PathBuf> {
         let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
 
@@ -323,8 +324,10 @@ impl Stoat {
             }
 
             let abs_path = workdir.join(path);
-            let mtime = std::fs::metadata(&abs_path)
-                .and_then(|m| m.modified())
+            let mtime = fs
+                .metadata(&abs_path)
+                .ok()
+                .and_then(|m| m.modified)
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
 
             if best
@@ -409,6 +412,7 @@ impl Stoat {
                 &self.review_state.last_hunk_snapshot,
                 &new_counts,
                 repo.workdir(),
+                &*self.services.fs,
             ) {
                 let old_count = self
                     .review_state

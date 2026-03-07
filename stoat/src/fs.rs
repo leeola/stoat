@@ -137,28 +137,34 @@ impl Fs for RealFs {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use parking_lot::Mutex;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+struct FakeFileEntry {
+    content: Vec<u8>,
+    mtime: SystemTime,
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 pub struct FakeFs {
     state: Mutex<FakeFsState>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 struct FakeFsState {
-    files: std::collections::HashMap<PathBuf, Vec<u8>>,
-    dirs: std::collections::HashSet<PathBuf>,
+    files: std::collections::BTreeMap<PathBuf, FakeFileEntry>,
+    dirs: std::collections::BTreeSet<PathBuf>,
     next_mtime: SystemTime,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl FakeFs {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(FakeFsState {
-                files: std::collections::HashMap::new(),
-                dirs: std::collections::HashSet::new(),
+                files: std::collections::BTreeMap::new(),
+                dirs: std::collections::BTreeSet::new(),
                 next_mtime: SystemTime::UNIX_EPOCH,
             }),
         }
@@ -177,8 +183,24 @@ impl FakeFs {
                 }
             }
         }
-        state.files.insert(path, content.as_ref().to_vec());
         state.next_mtime += std::time::Duration::from_secs(1);
+        let mtime = state.next_mtime;
+        state.files.insert(
+            path,
+            FakeFileEntry {
+                content: content.as_ref().to_vec(),
+                mtime,
+            },
+        );
+    }
+
+    pub fn read_to_string_fake(&self, path: &Path) -> io::Result<String> {
+        self.state
+            .lock()
+            .files
+            .get(path)
+            .map(|e| String::from_utf8_lossy(&e.content).into_owned())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path:?} not found")))
     }
 
     pub fn files(&self) -> Vec<PathBuf> {
@@ -186,7 +208,7 @@ impl FakeFs {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 impl Fs for FakeFs {
     fn as_any(&self) -> &dyn Any {
         self
@@ -197,7 +219,7 @@ impl Fs for FakeFs {
         state
             .files
             .get(path)
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .map(|e| String::from_utf8_lossy(&e.content).into_owned())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path:?} not found")))
     }
 
@@ -206,7 +228,7 @@ impl Fs for FakeFs {
         state
             .files
             .get(path)
-            .map(|b| b[..b.len().min(max_bytes)].to_vec())
+            .map(|e| e.content[..e.content.len().min(max_bytes)].to_vec())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path:?} not found")))
     }
 
@@ -228,12 +250,12 @@ impl Fs for FakeFs {
                 is_file: false,
                 modified: Some(state.next_mtime),
             })
-        } else if let Some(content) = state.files.get(path) {
+        } else if let Some(entry) = state.files.get(path) {
             Ok(FsMetadata {
-                len: content.len() as u64,
+                len: entry.content.len() as u64,
                 is_dir: false,
                 is_file: true,
-                modified: Some(state.next_mtime),
+                modified: Some(entry.mtime),
             })
         } else {
             Err(io::Error::new(
@@ -247,14 +269,14 @@ impl Fs for FakeFs {
         let state = self.state.lock();
         let mut entries = Vec::new();
 
-        for (file_path, content) in &state.files {
+        for (file_path, entry) in &state.files {
             if file_path.parent() == Some(path) {
                 entries.push(FsDirEntry {
                     path: file_path.clone(),
                     file_name: file_path.file_name().unwrap_or_default().to_os_string(),
                     is_dir: false,
                     is_file: true,
-                    len: content.len() as u64,
+                    len: entry.content.len() as u64,
                 });
             }
         }

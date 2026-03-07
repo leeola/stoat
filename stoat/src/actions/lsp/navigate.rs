@@ -101,8 +101,13 @@ impl Stoat {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 apply_text_edits_to_buffer(&buffer_item, text_edits, cx);
                 total_edits += text_edits.len();
-                crate::actions::write_file::write_buffer_to_disk(&buffer_item, &abs_path, cx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                crate::actions::write_file::write_buffer_to_disk(
+                    &buffer_item,
+                    &abs_path,
+                    &*self.services.fs,
+                    cx,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
 
@@ -165,8 +170,13 @@ impl Stoat {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 apply_text_edits_to_buffer(&buffer_item, &text_edits, cx);
                 total_edits += text_edits.len();
-                crate::actions::write_file::write_buffer_to_disk(&buffer_item, &abs_path, cx)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                crate::actions::write_file::write_buffer_to_disk(
+                    &buffer_item,
+                    &abs_path,
+                    &*self.services.fs,
+                    cx,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
         }
 
@@ -183,8 +193,11 @@ impl Stoat {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Result<Entity<BufferItem>, String> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let contents = self
+            .services
+            .fs
+            .read_to_string(path)
+            .map_err(|e| format!("Failed to read file: {e}"))?;
 
         let language = path
             .extension()

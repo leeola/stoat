@@ -17,7 +17,7 @@ impl Services {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
     pub fn fake() -> Arc<Self> {
         use crate::{fs::FakeFs, git::provider::FakeGitProvider};
 
@@ -27,7 +27,7 @@ impl Services {
         })
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
     pub fn fake_fs(&self) -> &crate::fs::FakeFs {
         self.fs
             .as_any()
@@ -35,7 +35,7 @@ impl Services {
             .expect("Services::fake_fs() called on non-fake Services")
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
     pub fn fake_git(&self) -> &crate::git::provider::FakeGitProvider {
         self.git
             .as_any()

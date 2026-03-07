@@ -288,7 +288,12 @@ impl BufferItem {
         self.line_ending = line_ending;
     }
 
-    pub fn has_conflict(&self, file_path: &std::path::Path, cx: &App) -> bool {
+    pub fn has_conflict(
+        &self,
+        file_path: &std::path::Path,
+        fs: &dyn crate::fs::Fs,
+        cx: &App,
+    ) -> bool {
         if !self.is_modified(cx) {
             return false;
         }
@@ -297,11 +302,11 @@ impl BufferItem {
             return false;
         };
 
-        let Ok(metadata) = std::fs::metadata(file_path) else {
+        let Ok(metadata) = fs.metadata(file_path) else {
             return false;
         };
 
-        let Ok(current_mtime) = metadata.modified() else {
+        let Some(current_mtime) = metadata.modified else {
             return false;
         };
 

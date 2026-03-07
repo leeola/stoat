@@ -47,25 +47,19 @@ impl PreviewData {
 ///
 /// Fast operation suitable for immediate display. Reads up to 100KB.
 /// Uses `smol::unblock` to avoid blocking async executor.
-pub async fn load_text_only(path: &Path) -> Option<String> {
+pub async fn load_text_only(path: &Path, fs: std::sync::Arc<dyn crate::fs::Fs>) -> Option<String> {
     let path = path.to_path_buf();
 
     smol::unblock(move || {
-        const MAX_BYTES: usize = 100 * 1024; // 100KB
+        const MAX_BYTES: usize = 100 * 1024;
 
-        // Read only first MAX_BYTES
-        let mut file = std::fs::File::open(&path).ok()?;
-        let mut buffer = vec![0; MAX_BYTES];
-        let bytes_read = std::io::Read::read(&mut file, &mut buffer).ok()?;
-        buffer.truncate(bytes_read);
+        let buffer = fs.read_bytes(&path, MAX_BYTES).ok()?;
 
-        // Check for binary content
         let check_size = buffer.len().min(1024);
         if buffer[..check_size].contains(&0) {
-            return None; // Binary file
+            return None;
         }
 
-        // Decode as UTF-8
         String::from_utf8(buffer).ok()
     })
     .await
@@ -75,17 +69,16 @@ pub async fn load_text_only(path: &Path) -> Option<String> {
 ///
 /// Reads file and parses for syntax highlighting. Both file I/O and parsing
 /// run on thread pool via `smol::unblock` to avoid blocking executor.
-pub async fn load_file_preview(path: &Path) -> Option<PreviewData> {
+pub async fn load_file_preview(
+    path: &Path,
+    fs: std::sync::Arc<dyn crate::fs::Fs>,
+) -> Option<PreviewData> {
     let path = path.to_path_buf();
 
-    // Phase 1: File I/O on thread pool
     let (text, language) = smol::unblock(move || {
         const MAX_BYTES: usize = 100 * 1024;
 
-        let mut file = std::fs::File::open(&path).ok()?;
-        let mut buffer = vec![0; MAX_BYTES];
-        let bytes_read = std::io::Read::read(&mut file, &mut buffer).ok()?;
-        buffer.truncate(bytes_read);
+        let buffer = fs.read_bytes(&path, MAX_BYTES).ok()?;
 
         let check_size = buffer.len().min(1024);
         if buffer[..check_size].contains(&0) {

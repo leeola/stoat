@@ -627,10 +627,10 @@ impl PaneGroupView {
         let abs_path = root.join(&relative_path);
         let abs_path_for_highlight = abs_path.clone();
 
-        // Spawn async task to load preview
+        let fs = self.app_state.services.fs.clone();
+        let fs2 = fs.clone();
         self.app_state.file_finder.preview_task = Some(cx.spawn(async move |this, cx| {
-            // Phase 1: Load plain text immediately
-            if let Some(text) = crate::file_finder::load_text_only(&abs_path).await {
+            if let Some(text) = crate::file_finder::load_text_only(&abs_path, fs).await {
                 let _ = this.update(cx, |pane_group, cx| {
                     pane_group.app_state.file_finder.preview =
                         Some(crate::file_finder::PreviewData::Plain(text));
@@ -638,9 +638,8 @@ impl PaneGroupView {
                 });
             }
 
-            // Phase 2: Load syntax-highlighted version
             if let Some(highlighted) =
-                crate::file_finder::load_file_preview(&abs_path_for_highlight).await
+                crate::file_finder::load_file_preview(&abs_path_for_highlight, fs2).await
             {
                 let _ = this.update(cx, |pane_group, cx| {
                     pane_group.app_state.file_finder.preview = Some(highlighted);
@@ -956,11 +955,15 @@ impl Focusable for PaneGroupView {
     }
 }
 
-fn git_index_changed(root: &std::path::Path, last_mtime: &mut Option<SystemTime>) -> bool {
-    let Ok(metadata) = std::fs::metadata(root.join(".git/index")) else {
+fn git_index_changed(
+    root: &std::path::Path,
+    last_mtime: &mut Option<SystemTime>,
+    fs: &dyn crate::fs::Fs,
+) -> bool {
+    let Ok(metadata) = fs.metadata(&root.join(".git/index")) else {
         return false;
     };
-    let Ok(mtime) = metadata.modified() else {
+    let Some(mtime) = metadata.modified else {
         return false;
     };
     let changed = last_mtime.is_none_or(|last| mtime > last);
@@ -1000,6 +1003,7 @@ impl Render for PaneGroupView {
             if let Some((receiver, watcher_handle)) = watch_result {
                 self._git_watcher = Some(watcher_handle);
 
+                let fs = self.app_state.services.fs.clone();
                 cx.spawn(async move |this, cx| {
                     let mut last_index_mtime: Option<SystemTime> = None;
                     let poll_interval = Duration::from_secs(2);
@@ -1014,7 +1018,7 @@ impl Render for PaneGroupView {
 
                         let is_poll = matches!(event, futures::future::Either::Right(_));
 
-                        if is_poll && !git_index_changed(&root, &mut last_index_mtime) {
+                        if is_poll && !git_index_changed(&root, &mut last_index_mtime, &*fs) {
                             let follow_active = this.update(cx, |this, cx| {
                                 this.active_editor()
                                     .map(|e| {

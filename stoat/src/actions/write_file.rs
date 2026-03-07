@@ -5,9 +5,9 @@
 //! associated file path, and [`write_all`](crate::Stoat::write_all) saves all
 //! modified buffers with file paths.
 
-use crate::{buffer::item::BufferItem, Stoat};
+use crate::{buffer::item::BufferItem, fs::Fs, Stoat};
 use gpui::{Context, Entity};
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 use text::LineEnding;
 
 /// Convert text line endings to the specified style.
@@ -66,37 +66,19 @@ fn convert_line_endings(text: &str, line_ending: LineEnding) -> String {
 pub(crate) fn write_buffer_to_disk(
     buffer_item: &Entity<BufferItem>,
     file_path: &PathBuf,
+    fs: &dyn Fs,
     cx: &mut Context<Stoat>,
 ) -> Result<(), String> {
-    // Get buffer content and line ending
     let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
     let line_ending = buffer_item.read(cx).line_ending();
 
-    // Convert line endings to preserve original file format
     let content_with_line_endings = convert_line_endings(&content, line_ending);
 
-    // Atomic write: write to temp file, then rename
-    let parent_dir = file_path
-        .parent()
-        .ok_or_else(|| "File path has no parent directory".to_string())?;
+    fs.atomic_write(file_path, content_with_line_endings.as_bytes())
+        .map_err(|e| format!("Failed to write file: {e}"))?;
 
-    let mut tmp_file = tempfile::NamedTempFile::new_in(parent_dir)
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let mtime = fs.metadata(file_path).ok().and_then(|m| m.modified);
 
-    tmp_file
-        .write_all(content_with_line_endings.as_bytes())
-        .map_err(|e| format!("Failed to write to temp file: {e}"))?;
-
-    tmp_file
-        .persist(file_path)
-        .map_err(|e| format!("Failed to persist temp file: {e}"))?;
-
-    // Get mtime after successful write
-    let mtime = std::fs::metadata(file_path)
-        .ok()
-        .and_then(|m| m.modified().ok());
-
-    // Update saved text baseline and mtime to mark buffer as clean
     buffer_item.update(cx, |item, _cx| {
         item.set_saved_text(content);
         if let Some(mtime) = mtime {
@@ -156,18 +138,15 @@ impl Stoat {
     /// });
     /// ```
     pub fn write_file(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        // Get the current file path
         let file_path = self
             .current_file_path
             .as_ref()
             .ok_or_else(|| "No file path set for current buffer".to_string())?
             .clone();
 
-        // Get active buffer
         let buffer_item = self.active_buffer(cx);
 
-        // Write using shared implementation
-        write_buffer_to_disk(&buffer_item, &file_path, cx)?;
+        write_buffer_to_disk(&buffer_item, &file_path, &*self.services.fs, cx)?;
 
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
@@ -235,8 +214,7 @@ impl Stoat {
                 continue;
             }
 
-            // Write buffer using shared implementation
-            write_buffer_to_disk(&buffer_item, &file_path, cx)?;
+            write_buffer_to_disk(&buffer_item, &file_path, &*self.services.fs, cx)?;
             wrote_any = true;
         }
 
@@ -253,12 +231,13 @@ impl Stoat {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::path::PathBuf;
 
     #[gpui::test]
     fn writes_buffer_to_disk(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+        let mut stoat = Stoat::test(cx);
 
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
+        let file_path = PathBuf::from("/fake/test.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -266,9 +245,14 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        assert!(file_path.exists(), "File should exist after write");
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "Hello from Stoat!");
+        stoat.update(|s, _cx| {
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "Hello from Stoat!");
+        });
     }
 
     #[gpui::test]
@@ -284,9 +268,9 @@ mod tests {
 
     #[gpui::test]
     fn writes_multiline_content(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+        let mut stoat = Stoat::test(cx);
 
-        let file_path = stoat.repo_path().unwrap().join("multiline.txt");
+        let file_path = PathBuf::from("/fake/multiline.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -294,14 +278,20 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "Line 1\nLine 2\nLine 3");
+        stoat.update(|s, _cx| {
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "Line 1\nLine 2\nLine 3");
+        });
     }
 
     #[gpui::test]
     fn modifies_buffer_and_writes(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("modify_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/modify_test.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -309,14 +299,20 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "Initial text here");
+        stoat.update(|s, _cx| {
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "Initial text here");
+        });
     }
 
     #[gpui::test]
     fn multiple_edits_then_write(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("complex_edit.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/complex_edit.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -328,14 +324,20 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "First\nThird");
+        stoat.update(|s, _cx| {
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "First\nThird");
+        });
     }
 
     #[gpui::test]
     fn write_updates_saved_baseline(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("baseline_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/baseline_test.txt");
         stoat.set_file_path(file_path.clone());
 
         stoat.update(|s, cx| {
@@ -354,10 +356,14 @@ mod tests {
 
     #[gpui::test]
     fn write_preserves_existing_content(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let file_path = stoat.repo_path().unwrap().join("preserve_test.txt");
+        let mut stoat = Stoat::test(cx);
+        let file_path = PathBuf::from("/fake/preserve_test.txt");
 
-        std::fs::write(&file_path, "Existing content").expect("Failed to write initial file");
+        stoat.update(|s, _cx| {
+            s.services
+                .fake_fs()
+                .insert_file(&file_path, "Existing content");
+        });
 
         stoat.update(|s, cx| {
             s.load_file(&file_path, cx).expect("Failed to load file");
@@ -366,8 +372,14 @@ mod tests {
             s.write_file(cx).unwrap();
         });
 
-        let contents = std::fs::read_to_string(&file_path).expect("Failed to read file");
-        assert_eq!(contents, "Existing content modified");
+        stoat.update(|s, _cx| {
+            let contents = s
+                .services
+                .fake_fs()
+                .read_to_string_fake(&file_path)
+                .unwrap();
+            assert_eq!(contents, "Existing content modified");
+        });
     }
 
     #[gpui::test]
@@ -436,7 +448,9 @@ mod tests {
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                buffer_item.read(cx).has_conflict(&file_path, cx),
+                buffer_item
+                    .read(cx)
+                    .has_conflict(&file_path, &*s.services.fs, cx),
                 "Should detect conflict when file modified externally with unsaved buffer changes"
             );
         });
@@ -464,7 +478,9 @@ mod tests {
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                !buffer_item.read(cx).has_conflict(&file_path, cx),
+                !buffer_item
+                    .read(cx)
+                    .has_conflict(&file_path, &*s.services.fs, cx),
                 "Should not detect conflict when buffer is clean (no unsaved changes)"
             );
         });
@@ -491,7 +507,9 @@ mod tests {
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                buffer_item.read(cx).has_conflict(&file_path, cx),
+                buffer_item
+                    .read(cx)
+                    .has_conflict(&file_path, &*s.services.fs, cx),
                 "Conflict should exist before write"
             );
         });
@@ -502,7 +520,9 @@ mod tests {
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                !buffer_item.read(cx).has_conflict(&file_path, cx),
+                !buffer_item
+                    .read(cx)
+                    .has_conflict(&file_path, &*s.services.fs, cx),
                 "Conflict should be cleared after write (buffer clean + mtime updated)"
             );
         });
@@ -611,18 +631,17 @@ mod tests {
 
     #[gpui::test]
     fn write_all_saves_multiple_modified_buffers(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let mut stoat = Stoat::test(cx);
 
-        // Create and modify multiple buffers
-        let file1 = repo_path.join("file1.txt");
-        let file2 = repo_path.join("file2.txt");
-        let file3 = repo_path.join("file3.txt");
+        let file1 = PathBuf::from("/fake/file1.txt");
+        let file2 = PathBuf::from("/fake/file2.txt");
+        let file3 = PathBuf::from("/fake/file3.txt");
 
-        // Create initial files
-        std::fs::write(&file1, "Initial 1").unwrap();
-        std::fs::write(&file2, "Initial 2").unwrap();
-        std::fs::write(&file3, "Initial 3").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_fs().insert_file(&file1, "Initial 1");
+            s.services.fake_fs().insert_file(&file2, "Initial 2");
+            s.services.fake_fs().insert_file(&file3, "Initial 3");
+        });
 
         for file in [&file1, &file2, &file3] {
             stoat.update(|s, cx| {
@@ -634,19 +653,20 @@ mod tests {
 
         stoat.update(|s, cx| s.write_all(cx).unwrap());
 
-        // Verify all files were written
-        assert_eq!(
-            std::fs::read_to_string(&file1).unwrap(),
-            "Initial 1 - modified"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&file2).unwrap(),
-            "Initial 2 - modified"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&file3).unwrap(),
-            "Initial 3 - modified"
-        );
+        stoat.update(|s, _cx| {
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file1).unwrap(),
+                "Initial 1 - modified"
+            );
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file2).unwrap(),
+                "Initial 2 - modified"
+            );
+            assert_eq!(
+                s.services.fake_fs().read_to_string_fake(&file3).unwrap(),
+                "Initial 3 - modified"
+            );
+        });
     }
 
     #[gpui::test]
@@ -699,14 +719,15 @@ mod tests {
 
     #[gpui::test]
     fn write_all_marks_all_buffers_clean(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let mut stoat = Stoat::test(cx);
 
-        let file1 = repo_path.join("buffer1.txt");
-        let file2 = repo_path.join("buffer2.txt");
+        let file1 = PathBuf::from("/fake/buffer1.txt");
+        let file2 = PathBuf::from("/fake/buffer2.txt");
 
-        std::fs::write(&file1, "").unwrap();
-        std::fs::write(&file2, "").unwrap();
+        stoat.update(|s, _cx| {
+            s.services.fake_fs().insert_file(&file1, "");
+            s.services.fake_fs().insert_file(&file2, "");
+        });
 
         stoat.update(|s, cx| {
             s.load_file(&file1, cx).unwrap();
@@ -719,7 +740,6 @@ mod tests {
 
         stoat.update(|s, cx| s.write_all(cx).unwrap());
 
-        // Verify both buffers are marked as clean
         stoat.update(|s, cx| {
             let buffer_store = s.buffer_store.read(cx);
             for buffer_id in buffer_store.buffer_ids_by_activation() {

@@ -1332,8 +1332,11 @@ impl Stoat {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let contents = self
+            .services
+            .fs
+            .read_to_string(path)
+            .map_err(|e| format!("Failed to read file: {e}"))?;
 
         let language = path
             .extension()
@@ -1359,7 +1362,12 @@ impl Stoat {
             .ok_or_else(|| "Failed to create buffer".to_string())?;
 
         // Get mtime after reading file
-        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let mtime = self
+            .services
+            .fs
+            .metadata(path)
+            .ok()
+            .and_then(|m| m.modified);
 
         // Detect line ending from file contents
         let line_ending = text::LineEnding::detect(&contents);
@@ -1722,7 +1730,7 @@ impl Stoat {
                 let diff = BufferDiff::new(buffer_id, parent_content, &buffer_snapshot).ok()?;
 
                 // Detect reverted hunks: rows where working tree differs from HEAD
-                let working_content = std::fs::read_to_string(path).ok();
+                let working_content = self.services.fs.read_to_string(path).ok();
                 let (staged_rows, staged_hunks) = working_content
                     .map(|wc| {
                         let wh_diff = BufferDiff::new(buffer_id, wc, &buffer_snapshot).ok();
@@ -1817,10 +1825,10 @@ impl Stoat {
         let Some(saved_mtime) = buffer_item.read(cx).saved_mtime() else {
             return;
         };
-        let Ok(metadata) = std::fs::metadata(&abs_path) else {
+        let Ok(metadata) = self.services.fs.metadata(&abs_path) else {
             return;
         };
-        let Ok(current_mtime) = metadata.modified() else {
+        let Some(current_mtime) = metadata.modified else {
             return;
         };
         if current_mtime <= saved_mtime {

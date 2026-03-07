@@ -35,25 +35,15 @@ impl Stoat {
             .ok_or_else(|| "No file path set for current buffer".to_string())?
             .clone();
 
-        let repo_dir = file_path
-            .parent()
-            .ok_or_else(|| "File path has no parent directory".to_string())?;
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = self
+            .services
+            .git
+            .discover(&root_path)
+            .map_err(|e| format!("git stage failed: {e}"))?;
 
-        let output = std::process::Command::new("git")
-            .arg("add")
-            .arg(
-                file_path
-                    .file_name()
-                    .ok_or_else(|| "Invalid file name".to_string())?,
-            )
-            .current_dir(repo_dir)
-            .output()
-            .map_err(|e| format!("Failed to execute git add: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git add failed: {stderr}"));
-        }
+        repo.stage_file(&file_path)
+            .map_err(|e| format!("git stage failed: {e}"))?;
 
         tracing::info!("Staged file {:?}", file_path);
 
@@ -65,57 +55,43 @@ impl Stoat {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::path::PathBuf;
 
     #[gpui::test]
     fn stages_file_successfully(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+        let mut stoat = Stoat::test(cx);
 
-        let file_path = stoat.repo_path().unwrap().join("test.txt");
+        let file_path = PathBuf::from("/fake/repo/test.txt");
         stoat.set_file_path(file_path.clone());
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_exists(true);
+            s.services
+                .fake_git()
+                .set_workdir(PathBuf::from("/fake/repo"));
+        });
 
         stoat.update(|s, cx| {
-            s.insert_text("Hello from Stoat!", cx);
-            s.write_file(cx).unwrap();
             s.git_stage_file(cx).unwrap();
         });
 
-        let output = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(stoat.repo_path().unwrap())
-            .output()
-            .expect("Failed to execute git status");
-
-        let status = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            status.starts_with("A "),
-            "File should be staged (status should start with 'A '), got: {status}"
-        );
+        stoat.update(|s, _cx| {
+            let staged = s.services.fake_git().staged_files();
+            assert!(staged.contains(&file_path), "File should be staged");
+        });
     }
 
     #[gpui::test]
     #[should_panic(expected = "No file path set for current buffer")]
     fn fails_without_file_path(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
-
-        stoat.update(|s, cx| {
-            s.insert_text("Hello", cx);
-            s.git_stage_file(cx).unwrap();
-        });
+        let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.git_stage_file(cx).unwrap());
     }
 
     #[gpui::test]
-    #[should_panic(expected = "git add failed")]
+    #[should_panic(expected = "git stage failed")]
     fn fails_outside_git_repo(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
-
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
-        let file_path = temp_dir.path().join("test.txt");
-        stoat.set_file_path(file_path.clone());
-
-        stoat.update(|s, cx| {
-            s.insert_text("Hello", cx);
-            s.write_file(cx).unwrap();
-            s.git_stage_file(cx).unwrap();
-        });
+        stoat.set_file_path(PathBuf::from("/no/repo/test.txt"));
+        stoat.update(|s, cx| s.git_stage_file(cx).unwrap());
     }
 }

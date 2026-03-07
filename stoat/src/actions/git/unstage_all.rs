@@ -30,29 +30,17 @@ impl Stoat {
     /// - [`git_stage_all`](crate::Stoat::git_stage_all) - Stage all changes
     /// - [`git_unstage_hunk`](crate::Stoat::git_unstage_hunk) - Unstage individual hunks
     pub fn git_unstage_all(&mut self, _cx: &mut Context<Self>) -> Result<(), String> {
-        let file_path = self
-            .current_file_path
-            .as_ref()
-            .ok_or_else(|| "No file path set for current buffer".to_string())?
-            .clone();
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let repo = self
+            .services
+            .git
+            .discover(&root_path)
+            .map_err(|e| format!("git unstage all failed: {e}"))?;
 
-        let repo_dir = file_path
-            .parent()
-            .ok_or_else(|| "File path has no parent directory".to_string())?;
+        repo.unstage_all()
+            .map_err(|e| format!("git unstage all failed: {e}"))?;
 
-        let output = std::process::Command::new("git")
-            .arg("reset")
-            .arg("HEAD")
-            .current_dir(repo_dir)
-            .output()
-            .map_err(|e| format!("Failed to execute git reset HEAD: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("git reset HEAD failed: {stderr}"));
-        }
-
-        tracing::info!("Unstaged all changes in repository at {:?}", repo_dir);
+        tracing::info!("Unstaged all changes in repository at {:?}", root_path);
 
         Ok(())
     }
@@ -62,79 +50,48 @@ impl Stoat {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::path::PathBuf;
 
     #[gpui::test]
     fn unstages_all_changes_successfully(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+        let mut stoat = Stoat::test(cx);
 
-        let repo_path = stoat.repo_path().unwrap().to_path_buf();
+        let file1 = PathBuf::from("file1.txt");
+        let file2 = PathBuf::from("file2.txt");
+        let file3 = PathBuf::from("file3.txt");
 
-        // Create initial commit (needed for git reset HEAD to work)
-        let init_file = repo_path.join("init.txt");
-        std::fs::write(&init_file, "init").expect("Failed to write init file");
+        stoat.update(|s, _cx| {
+            s.services.fake_git().set_exists(true);
+            s.services
+                .fake_git()
+                .set_workdir(PathBuf::from("/fake/repo"));
+        });
 
-        std::process::Command::new("git")
-            .args(["add", "init.txt"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("Failed to git add");
+        // Stage files individually via the fake
+        stoat.update(|s, cx| {
+            s.current_file_path = Some(file1.clone());
+            s.git_stage_file(cx).unwrap();
+            s.current_file_path = Some(file2.clone());
+            s.git_stage_file(cx).unwrap();
+            s.current_file_path = Some(file3.clone());
+            s.git_stage_file(cx).unwrap();
+        });
 
-        std::process::Command::new("git")
-            .args(["commit", "-m", "Initial commit"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("Failed to git commit");
+        stoat.update(|s, _cx| {
+            assert_eq!(s.services.fake_git().staged_files().len(), 3);
+        });
 
-        // Create and stage multiple files
-        let file1 = repo_path.join("file1.txt");
-        let file2 = repo_path.join("file2.txt");
-        let file3 = repo_path.join("file3.txt");
-
-        std::fs::write(&file1, "content 1").expect("Failed to write file1");
-        std::fs::write(&file2, "content 2").expect("Failed to write file2");
-        std::fs::write(&file3, "content 3").expect("Failed to write file3");
-
-        std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("Failed to git add");
-
-        // Verify files are staged
-        let output = std::process::Command::new("git")
-            .args(["diff", "--cached", "--name-only"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("Failed to execute git diff --cached");
-
-        let staged_files = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            staged_files.contains("file1.txt"),
-            "file1.txt should be staged"
-        );
-
-        // Set file path and unstage all
-        stoat.set_file_path(file1.clone());
         stoat.update(|s, cx| s.git_unstage_all(cx).unwrap());
 
-        // Verify no files are staged
-        let output = std::process::Command::new("git")
-            .args(["diff", "--cached", "--name-only"])
-            .current_dir(&repo_path)
-            .output()
-            .expect("Failed to execute git diff --cached");
-
-        let staged_files = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            staged_files.trim().is_empty(),
-            "No files should be staged after unstage all, got: {staged_files}"
-        );
+        stoat.update(|s, _cx| {
+            assert!(s.services.fake_git().staged_files().is_empty());
+        });
     }
 
     #[gpui::test]
-    #[should_panic(expected = "No file path set for current buffer")]
-    fn fails_without_file_path(cx: &mut TestAppContext) {
-        let mut stoat = Stoat::test(cx).init_git();
+    #[should_panic(expected = "git unstage all failed")]
+    fn fails_outside_git_repo(cx: &mut TestAppContext) {
+        let mut stoat = Stoat::test(cx);
         stoat.update(|s, cx| s.git_unstage_all(cx).unwrap());
     }
 }
