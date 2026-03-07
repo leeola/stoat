@@ -177,6 +177,18 @@ impl AssistantMessage {
             .collect()
     }
 
+    pub fn get_thinking_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| c.as_thinking())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn has_thinking(&self) -> bool {
+        self.content.iter().any(|c| c.is_thinking())
+    }
+
     pub fn is_tool_only(&self) -> bool {
         !self.content.is_empty()
             && self
@@ -311,8 +323,10 @@ mod user_content_serde {
 }
 
 /// Content blocks within assistant messages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+///
+/// Uses custom serialize/deserialize to gracefully handle unknown content block
+/// types from the Claude API without failing deserialization.
+#[derive(Debug, Clone)]
 pub enum MessageContent {
     Text {
         text: String,
@@ -322,6 +336,165 @@ pub enum MessageContent {
         name: String,
         input: HashMap<String, serde_json::Value>,
     },
+    Thinking {
+        thinking: String,
+    },
+    RedactedThinking,
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ServerToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
+    Unknown {
+        content_type: String,
+    },
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        match self {
+            MessageContent::Text { text } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "text")?;
+                map.serialize_entry("text", text)?;
+                map.end()
+            },
+            MessageContent::ToolUse { id, name, input } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "tool_use")?;
+                map.serialize_entry("id", id)?;
+                map.serialize_entry("name", name)?;
+                map.serialize_entry("input", input)?;
+                map.end()
+            },
+            MessageContent::Thinking { thinking } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "thinking")?;
+                map.serialize_entry("thinking", thinking)?;
+                map.end()
+            },
+            MessageContent::RedactedThinking => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("type", "redacted_thinking")?;
+                map.end()
+            },
+            MessageContent::ServerToolUse { id, name, input } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "server_tool_use")?;
+                map.serialize_entry("id", id)?;
+                map.serialize_entry("name", name)?;
+                map.serialize_entry("input", input)?;
+                map.end()
+            },
+            MessageContent::ServerToolResult {
+                tool_use_id,
+                content,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "server_tool_result")?;
+                map.serialize_entry("tool_use_id", tool_use_id)?;
+                map.serialize_entry("content", content)?;
+                map.end()
+            },
+            MessageContent::Unknown { content_type } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("type", content_type)?;
+                map.end()
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let content_type = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        match content_type.as_str() {
+            "text" => {
+                let text = value
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(MessageContent::Text { text })
+            },
+            "tool_use" => {
+                let id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input: HashMap<String, serde_json::Value> = value
+                    .get("input")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                Ok(MessageContent::ToolUse { id, name, input })
+            },
+            "thinking" => {
+                let thinking = value
+                    .get("thinking")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(MessageContent::Thinking { thinking })
+            },
+            "redacted_thinking" => Ok(MessageContent::RedactedThinking),
+            "server_tool_use" => {
+                let id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = value
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(MessageContent::ServerToolUse { id, name, input })
+            },
+            "server_tool_result" => {
+                let tool_use_id = value
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = value
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(MessageContent::ServerToolResult {
+                    tool_use_id,
+                    content,
+                })
+            },
+            _ => Ok(MessageContent::Unknown { content_type }),
+        }
+    }
 }
 
 impl MessageContent {
@@ -333,9 +506,20 @@ impl MessageContent {
         matches!(self, MessageContent::ToolUse { .. })
     }
 
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, MessageContent::Thinking { .. })
+    }
+
     pub fn as_text(&self) -> Option<&str> {
         match self {
             MessageContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_thinking(&self) -> Option<&str> {
+        match self {
+            MessageContent::Thinking { thinking } => Some(thinking.as_str()),
             _ => None,
         }
     }
@@ -389,6 +573,25 @@ mod tests {
     }
 
     #[test]
+    fn assistant_thinking_helpers() {
+        let msg = AssistantMessage {
+            role: Role::Assistant,
+            content: vec![
+                MessageContent::Thinking {
+                    thinking: "Let me reason...".to_string(),
+                },
+                MessageContent::Text {
+                    text: "Here's my answer.".to_string(),
+                },
+            ],
+        };
+
+        assert!(msg.has_thinking());
+        assert_eq!(msg.get_thinking_content(), "Let me reason...");
+        assert_eq!(msg.get_text_content(), "Here's my answer.");
+    }
+
+    #[test]
     fn user_message_constructors() {
         let text_msg = UserMessage::from_text("Hello");
         assert_eq!(text_msg.as_text(), Some("Hello"));
@@ -397,5 +600,97 @@ mod tests {
         let tool_msg = UserMessage::from_tool_result("tool_123", "Success");
         assert!(tool_msg.is_tool_result());
         assert_eq!(tool_msg.as_text(), None);
+    }
+
+    #[test]
+    fn deserialize_text_content() {
+        let json = r#"{"type": "text", "text": "hello"}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        assert_eq!(content.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn deserialize_tool_use_content() {
+        let json = r#"{"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "/foo"}}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        assert!(content.is_tool_use());
+        match &content {
+            MessageContent::ToolUse { id, name, input } => {
+                assert_eq!(id, "t1");
+                assert_eq!(name, "Read");
+                assert_eq!(input.get("path").unwrap(), "/foo");
+            },
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn deserialize_thinking_content() {
+        let json = r#"{"type": "thinking", "thinking": "hmm..."}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        assert_eq!(content.as_thinking(), Some("hmm..."));
+    }
+
+    #[test]
+    fn deserialize_redacted_thinking() {
+        let json = r#"{"type": "redacted_thinking"}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        assert!(matches!(content, MessageContent::RedactedThinking));
+    }
+
+    #[test]
+    fn deserialize_server_tool_use() {
+        let json = r#"{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "rust"}}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        match &content {
+            MessageContent::ServerToolUse { id, name, .. } => {
+                assert_eq!(id, "s1");
+                assert_eq!(name, "web_search");
+            },
+            _ => panic!("expected ServerToolUse"),
+        }
+    }
+
+    #[test]
+    fn deserialize_unknown_content_type() {
+        let json = r#"{"type": "future_thing", "data": 42}"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        match &content {
+            MessageContent::Unknown { content_type } => {
+                assert_eq!(content_type, "future_thing");
+            },
+            _ => panic!("expected Unknown"),
+        }
+    }
+
+    #[test]
+    fn deserialize_assistant_with_mixed_content() {
+        let json = r#"{
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "reasoning..."},
+                    {"type": "text", "text": "answer"},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}},
+                    {"type": "weird_new_type", "foo": "bar"}
+                ]
+            },
+            "session_id": "s1"
+        }"#;
+        let msg: SdkMessage = serde_json::from_str(json).unwrap();
+        match &msg {
+            SdkMessage::Assistant { message, .. } => {
+                assert_eq!(message.content.len(), 4);
+                assert!(message.has_thinking());
+                assert!(message.has_tool_uses());
+                assert_eq!(message.get_text_content(), "answer");
+                assert!(matches!(
+                    &message.content[3],
+                    MessageContent::Unknown { content_type } if content_type == "weird_new_type"
+                ));
+            },
+            _ => panic!("expected Assistant"),
+        }
     }
 }

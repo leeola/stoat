@@ -4,6 +4,6 @@ pub mod messages;
 
 pub use claude_code::{ClaudeCode, ClaudeCodeBuilder, SessionConfig};
 pub use messages::{
-    AssistantMessage, McpServer, MessageContent, PermissionMode, ResultSubtype, SdkMessage,
+    AssistantMessage, McpServer, MessageContent, PermissionMode, ResultSubtype, Role, SdkMessage,
     SystemSubtype, UserContent, UserContentBlock, UserMessage,
 };

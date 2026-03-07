@@ -1189,7 +1189,12 @@ impl Render for PaneGroupView {
                     && stoat.conflict_view_kind == crate::git::conflict::ConflictViewKind::Merge
             })
             .unwrap_or(false);
-        let minimap_visible = minimap_opacity > 0.0 && !in_merge_view;
+        let active_is_editor = self
+            .pane_contents
+            .get(&self.active_pane)
+            .map(|c| c.as_editor().is_some())
+            .unwrap_or(false);
+        let minimap_visible = minimap_opacity > 0.0 && !in_merge_view && active_is_editor;
 
         // Request animation frame if currently animating
         if is_animating {

@@ -1,6 +1,6 @@
 use crate::{
     buffer::item::BufferItemEvent,
-    claude::state::{ChatMessage, ClaudeState, ClaudeStateEvent, ClaudeStatus},
+    claude::state::{AssistantBlock, ChatMessage, ClaudeState, ClaudeStateEvent, ClaudeStatus},
     content_view::{ContentView, ViewType},
     editor::{element::EditorElement, style::EditorStyle, view::EditorView},
     keymap::dispatch::handle_key_common,
@@ -11,7 +11,7 @@ use gpui::{
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, ScrollHandle,
     StatefulInteractiveElement, Styled, Window,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 pub enum ClaudeViewEvent {
     CloseRequested,
@@ -25,6 +25,8 @@ pub struct ClaudeView {
     input_stoat: Entity<Stoat>,
     input_editor_view: Entity<EditorView>,
     input_style: Arc<EditorStyle>,
+    expanded_thinking: HashSet<usize>,
+    draft_text: Option<String>,
 }
 
 impl ClaudeView {
@@ -108,6 +110,8 @@ impl ClaudeView {
             input_stoat,
             input_editor_view,
             input_style,
+            expanded_thinking: HashSet::new(),
+            draft_text: None,
         }
     }
 
@@ -167,6 +171,38 @@ impl ClaudeView {
                 return;
             }
 
+            if input_mode == "normal" && event.keystroke.key.as_str() == "q" {
+                self.state.update(cx, |s, cx| s.stop(cx));
+                return;
+            }
+
+            if input_mode == "normal" {
+                let key = event.keystroke.key.as_str();
+                let has_history = !self.state.read(cx).input_history.is_empty();
+                if (key == "k" || key == "up") && has_history {
+                    if self.draft_text.is_none() {
+                        self.draft_text = Some(self.get_input_text(cx));
+                    }
+                    if let Some(text) = self.state.update(cx, |s, _| s.history_up()) {
+                        self.set_input_text(&text, cx);
+                        cx.notify();
+                    }
+                    return;
+                }
+                if (key == "j" || key == "down") && self.draft_text.is_some() {
+                    match self.state.update(cx, |s, _| s.history_down()) {
+                        Some(text) => self.set_input_text(&text, cx),
+                        None => {
+                            if let Some(draft) = self.draft_text.take() {
+                                self.set_input_text(&draft, cx);
+                            }
+                        },
+                    }
+                    cx.notify();
+                    return;
+                }
+            }
+
             if handle_key_common(&self.input_stoat, event, cx) {
                 cx.notify();
                 return;
@@ -183,6 +219,11 @@ impl ClaudeView {
         }
 
         let mode = self.stoat.read(cx).mode().to_string();
+        if mode == "normal" && event.keystroke.key.as_str() == "q" {
+            self.state.update(cx, |s, cx| s.stop(cx));
+            return;
+        }
+
         if mode == "normal" && event.keystroke.key.as_str() == "i" {
             let input_handle = self.input_editor_view.read(cx).focus_handle.clone();
             window.focus(&input_handle, cx);
@@ -194,6 +235,27 @@ impl ClaudeView {
         if handle_key_common(&self.stoat, event, cx) {
             cx.notify();
         }
+    }
+
+    fn get_input_text(&self, cx: &Context<Self>) -> String {
+        self.input_stoat
+            .read(cx)
+            .active_buffer(cx)
+            .read(cx)
+            .buffer()
+            .read(cx)
+            .text()
+    }
+
+    fn set_input_text(&self, text: &str, cx: &mut Context<Self>) {
+        self.input_stoat.update(cx, |stoat, cx| {
+            let buffer_item = stoat.active_buffer(cx);
+            let buffer = buffer_item.read(cx).buffer().clone();
+            let len = buffer.read(cx).len();
+            buffer.update(cx, |buf, _cx| {
+                buf.edit([(0..len, text)]);
+            });
+        });
     }
 
     fn send_input(&mut self, cx: &mut Context<Self>) {
@@ -270,45 +332,262 @@ impl Focusable for ClaudeView {
     }
 }
 
+const BG_PRIMARY: u32 = 0x1e1e1e;
+const BG_ELEVATED: u32 = 0x252526;
+const BG_CODE: u32 = 0x1a1a1a;
+const BORDER: u32 = 0x3e3e42;
+const TEXT_PRIMARY: u32 = 0xcccccc;
+const TEXT_MUTED: u32 = 0x808080;
+const TEXT_ERROR: u32 = 0xf44747;
+const TEXT_TOOL: u32 = 0xce9178;
+const ACCENT_THINKING: u32 = 0x569cd6;
+
 impl Render for ClaudeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
+        let primary_session = state.primary_session_id.clone();
+        let status = state.status;
+        let permission_label = state.permission_mode_label();
+        let model = state.model.clone();
 
         let mut messages_container = div()
             .id("claude-messages")
             .flex_1()
+            .min_w(px(0.0))
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .px(px(12.0))
             .py(px(8.0));
 
         for (i, msg) in state.messages.iter().enumerate() {
-            let (role, text, role_color) = match msg {
-                ChatMessage::User(t) => ("You", t.as_str(), rgb(0x569cd6)),
-                ChatMessage::Assistant(t) => ("Claude", t.as_str(), rgb(0x4ec9b0)),
-                ChatMessage::System(t) => ("System", t.as_str(), rgb(0x808080)),
-                ChatMessage::Error(t) => ("Error", t.as_str(), rgb(0xf44747)),
-            };
-
-            messages_container = messages_container.child(
-                div()
+            let msg_element = match msg {
+                ChatMessage::User { text, session_id } => {
+                    let is_sub = is_sub_agent(session_id, &primary_session);
+                    let mut card = div()
+                        .id(gpui::ElementId::Name(format!("msg-{i}").into()))
+                        .mb(px(8.0))
+                        .bg(rgb(BG_ELEVATED))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded(px(6.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .text_color(rgb(TEXT_PRIMARY))
+                        .text_size(px(13.0))
+                        .child(text.to_string());
+                    if is_sub {
+                        card = card
+                            .ml(px(16.0))
+                            .border_l_2()
+                            .border_color(rgb(ACCENT_THINKING));
+                    }
+                    card
+                },
+                ChatMessage::Assistant { blocks, session_id } => {
+                    let is_sub = is_sub_agent(session_id, &primary_session);
+                    let mut container = div()
+                        .id(gpui::ElementId::Name(format!("msg-{i}").into()))
+                        .mb(px(8.0))
+                        .pl(px(4.0));
+                    if is_sub {
+                        container = container
+                            .ml(px(16.0))
+                            .border_l_2()
+                            .border_color(rgb(ACCENT_THINKING))
+                            .pl(px(8.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_size(px(10.0))
+                                    .mb(px(2.0))
+                                    .child("Sub-agent"),
+                            );
+                    }
+                    for (bi, block) in blocks.iter().enumerate() {
+                        container = match block {
+                            AssistantBlock::Text { text } => {
+                                container.child(render_text_blocks(text, i, bi))
+                            },
+                            AssistantBlock::ToolUse {
+                                name,
+                                input_summary,
+                            } => container.child(
+                                div()
+                                    .mb(px(4.0))
+                                    .border_l_2()
+                                    .border_color(rgb(TEXT_TOOL))
+                                    .bg(rgb(BG_ELEVATED))
+                                    .rounded_r(px(4.0))
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(TEXT_TOOL))
+                                            .text_size(px(12.0))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .child(name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_size(px(11.0))
+                                            .child(input_summary.clone()),
+                                    ),
+                            ),
+                            AssistantBlock::Thinking { text } => {
+                                let expanded = self.expanded_thinking.contains(&i);
+                                let header_label =
+                                    if expanded { "v Thinking" } else { "> Thinking" };
+                                let mut section = div().mb(px(4.0)).child(
+                                    div()
+                                        .id(gpui::ElementId::Name(
+                                            format!("thinking-{i}-{bi}").into(),
+                                        ))
+                                        .cursor_pointer()
+                                        .text_color(rgb(ACCENT_THINKING))
+                                        .text_size(px(11.0))
+                                        .on_click(cx.listener(move |this, _, _window, _cx| {
+                                            if this.expanded_thinking.contains(&i) {
+                                                this.expanded_thinking.remove(&i);
+                                            } else {
+                                                this.expanded_thinking.insert(i);
+                                            }
+                                        }))
+                                        .child(header_label),
+                                );
+                                if expanded {
+                                    section = section.child(
+                                        div()
+                                            .border_l_2()
+                                            .border_color(rgb(ACCENT_THINKING))
+                                            .pl(px(8.0))
+                                            .mt(px(2.0))
+                                            .text_color(rgb(TEXT_MUTED))
+                                            .text_size(px(12.0))
+                                            .child(text.clone()),
+                                    );
+                                }
+                                container.child(section)
+                            },
+                            AssistantBlock::RedactedThinking => container.child(
+                                div()
+                                    .mb(px(4.0))
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_size(px(11.0))
+                                    .child("[thinking redacted]"),
+                            ),
+                            AssistantBlock::ServerToolUse { name } => container.child(
+                                div()
+                                    .mb(px(4.0))
+                                    .border_l_2()
+                                    .border_color(rgb(TEXT_TOOL))
+                                    .bg(rgb(BG_ELEVATED))
+                                    .rounded_r(px(4.0))
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(TEXT_TOOL))
+                                            .text_size(px(12.0))
+                                            .child(name.clone()),
+                                    ),
+                            ),
+                            AssistantBlock::Unknown => container.child(
+                                div()
+                                    .mb(px(4.0))
+                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_size(px(11.0))
+                                    .child("[unknown content]"),
+                            ),
+                        };
+                    }
+                    container
+                },
+                ChatMessage::System { text, model } => div()
                     .id(gpui::ElementId::Name(format!("msg-{i}").into()))
                     .mb(px(8.0))
-                    .child(
-                        div()
-                            .text_color(role_color)
-                            .text_size(px(11.0))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .child(format!("{role}:")),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0xd4d4d4))
-                            .text_size(px(13.0))
-                            .child(text.to_string()),
-                    ),
+                    .flex()
+                    .justify_center()
+                    .child(div().text_color(rgb(TEXT_MUTED)).text_size(px(11.0)).child(
+                        if let Some(m) = model {
+                            format!("{text} ({m})")
+                        } else {
+                            text.clone()
+                        },
+                    )),
+                ChatMessage::Error { text } => div()
+                    .id(gpui::ElementId::Name(format!("msg-{i}").into()))
+                    .mb(px(8.0))
+                    .bg(rgb(0x3a1515))
+                    .border_1()
+                    .border_color(rgb(TEXT_ERROR))
+                    .rounded(px(6.0))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .text_color(rgb(TEXT_ERROR))
+                    .text_size(px(13.0))
+                    .child(text.to_string()),
+                ChatMessage::Result {
+                    duration_ms,
+                    num_turns,
+                    cost_usd,
+                    ..
+                } => {
+                    let secs = *duration_ms as f64 / 1000.0;
+                    div()
+                        .id(gpui::ElementId::Name(format!("msg-{i}").into()))
+                        .mb(px(8.0))
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .pt(px(4.0))
+                        .flex()
+                        .justify_center()
+                        .child(div().text_color(rgb(TEXT_MUTED)).text_size(px(10.0)).child(
+                            format!("Completed in {secs:.1}s - {num_turns} turns - ${cost_usd:.4}"),
+                        ))
+                },
+            };
+            messages_container = messages_container.child(msg_element);
+        }
+
+        if status == ClaudeStatus::Responding {
+            messages_container = messages_container.child(
+                div()
+                    .text_color(rgb(TEXT_MUTED))
+                    .text_size(px(11.0))
+                    .py(px(4.0))
+                    .child("Claude is responding..."),
             );
         }
+
+        let mut input_footer = div()
+            .flex()
+            .px(px(8.0))
+            .py(px(2.0))
+            .gap(px(8.0))
+            .text_size(px(10.0))
+            .text_color(rgb(TEXT_MUTED));
+
+        let mode_color = match permission_label {
+            "accept-edits" => 0xdcdcaa,
+            "plan-only" => 0x569cd6,
+            "full-access" => 0xf44747,
+            _ => 0x4ec9b0,
+        };
+        input_footer = input_footer.child(
+            div()
+                .px(px(4.0))
+                .rounded(px(3.0))
+                .bg(rgb(BG_ELEVATED))
+                .text_color(rgb(mode_color))
+                .child(permission_label),
+        );
+
+        if let Some(m) = &model {
+            input_footer = input_footer.child(div().child(m.clone()));
+        }
+
+        input_footer = input_footer.child(div().child(Self::status_label(status)));
 
         div()
             .id("claude-view")
@@ -317,19 +596,21 @@ impl Render for ClaudeView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e1e))
+            .bg(rgb(BG_PRIMARY))
             .font_family("Menlo")
             .child(messages_container)
             .child(
                 div()
-                    .h(px(80.0))
                     .min_h(px(80.0))
                     .border_t_1()
-                    .border_color(rgb(0x3e3e42))
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .flex_col()
+                    .child(input_footer)
                     .child(
                         div()
                             .track_focus(&self.input_editor_view.read(cx).focus_handle)
-                            .size_full()
+                            .flex_1()
                             .child(EditorElement::new(
                                 self.input_editor_view.clone(),
                                 self.input_style.clone(),
@@ -337,4 +618,63 @@ impl Render for ClaudeView {
                     ),
             )
     }
+}
+
+fn is_sub_agent(session_id: &str, primary: &Option<String>) -> bool {
+    match primary {
+        Some(p) => !session_id.is_empty() && session_id != p,
+        None => false,
+    }
+}
+
+fn render_text_blocks(text: &str, msg_idx: usize, block_idx: usize) -> gpui::Div {
+    use crate::claude::text_format::{parse_blocks, TextBlock};
+
+    let blocks = parse_blocks(text);
+    let mut container = div()
+        .min_w(px(0.0))
+        .text_color(rgb(TEXT_PRIMARY))
+        .text_size(px(13.0))
+        .mb(px(4.0));
+
+    for (ti, block) in blocks.iter().enumerate() {
+        container = match block {
+            TextBlock::Prose(line) => container.child(
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("prose-{msg_idx}-{block_idx}-{ti}").into(),
+                    ))
+                    .child(line.clone()),
+            ),
+            TextBlock::CodeFence { language, content } => container.child(
+                div()
+                    .id(gpui::ElementId::Name(
+                        format!("code-{msg_idx}-{block_idx}-{ti}").into(),
+                    ))
+                    .mb(px(4.0))
+                    .bg(rgb(BG_CODE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .rounded(px(4.0))
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .child(if let Some(lang) = language {
+                        div()
+                            .text_color(rgb(TEXT_MUTED))
+                            .text_size(px(10.0))
+                            .mb(px(2.0))
+                            .child(lang.clone())
+                    } else {
+                        div()
+                    })
+                    .child(
+                        div()
+                            .text_color(rgb(TEXT_PRIMARY))
+                            .text_size(px(12.0))
+                            .child(content.clone()),
+                    ),
+            ),
+        };
+    }
+    container
 }

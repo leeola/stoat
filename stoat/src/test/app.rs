@@ -689,13 +689,57 @@ pub(crate) fn snapshot_claude(
 
             let state = cv.state_entity().read(cx);
             for msg in &state.messages {
-                let (role, text) = match msg {
-                    ChatMessage::User(t) => ("You", t.as_str()),
-                    ChatMessage::Assistant(t) => ("Claude", t.as_str()),
-                    ChatMessage::System(t) => ("System", t.as_str()),
-                    ChatMessage::Error(t) => ("Error", t.as_str()),
-                };
-                result.push_str(&format!("\n{role}: {text}"));
+                match msg {
+                    ChatMessage::User { text, .. } => {
+                        result.push_str(&format!("\nYou: {text}"));
+                    },
+                    ChatMessage::Assistant { blocks, .. } => {
+                        use crate::claude::state::AssistantBlock;
+                        for block in blocks {
+                            match block {
+                                AssistantBlock::Text { text: t } => {
+                                    result.push_str(&format!("\nClaude: {t}"));
+                                },
+                                AssistantBlock::ToolUse {
+                                    name,
+                                    input_summary,
+                                } => {
+                                    result.push_str(&format!(
+                                        "\nClaude [tool]: {name} {input_summary}"
+                                    ));
+                                },
+                                AssistantBlock::Thinking { text: t } => {
+                                    result.push_str(&format!("\nClaude [thinking]: {t}"));
+                                },
+                                AssistantBlock::RedactedThinking => {
+                                    result.push_str("\nClaude [thinking redacted]");
+                                },
+                                AssistantBlock::ServerToolUse { name } => {
+                                    result.push_str(&format!("\nClaude [server tool]: {name}"));
+                                },
+                                AssistantBlock::Unknown => {
+                                    result.push_str("\nClaude [unknown]");
+                                },
+                            }
+                        }
+                    },
+                    ChatMessage::System { text, .. } => {
+                        result.push_str(&format!("\nSystem: {text}"));
+                    },
+                    ChatMessage::Error { text: t } => {
+                        result.push_str(&format!("\nError: {t}"));
+                    },
+                    ChatMessage::Result {
+                        duration_ms,
+                        num_turns,
+                        cost_usd,
+                        ..
+                    } => {
+                        result.push_str(&format!(
+                            "\nResult: {duration_ms}ms {num_turns} turns ${cost_usd:.4}"
+                        ));
+                    },
+                }
             }
 
             result
