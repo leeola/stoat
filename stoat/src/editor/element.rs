@@ -359,7 +359,7 @@ impl Element for EditorElement {
                         runs.extend(processed_runs);
                     } else {
                         runs.push(TextRun {
-                            len: line_text.len().max(1),
+                            len: line_text.len(),
                             font: font.clone(),
                             color: self.style.text_color,
                             background_color: None,
@@ -401,7 +401,7 @@ impl Element for EditorElement {
                     };
 
                     let runs = vec![TextRun {
-                        len: line_text.len().max(1),
+                        len: line_text.len(),
                         font: font.clone(),
                         color: deleted_text_color,
                         background_color: None,
@@ -476,7 +476,7 @@ impl Element for EditorElement {
                     runs.extend(processed_runs);
                 } else {
                     runs.push(TextRun {
-                        len: line_text.len().max(1),
+                        len: line_text.len(),
                         font: font.clone(),
                         color: self.style.text_color,
                         background_color: None,

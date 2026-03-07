@@ -51,7 +51,9 @@ dirs = "5.0"
 # Zed dependencies - pinned to specific commit to prevent accidental updates
 text = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
-gpui_macos = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
+gpui_macos = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea", features = [
+  "font-kit",
+] }
 gpui_macros = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
 sum_tree = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
 fuzzy = { git = "https://github.com/zed-industries/zed.git", rev = "1dd80ac28f436cec7f481dbdfcb90d1d9c1d8cea" }
