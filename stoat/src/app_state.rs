@@ -349,6 +349,8 @@ pub struct AppState {
     pub git_status: GitStatus,
     /// Blame commit diff modal state
     pub blame_commit_diff: Option<BlameCommitDiff>,
+    /// Interactive rebase state
+    pub rebase: crate::git::rebase::RebaseState,
     /// LSP manager for language server coordination
     ///
     /// Manages language server processes and routes diagnostics to buffers.
@@ -472,6 +474,7 @@ impl AppState {
                 ..Default::default()
             },
             blame_commit_diff: None,
+            rebase: crate::git::rebase::RebaseState::default(),
             lsp_manager,
             lsp_state,
             project_env,
@@ -1101,6 +1104,30 @@ impl AppState {
         self.git_status.selected = 0;
         self.git_status.preview = None;
         self.git_status.preview_task = None;
+
+        (prev_mode, prev_ctx)
+    }
+
+    /// Open interactive rebase modal.
+    pub fn open_rebase(&mut self, current_mode: String, current_key_context: KeyContext) {
+        self.rebase.previous_mode = Some(current_mode);
+        self.rebase.previous_key_context = Some(current_key_context);
+        self.rebase.selected = 0;
+        self.rebase.preview = None;
+        self.rebase.preview_task = None;
+    }
+
+    /// Dismiss rebase modal and restore previous mode/context.
+    pub fn dismiss_rebase(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.rebase.previous_mode.take();
+        let prev_ctx = self.rebase.previous_key_context.take();
+
+        self.rebase.commits.clear();
+        self.rebase.selected = 0;
+        self.rebase.preview = None;
+        self.rebase.preview_task = None;
+        self.rebase.in_progress = None;
+        self.rebase.phase = crate::git::rebase::RebasePhase::Planning;
 
         (prev_mode, prev_ctx)
     }

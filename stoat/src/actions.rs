@@ -370,6 +370,47 @@ actions!(
     ]
 );
 
+// Interactive rebase actions
+actions!(
+    stoat,
+    [
+        /// Open interactive rebase mode
+        OpenRebase,
+        /// Move to next commit in rebase list
+        RebaseNext,
+        /// Move to previous commit in rebase list
+        RebasePrev,
+        /// Dismiss rebase modal
+        RebaseDismiss,
+        /// Set commit operation to pick
+        RebaseSetPick,
+        /// Set commit operation to reword
+        RebaseSetReword,
+        /// Set commit operation to edit
+        RebaseSetEdit,
+        /// Set commit operation to squash
+        RebaseSetSquash,
+        /// Set commit operation to fixup
+        RebaseSetFixup,
+        /// Set commit operation to drop
+        RebaseSetDrop,
+        /// Move commit up in rebase list
+        RebaseMoveUp,
+        /// Move commit down in rebase list
+        RebaseMoveDown,
+        /// Execute the rebase plan
+        RebaseConfirm,
+        /// Continue an in-progress rebase
+        RebaseContinue,
+        /// Abort an in-progress rebase
+        RebaseAbort,
+        /// Skip the current commit in rebase
+        RebaseSkip,
+        /// Edit the commit message during rebase
+        RebaseEditMessage,
+    ]
+);
+
 // Line selection actions (partial hunk staging)
 actions!(
     stoat,
@@ -1360,6 +1401,110 @@ action_metadata!(
     ["toggle-stage-line"]
 );
 
+// Interactive rebase actions
+action_metadata!(
+    OpenRebase,
+    "rebase",
+    "Open interactive rebase mode",
+    ["rebase"]
+);
+action_metadata!(
+    RebaseNext,
+    "next commit",
+    "Move to next commit in rebase list",
+    hidden
+);
+action_metadata!(
+    RebasePrev,
+    "prev commit",
+    "Move to previous commit in rebase list",
+    hidden
+);
+action_metadata!(
+    RebaseDismiss,
+    "dismiss rebase",
+    "Close the rebase modal",
+    hidden
+);
+action_metadata!(
+    RebaseSetPick,
+    "set pick",
+    "Set commit operation to pick",
+    hidden
+);
+action_metadata!(
+    RebaseSetReword,
+    "set reword",
+    "Set commit operation to reword",
+    hidden
+);
+action_metadata!(
+    RebaseSetEdit,
+    "set edit",
+    "Set commit operation to edit",
+    hidden
+);
+action_metadata!(
+    RebaseSetSquash,
+    "set squash",
+    "Set commit operation to squash",
+    hidden
+);
+action_metadata!(
+    RebaseSetFixup,
+    "set fixup",
+    "Set commit operation to fixup",
+    hidden
+);
+action_metadata!(
+    RebaseSetDrop,
+    "set drop",
+    "Set commit operation to drop",
+    hidden
+);
+action_metadata!(
+    RebaseMoveUp,
+    "move up",
+    "Move commit up in rebase list",
+    hidden
+);
+action_metadata!(
+    RebaseMoveDown,
+    "move down",
+    "Move commit down in rebase list",
+    hidden
+);
+action_metadata!(
+    RebaseConfirm,
+    "execute rebase",
+    "Execute the rebase plan",
+    hidden
+);
+action_metadata!(
+    RebaseContinue,
+    "continue rebase",
+    "Continue an in-progress rebase",
+    hidden
+);
+action_metadata!(
+    RebaseAbort,
+    "abort rebase",
+    "Abort an in-progress rebase",
+    hidden
+);
+action_metadata!(
+    RebaseSkip,
+    "skip commit",
+    "Skip the current commit in rebase",
+    hidden
+);
+action_metadata!(
+    RebaseEditMessage,
+    "edit message",
+    "Edit the commit message during rebase",
+    hidden
+);
+
 // Line selection actions
 action_metadata!(
     DiffReviewEnterLineSelect,
@@ -2019,6 +2164,43 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitToggleStageLine::action_name(),
     );
 
+    // Interactive rebase actions
+    names.insert(TypeId::of::<OpenRebase>(), OpenRebase::action_name());
+    names.insert(TypeId::of::<RebaseNext>(), RebaseNext::action_name());
+    names.insert(TypeId::of::<RebasePrev>(), RebasePrev::action_name());
+    names.insert(TypeId::of::<RebaseDismiss>(), RebaseDismiss::action_name());
+    names.insert(TypeId::of::<RebaseSetPick>(), RebaseSetPick::action_name());
+    names.insert(
+        TypeId::of::<RebaseSetReword>(),
+        RebaseSetReword::action_name(),
+    );
+    names.insert(TypeId::of::<RebaseSetEdit>(), RebaseSetEdit::action_name());
+    names.insert(
+        TypeId::of::<RebaseSetSquash>(),
+        RebaseSetSquash::action_name(),
+    );
+    names.insert(
+        TypeId::of::<RebaseSetFixup>(),
+        RebaseSetFixup::action_name(),
+    );
+    names.insert(TypeId::of::<RebaseSetDrop>(), RebaseSetDrop::action_name());
+    names.insert(TypeId::of::<RebaseMoveUp>(), RebaseMoveUp::action_name());
+    names.insert(
+        TypeId::of::<RebaseMoveDown>(),
+        RebaseMoveDown::action_name(),
+    );
+    names.insert(TypeId::of::<RebaseConfirm>(), RebaseConfirm::action_name());
+    names.insert(
+        TypeId::of::<RebaseContinue>(),
+        RebaseContinue::action_name(),
+    );
+    names.insert(TypeId::of::<RebaseAbort>(), RebaseAbort::action_name());
+    names.insert(TypeId::of::<RebaseSkip>(), RebaseSkip::action_name());
+    names.insert(
+        TypeId::of::<RebaseEditMessage>(),
+        RebaseEditMessage::action_name(),
+    );
+
     // Line selection actions
     names.insert(
         TypeId::of::<DiffReviewEnterLineSelect>(),
@@ -2593,6 +2775,43 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         GitToggleStageLine::description(),
     );
 
+    // Interactive rebase actions
+    descriptions.insert(TypeId::of::<OpenRebase>(), OpenRebase::description());
+    descriptions.insert(TypeId::of::<RebaseNext>(), RebaseNext::description());
+    descriptions.insert(TypeId::of::<RebasePrev>(), RebasePrev::description());
+    descriptions.insert(TypeId::of::<RebaseDismiss>(), RebaseDismiss::description());
+    descriptions.insert(TypeId::of::<RebaseSetPick>(), RebaseSetPick::description());
+    descriptions.insert(
+        TypeId::of::<RebaseSetReword>(),
+        RebaseSetReword::description(),
+    );
+    descriptions.insert(TypeId::of::<RebaseSetEdit>(), RebaseSetEdit::description());
+    descriptions.insert(
+        TypeId::of::<RebaseSetSquash>(),
+        RebaseSetSquash::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<RebaseSetFixup>(),
+        RebaseSetFixup::description(),
+    );
+    descriptions.insert(TypeId::of::<RebaseSetDrop>(), RebaseSetDrop::description());
+    descriptions.insert(TypeId::of::<RebaseMoveUp>(), RebaseMoveUp::description());
+    descriptions.insert(
+        TypeId::of::<RebaseMoveDown>(),
+        RebaseMoveDown::description(),
+    );
+    descriptions.insert(TypeId::of::<RebaseConfirm>(), RebaseConfirm::description());
+    descriptions.insert(
+        TypeId::of::<RebaseContinue>(),
+        RebaseContinue::description(),
+    );
+    descriptions.insert(TypeId::of::<RebaseAbort>(), RebaseAbort::description());
+    descriptions.insert(TypeId::of::<RebaseSkip>(), RebaseSkip::description());
+    descriptions.insert(
+        TypeId::of::<RebaseEditMessage>(),
+        RebaseEditMessage::description(),
+    );
+
     // Line selection actions
     descriptions.insert(
         TypeId::of::<DiffReviewEnterLineSelect>(),
@@ -3147,6 +3366,34 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         GitToggleStageLine::help_text(),
     );
 
+    // Interactive rebase actions
+    help.insert(TypeId::of::<OpenRebase>(), OpenRebase::help_text());
+    help.insert(TypeId::of::<RebaseNext>(), RebaseNext::help_text());
+    help.insert(TypeId::of::<RebasePrev>(), RebasePrev::help_text());
+    help.insert(TypeId::of::<RebaseDismiss>(), RebaseDismiss::help_text());
+    help.insert(TypeId::of::<RebaseSetPick>(), RebaseSetPick::help_text());
+    help.insert(
+        TypeId::of::<RebaseSetReword>(),
+        RebaseSetReword::help_text(),
+    );
+    help.insert(TypeId::of::<RebaseSetEdit>(), RebaseSetEdit::help_text());
+    help.insert(
+        TypeId::of::<RebaseSetSquash>(),
+        RebaseSetSquash::help_text(),
+    );
+    help.insert(TypeId::of::<RebaseSetFixup>(), RebaseSetFixup::help_text());
+    help.insert(TypeId::of::<RebaseSetDrop>(), RebaseSetDrop::help_text());
+    help.insert(TypeId::of::<RebaseMoveUp>(), RebaseMoveUp::help_text());
+    help.insert(TypeId::of::<RebaseMoveDown>(), RebaseMoveDown::help_text());
+    help.insert(TypeId::of::<RebaseConfirm>(), RebaseConfirm::help_text());
+    help.insert(TypeId::of::<RebaseContinue>(), RebaseContinue::help_text());
+    help.insert(TypeId::of::<RebaseAbort>(), RebaseAbort::help_text());
+    help.insert(TypeId::of::<RebaseSkip>(), RebaseSkip::help_text());
+    help.insert(
+        TypeId::of::<RebaseEditMessage>(),
+        RebaseEditMessage::help_text(),
+    );
+
     // Line selection actions
     help.insert(
         TypeId::of::<DiffReviewEnterLineSelect>(),
@@ -3381,6 +3628,9 @@ pub static ALIASES: LazyLock<HashMap<TypeId, &'static [&'static str]>> = LazyLoc
         TypeId::of::<GitToggleStageLine>(),
         GitToggleStageLine::aliases(),
     );
+
+    // Interactive rebase actions
+    aliases.insert(TypeId::of::<OpenRebase>(), OpenRebase::aliases());
 
     // Command line actions
     aliases.insert(

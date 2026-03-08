@@ -1,0 +1,11 @@
+mod abort;
+mod confirm;
+mod continue_rebase;
+mod dismiss;
+mod edit_message;
+mod move_commit;
+mod next;
+mod open;
+mod prev;
+mod set_operation;
+mod skip;

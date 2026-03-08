@@ -15,6 +15,8 @@ pub enum GitChangeKind {
     Index,
     /// `.git/HEAD` or refs changed (checkout, commit, branch)
     Head,
+    /// `.git/rebase-merge/` or `.git/rebase-apply/` changed
+    Rebase,
 }
 
 /// Start watching git-relevant paths. Sends events to `sender`.
@@ -39,12 +41,19 @@ pub fn start_watching(root: &Path, sender: Sender<GitChangeKind>) -> Option<Reco
     let _ = watcher.watch(&git_dir.join("index"), RecursiveMode::NonRecursive);
     let _ = watcher.watch(&git_dir.join("HEAD"), RecursiveMode::NonRecursive);
     let _ = watcher.watch(&git_dir.join("refs"), RecursiveMode::Recursive);
+    let _ = watcher.watch(&git_dir.join("rebase-merge"), RecursiveMode::Recursive);
+    let _ = watcher.watch(&git_dir.join("rebase-apply"), RecursiveMode::Recursive);
 
     Some(watcher)
 }
 
 fn classify_event(event: &notify::Event, git_dir: &Path) -> Option<GitChangeKind> {
     for path in &event.paths {
+        if path.starts_with(git_dir.join("rebase-merge"))
+            || path.starts_with(git_dir.join("rebase-apply"))
+        {
+            return Some(GitChangeKind::Rebase);
+        }
         if path.starts_with(git_dir.join("refs")) || *path == git_dir.join("HEAD") {
             return Some(GitChangeKind::Head);
         }

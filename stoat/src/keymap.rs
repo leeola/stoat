@@ -89,6 +89,14 @@ pub fn default_modes() -> HashMap<String, Mode> {
         "symbol_picker".into(),
         Mode::with_previous("symbol_picker", "SYMBOL PICKER", "normal", false, true),
     );
+    modes.insert(
+        "rebase_plan".into(),
+        Mode::with_previous("rebase_plan", "REBASE", "normal", false, true),
+    );
+    modes.insert(
+        "rebase_progress".into(),
+        Mode::with_previous("rebase_progress", "REBASE", "normal", false, true),
+    );
 
     modes
 }
@@ -138,6 +146,10 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
     contexts.insert(
         KeyContext::BlameCommitDiff,
         KeyContextMeta::new("blame_commit_diff".into()),
+    );
+    contexts.insert(
+        KeyContext::Rebase,
+        KeyContextMeta::new("rebase_plan".into()),
     );
 
     contexts

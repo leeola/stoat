@@ -1,12 +1,13 @@
 use crate::git::{
     blame::BlameData,
     diff_review::DiffComparisonMode,
-    repository::{CommitFileChange, GitError, Repository},
+    repository::{CommitFileChange, CommitLogEntry, GitError, Repository},
     status::{GitBranchInfo, GitStatusEntry, GitStatusError},
 };
 use std::{
     any::Any,
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -47,6 +48,19 @@ pub trait GitRepo: Send {
     fn unstage_file(&self, path: &Path) -> Result<(), GitError>;
     fn stage_all(&self) -> Result<(), GitError>;
     fn unstage_all(&self) -> Result<(), GitError>;
+    fn log_commits(
+        &self,
+        base: &str,
+        head: &str,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError>;
+    fn merge_base(&self, ref1: &str, ref2: &str) -> Result<String, GitError>;
+    fn upstream_ref(&self) -> Result<Option<String>, GitError>;
+    fn rebase_interactive(&self, base_ref: &str, todo_content: &str) -> Result<(), GitError>;
+    fn rebase_continue(&self) -> Result<(), GitError>;
+    fn rebase_abort(&self) -> Result<(), GitError>;
+    fn rebase_skip(&self) -> Result<(), GitError>;
+    fn has_unmerged_paths(&self) -> bool;
 }
 
 // -- Real implementations --
@@ -163,9 +177,109 @@ impl GitRepo for RealGitRepo {
     fn unstage_all(&self) -> Result<(), GitError> {
         run_git(self.repo.workdir(), &["reset", "HEAD"])
     }
+
+    fn log_commits(
+        &self,
+        base: &str,
+        head: &str,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        self.repo.log_commits(base, head, max)
+    }
+
+    fn merge_base(&self, ref1: &str, ref2: &str) -> Result<String, GitError> {
+        self.repo.merge_base(ref1, ref2)
+    }
+
+    fn upstream_ref(&self) -> Result<Option<String>, GitError> {
+        self.repo.upstream_ref()
+    }
+
+    fn rebase_interactive(&self, base_ref: &str, todo_content: &str) -> Result<(), GitError> {
+        let mut tmp = tempfile::NamedTempFile::new().map_err(|e| {
+            GitError::GitOperationFailed(format!("Failed to create temp file: {e}"))
+        })?;
+        tmp.write_all(todo_content.as_bytes())
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to write todo: {e}")))?;
+        tmp.flush()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to flush todo: {e}")))?;
+
+        let todo_path_str = tmp.path().to_string_lossy().replace('\'', "'\\''");
+        let seq_editor = format!("cp '{}' ", todo_path_str);
+
+        let output = std::process::Command::new("git")
+            .args(["rebase", "-i", base_ref])
+            .env("GIT_SEQUENCE_EDITOR", &seq_editor)
+            .current_dir(self.repo.workdir())
+            .output()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to run git rebase: {e}")))?;
+
+        // Exit code 1 with rebase-merge dir means paused (conflicts/edit) -- not a failure
+        if !output.status.success() {
+            let rebase_dir = self.repo.workdir().join(".git/rebase-merge");
+            if !rebase_dir.exists() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(GitError::GitOperationFailed(format!(
+                    "git rebase -i failed: {stderr}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn rebase_continue(&self) -> Result<(), GitError> {
+        let output = std::process::Command::new("git")
+            .args(["rebase", "--continue"])
+            .env("GIT_EDITOR", "true")
+            .current_dir(self.repo.workdir())
+            .output()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to run git rebase: {e}")))?;
+
+        if !output.status.success() {
+            let rebase_dir = self.repo.workdir().join(".git/rebase-merge");
+            if !rebase_dir.exists() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(GitError::GitOperationFailed(format!(
+                    "git rebase --continue failed: {stderr}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn rebase_abort(&self) -> Result<(), GitError> {
+        run_git(self.repo.workdir(), &["rebase", "--abort"])
+    }
+
+    fn rebase_skip(&self) -> Result<(), GitError> {
+        let output = std::process::Command::new("git")
+            .args(["rebase", "--skip"])
+            .current_dir(self.repo.workdir())
+            .output()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to run git rebase: {e}")))?;
+
+        if !output.status.success() {
+            let rebase_dir = self.repo.workdir().join(".git/rebase-merge");
+            if !rebase_dir.exists() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(GitError::GitOperationFailed(format!(
+                    "git rebase --skip failed: {stderr}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn has_unmerged_paths(&self) -> bool {
+        self.repo
+            .inner()
+            .index()
+            .map(|idx| idx.has_conflicts())
+            .unwrap_or(false)
+    }
 }
 
-fn run_git(workdir: &Path, args: &[&str]) -> Result<(), GitError> {
+fn run_git_output(workdir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(workdir)
@@ -178,6 +292,11 @@ fn run_git(workdir: &Path, args: &[&str]) -> Result<(), GitError> {
             args.join(" ")
         )));
     }
+    Ok(output)
+}
+
+fn run_git(workdir: &Path, args: &[&str]) -> Result<(), GitError> {
+    run_git_output(workdir, args)?;
     Ok(())
 }
 
@@ -552,6 +671,68 @@ impl GitRepo for FakeGitRepo {
         self.state.lock().staged_files.clear();
         Ok(())
     }
+
+    fn log_commits(
+        &self,
+        _base: &str,
+        _head: &str,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let state = self.state.lock();
+        Ok(state
+            .commit_history
+            .iter()
+            .take(max)
+            .map(|c| CommitLogEntry {
+                oid: c.oid.clone(),
+                short_hash: c.oid[..7.min(c.oid.len())].to_string(),
+                author: "Test Author".to_string(),
+                timestamp: 0,
+                message: c
+                    .changed_files
+                    .first()
+                    .map(|f| f.path.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    fn merge_base(&self, _ref1: &str, _ref2: &str) -> Result<String, GitError> {
+        let state = self.state.lock();
+        Ok(state
+            .commit_history
+            .first()
+            .map(|c| c.oid.clone())
+            .unwrap_or_default())
+    }
+
+    fn upstream_ref(&self) -> Result<Option<String>, GitError> {
+        let state = self.state.lock();
+        Ok(state
+            .branch_info
+            .as_ref()
+            .map(|_| "refs/remotes/origin/main".to_string()))
+    }
+
+    fn rebase_interactive(&self, _base_ref: &str, _todo_content: &str) -> Result<(), GitError> {
+        Ok(())
+    }
+
+    fn rebase_continue(&self) -> Result<(), GitError> {
+        Ok(())
+    }
+
+    fn rebase_abort(&self) -> Result<(), GitError> {
+        Ok(())
+    }
+
+    fn rebase_skip(&self) -> Result<(), GitError> {
+        Ok(())
+    }
+
+    fn has_unmerged_paths(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
@@ -732,4 +913,106 @@ fn compute_hunk_counts(
     }
 
     Ok(counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{fs::FakeFs, git::status::GitBranchInfo};
+    use std::sync::Arc;
+
+    #[test]
+    fn fake_log_commits_returns_history() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+
+        provider.add_commit(
+            "abc1234567890",
+            vec![CommitFileChange {
+                path: PathBuf::from("src/main.rs"),
+                status: "M".to_string(),
+            }],
+            HashMap::new(),
+        );
+        provider.add_commit(
+            "def5678901234",
+            vec![CommitFileChange {
+                path: PathBuf::from("src/lib.rs"),
+                status: "A".to_string(),
+            }],
+            HashMap::new(),
+        );
+
+        let repo = provider.open(&workdir).unwrap();
+        let commits = repo.log_commits("base", "HEAD", 10).unwrap();
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].oid, "abc1234567890");
+        assert_eq!(commits[0].short_hash, "abc1234");
+        assert_eq!(commits[1].oid, "def5678901234");
+    }
+
+    #[test]
+    fn fake_merge_base_returns_first() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.add_commit("first_commit", vec![], HashMap::new());
+        provider.add_commit("second_commit", vec![], HashMap::new());
+
+        let repo = provider.open(&workdir).unwrap();
+        assert_eq!(repo.merge_base("a", "b").unwrap(), "first_commit");
+    }
+
+    #[test]
+    fn fake_upstream_ref_with_branch_info() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        provider.set_branch_info(Some(GitBranchInfo {
+            branch_name: "main".to_string(),
+            ahead: 0,
+            behind: 0,
+        }));
+
+        let repo = provider.open(&workdir).unwrap();
+        assert_eq!(
+            repo.upstream_ref().unwrap(),
+            Some("refs/remotes/origin/main".to_string())
+        );
+    }
+
+    #[test]
+    fn fake_upstream_ref_without_branch_info() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+
+        let repo = provider.open(&workdir).unwrap();
+        assert_eq!(repo.upstream_ref().unwrap(), None);
+    }
+
+    #[test]
+    fn fake_rebase_methods_are_noops() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+
+        let repo = provider.open(&workdir).unwrap();
+        assert!(repo.rebase_interactive("base", "pick abc123 msg\n").is_ok());
+        assert!(repo.rebase_continue().is_ok());
+        assert!(repo.rebase_abort().is_ok());
+        assert!(repo.rebase_skip().is_ok());
+        assert!(!repo.has_unmerged_paths());
+    }
 }

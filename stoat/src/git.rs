@@ -11,6 +11,8 @@ pub mod diff_review;
 pub mod diff_summary;
 pub mod line_selection;
 pub mod provider;
+pub mod rebase;
+pub mod rebase_view;
 pub mod repository;
 pub mod status;
 pub mod watcher;

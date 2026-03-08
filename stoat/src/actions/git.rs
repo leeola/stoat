@@ -5,6 +5,7 @@ mod conflict;
 mod diff_hunk;
 mod diff_review;
 mod hunk_patch;
+mod rebase;
 mod stage_all;
 mod stage_file;
 mod stage_hunk;

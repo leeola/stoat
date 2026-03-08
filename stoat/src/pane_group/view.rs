@@ -128,6 +128,7 @@ pub struct PaneGroupView {
     buffer_finder_scroll: ScrollHandle,
     git_status_scroll: ScrollHandle,
     blame_commit_diff_scroll: ScrollHandle,
+    rebase_scroll: ScrollHandle,
     symbol_picker_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
@@ -307,6 +308,7 @@ impl PaneGroupView {
             buffer_finder_scroll: ScrollHandle::new(),
             git_status_scroll: ScrollHandle::new(),
             blame_commit_diff_scroll: ScrollHandle::new(),
+            rebase_scroll: ScrollHandle::new(),
             symbol_picker_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
@@ -544,6 +546,47 @@ impl PaneGroupView {
                 "GitStatusSetFilterUntracked" => {
                     self.handle_git_status_set_filter_untracked(window, cx);
                 },
+                "OpenRebase" => self.handle_open_rebase(window, cx),
+                "RebaseNext" => self.handle_rebase_next(window, cx),
+                "RebasePrev" => self.handle_rebase_prev(window, cx),
+                "RebaseDismiss" => self.handle_rebase_dismiss(window, cx),
+                "RebaseSetPick" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Pick,
+                    window,
+                    cx,
+                ),
+                "RebaseSetReword" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Reword,
+                    window,
+                    cx,
+                ),
+                "RebaseSetEdit" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Edit,
+                    window,
+                    cx,
+                ),
+                "RebaseSetSquash" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Squash,
+                    window,
+                    cx,
+                ),
+                "RebaseSetFixup" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Fixup,
+                    window,
+                    cx,
+                ),
+                "RebaseSetDrop" => self.handle_rebase_set_operation(
+                    crate::git::rebase::RebaseOperation::Drop,
+                    window,
+                    cx,
+                ),
+                "RebaseMoveUp" => self.handle_rebase_move_up(window, cx),
+                "RebaseMoveDown" => self.handle_rebase_move_down(window, cx),
+                "RebaseConfirm" => self.handle_rebase_confirm(window, cx),
+                "RebaseContinue" => self.handle_rebase_continue(window, cx),
+                "RebaseAbort" => self.handle_rebase_abort(window, cx),
+                "RebaseSkip" => self.handle_rebase_skip(window, cx),
+                "RebaseEditMessage" => self.handle_rebase_edit_message(window, cx),
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
                 "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
                 "OpenGitBlame" => self.handle_open_git_blame(window, cx),
@@ -797,6 +840,57 @@ impl PaneGroupView {
         }));
     }
 
+    pub(crate) fn load_rebase_preview(&mut self, cx: &mut Context<'_, Self>) {
+        self.app_state.rebase.preview_task = None;
+
+        let commit = match self
+            .app_state
+            .rebase
+            .commits
+            .get(self.app_state.rebase.selected)
+        {
+            Some(c) => c.clone(),
+            None => {
+                self.app_state.rebase.preview = None;
+                return;
+            },
+        };
+
+        let root_path = self.app_state.worktree.lock().root().to_path_buf();
+        let services = self.app_state.services.clone();
+        let oid = commit.oid.clone();
+
+        self.app_state.rebase.preview_task = Some(cx.spawn(async move |this, cx| {
+            let diff_text = smol::unblock(move || -> Option<String> {
+                let repo = services.git.open(&root_path).ok()?;
+                let files = repo.commit_files_by_oid(&oid).ok()?;
+                let mut combined = String::new();
+                for file in &files {
+                    if let Ok(diff) = repo.commit_file_diff(&oid, &file.path) {
+                        if !combined.is_empty() {
+                            combined.push('\n');
+                        }
+                        combined.push_str(&diff);
+                    }
+                }
+                if combined.is_empty() {
+                    None
+                } else {
+                    Some(combined)
+                }
+            })
+            .await;
+
+            if let Some(text) = diff_text {
+                let _ = this.update(cx, |pane_group, cx| {
+                    pane_group.app_state.rebase.preview =
+                        Some(crate::git::status::DiffPreviewData::new(text));
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
     /// Split the active pane in the given direction.
     ///
     /// This is public so it can be called from actions with access to Window context.
@@ -992,6 +1086,7 @@ impl Render for PaneGroupView {
                 self._git_watcher = Some(watcher_handle);
 
                 let fs = self.app_state.services.fs.clone();
+                let services = self.app_state.services.clone();
                 cx.spawn(async move |this, cx| {
                     let mut last_index_mtime: Option<SystemTime> = None;
                     let poll_interval = Duration::from_secs(2);
@@ -1026,6 +1121,41 @@ impl Render for PaneGroupView {
 
                         let ok = this.update(cx, |this, cx| {
                             this.app_state.refresh_git_status();
+
+                            if this.app_state.rebase.in_progress.is_some() {
+                                let git_dir = root.join(".git");
+                                let repo = services.git.open(&root).ok();
+                                let detected = repo.as_deref().and_then(|r| {
+                                    crate::git::rebase::detect_rebase_state(
+                                        &git_dir,
+                                        &*services.fs,
+                                        r,
+                                    )
+                                });
+                                if let Some(ip) = detected {
+                                    let phase = crate::git::rebase::phase_from_in_progress(
+                                        &ip,
+                                        &git_dir,
+                                        &*services.fs,
+                                    );
+                                    this.app_state.rebase.in_progress = Some(ip);
+                                    this.app_state.rebase.phase = phase;
+                                } else {
+                                    this.app_state.flash_message =
+                                        Some("Rebase completed".to_string());
+                                    let (_prev_mode, prev_ctx) = this.app_state.dismiss_rebase();
+                                    if let Some(prev) = prev_ctx {
+                                        if let Some(editor) = this.active_editor().cloned() {
+                                            editor.update(cx, |editor, cx| {
+                                                editor.stoat.update(cx, |stoat, cx| {
+                                                    stoat.handle_set_key_context(prev, cx);
+                                                });
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Some(editor) = this.active_editor().cloned() {
                                 editor.update(cx, |editor, cx| {
                                     editor.stoat.update(cx, |stoat, cx| {
@@ -1675,6 +1805,17 @@ impl Render for PaneGroupView {
                         } else {
                             div
                         }
+                    })
+                    .when(key_context == KeyContext::Rebase, |div| {
+                        div.child(crate::git::rebase_view::RebaseView::new(
+                            self.app_state.rebase.phase.clone(),
+                            self.app_state.rebase.commits.clone(),
+                            self.app_state.rebase.selected,
+                            self.app_state.rebase.preview.clone(),
+                            self.rebase_scroll.clone(),
+                            self.app_state.rebase.in_progress.clone(),
+                            self.app_state.rebase.base_ref.clone(),
+                        ))
                     })
                     .when(key_context == KeyContext::BlameCommitDiff, |div| {
                         if let Some(ref bcd) = self.app_state.blame_commit_diff {

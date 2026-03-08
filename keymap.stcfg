@@ -274,7 +274,8 @@ on key {
         escape -> SetMode(normal);
         s -> OpenGitStatus();
         b -> OpenGitBlame();
-        r -> OpenDiffReview();
+        d -> OpenDiffReview();
+        r -> OpenRebase();
         x -> OpenConflictReview();
     }
 
@@ -437,6 +438,37 @@ on key {
             d -> BlameToggleDate();
             i -> BlameOpenCommitDiff();
             q -> BlameDismiss();
+            ? -> OpenHelpOverlay();
+        }
+    }
+
+    # Rebase Context
+    focus == "Rebase" {
+        mode == "rebase_plan" {
+            escape -> RebaseDismiss();
+            j -> RebaseNext();
+            k -> RebasePrev();
+            down -> RebaseNext();
+            up -> RebasePrev();
+            ctrl-n -> RebaseNext();
+            ctrl-p -> RebasePrev();
+            J -> RebaseMoveDown();
+            K -> RebaseMoveUp();
+            p -> RebaseSetPick();
+            s -> RebaseSetSquash();
+            f -> RebaseSetFixup();
+            e -> RebaseSetEdit();
+            d -> RebaseSetDrop();
+            w -> RebaseSetReword();
+            enter -> RebaseConfirm();
+            ? -> OpenHelpOverlay();
+        }
+        mode == "rebase_progress" {
+            escape -> RebaseDismiss();
+            c -> RebaseContinue();
+            a -> RebaseAbort();
+            s -> RebaseSkip();
+            m -> RebaseEditMessage();
             ? -> OpenHelpOverlay();
         }
     }

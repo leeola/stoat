@@ -47,6 +47,16 @@ pub struct CommitFileChange {
     pub status: String,
 }
 
+/// A commit log entry with metadata.
+#[derive(Clone, Debug)]
+pub struct CommitLogEntry {
+    pub oid: String,
+    pub short_hash: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub message: String,
+}
+
 /// Errors that can occur during git operations.
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -441,6 +451,111 @@ impl Repository {
         .map_err(|e| GitError::GitOperationFailed(format!("Failed to print diff: {e}")))?;
 
         Ok(patch_text)
+    }
+
+    /// List commits reachable from `head` but not from `base`.
+    pub fn log_commits(
+        &self,
+        base: &str,
+        head: &str,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let head_oid = self
+            .repo
+            .revparse_single(head)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to parse '{head}': {e}")))?
+            .id();
+        let base_oid = self
+            .repo
+            .revparse_single(base)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to parse '{base}': {e}")))?
+            .id();
+
+        let mut revwalk = self
+            .repo
+            .revwalk()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create revwalk: {e}")))?;
+        revwalk
+            .push(head_oid)
+            .map_err(|e| GitError::GitOperationFailed(format!("Revwalk push failed: {e}")))?;
+        revwalk
+            .hide(base_oid)
+            .map_err(|e| GitError::GitOperationFailed(format!("Revwalk hide failed: {e}")))?;
+        revwalk.set_sorting(git2::Sort::REVERSE).ok();
+
+        let mut entries = Vec::new();
+        for oid_result in revwalk {
+            if entries.len() >= max {
+                break;
+            }
+            let oid = oid_result.map_err(|e| {
+                GitError::GitOperationFailed(format!("Revwalk iteration failed: {e}"))
+            })?;
+            let commit = self
+                .repo
+                .find_commit(oid)
+                .map_err(|e| GitError::GitOperationFailed(format!("Failed to find commit: {e}")))?;
+            let short = &oid.to_string()[..7.min(oid.to_string().len())];
+            entries.push(CommitLogEntry {
+                oid: oid.to_string(),
+                short_hash: short.to_string(),
+                author: commit.author().name().unwrap_or("Unknown").to_string(),
+                timestamp: commit.time().seconds(),
+                message: commit.summary().unwrap_or("").to_string(),
+            });
+        }
+
+        Ok(entries)
+    }
+
+    /// Find the merge base (common ancestor) of two refs.
+    pub fn merge_base(&self, ref1: &str, ref2: &str) -> Result<String, GitError> {
+        let oid1 = self
+            .repo
+            .revparse_single(ref1)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to parse '{ref1}': {e}")))?
+            .id();
+        let oid2 = self
+            .repo
+            .revparse_single(ref2)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to parse '{ref2}': {e}")))?
+            .id();
+        let base = self
+            .repo
+            .merge_base(oid1, oid2)
+            .map_err(|e| GitError::GitOperationFailed(format!("merge_base failed: {e}")))?;
+        Ok(base.to_string())
+    }
+
+    /// Get the upstream tracking ref for the current branch.
+    pub fn upstream_ref(&self) -> Result<Option<String>, GitError> {
+        let head = self
+            .repo
+            .head()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to get HEAD: {e}")))?;
+        if !head.is_branch() {
+            return Ok(None);
+        }
+        let branch_name = head
+            .shorthand()
+            .ok_or_else(|| GitError::GitOperationFailed("HEAD has no shorthand".to_string()))?;
+        let branch = self
+            .repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to find branch: {e}")))?;
+        match branch.upstream() {
+            Ok(upstream) => {
+                let name = upstream
+                    .get()
+                    .name()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| {
+                        GitError::GitOperationFailed("Upstream has no name".to_string())
+                    })?;
+                Ok(Some(name))
+            },
+            Err(_) => Ok(None),
+        }
     }
 
     /// Get a reference to the inner git2 repository.
