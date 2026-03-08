@@ -17,7 +17,6 @@ impl RenderOnce for InfoboxView {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let bg_color: Hsla = gpui::rgb(0x1E1E1E).into();
         let border_color: Hsla = gpui::rgb(0x404040).into();
-        let text_color: Hsla = gpui::rgb(0xE0E0E0).into();
         let text_muted: Hsla = gpui::rgb(0xA0A0A0).into();
         let key_color: Hsla = gpui::rgb(0x569CD6).into();
 
@@ -64,10 +63,10 @@ impl RenderOnce for InfoboxView {
 
         let title: SharedString = self.infobox.title.into();
 
-        let container = div()
+        div()
             .absolute()
-            .bottom_4()
-            .right_4()
+            .bottom_2()
+            .right_2()
             .p(padding)
             .rounded_md()
             .bg(bg_color.opacity(0.95))
@@ -80,30 +79,8 @@ impl RenderOnce for InfoboxView {
                     .flex()
                     .flex_col()
                     .gap(gap)
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(text_color)
-                            .mb_1()
-                            .child(title),
-                    )
-                    .children(entries)
-                    .child(
-                        div()
-                            .mt_1()
-                            .pt_1()
-                            .border_t_1()
-                            .border_color(border_color.opacity(0.5))
-                            .text_xs()
-                            .text_color(text_muted.opacity(0.7))
-                            .child(if self.expanded {
-                                "? for full help"
-                            } else {
-                                "? to expand"
-                            }),
-                    ),
-            );
-
-        container
+                    .child(div().text_color(text_muted).text_xs().mb_1().child(title))
+                    .children(entries),
+            )
     }
 }

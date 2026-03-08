@@ -1,5 +1,5 @@
 use crate::keymap::{
-    compiled::{action_name, CompiledKeymap},
+    compiled::{action_first_string_arg, action_name, CompiledKeymap},
     infobox::{Infobox, InfoboxEntry},
     usage::UsageTracker,
 };
@@ -66,8 +66,18 @@ pub fn bindings_for_infobox(
     for binding in &keymap.bindings {
         let name = action_name(&binding.action);
 
-        let Some(desc) = crate::actions::help_text_by_name(name) else {
-            continue;
+        let (identity, desc) = match action_first_string_arg(&binding.action) {
+            Some(arg) if name == "SetMode" => (format!("{name}:{arg}"), format!("{arg} mode")),
+            Some(arg) if name == "SetKeyContext" => (
+                format!("{name}:{arg}"),
+                arg.to_lowercase().replace('_', " "),
+            ),
+            _ => {
+                let Some(d) = crate::actions::help_text_by_name(name) else {
+                    continue;
+                };
+                (name.to_string(), d.to_string())
+            },
         };
 
         let has_mode_pred = has_mode_predicate(&binding.predicates);
@@ -77,16 +87,16 @@ pub fn bindings_for_infobox(
             continue;
         }
 
-        if usage.should_hide(mode, name) {
+        if usage.should_hide(mode, &identity) {
             continue;
         }
 
         let keystroke = binding.key.display();
 
         if has_mode_pred {
-            mode_specific.push((name.to_string(), keystroke, desc.to_string()));
+            mode_specific.push((identity, keystroke, desc));
         } else {
-            global.push((name.to_string(), keystroke, desc.to_string()));
+            global.push((identity, keystroke, desc));
         }
     }
 
