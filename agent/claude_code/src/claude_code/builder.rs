@@ -69,6 +69,11 @@ impl ClaudeCodeBuilder {
         self
     }
 
+    pub fn log_file_name(mut self, name: impl Into<String>) -> Self {
+        self.config.log_file_name = Some(name.into());
+        self
+    }
+
     pub async fn build(self) -> Result<ClaudeCode> {
         let existing_session_id = self.managed_session_id.or(self.config.session_id);
 

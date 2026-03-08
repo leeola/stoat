@@ -99,6 +99,7 @@ impl ClaudeState {
         &mut self,
         workdir: String,
         provider: Arc<dyn ClaudeProvider>,
+        session_slug: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let initial_mode = self.permission_mode.clone();
@@ -111,6 +112,7 @@ impl ClaudeState {
             workdir,
             permission_mode: initial_mode,
             log_dir: Some(log_dir),
+            session_slug,
         };
 
         let session = match provider.create_session(config) {

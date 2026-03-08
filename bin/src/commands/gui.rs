@@ -8,6 +8,7 @@ pub fn run(
     #[cfg(debug_assertions)] timeout: Option<u64>,
     #[cfg(debug_assertions)] background: bool,
     paths: Vec<PathBuf>,
+    session_slug: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(cwd) = cwd {
         std::env::set_current_dir(&cwd)
@@ -15,11 +16,11 @@ pub fn run(
     }
     #[cfg(debug_assertions)]
     {
-        stoat::app::run_with_paths(config_path, input, timeout, background, paths)
+        stoat::app::run_with_paths(config_path, input, timeout, background, paths, session_slug)
     }
     #[cfg(not(debug_assertions))]
     {
-        stoat::app::run_with_paths(config_path, input, paths)
+        stoat::app::run_with_paths(config_path, input, paths, session_slug)
     }
 }
 
@@ -31,6 +32,7 @@ pub fn run(
     #[cfg(debug_assertions)] _timeout: Option<u64>,
     #[cfg(debug_assertions)] _background: bool,
     _paths: Vec<PathBuf>,
+    _session_slug: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Error: gui feature not enabled");
     eprintln!("Run with: cargo run --features gui --bin stoat -- gui");

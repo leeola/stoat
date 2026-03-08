@@ -34,6 +34,7 @@ pub mod rel_path;
 pub mod scroll;
 pub mod selections;
 pub mod services;
+pub mod session_name;
 pub mod stoat;
 pub mod stoat_actions;
 pub mod worktree;

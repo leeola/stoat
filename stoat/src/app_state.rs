@@ -375,6 +375,8 @@ pub struct AppState {
     pub flash_message: Option<String>,
     /// IO services (filesystem, git provider) -- injectable for testing.
     pub services: Arc<Services>,
+    /// Dictionary-style session identifier for unified log naming.
+    pub session_slug: Option<String>,
 }
 
 impl AppState {
@@ -477,6 +479,7 @@ impl AppState {
             inline_editor_mode: "normal".to_string(),
             flash_message: None,
             services,
+            session_slug: None,
         }
     }
 

@@ -35,6 +35,7 @@ impl<'a> TestApp<'a> {
                 keymap,
                 PathBuf::from("."),
                 crate::services::Services::fake(),
+                None,
                 cx,
             )
         });

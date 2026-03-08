@@ -91,7 +91,10 @@ impl PaneGroupView {
         window.focus(&handle, cx);
 
         let claude_provider = self.app_state.services.claude.clone();
-        state.update(cx, |s, cx| s.start(workdir, claude_provider, cx));
+        let session_slug = self.app_state.session_slug.clone();
+        state.update(cx, |s, cx| {
+            s.start(workdir, claude_provider, session_slug, cx)
+        });
 
         self.exit_pane_mode(cx);
         cx.notify();

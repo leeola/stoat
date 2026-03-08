@@ -22,6 +22,7 @@ pub struct SessionConfig {
     pub session_id: Option<uuid::Uuid>,
     pub model: Option<String>,
     pub log_dir: Option<PathBuf>,
+    pub log_file_name: Option<String>,
 }
 
 impl SessionConfig {
@@ -43,6 +44,9 @@ impl SessionConfig {
         }
         if let Some(dir) = &self.log_dir {
             builder = builder.log_dir(dir.clone());
+        }
+        if let Some(name) = &self.log_file_name {
+            builder = builder.log_file_name(name.clone());
         }
         builder
     }
@@ -75,10 +79,11 @@ impl ClaudeCode {
     ) -> Self {
         info!("ClaudeCode instance created for session: {}", session_id);
 
-        let log_file = config
-            .log_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
+        let session_id_str = session_id.to_string();
+        let log_file = config.log_dir.as_ref().map(|dir| {
+            let stem = config.log_file_name.as_deref().unwrap_or(&session_id_str);
+            dir.join(format!("claude-{stem}.jsonl"))
+        });
 
         Self {
             process: Some(process),

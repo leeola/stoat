@@ -1,6 +1,9 @@
 use clap::Parser;
 use std::{collections::HashMap, path::PathBuf};
-use stoat::log::{LogConfig, LogGuard};
+use stoat::{
+    log::{LogConfig, LogGuard},
+    session_name::SessionName,
+};
 
 #[derive(Parser)]
 #[command(name = "stoat")]
@@ -128,7 +131,13 @@ fn main() {
         None
     };
 
-    let _log_guard: LogGuard = match stoat::log::init(LogConfig { log_file_path }) {
+    let session_name = SessionName::generate();
+    let session_slug = session_name.file_slug();
+
+    let _log_guard: LogGuard = match stoat::log::init(LogConfig {
+        log_file_path,
+        session_slug: Some(session_slug.clone()),
+    }) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("Failed to initialize logging: {e}");
@@ -137,6 +146,8 @@ fn main() {
     };
 
     tracing::info!(
+        session = session_name.display_name(),
+        uuid = %session_name.uuid(),
         pid = std::process::id(),
         log_file = %_log_guard.log_file.display(),
         "Starting Stoat editor"
@@ -165,10 +176,18 @@ fn main() {
         }) => {
             // Launch GUI
             #[cfg(debug_assertions)]
-            let result =
-                stoat_bin::commands::gui::run(config, cwd, input, timeout, background, paths);
+            let result = stoat_bin::commands::gui::run(
+                config,
+                cwd,
+                input,
+                timeout,
+                background,
+                paths,
+                Some(session_slug),
+            );
             #[cfg(not(debug_assertions))]
-            let result = stoat_bin::commands::gui::run(config, cwd, input, paths);
+            let result =
+                stoat_bin::commands::gui::run(config, cwd, input, paths, Some(session_slug));
 
             if let Err(e) = result {
                 eprintln!("Error: Failed to launch GUI: {e}");

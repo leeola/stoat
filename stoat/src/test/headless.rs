@@ -42,6 +42,7 @@ impl<'a> HeadlessStoat<'a> {
                 keymap,
                 root_for_view,
                 crate::services::Services::fake(),
+                None,
                 cx,
             )
         });
@@ -94,6 +95,7 @@ impl<'a> HeadlessStoat<'a> {
                 keymap,
                 root_for_view,
                 crate::services::Services::fake(),
+                None,
                 cx,
             )
         });

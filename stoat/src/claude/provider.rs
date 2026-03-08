@@ -7,6 +7,7 @@ pub struct ClaudeSessionConfig {
     pub workdir: String,
     pub permission_mode: PermissionMode,
     pub log_dir: Option<PathBuf>,
+    pub session_slug: Option<String>,
 }
 
 pub type StdinMessage = (String, PermissionMode);
@@ -38,6 +39,7 @@ impl ClaudeProvider for RealClaudeProvider {
         let workdir = config.workdir;
         let log_dir = config.log_dir;
         let initial_mode = config.permission_mode;
+        let session_slug = config.session_slug;
 
         std::thread::spawn(move || {
             smol::block_on(async {
@@ -46,6 +48,9 @@ impl ClaudeProvider for RealClaudeProvider {
                 let mut builder = ClaudeCode::builder().cwd(&workdir);
                 if let Some(ref dir) = log_dir {
                     builder = builder.log_dir(dir);
+                }
+                if let Some(ref slug) = session_slug {
+                    builder = builder.log_file_name(slug);
                 }
                 let claude = builder.permission_mode(initial_mode).build().await;
 

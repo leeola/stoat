@@ -93,6 +93,7 @@ pub struct ProcessBuilder {
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<PermissionMode>,
     log_dir: Option<PathBuf>,
+    log_file_name: Option<String>,
 }
 
 impl ProcessBuilder {
@@ -107,6 +108,7 @@ impl ProcessBuilder {
             allowed_tools: None,
             permission_mode: None,
             log_dir: None,
+            log_file_name: None,
         }
     }
 
@@ -142,6 +144,11 @@ impl ProcessBuilder {
 
     pub fn log_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.log_dir = Some(dir.into());
+        self
+    }
+
+    pub fn log_file_name(mut self, name: impl Into<String>) -> Self {
+        self.log_file_name = Some(name.into());
         self
     }
 
@@ -206,10 +213,10 @@ impl ProcessBuilder {
             },
         };
 
-        let log_file = self
-            .log_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
+        let log_file = self.log_dir.as_ref().map(|dir| {
+            let stem = self.log_file_name.as_deref().unwrap_or(session_id.as_str());
+            dir.join(format!("claude-{stem}.jsonl"))
+        });
         let (stdin_handle, stdout_handle, stderr_handle) =
             Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, log_file);
 
@@ -312,10 +319,10 @@ impl ProcessBuilder {
             },
         };
 
-        let log_file = self
-            .log_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("claude-{session_id}.jsonl")));
+        let log_file = self.log_dir.as_ref().map(|dir| {
+            let stem = self.log_file_name.as_deref().unwrap_or(session_id.as_str());
+            dir.join(format!("claude-{stem}.jsonl"))
+        });
         let (stdin_handle, stdout_handle, stderr_handle) =
             Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, log_file);
 

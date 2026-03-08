@@ -10,6 +10,7 @@ pub fn run_with_paths(
     timeout: Option<u64>,
     background: bool,
     paths: Vec<std::path::PathBuf>,
+    session_slug: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_with_paths_impl(
         config_path,
@@ -17,6 +18,7 @@ pub fn run_with_paths(
         Some(timeout),
         background,
         paths,
+        session_slug,
     )
 }
 
@@ -25,8 +27,16 @@ pub fn run_with_paths(
     config_path: Option<std::path::PathBuf>,
     input_sequence: Option<String>,
     paths: Vec<std::path::PathBuf>,
+    session_slug: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_paths_impl(config_path, input_sequence, None, false, paths)
+    run_with_paths_impl(
+        config_path,
+        input_sequence,
+        None,
+        false,
+        paths,
+        session_slug,
+    )
 }
 
 fn run_with_paths_impl(
@@ -35,6 +45,7 @@ fn run_with_paths_impl(
     timeout: Option<Option<u64>>,
     background: bool,
     paths: Vec<std::path::PathBuf>,
+    session_slug: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Application::with_platform(Rc::new(MacPlatform::new(false))).run(move |cx: &mut App| {
         let discovered = crate::paths::discover(
@@ -62,6 +73,8 @@ fn run_with_paths_impl(
 
         let bounds = Bounds::centered(None, window_size, cx);
 
+        let exit_slug_for_close = session_slug.clone();
+        let exit_slug_for_timeout = session_slug.clone();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -77,6 +90,7 @@ fn run_with_paths_impl(
                         compiled_keymap.clone(),
                         std::env::current_dir().unwrap_or_default(),
                         crate::services::Services::production(),
+                        session_slug.clone(),
                         cx,
                     )
                 });
@@ -159,6 +173,9 @@ fn run_with_paths_impl(
                     .timer(Duration::from_secs(timeout_secs))
                     .await;
 
+                if let Some(ref slug) = exit_slug_for_timeout {
+                    tracing::info!(session = slug.as_str(), "Stoat editor exiting");
+                }
                 tracing::info!("Timeout reached, quitting");
                 let _ = cx.update(|cx| {
                     cx.quit();
@@ -167,7 +184,10 @@ fn run_with_paths_impl(
             .detach();
         }
 
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(move |cx| {
+            if let Some(ref slug) = exit_slug_for_close {
+                tracing::info!(session = slug.as_str(), "Stoat editor exiting");
+            }
             cx.quit();
         })
         .detach();

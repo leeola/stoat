@@ -31,6 +31,7 @@ pub struct LogGuard {
 
 pub struct LogConfig {
     pub log_file_path: Option<PathBuf>,
+    pub session_slug: Option<String>,
 }
 
 /// Initialize logging.
@@ -43,7 +44,8 @@ pub struct LogConfig {
 ///
 /// Safe to call multiple times -- will not crash if logging is already initialized.
 pub fn init(config: LogConfig) -> Result<LogGuard, Box<dyn std::error::Error + Send + Sync>> {
-    let log_dir_and_filename = resolve_log_path(config.log_file_path);
+    let log_dir_and_filename =
+        resolve_log_path(config.log_file_path, config.session_slug.as_deref());
     let (log_dir, filename) = match &log_dir_and_filename {
         Some((dir, name)) => (dir.as_path(), name.as_str()),
         None => unreachable!(),
@@ -96,8 +98,14 @@ fn test_init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
-fn resolve_log_path(override_path: Option<PathBuf>) -> Option<(PathBuf, String)> {
-    let filename = format!("stoat-{}.log", std::process::id());
+fn resolve_log_path(
+    override_path: Option<PathBuf>,
+    session_slug: Option<&str>,
+) -> Option<(PathBuf, String)> {
+    let filename = match session_slug {
+        Some(slug) => format!("stoat-{slug}.log"),
+        None => format!("stoat-{}.log", std::process::id()),
+    };
 
     if let Some(path) = override_path {
         if path.extension().is_some() {
