@@ -1138,6 +1138,17 @@ impl Render for PaneGroupView {
                                         &git_dir,
                                         &*services.fs,
                                     );
+                                    if matches!(
+                                        phase,
+                                        crate::git::rebase::RebasePhase::PausedConflict { .. }
+                                    ) {
+                                        if let Some(repo) = repo.as_deref() {
+                                            this.app_state.rebase.conflict_files =
+                                                repo.conflict_files();
+                                        }
+                                    } else {
+                                        this.app_state.rebase.conflict_files.clear();
+                                    }
                                     this.app_state.rebase.in_progress = Some(ip);
                                     this.app_state.rebase.phase = phase;
                                 } else {
@@ -1815,6 +1826,7 @@ impl Render for PaneGroupView {
                             self.rebase_scroll.clone(),
                             self.app_state.rebase.in_progress.clone(),
                             self.app_state.rebase.base_ref.clone(),
+                            self.app_state.rebase.conflict_files.clone(),
                         ))
                     })
                     .when(key_context == KeyContext::BlameCommitDiff, |div| {

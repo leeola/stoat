@@ -4,7 +4,7 @@ use crate::{
     stoat::KeyContext,
 };
 use gpui::Task;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RebaseOperation {
@@ -91,6 +91,8 @@ pub struct RebaseInProgress {
     pub total: usize,
     pub has_conflicts: bool,
     pub stopped_sha: Option<String>,
+    pub done_commits: Vec<RebaseCommit>,
+    pub pending_commits: Vec<RebaseCommit>,
 }
 
 pub struct RebaseState {
@@ -103,6 +105,7 @@ pub struct RebaseState {
     pub preview: Option<DiffPreviewData>,
     pub preview_task: Option<Task<()>>,
     pub in_progress: Option<RebaseInProgress>,
+    pub conflict_files: Vec<PathBuf>,
 }
 
 impl Default for RebaseState {
@@ -117,11 +120,12 @@ impl Default for RebaseState {
             preview: None,
             preview_task: None,
             in_progress: None,
+            conflict_files: Vec::new(),
         }
     }
 }
 
-/// Detect an in-progress rebase by reading `.git/rebase-merge/` files.
+/// Detect an in-progress rebase by reading `.git/rebase-merge/` or `.git/rebase-apply/`.
 ///
 /// Uses the [`Fs`] abstraction for file reads and [`GitRepo::has_unmerged_paths`]
 /// for conflict detection, making this testable with `FakeFs`/`FakeGitRepo`.
@@ -131,9 +135,22 @@ pub fn detect_rebase_state(
     repo: &dyn GitRepo,
 ) -> Option<RebaseInProgress> {
     let rebase_merge = git_dir.join("rebase-merge");
-    if !fs.exists(&rebase_merge) {
-        return None;
+    if fs.exists(&rebase_merge) {
+        return detect_rebase_merge(git_dir, fs, repo);
     }
+    let rebase_apply = git_dir.join("rebase-apply");
+    if fs.exists(&rebase_apply) {
+        return detect_rebase_apply(git_dir, fs, repo);
+    }
+    None
+}
+
+fn detect_rebase_merge(
+    git_dir: &Path,
+    fs: &dyn Fs,
+    repo: &dyn GitRepo,
+) -> Option<RebaseInProgress> {
+    let rebase_merge = git_dir.join("rebase-merge");
 
     let head_name = fs
         .read_to_string(&rebase_merge.join("head-name"))
@@ -163,6 +180,17 @@ pub fn detect_rebase_state(
         .map(|s| s.trim().to_string());
     let has_conflicts = repo.has_unmerged_paths();
 
+    let done_commits = fs
+        .read_to_string(&rebase_merge.join("done"))
+        .ok()
+        .map(|s| parse_todo(&s))
+        .unwrap_or_default();
+    let pending_commits = fs
+        .read_to_string(&rebase_merge.join("git-rebase-todo"))
+        .ok()
+        .map(|s| parse_todo(&s))
+        .unwrap_or_default();
+
     Some(RebaseInProgress {
         head_name,
         onto,
@@ -170,6 +198,55 @@ pub fn detect_rebase_state(
         total,
         has_conflicts,
         stopped_sha,
+        done_commits,
+        pending_commits,
+    })
+}
+
+fn detect_rebase_apply(
+    git_dir: &Path,
+    fs: &dyn Fs,
+    repo: &dyn GitRepo,
+) -> Option<RebaseInProgress> {
+    let rebase_apply = git_dir.join("rebase-apply");
+
+    let head_name = fs
+        .read_to_string(&rebase_apply.join("head-name"))
+        .ok()?
+        .trim()
+        .to_string();
+    let onto = fs
+        .read_to_string(&rebase_apply.join("onto"))
+        .ok()?
+        .trim()
+        .to_string();
+    let step: usize = fs
+        .read_to_string(&rebase_apply.join("next"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let total: usize = fs
+        .read_to_string(&rebase_apply.join("last"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let stopped_sha = fs
+        .read_to_string(&rebase_apply.join("original-commit"))
+        .ok()
+        .map(|s| s.trim().to_string());
+    let has_conflicts = repo.has_unmerged_paths();
+
+    Some(RebaseInProgress {
+        head_name,
+        onto,
+        step,
+        total,
+        has_conflicts,
+        stopped_sha,
+        done_commits: Vec::new(),
+        pending_commits: Vec::new(),
     })
 }
 
@@ -183,7 +260,9 @@ pub fn phase_from_in_progress(ip: &RebaseInProgress, git_dir: &Path, fs: &dyn Fs
             total: ip.total,
         };
     }
-    if fs.exists(&git_dir.join("rebase-merge/amend")) {
+    if fs.exists(&git_dir.join("rebase-merge/amend"))
+        || fs.exists(&git_dir.join("rebase-apply/amend"))
+    {
         return RebasePhase::PausedReword {
             step: ip.step,
             total: ip.total,
@@ -193,6 +272,83 @@ pub fn phase_from_in_progress(ip: &RebaseInProgress, git_dir: &Path, fs: &dyn Fs
         step: ip.step,
         total: ip.total,
     }
+}
+
+/// Validate that a planned todo list is safe to execute.
+///
+/// Squash/fixup as the first commit has no target to fold into.
+pub fn validate_todo(commits: &[RebaseCommit]) -> Result<(), String> {
+    if let Some(first) = commits.first() {
+        if matches!(
+            first.operation,
+            RebaseOperation::Squash | RebaseOperation::Fixup
+        ) {
+            return Err(format!(
+                "Cannot {} the first commit",
+                first.operation.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub enum TodoEntry {
+    Commit(RebaseCommit),
+    RawLine(String),
+}
+
+/// Parse a git rebase-todo preserving non-commit lines (exec, break, label, etc.).
+pub fn parse_todo_full(content: &str) -> Vec<TodoEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.splitn(3, ' ');
+        let op_str = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        if let Some(op) = RebaseOperation::parse(op_str) {
+            let hash = parts.next().unwrap_or("").to_string();
+            let message = parts.next().unwrap_or("").to_string();
+            entries.push(TodoEntry::Commit(RebaseCommit {
+                oid: hash.clone(),
+                short_hash: hash,
+                author: String::new(),
+                date: String::new(),
+                message,
+                operation: op,
+            }));
+        } else {
+            entries.push(TodoEntry::RawLine(line.to_string()));
+        }
+    }
+    entries
+}
+
+/// Serialize a mixed todo list back to rebase-todo format.
+pub fn format_todo_full(entries: &[TodoEntry]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        match entry {
+            TodoEntry::Commit(c) => {
+                out.push_str(c.operation.as_str());
+                out.push(' ');
+                out.push_str(&c.short_hash);
+                out.push(' ');
+                out.push_str(&c.message);
+                out.push('\n');
+            },
+            TodoEntry::RawLine(line) => {
+                out.push_str(line);
+                out.push('\n');
+            },
+        }
+    }
+    out
 }
 
 /// Serialize commits to git rebase-todo format.
@@ -359,6 +515,8 @@ mod tests {
             total: 5,
             has_conflicts: false,
             stopped_sha: Some("deadbeef".into()),
+            done_commits: Vec::new(),
+            pending_commits: Vec::new(),
         };
 
         assert_eq!(
@@ -379,6 +537,8 @@ mod tests {
             total: 3,
             has_conflicts: true,
             stopped_sha: None,
+            done_commits: Vec::new(),
+            pending_commits: Vec::new(),
         };
 
         assert_eq!(
@@ -399,6 +559,8 @@ mod tests {
             total: 4,
             has_conflicts: false,
             stopped_sha: Some("cafe1234".into()),
+            done_commits: Vec::new(),
+            pending_commits: Vec::new(),
         };
 
         assert_eq!(
@@ -489,5 +651,148 @@ mod tests {
             assert_eq!(RebaseOperation::parse(op.as_str()), Some(op));
             assert_eq!(RebaseOperation::parse(op.short()), Some(op));
         }
+    }
+
+    #[test]
+    fn parse_todo_full_preserves_exec() {
+        let content =
+            "pick abc123 First commit\nexec make test\npick def456 Second commit\nbreak\n";
+        let entries = parse_todo_full(content);
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[0], TodoEntry::Commit(c) if c.short_hash == "abc123"));
+        assert!(matches!(&entries[1], TodoEntry::RawLine(l) if l == "exec make test"));
+        assert!(matches!(&entries[2], TodoEntry::Commit(c) if c.short_hash == "def456"));
+        assert!(matches!(&entries[3], TodoEntry::RawLine(l) if l == "break"));
+    }
+
+    #[test]
+    fn format_todo_full_roundtrip() {
+        let input = "pick abc123 First commit\nexec make test\npick def456 Second commit\nbreak\n";
+        let entries = parse_todo_full(input);
+        let output = format_todo_full(&entries);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn parse_todo_full_preserves_label_reset() {
+        let content = "pick abc123 msg\nlabel onto\nreset onto\nmerge -C def456 branch\n";
+        let entries = parse_todo_full(content);
+        assert_eq!(entries.len(), 4);
+        assert!(matches!(&entries[0], TodoEntry::Commit(_)));
+        assert!(matches!(&entries[1], TodoEntry::RawLine(l) if l == "label onto"));
+        assert!(matches!(&entries[2], TodoEntry::RawLine(l) if l == "reset onto"));
+        assert!(matches!(&entries[3], TodoEntry::RawLine(l) if l == "merge -C def456 branch"));
+    }
+
+    #[test]
+    fn validate_todo_squash_first() {
+        let commits = vec![RebaseCommit {
+            oid: "a".into(),
+            short_hash: "a".into(),
+            author: String::new(),
+            date: String::new(),
+            message: "msg".into(),
+            operation: RebaseOperation::Squash,
+        }];
+        let err = validate_todo(&commits).unwrap_err();
+        assert!(err.contains("squash"), "{err}");
+    }
+
+    #[test]
+    fn validate_todo_fixup_first() {
+        let commits = vec![RebaseCommit {
+            oid: "a".into(),
+            short_hash: "a".into(),
+            author: String::new(),
+            date: String::new(),
+            message: "msg".into(),
+            operation: RebaseOperation::Fixup,
+        }];
+        let err = validate_todo(&commits).unwrap_err();
+        assert!(err.contains("fixup"), "{err}");
+    }
+
+    #[test]
+    fn validate_todo_valid() {
+        let ops = [
+            RebaseOperation::Pick,
+            RebaseOperation::Squash,
+            RebaseOperation::Fixup,
+            RebaseOperation::Drop,
+        ];
+        let commits: Vec<_> = ops
+            .iter()
+            .map(|&op| RebaseCommit {
+                oid: "a".into(),
+                short_hash: "a".into(),
+                author: String::new(),
+                date: String::new(),
+                message: "msg".into(),
+                operation: op,
+            })
+            .collect();
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn validate_todo_empty() {
+        assert!(validate_todo(&[]).is_ok());
+    }
+
+    #[test]
+    fn detect_rebase_apply() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs.clone());
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        let repo = provider.open(&workdir).unwrap();
+        let git_dir = workdir.join(".git");
+
+        fs.insert_file(
+            git_dir.join("rebase-apply/head-name"),
+            "refs/heads/feature\n",
+        );
+        fs.insert_file(git_dir.join("rebase-apply/onto"), "abc123\n");
+        fs.insert_file(git_dir.join("rebase-apply/next"), "3\n");
+        fs.insert_file(git_dir.join("rebase-apply/last"), "7\n");
+        fs.insert_file(git_dir.join("rebase-apply/original-commit"), "cafe1234\n");
+
+        let state = detect_rebase_state(&git_dir, &*fs, &*repo).unwrap();
+        assert_eq!(state.head_name, "refs/heads/feature");
+        assert_eq!(state.onto, "abc123");
+        assert_eq!(state.step, 3);
+        assert_eq!(state.total, 7);
+        assert_eq!(state.stopped_sha.as_deref(), Some("cafe1234"));
+        assert!(state.done_commits.is_empty());
+        assert!(state.pending_commits.is_empty());
+    }
+
+    #[test]
+    fn detect_with_done_and_pending() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs.clone());
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+        let repo = provider.open(&workdir).unwrap();
+        let git_dir = workdir.join(".git");
+
+        setup_rebase_fs(&git_dir, &fs);
+        fs.insert_file(
+            git_dir.join("rebase-merge/done"),
+            "pick aaa1111 Done commit\n",
+        );
+        fs.insert_file(
+            git_dir.join("rebase-merge/git-rebase-todo"),
+            "pick bbb2222 Pending one\npick ccc3333 Pending two\n",
+        );
+
+        let state = detect_rebase_state(&git_dir, &*fs, &*repo).unwrap();
+        assert_eq!(state.done_commits.len(), 1);
+        assert_eq!(state.done_commits[0].short_hash, "aaa1111");
+        assert_eq!(state.pending_commits.len(), 2);
+        assert_eq!(state.pending_commits[0].short_hash, "bbb2222");
+        assert_eq!(state.pending_commits[1].short_hash, "ccc3333");
     }
 }

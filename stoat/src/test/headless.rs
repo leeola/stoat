@@ -2,7 +2,7 @@ use crate::{
     content_view::PaneContent,
     environment::ProjectEnvironment,
     input_simulator::parse_input_sequence,
-    keymap::dispatch::dispatch_editor_action,
+    keymap::dispatch::{dispatch_editor_action, dispatch_pane_action},
     pane_group::view::PaneGroupView,
     test::app::{format_member, snapshot_claude, snapshot_editor},
     Stoat,
@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 pub struct HeadlessStoat<'a> {
     pub view: Entity<PaneGroupView>,
-    cx: &'a mut VisualTestContext,
+    pub(crate) cx: &'a mut VisualTestContext,
     _temp_dir: TempDir,
     root: PathBuf,
 }
@@ -177,7 +177,9 @@ impl<'a> HeadlessStoat<'a> {
         });
         self.cx.update(|_window, cx| {
             if let Some(stoat) = view.read(cx).active_stoat(cx) {
-                dispatch_editor_action(&stoat, &action, cx);
+                if !dispatch_editor_action(&stoat, &action, cx) {
+                    dispatch_pane_action(&stoat, &action, cx);
+                }
             }
         });
         self.cx.run_until_parked();

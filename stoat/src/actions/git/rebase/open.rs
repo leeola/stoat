@@ -24,10 +24,14 @@ impl PaneGroupView {
             Err(_) => return,
         };
 
+        // Detect in-progress rebase (rebase-merge or rebase-apply)
         if let Some(in_progress) = detect_rebase_state(&git_dir, &*services.fs, &*repo) {
             self.app_state
                 .open_rebase(current_mode, current_key_context);
             let phase = phase_from_in_progress(&in_progress, &git_dir, &*services.fs);
+            if matches!(phase, RebasePhase::PausedConflict { .. }) {
+                self.app_state.rebase.conflict_files = repo.conflict_files();
+            }
             self.app_state.rebase.in_progress = Some(in_progress);
             self.app_state.rebase.phase = phase;
 
@@ -42,6 +46,7 @@ impl PaneGroupView {
             return;
         }
 
+        // Determine base ref for planning mode
         let base_ref = match repo.upstream_ref() {
             Ok(Some(r)) => r,
             _ => {
@@ -50,34 +55,20 @@ impl PaneGroupView {
                 } else if repo.merge_base("origin/master", "HEAD").is_ok() {
                     "origin/master".to_string()
                 } else {
+                    self.app_state.flash_message = Some(
+                        "No upstream branch found (tried upstream, origin/main, origin/master)"
+                            .to_string(),
+                    );
+                    cx.notify();
                     return;
                 }
             },
         };
 
-        let merge_base = match repo.merge_base(&base_ref, "HEAD") {
-            Ok(mb) => mb,
-            Err(_) => return,
-        };
-
-        let log_entries = match repo.log_commits(&merge_base, "HEAD", 100) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        if log_entries.is_empty() {
-            return;
-        }
-
-        let commits: Vec<RebaseCommit> = log_entries
-            .into_iter()
-            .map(RebaseCommit::from_log_entry)
-            .collect();
-
+        // Enter planning mode immediately with empty commits, then load async
         self.app_state
             .open_rebase(current_mode, current_key_context);
-        self.app_state.rebase.commits = commits;
-        self.app_state.rebase.base_ref = base_ref;
+        self.app_state.rebase.base_ref = base_ref.clone();
         self.app_state.rebase.phase = RebasePhase::Planning;
 
         editor.update(cx, |editor, cx| {
@@ -87,7 +78,66 @@ impl PaneGroupView {
             });
         });
 
-        self.load_rebase_preview(cx);
         cx.notify();
+
+        // Async: load commits via merge_base + log_commits
+        self.app_state.rebase.preview_task = Some(cx.spawn({
+            let base_ref = base_ref.clone();
+            async move |this, cx| {
+                let result = smol::unblock({
+                    let services = services.clone();
+                    let root_path = root_path.clone();
+                    let base_ref = base_ref.clone();
+                    move || {
+                        let repo = services.git.open(&root_path)?;
+                        let merge_base = repo.merge_base(&base_ref, "HEAD")?;
+                        repo.log_commits(&merge_base, "HEAD", 100)
+                    }
+                })
+                .await;
+
+                let _ = this.update(cx, |pane_group, cx| {
+                    match result {
+                        Ok(entries) if !entries.is_empty() => {
+                            let commits: Vec<RebaseCommit> = entries
+                                .into_iter()
+                                .map(RebaseCommit::from_log_entry)
+                                .collect();
+                            pane_group.app_state.rebase.commits = commits;
+                            pane_group.load_rebase_preview(cx);
+                        },
+                        Ok(_) => {
+                            pane_group.app_state.flash_message =
+                                Some("No commits to rebase".to_string());
+                            let (_prev_mode, prev_ctx) = pane_group.app_state.dismiss_rebase();
+                            if let Some(prev) = prev_ctx {
+                                if let Some(editor) = pane_group.active_editor().cloned() {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.stoat.update(cx, |stoat, cx| {
+                                            stoat.handle_set_key_context(prev, cx);
+                                        });
+                                    });
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            pane_group.app_state.flash_message =
+                                Some(format!("Failed to load commits: {e}"));
+                            let (_prev_mode, prev_ctx) = pane_group.app_state.dismiss_rebase();
+                            if let Some(prev) = prev_ctx {
+                                if let Some(editor) = pane_group.active_editor().cloned() {
+                                    editor.update(cx, |editor, cx| {
+                                        editor.stoat.update(cx, |stoat, cx| {
+                                            stoat.handle_set_key_context(prev, cx);
+                                        });
+                                    });
+                                }
+                            }
+                        },
+                    }
+                    cx.notify();
+                });
+            }
+        }));
     }
 }

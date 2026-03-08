@@ -35,6 +35,16 @@ impl PaneGroupView {
 
                 if let Some(ip) = in_progress {
                     let phase = phase_from_in_progress(&ip, &git_dir, fs);
+                    if matches!(
+                        phase,
+                        crate::git::rebase::RebasePhase::PausedConflict { .. }
+                    ) {
+                        if let Some(repo) = repo_for_detect.as_deref() {
+                            pane_group.app_state.rebase.conflict_files = repo.conflict_files();
+                        }
+                    } else {
+                        pane_group.app_state.rebase.conflict_files.clear();
+                    }
                     pane_group.app_state.rebase.in_progress = Some(ip);
                     pane_group.app_state.rebase.phase = phase;
                 } else {

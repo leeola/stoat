@@ -1127,6 +1127,7 @@ impl AppState {
         self.rebase.preview = None;
         self.rebase.preview_task = None;
         self.rebase.in_progress = None;
+        self.rebase.conflict_files.clear();
         self.rebase.phase = crate::git::rebase::RebasePhase::Planning;
 
         (prev_mode, prev_ctx)

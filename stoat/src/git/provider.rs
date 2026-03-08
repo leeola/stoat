@@ -61,6 +61,7 @@ pub trait GitRepo: Send {
     fn rebase_abort(&self) -> Result<(), GitError>;
     fn rebase_skip(&self) -> Result<(), GitError>;
     fn has_unmerged_paths(&self) -> bool;
+    fn conflict_files(&self) -> Vec<PathBuf>;
 }
 
 // -- Real implementations --
@@ -277,6 +278,28 @@ impl GitRepo for RealGitRepo {
             .map(|idx| idx.has_conflicts())
             .unwrap_or(false)
     }
+
+    fn conflict_files(&self) -> Vec<PathBuf> {
+        let Ok(index) = self.repo.inner().index() else {
+            return Vec::new();
+        };
+        let Ok(conflicts) = index.conflicts() else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for entry in conflicts.flatten() {
+            let path = entry
+                .our
+                .as_ref()
+                .or(entry.their.as_ref())
+                .or(entry.ancestor.as_ref());
+            if let Some(ie) = path {
+                let p = String::from_utf8_lossy(&ie.path);
+                paths.push(PathBuf::from(p.as_ref()));
+            }
+        }
+        paths
+    }
 }
 
 fn run_git_output(workdir: &Path, args: &[&str]) -> Result<std::process::Output, GitError> {
@@ -353,6 +376,8 @@ struct FakeGitState {
     blame_data: HashMap<PathBuf, BlameData>,
     commit_history: Vec<FakeCommit>,
     exists: bool,
+    has_conflicts: bool,
+    conflict_file_list: Vec<PathBuf>,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
@@ -372,6 +397,8 @@ impl FakeGitProvider {
                 blame_data: HashMap::new(),
                 commit_history: Vec::new(),
                 exists: false,
+                has_conflicts: false,
+                conflict_file_list: Vec::new(),
             })),
             fs,
         }
@@ -392,6 +419,8 @@ impl FakeGitProvider {
                 blame_data: HashMap::new(),
                 commit_history: Vec::new(),
                 exists: true,
+                has_conflicts: false,
+                conflict_file_list: Vec::new(),
             })),
             fs,
         }
@@ -480,6 +509,14 @@ impl FakeGitProvider {
 
     pub fn applied_diffs(&self) -> Vec<(String, ApplyLocation, bool)> {
         self.state.lock().applied_diffs.clone()
+    }
+
+    pub fn set_has_conflicts(&self, v: bool) {
+        self.state.lock().has_conflicts = v;
+    }
+
+    pub fn set_conflict_files(&self, files: Vec<PathBuf>) {
+        self.state.lock().conflict_file_list = files;
     }
 }
 
@@ -699,11 +736,11 @@ impl GitRepo for FakeGitRepo {
 
     fn merge_base(&self, _ref1: &str, _ref2: &str) -> Result<String, GitError> {
         let state = self.state.lock();
-        Ok(state
+        state
             .commit_history
             .first()
             .map(|c| c.oid.clone())
-            .unwrap_or_default())
+            .ok_or_else(|| GitError::GitOperationFailed("no merge base found".into()))
     }
 
     fn upstream_ref(&self) -> Result<Option<String>, GitError> {
@@ -731,7 +768,11 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn has_unmerged_paths(&self) -> bool {
-        false
+        self.state.lock().has_conflicts
+    }
+
+    fn conflict_files(&self) -> Vec<PathBuf> {
+        self.state.lock().conflict_file_list.clone()
     }
 }
 
@@ -1014,5 +1055,41 @@ mod tests {
         assert!(repo.rebase_abort().is_ok());
         assert!(repo.rebase_skip().is_ok());
         assert!(!repo.has_unmerged_paths());
+    }
+
+    #[test]
+    fn fake_has_unmerged_paths_configurable() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+
+        let repo = provider.open(&workdir).unwrap();
+        assert!(!repo.has_unmerged_paths());
+
+        provider.set_has_conflicts(true);
+        let repo = provider.open(&workdir).unwrap();
+        assert!(repo.has_unmerged_paths());
+    }
+
+    #[test]
+    fn fake_conflict_files() {
+        let fs = Arc::new(FakeFs::new());
+        let provider = FakeGitProvider::new(fs);
+        let workdir = PathBuf::from("/fake/repo");
+        provider.set_exists(true);
+        provider.set_workdir(workdir.clone());
+
+        provider.set_conflict_files(vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/lib.rs"),
+        ]);
+
+        let repo = provider.open(&workdir).unwrap();
+        assert_eq!(
+            repo.conflict_files(),
+            vec![PathBuf::from("src/main.rs"), PathBuf::from("src/lib.rs")]
+        );
     }
 }

@@ -1,5 +1,8 @@
 use crate::{
-    git::rebase::{detect_rebase_state, format_todo, phase_from_in_progress},
+    git::{
+        rebase::{detect_rebase_state, format_todo, phase_from_in_progress, validate_todo},
+        repository::GitError,
+    },
     pane_group::view::PaneGroupView,
 };
 use gpui::{Context, Window};
@@ -14,6 +17,12 @@ impl PaneGroupView {
             return;
         }
 
+        if let Err(msg) = validate_todo(&self.app_state.rebase.commits) {
+            self.app_state.flash_message = Some(msg);
+            cx.notify();
+            return;
+        }
+
         let todo = format_todo(&self.app_state.rebase.commits);
         let base_ref = self.app_state.rebase.base_ref.clone();
         let root_path = self.app_state.worktree.lock().root().to_path_buf();
@@ -24,6 +33,14 @@ impl PaneGroupView {
                 let services = services.clone();
                 let root_path = root_path.clone();
                 move || {
+                    let git_dir = root_path.join(".git");
+                    if services.fs.exists(&git_dir.join("rebase-merge"))
+                        || services.fs.exists(&git_dir.join("rebase-apply"))
+                    {
+                        return Err(GitError::GitOperationFailed(
+                            "A rebase is already in progress".into(),
+                        ));
+                    }
                     let repo = services.git.open(&root_path)?;
                     repo.rebase_interactive(&base_ref, &todo)
                 }
@@ -41,6 +58,16 @@ impl PaneGroupView {
 
                 if let Some(ip) = in_progress {
                     let phase = phase_from_in_progress(&ip, &git_dir, fs);
+                    if matches!(
+                        phase,
+                        crate::git::rebase::RebasePhase::PausedConflict { .. }
+                    ) {
+                        if let Some(repo) = repo_for_detect.as_deref() {
+                            pane_group.app_state.rebase.conflict_files = repo.conflict_files();
+                        }
+                    } else {
+                        pane_group.app_state.rebase.conflict_files.clear();
+                    }
                     pane_group.app_state.rebase.in_progress = Some(ip);
                     pane_group.app_state.rebase.phase = phase;
 

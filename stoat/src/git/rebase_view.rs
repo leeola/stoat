@@ -7,6 +7,7 @@ use gpui::{
     div, prelude::FluentBuilder, px, rgb, rgba, FontWeight, InteractiveElement, IntoElement,
     ParentElement, RenderOnce, ScrollHandle, StatefulInteractiveElement, Styled, Window,
 };
+use std::path::PathBuf;
 
 #[derive(IntoElement)]
 pub struct RebaseView {
@@ -17,9 +18,11 @@ pub struct RebaseView {
     scroll_handle: ScrollHandle,
     in_progress: Option<RebaseInProgress>,
     base_ref: String,
+    conflict_files: Vec<PathBuf>,
 }
 
 impl RebaseView {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         phase: RebasePhase,
         commits: Vec<RebaseCommit>,
@@ -28,6 +31,7 @@ impl RebaseView {
         scroll_handle: ScrollHandle,
         in_progress: Option<RebaseInProgress>,
         base_ref: String,
+        conflict_files: Vec<PathBuf>,
     ) -> Self {
         Self {
             phase,
@@ -37,6 +41,7 @@ impl RebaseView {
             scroll_handle,
             in_progress,
             base_ref,
+            conflict_files,
         }
     }
 
@@ -263,12 +268,14 @@ impl RebaseView {
             .font_weight(FontWeight::SEMIBOLD)
             .child(format!("Rebase in Progress \u{2014} Step {step}/{total}"));
 
-        let body = div()
+        let mut body = div()
+            .id("rebase-progress-body")
             .flex()
             .flex_col()
             .flex_1()
+            .overflow_y_scroll()
             .p(px(16.0))
-            .gap_4()
+            .gap_2()
             .child(
                 div()
                     .text_color(rgb(0x808080))
@@ -281,6 +288,107 @@ impl RebaseView {
                     .text_size(px(13.0))
                     .child(status_msg),
             );
+
+        // Render done/pending commit list from in_progress
+        if let Some(ref ip) = self.in_progress {
+            if !ip.done_commits.is_empty() || !ip.pending_commits.is_empty() {
+                body = body.child(
+                    div()
+                        .mt_2()
+                        .text_color(rgb(0x808080))
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Commits"),
+                );
+
+                for c in &ip.done_commits {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(0x4a7a3a))
+                                    .text_size(px(10.0))
+                                    .w(px(48.0))
+                                    .child(c.operation.as_str().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x6a6a6a))
+                                    .text_size(px(10.0))
+                                    .w(px(56.0))
+                                    .child(c.short_hash.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x6a6a6a))
+                                    .text_size(px(10.0))
+                                    .flex_1()
+                                    .child(c.message.clone()),
+                            ),
+                    );
+                }
+
+                for c in &ip.pending_commits {
+                    body = body.child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .child(
+                                div()
+                                    .text_color(rgb(0x555555))
+                                    .text_size(px(10.0))
+                                    .w(px(48.0))
+                                    .child(c.operation.as_str().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x555555))
+                                    .text_size(px(10.0))
+                                    .w(px(56.0))
+                                    .child(c.short_hash.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x555555))
+                                    .text_size(px(10.0))
+                                    .flex_1()
+                                    .child(c.message.clone()),
+                            ),
+                    );
+                }
+            }
+        }
+
+        // Render conflict files when paused on conflict
+        if matches!(self.phase, RebasePhase::PausedConflict { .. })
+            && !self.conflict_files.is_empty()
+        {
+            body = body.child(
+                div()
+                    .mt_2()
+                    .text_color(rgb(0xf14c4c))
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("Conflicts ({})", self.conflict_files.len())),
+            );
+
+            for path in &self.conflict_files {
+                body = body.child(
+                    div()
+                        .px(px(4.0))
+                        .py(px(1.0))
+                        .text_color(rgb(0xce9178))
+                        .text_size(px(10.0))
+                        .child(path.to_string_lossy().to_string()),
+                );
+            }
+        }
 
         let footer = div()
             .border_t_1()
@@ -312,8 +420,8 @@ impl RebaseView {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(500.0))
-                    .h(px(viewport_height.min(300.0)))
+                    .w(px(600.0))
+                    .h(px(viewport_height * 0.7))
                     .bg(rgb(0x1e1e1e))
                     .border_1()
                     .border_color(rgb(0x3e3e42))
