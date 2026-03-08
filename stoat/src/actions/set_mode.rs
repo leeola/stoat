@@ -102,6 +102,28 @@ impl Stoat {
 
         self.mode = mode_name.to_string();
         debug!(mode = mode_name, "Set mode");
+
+        // Auto-show infobox for modes that have it enabled
+        if let Some(mode_meta) = self.get_mode(mode_name) {
+            if mode_meta.show_infobox {
+                let display_name = mode_meta.display_name.clone();
+                let usage = self.usage_tracker.lock();
+                self.autoinfo = Some(crate::keymap::query::bindings_for_infobox(
+                    &self.compiled_keymap,
+                    mode_name,
+                    &display_name,
+                    &usage,
+                ));
+                self.autoinfo_expanded = false;
+            } else {
+                self.autoinfo = None;
+                self.autoinfo_expanded = false;
+            }
+        } else {
+            self.autoinfo = None;
+            self.autoinfo_expanded = false;
+        }
+
         cx.emit(crate::stoat::StoatEvent::Changed);
         cx.notify();
     }

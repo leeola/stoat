@@ -155,6 +155,8 @@ pub struct Mode {
     /// the selection from this anchor. Used for visual selection modes (visual, visual_line,
     /// visual_block).
     pub anchored_selection: bool,
+    /// Whether entering this mode auto-shows the keybinding infobox.
+    pub show_infobox: bool,
 }
 
 impl Mode {
@@ -163,12 +165,14 @@ impl Mode {
         name: impl Into<String>,
         display_name: impl Into<String>,
         anchored_selection: bool,
+        show_infobox: bool,
     ) -> Self {
         Self {
             name: name.into(),
             display_name: display_name.into(),
             previous: None,
             anchored_selection,
+            show_infobox,
         }
     }
 
@@ -178,12 +182,14 @@ impl Mode {
         display_name: impl Into<String>,
         previous: impl Into<String>,
         anchored_selection: bool,
+        show_infobox: bool,
     ) -> Self {
         Self {
             name: name.into(),
             display_name: display_name.into(),
             previous: Some(previous.into()),
             anchored_selection,
+            show_infobox,
         }
     }
 }
@@ -315,6 +321,10 @@ pub struct Stoat {
     /// Temporary reference to symbol_picker input buffer (set when entering SymbolPicker context)
     pub(crate) symbol_picker_input_ref: Option<Entity<Buffer>>,
 
+    // Auto-infobox state
+    pub(crate) autoinfo: Option<crate::keymap::infobox::Infobox>,
+    pub(crate) autoinfo_expanded: bool,
+
     // Help modal state
     pub(crate) help_modal_previous_mode: Option<String>,
     pub(crate) help_modal_previous_key_context: Option<KeyContext>,
@@ -398,6 +408,9 @@ pub struct Stoat {
 
     /// IO services (filesystem, git provider) -- injectable for testing.
     pub(crate) services: Arc<Services>,
+
+    /// Keybinding usage tracker for progressive infobox hiding.
+    pub(crate) usage_tracker: Arc<Mutex<crate::keymap::usage::UsageTracker>>,
 
     /// Accumulating count prefix for multiplied actions (e.g., `5j` = move down 5 lines).
     pub(crate) pending_count: Option<u32>,
@@ -542,6 +555,10 @@ impl Stoat {
             })
         };
 
+        let usage_tracker = Arc::new(Mutex::new(crate::keymap::usage::UsageTracker::load(
+            &crate::keymap::usage::UsageTracker::default_path(),
+        )));
+
         Self {
             config,
             buffer_store,
@@ -560,6 +577,8 @@ impl Stoat {
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
             symbol_picker_input_ref: None,
+            autoinfo: None,
+            autoinfo_expanded: false,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -584,6 +603,7 @@ impl Stoat {
             select_prev_state: None,
             compiled_keymap,
             services,
+            usage_tracker,
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
@@ -654,6 +674,8 @@ impl Stoat {
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
             symbol_picker_input_ref: None,
+            autoinfo: None,
+            autoinfo_expanded: false,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -681,6 +703,7 @@ impl Stoat {
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
             services: self.services.clone(),
+            usage_tracker: self.usage_tracker.clone(),
             pending_count: None,
             replace_pending: false,
             rename_pending: None,
@@ -1875,6 +1898,8 @@ impl Stoat {
             command_palette_input_ref: None,
             buffer_finder_input_ref: None,
             symbol_picker_input_ref: None,
+            autoinfo: None,
+            autoinfo_expanded: false,
             help_modal_previous_mode: None,
             help_modal_previous_key_context: None,
             about_modal_previous_mode: None,
@@ -1899,6 +1924,7 @@ impl Stoat {
             select_prev_state: None,
             compiled_keymap: self.compiled_keymap.clone(),
             services: self.services.clone(),
+            usage_tracker: self.usage_tracker.clone(),
             pending_count: None,
             replace_pending: false,
             rename_pending: None,

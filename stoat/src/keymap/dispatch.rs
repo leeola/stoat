@@ -37,11 +37,20 @@ pub fn handle_key_common(stoat: &Entity<Stoat>, event: &KeyDownEvent, cx: &mut A
 
     if let Some(action) = matched_action {
         let mode_before = stoat.read(cx).mode().to_string();
+        let action_name_str = action_name(&action).to_string();
 
         let dispatched =
             dispatch_editor_action(stoat, &action, cx) || dispatch_pane_action(stoat, &action, cx);
 
         if dispatched {
+            stoat.update(cx, |s, _| {
+                let mut tracker = s.usage_tracker.lock();
+                tracker.record(&mode_before, &action_name_str);
+                if tracker.should_save() {
+                    tracker.save(&crate::keymap::usage::UsageTracker::default_path());
+                }
+            });
+
             let is_transient = mode_before == "goto"
                 || mode_before == "buffer"
                 || mode_before == "lsp"

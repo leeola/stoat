@@ -70,11 +70,12 @@ impl PaneGroupView {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, cx| {
+                    stoat.autoinfo = None;
+                    stoat.autoinfo_expanded = false;
                     stoat.open_help_modal(cx);
                 });
             });
         }
-        self.help_overlay_visible = false;
         cx.notify();
     }
 }

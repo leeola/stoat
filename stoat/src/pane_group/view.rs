@@ -1,6 +1,6 @@
 use crate::{
     claude::{state::ClaudeState, view::ClaudeView},
-    command::{overlay::CommandOverlay, palette::CommandPalette},
+    command::{infobox::InfoboxView, palette::CommandPalette},
     editor::view::EditorView,
     file_finder::Finder,
     git::status::GitStatus,
@@ -148,8 +148,6 @@ pub struct PaneGroupView {
     pub(crate) last_editor_scroll_y: Option<f32>,
     /// Minimap fade animation state (for ScrollHint mode)
     pub(crate) minimap_fade_state: MinimapFadeState,
-    /// Help overlay visibility (non-modal overlay showing hint to press ? again)
-    pub(crate) help_overlay_visible: bool,
     /// Subscriptions to StoatEvent::Action on each pane's Stoat entity
     stoat_subscriptions: Vec<Subscription>,
     /// Pending actions queued from StoatEvent::Action, processed in render() (which has window
@@ -325,7 +323,6 @@ impl PaneGroupView {
             minimap_visibility: MinimapVisibility::AlwaysVisible,
             last_editor_scroll_y: None,
             minimap_fade_state: MinimapFadeState::Hidden,
-            help_overlay_visible: false,
             stoat_subscriptions: vec![initial_sub],
             pending_actions: Vec::new(),
             activation_observer_set: false,
@@ -1220,7 +1217,7 @@ impl Render for PaneGroupView {
         // git status data, status bar data, minimap scroll, and thumb data from the active editor
         let (
             key_context,
-            active_mode,
+            _active_mode,
             mode_display,
             _file_finder_data,
             _command_palette_data,
@@ -1542,8 +1539,28 @@ impl Render for PaneGroupView {
             }
         }
 
-        // Query keymap for bindings in the current mode
-        let bindings = crate::keymap::query::bindings_for_mode(&self.compiled_keymap, &active_mode);
+        // Extract autoinfo data from the active stoat for infobox rendering
+        let autoinfo_data: Option<(crate::keymap::infobox::Infobox, bool)> = self
+            .pane_contents
+            .get(&self.active_pane)
+            .and_then(|content| content.as_editor())
+            .and_then(|editor| {
+                let stoat = editor.read(cx).stoat.read(cx);
+                stoat.autoinfo.as_ref().map(|info| {
+                    let infobox = crate::keymap::infobox::Infobox {
+                        title: info.title.clone(),
+                        entries: info
+                            .entries
+                            .iter()
+                            .map(|e| crate::keymap::infobox::InfoboxEntry {
+                                keys: e.keys.clone(),
+                                description: e.description.clone(),
+                            })
+                            .collect(),
+                    };
+                    (infobox, stoat.autoinfo_expanded)
+                })
+            });
 
         // Calculate minimap thumb bounds using pre-extracted data
         // Following Zed's architecture: thumb is sized and positioned using minimap line heights
@@ -1738,9 +1755,9 @@ impl Render for PaneGroupView {
                                                                         * border */
                         )
                     })
-                    // Render help overlay (CommandOverlay) on top of minimap
-                    .when(self.help_overlay_visible, |div| {
-                        div.child(CommandOverlay::new(mode_display.clone(), bindings.clone()))
+                    // Render keybinding infobox on top of minimap
+                    .when_some(autoinfo_data, |div, (infobox, expanded)| {
+                        div.child(InfoboxView::new(infobox, expanded))
                     })
                     .child(RenderStatsOverlayElement::new(
                         self.render_stats_tracker.clone(),
