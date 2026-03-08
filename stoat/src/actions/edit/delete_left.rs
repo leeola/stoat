@@ -146,7 +146,7 @@ impl Stoat {
 
             let cursor_pos = self.cursor.position();
             if self.selections.count() == 1 {
-                let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+                let newest_sel = self.selections.newest::<text::Point>(snapshot);
                 if newest_sel.head() != cursor_pos {
                     let id = self.selections.next_id();
                     self.selections.select(
@@ -157,13 +157,13 @@ impl Stoat {
                             reversed: false,
                             goal: text::SelectionGoal::None,
                         }],
-                        &snapshot,
+                        snapshot,
                     );
                 }
             }
 
             tracing::debug!("delete_left: About to call selections.all()");
-            let selections = self.selections.all::<text::Point>(&snapshot);
+            let selections = self.selections.all::<text::Point>(snapshot);
             tracing::debug!(
                 "delete_left: selections.all() succeeded, got {} selections",
                 selections.len()
@@ -198,7 +198,7 @@ impl Stoat {
                 });
 
                 let new_snapshot = buffer.read(cx).snapshot();
-                self.selections = crate::selections::SelectionsCollection::new(&new_snapshot);
+                self.selections = crate::selections::SelectionsCollection::new(new_snapshot);
 
                 if let Some(pos) = new_cursor_pos {
                     self.cursor.move_to(pos);
@@ -212,7 +212,7 @@ impl Stoat {
                             reversed: false,
                             goal: text::SelectionGoal::None,
                         }],
-                        &new_snapshot,
+                        new_snapshot,
                     );
                 }
 

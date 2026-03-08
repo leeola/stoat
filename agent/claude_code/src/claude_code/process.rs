@@ -507,11 +507,11 @@ impl ProcessBuilder {
     ) -> JoinHandle<Sender<SdkMessage>> {
         std::thread::spawn(move || {
             let mut log_writer = log_file.and_then(|path| {
-                if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        error!("Failed to create log directory: {e}");
-                        return None;
-                    }
+                if let Some(parent) = path.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    error!("Failed to create log directory: {e}");
+                    return None;
                 }
                 match std::fs::OpenOptions::new()
                     .create(true)

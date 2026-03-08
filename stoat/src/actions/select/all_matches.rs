@@ -49,7 +49,7 @@ impl Stoat {
         let snapshot = buffer.snapshot();
 
         // Get newest selection and extract query text
-        let newest: Selection<Point> = self.selections.newest(&snapshot);
+        let newest: Selection<Point> = self.selections.newest(snapshot);
         if newest.start == newest.end {
             // Empty selection, nothing to search for
             return;
@@ -60,7 +60,7 @@ impl Stoat {
             .collect::<String>();
 
         // Find all occurrences in buffer
-        let all_matches = find_all_occurrences(&snapshot, &query);
+        let all_matches = find_all_occurrences(snapshot, &query);
 
         if all_matches.is_empty() {
             // No matches found
@@ -84,8 +84,8 @@ impl Stoat {
 
         // Replace all selections with matches
         // SelectionsCollection::select() will merge overlapping selections
-        self.selections.select(new_selections, &snapshot);
-        let newest = self.selections.newest::<Point>(&snapshot);
+        self.selections.select(new_selections, snapshot);
+        let newest = self.selections.newest::<Point>(snapshot);
         self.cursor.move_to(newest.head());
 
         cx.notify();

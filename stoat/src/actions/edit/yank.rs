@@ -8,7 +8,7 @@ impl Stoat {
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
 
-        let selections = self.selections.all::<text::Point>(&snapshot);
+        let selections = self.selections.all::<text::Point>(snapshot);
         let mut texts = Vec::new();
         for selection in &selections {
             if !selection.is_empty() {

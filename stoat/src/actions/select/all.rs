@@ -19,7 +19,7 @@ impl Stoat {
                 reversed: false,
                 goal: text::SelectionGoal::None,
             }],
-            &snapshot,
+            snapshot,
         );
         self.cursor.move_to(end);
     }

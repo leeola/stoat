@@ -34,7 +34,7 @@ impl Stoat {
                 reversed: false,
                 goal: text::SelectionGoal::None,
             }],
-            &buffer_snapshot,
+            buffer_snapshot,
         );
 
         self.cursor.move_to(new_pos);

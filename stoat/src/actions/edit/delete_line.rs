@@ -47,7 +47,7 @@ impl Stoat {
 
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<text::Point>(&buffer_snapshot);
+            let newest_sel = self.selections.newest::<text::Point>(buffer_snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -58,12 +58,12 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &buffer_snapshot,
+                    buffer_snapshot,
                 );
             }
         }
 
-        let selections = self.selections.all::<text::Point>(&buffer_snapshot);
+        let selections = self.selections.all::<text::Point>(buffer_snapshot);
         let mut edits = Vec::new();
         let row_count = buffer_snapshot.row_count();
 
@@ -95,7 +95,7 @@ impl Stoat {
 
             // Get updated selections (anchors have auto-adjusted)
             let snapshot = buffer.read(cx).snapshot();
-            let updated_selections = self.selections.all::<text::Point>(&snapshot);
+            let updated_selections = self.selections.all::<text::Point>(snapshot);
 
             // Sync cursor to last selection
             if let Some(last) = updated_selections.last() {

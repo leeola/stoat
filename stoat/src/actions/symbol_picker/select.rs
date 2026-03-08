@@ -44,8 +44,7 @@ impl PaneGroupView {
                         editor.stoat.update(cx, |stoat, cx| {
                             let buffer_item = stoat.active_buffer(cx);
                             let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-                            if let Ok(point) = lsp_position_to_point(&entry.range_start, &snapshot)
-                            {
+                            if let Ok(point) = lsp_position_to_point(&entry.range_start, snapshot) {
                                 stoat.jump_to_point(point, cx);
                             }
                         });

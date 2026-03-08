@@ -78,18 +78,13 @@ impl DiffSource {
 /// Mode for comparing different git states during diff review.
 ///
 /// Each variant maps 1:1 from a [`DiffSource`] variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum DiffComparisonMode {
+    #[default]
     WorkingVsHead,
     WorkingVsIndex,
     IndexVsHead,
     HeadVsParent,
-}
-
-impl Default for DiffComparisonMode {
-    fn default() -> Self {
-        Self::WorkingVsHead
-    }
 }
 
 impl DiffComparisonMode {

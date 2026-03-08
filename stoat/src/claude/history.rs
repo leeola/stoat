@@ -50,8 +50,7 @@ impl ConversationStore {
             meta: meta.clone(),
             messages: messages.to_vec(),
         };
-        let json = serde_json::to_string_pretty(&file)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
         std::fs::write(self.path_for(&meta.id), json)?;
         Ok(())
     }

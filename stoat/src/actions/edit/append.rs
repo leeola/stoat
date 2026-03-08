@@ -24,7 +24,7 @@ impl Stoat {
                 reversed: false,
                 goal: text::SelectionGoal::None,
             }],
-            &snapshot,
+            snapshot,
         );
 
         self.set_mode_by_name("insert", cx);

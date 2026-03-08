@@ -159,8 +159,8 @@ struct FakeFsState {
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
-impl FakeFs {
-    pub fn new() -> Self {
+impl Default for FakeFs {
+    fn default() -> Self {
         Self {
             state: Mutex::new(FakeFsState {
                 files: std::collections::BTreeMap::new(),
@@ -168,6 +168,13 @@ impl FakeFs {
                 next_mtime: SystemTime::UNIX_EPOCH,
             }),
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+impl FakeFs {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn insert_file(&self, path: impl Into<PathBuf>, content: impl AsRef<[u8]>) {

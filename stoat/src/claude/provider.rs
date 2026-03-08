@@ -1,6 +1,9 @@
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use parking_lot::Mutex;
 use smol::channel;
-use std::{any::Any, collections::VecDeque, path::PathBuf, sync::Arc};
+use std::{any::Any, path::PathBuf};
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+use std::{collections::VecDeque, sync::Arc};
 use stoat_agent_claude_code::{PermissionMode, SdkMessage};
 
 pub struct ClaudeSessionConfig {
@@ -124,14 +127,21 @@ struct FakeClaudeState {
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
-impl FakeClaudeProvider {
-    pub fn new() -> Self {
+impl Default for FakeClaudeProvider {
+    fn default() -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeClaudeState {
                 replay_queue: VecDeque::new(),
                 sent_messages: Vec::new(),
             })),
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+impl FakeClaudeProvider {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn queue_message(&self, msg: SdkMessage) {

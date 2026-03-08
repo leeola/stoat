@@ -437,7 +437,7 @@ impl AppState {
                     let result: Option<(Entity<BufferItem>, DiagnosticSet)> = cx.update(|cx| {
                         let buffer_item = buffer_store_clone.read(cx).get_buffer_by_path(&path)?;
                         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-                        let diag_set = lsp_manager.diagnostics_for_buffer(&path, &snapshot)?;
+                        let diag_set = lsp_manager.diagnostics_for_buffer(&path, snapshot)?;
 
                         Some((buffer_item.clone(), diag_set))
                     });

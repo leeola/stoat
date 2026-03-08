@@ -53,7 +53,7 @@ impl Stoat {
         let snapshot = buffer.snapshot();
 
         // Get newest selection and extract query text
-        let newest: Selection<Point> = self.selections.newest(&snapshot);
+        let newest: Selection<Point> = self.selections.newest(snapshot);
         if newest.start == newest.end {
             // Empty selection, nothing to search for
             return;
@@ -84,15 +84,15 @@ impl Stoat {
         }
 
         // Find previous occurrence before newest selection
-        let start_offset = newest.start.to_offset(&snapshot);
-        let prev_match = find_prev_occurrence(&snapshot, &query, start_offset, true);
+        let start_offset = newest.start.to_offset(snapshot);
+        let prev_match = find_prev_occurrence(snapshot, &query, start_offset, true);
 
         if let Some(range) = prev_match {
             // Check if this match overlaps with any existing selection
             let all_selections = self.active_selections(cx);
             let overlaps = all_selections.iter().any(|sel| {
-                let sel_start = sel.start.to_offset(&snapshot);
-                let sel_end = sel.end.to_offset(&snapshot);
+                let sel_start = sel.start.to_offset(snapshot);
+                let sel_end = sel.end.to_offset(snapshot);
                 !(range.end <= sel_start || range.start >= sel_end)
             });
 
@@ -111,7 +111,7 @@ impl Stoat {
 
                 let mut all_selections: Vec<Selection<Point>> = self.active_selections(cx);
                 all_selections.push(new_selection);
-                self.selections.select(all_selections, &snapshot);
+                self.selections.select(all_selections, snapshot);
 
                 cx.notify();
             } else {

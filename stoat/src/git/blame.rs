@@ -18,22 +18,12 @@ pub struct BlameData {
     pub line_to_entry: Vec<usize>,
 }
 
+#[derive(Default)]
 pub struct BlameState {
     pub active: bool,
     pub data: Option<BlameData>,
     pub show_author: bool,
     pub show_date: bool,
-}
-
-impl Default for BlameState {
-    fn default() -> Self {
-        Self {
-            active: false,
-            data: None,
-            show_author: false,
-            show_date: false,
-        }
-    }
 }
 
 pub fn blame_file(repo: &Repository, path: &Path) -> Result<BlameData, GitError> {

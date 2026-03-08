@@ -71,7 +71,7 @@ impl Stoat {
 
                 // Initialize selection at cursor if needed
                 if self.selections.count() == 1 {
-                    let newest = self.selections.newest::<text::Point>(&snapshot);
+                    let newest = self.selections.newest::<text::Point>(snapshot);
                     if newest.is_empty() && newest.head() == cursor_pos {
                         // Already have empty selection at cursor - good
                     } else {
@@ -85,7 +85,7 @@ impl Stoat {
                                 reversed: false,
                                 goal: text::SelectionGoal::None,
                             }],
-                            &snapshot,
+                            snapshot,
                         );
                     }
                 }

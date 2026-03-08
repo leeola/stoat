@@ -47,10 +47,8 @@ pub fn parse_blocks(text: &str) -> Vec<TextBlock> {
         }
     }
 
-    if in_fence {
-        if !fence_content.is_empty() {
-            blocks.push(TextBlock::Prose(fence_content));
-        }
+    if in_fence && !fence_content.is_empty() {
+        blocks.push(TextBlock::Prose(fence_content));
     }
     if !current_prose.is_empty() {
         blocks.push(TextBlock::Prose(current_prose));

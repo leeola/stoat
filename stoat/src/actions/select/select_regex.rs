@@ -37,7 +37,7 @@ impl Stoat {
         self.selections.select_anchors(base.clone());
         let buffer_item = self.active_buffer(cx);
         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        let selections: Vec<Selection<Point>> = self.selections.all(&snapshot);
+        let selections: Vec<Selection<Point>> = self.selections.all(snapshot);
 
         let mut new_selections = Vec::new();
         for sel in &selections {
@@ -63,12 +63,12 @@ impl Stoat {
         }
 
         if !new_selections.is_empty() {
-            self.selections.select(new_selections, &snapshot);
-            let newest = self.selections.newest::<Point>(&snapshot);
+            self.selections.select(new_selections, snapshot);
+            let newest = self.selections.newest::<Point>(snapshot);
             self.cursor.move_to(newest.head());
         } else {
             self.selections.select_anchors(base.clone());
-            let newest = self.selections.newest::<Point>(&snapshot);
+            let newest = self.selections.newest::<Point>(snapshot);
             self.cursor.move_to(newest.head());
         }
         cx.notify();
@@ -80,7 +80,7 @@ impl Stoat {
             self.selections.select_anchors(base);
             let buffer_item = self.active_buffer(cx);
             let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-            let newest = self.selections.newest::<Point>(&snapshot);
+            let newest = self.selections.newest::<Point>(snapshot);
             self.cursor.move_to(newest.head());
         }
         self.select_regex_pending = None;
@@ -99,7 +99,7 @@ impl Stoat {
         }
         let buffer_item = self.active_buffer(cx);
         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        let newest = self.selections.newest::<Point>(&snapshot);
+        let newest = self.selections.newest::<Point>(snapshot);
         self.cursor.move_to(newest.head());
         cx.notify();
     }

@@ -197,7 +197,7 @@ pub fn dispatch_editor_action<C: AppContext>(
 
         "SetMode" => {
             if let Some(mode_name) = action_first_string_arg(action) {
-                let _ = stoat.update(cx, |s, cx| s.set_mode_by_name(&mode_name, cx));
+                stoat.update(cx, |s, cx| s.set_mode_by_name(&mode_name, cx));
             }
         },
         "EnterInsertMode" => ed!(stoat, cx, |s, cx| s.enter_insert_mode(cx)),
@@ -210,7 +210,7 @@ pub fn dispatch_editor_action<C: AppContext>(
         "SetKeyContext" => {
             if let Some(ctx_name) = action_first_string_arg(action) {
                 if let Ok(key_context) = KeyContext::from_str(&ctx_name) {
-                    let _ = stoat.update(cx, |s, cx| s.handle_set_key_context(key_context, cx));
+                    stoat.update(cx, |s, cx| s.handle_set_key_context(key_context, cx));
                 }
             }
         },
@@ -232,7 +232,7 @@ pub fn dispatch_editor_action<C: AppContext>(
             ed!(stoat, cx, |s, cx| s.diff_review_cycle_comparison_mode(cx))
         },
         "DiffReviewRevertHunk" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.diff_review_revert_hunk(cx) {
                     tracing::error!("DiffReviewRevertHunk failed: {e}");
                 }
@@ -269,28 +269,28 @@ pub fn dispatch_editor_action<C: AppContext>(
         },
 
         "GitStageHunk" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.git_stage_hunk(cx) {
                     tracing::error!("GitStageHunk failed: {e}");
                 }
             });
         },
         "GitUnstageHunk" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.git_unstage_hunk(cx) {
                     tracing::error!("GitUnstageHunk failed: {e}");
                 }
             });
         },
         "GitToggleStageHunk" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.git_toggle_stage_hunk(cx) {
                     tracing::error!("GitToggleStageHunk failed: {e}");
                 }
             });
         },
         "GitToggleStageLine" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.git_toggle_stage_line(cx) {
                     tracing::error!("GitToggleStageLine failed: {e}");
                 }
@@ -310,14 +310,14 @@ pub fn dispatch_editor_action<C: AppContext>(
         "ConflictToggleView" => ed!(stoat, cx, |s, cx| s.conflict_toggle_view(cx)),
 
         "WriteFile" | "Save" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.write_file(cx) {
                     tracing::error!("WriteFile failed: {}", e);
                 }
             });
         },
         "WriteAll" => {
-            let _ = stoat.update(cx, |s, cx| {
+            stoat.update(cx, |s, cx| {
                 if let Err(e) = s.write_all(cx) {
                     tracing::error!("WriteAll failed: {}", e);
                 }
@@ -436,7 +436,7 @@ pub fn dispatch_pane_action<C: AppContext>(
     let action_name = name.to_string();
     let args: Vec<String> = action_first_string_arg(action).into_iter().collect();
 
-    let _ = stoat.update(cx, |_, cx| {
+    stoat.update(cx, |_, cx| {
         cx.emit(StoatEvent::Action {
             name: action_name,
             args,

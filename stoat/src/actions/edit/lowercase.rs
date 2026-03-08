@@ -22,7 +22,7 @@ impl Stoat {
 
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+            let newest_sel = self.selections.newest::<text::Point>(snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -33,12 +33,12 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
 
-        let selections = self.selections.all::<text::Point>(&snapshot);
+        let selections = self.selections.all::<text::Point>(snapshot);
         let mut owned_edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
 
         for selection in &selections {
@@ -73,7 +73,7 @@ impl Stoat {
                 .collect();
             buffer.update(cx, |buffer, _| buffer.edit(edits));
             let snapshot = buffer.read(cx).snapshot();
-            let updated = self.selections.all::<text::Point>(&snapshot);
+            let updated = self.selections.all::<text::Point>(snapshot);
             if let Some(last) = updated.last() {
                 self.cursor.move_to(last.head());
             }

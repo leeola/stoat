@@ -72,9 +72,10 @@ const FADE_OUT_DURATION: Duration = Duration::from_millis(300);
 ///
 /// Tracks the current fade animation state of the minimap in ScrollHint mode.
 /// Transitions: Hidden -> FadingIn -> Visible -> FadingOut -> Hidden
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub(crate) enum MinimapFadeState {
     /// Minimap is not rendered
+    #[default]
     Hidden,
     /// Minimap is fading in (opacity 0.0 to 1.0)
     FadingIn { started_at: Instant },
@@ -84,18 +85,13 @@ pub(crate) enum MinimapFadeState {
     FadingOut { started_at: Instant },
 }
 
-impl Default for MinimapFadeState {
-    fn default() -> Self {
-        Self::Hidden
-    }
-}
-
 /// Minimap visibility mode.
 ///
 /// Controls when and how the minimap is displayed to the user.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MinimapVisibility {
     /// Minimap is always visible
+    #[default]
     AlwaysVisible,
     /// Minimap is always hidden
     AlwaysHidden,
@@ -108,12 +104,6 @@ pub enum MinimapVisibility {
         /// Scroll threshold in lines
         threshold_lines: f32,
     },
-}
-
-impl Default for MinimapVisibility {
-    fn default() -> Self {
-        Self::AlwaysVisible
-    }
 }
 
 /// Main view that manages multiple editor panes in a tree layout.

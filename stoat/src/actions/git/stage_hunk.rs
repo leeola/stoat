@@ -32,7 +32,7 @@ impl Stoat {
             .ok_or_else(|| "No diff information available".to_string())?;
 
         let hunk_index = diff
-            .hunk_for_row(cursor_row, &buffer_snapshot)
+            .hunk_for_row(cursor_row, buffer_snapshot)
             .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
 
         let is_staged = buffer_item
@@ -89,11 +89,11 @@ impl Stoat {
                 .diff()
                 .ok_or_else(|| "No diff information available".to_string())?;
             let hunk_index = diff
-                .hunk_for_row(cursor_row, &buffer_snapshot)
+                .hunk_for_row(cursor_row, buffer_snapshot)
                 .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
             let hunk = &diff.hunks[hunk_index];
-            let start = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
-            let end = hunk.buffer_range.end.to_point(&buffer_snapshot).row;
+            let start = hunk.buffer_range.start.to_point(buffer_snapshot).row;
+            let end = hunk.buffer_range.end.to_point(buffer_snapshot).row;
             (start, end)
         };
 
@@ -105,13 +105,13 @@ impl Stoat {
             .map_err(|e| format!("Repository not found: {e}"))?;
         let index_content = repo.index_content(&file_path).unwrap_or_default();
         let buffer_id = buffer_snapshot.remote_id();
-        let stage_diff = BufferDiff::new(buffer_id, index_content, &buffer_snapshot)
+        let stage_diff = BufferDiff::new(buffer_id, index_content, buffer_snapshot)
             .map_err(|e| format!("Working-vs-index diff failed: {e}"))?;
 
         // Find the working-vs-index hunk that overlaps the display hunk's buffer range
         let stage_hunk = stage_diff.hunks.iter().find(|h| {
-            let start = h.buffer_range.start.to_point(&buffer_snapshot).row;
-            let end = h.buffer_range.end.to_point(&buffer_snapshot).row;
+            let start = h.buffer_range.start.to_point(buffer_snapshot).row;
+            let end = h.buffer_range.end.to_point(buffer_snapshot).row;
             start <= display_end && end >= display_start
         });
 
@@ -119,7 +119,7 @@ impl Stoat {
             let patch = super::hunk_patch::generate_hunk_patch(
                 &stage_diff,
                 hunk,
-                &buffer_snapshot,
+                buffer_snapshot,
                 &file_path,
             )?;
             super::hunk_patch::apply_patch(

@@ -16,7 +16,7 @@ impl Stoat {
 
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            let newest_sel = self.selections.newest::<Point>(snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -27,12 +27,12 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
 
-        let mut selections = self.selections.all::<Point>(&snapshot);
+        let mut selections = self.selections.all::<Point>(snapshot);
         for selection in &mut selections {
             let head = selection.head();
             let line_start_offset = snapshot.point_to_offset(Point::new(head.row, 0));
@@ -53,7 +53,7 @@ impl Stoat {
             selection.goal = text::SelectionGoal::None;
         }
 
-        self.selections.select(selections.clone(), &snapshot);
+        self.selections.select(selections.clone(), snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
         }

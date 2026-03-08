@@ -494,6 +494,7 @@ impl Stoat {
     }
 
     /// Create new Stoat with specific initial buffer text (primarily for tests).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_text(
         config: crate::config::Config,
         worktree: Arc<Mutex<Worktree>>,
@@ -524,7 +525,7 @@ impl Stoat {
         // Initialize cursor and selections at origin
         let cursor = CursorManager::new();
         let buffer_snapshot = buffer.read(cx).snapshot();
-        let selections = SelectionsCollection::new(&buffer_snapshot);
+        let selections = SelectionsCollection::new(buffer_snapshot);
 
         let modes = crate::keymap::default_modes();
         let contexts = crate::keymap::default_contexts();
@@ -849,7 +850,7 @@ impl Stoat {
                 reversed: false,
                 goal: text::SelectionGoal::None,
             }],
-            &buffer_snapshot,
+            buffer_snapshot,
         );
 
         cx.notify();
@@ -873,7 +874,7 @@ impl Stoat {
     pub fn active_selections(&self, cx: &App) -> Vec<text::Selection<Point>> {
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        self.selections.all(&buffer_snapshot)
+        self.selections.all(buffer_snapshot)
     }
 
     /// Get the newest (primary) selection resolved to Point.
@@ -890,7 +891,7 @@ impl Stoat {
     pub fn newest_selection(&self, cx: &App) -> text::Selection<Point> {
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        self.selections.newest(&buffer_snapshot)
+        self.selections.newest(buffer_snapshot)
     }
 
     /// Get visual cursor positions for all active selections.
@@ -902,7 +903,7 @@ impl Stoat {
     pub fn cursor_points(&self, cx: &App) -> Vec<Point> {
         let buffer_item = self.active_buffer(cx);
         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        let selections = self.selections.all::<Point>(&snapshot);
+        let selections = self.selections.all::<Point>(snapshot);
 
         selections
             .iter()
@@ -1419,16 +1420,15 @@ impl Stoat {
                 if let Ok(head_content) = repo.head_content(path) {
                     let buffer_snapshot = item.buffer().read(cx).snapshot();
                     let buffer_id = buffer_snapshot.remote_id();
-                    match BufferDiff::new(buffer_id, head_content.clone(), &buffer_snapshot) {
+                    match BufferDiff::new(buffer_id, head_content.clone(), buffer_snapshot) {
                         Ok(ref diff) => {
                             if let Ok(index_content) = repo.index_content(path) {
                                 let wi_diff =
-                                    BufferDiff::new(buffer_id, index_content, &buffer_snapshot)
-                                        .ok();
+                                    BufferDiff::new(buffer_id, index_content, buffer_snapshot).ok();
                                 let ranges = crate::git::diff::compute_staged_buffer_rows(
                                     diff,
                                     wi_diff.as_ref(),
-                                    &buffer_snapshot,
+                                    buffer_snapshot,
                                 );
                                 item.set_staged_rows(if ranges.is_empty() {
                                     None
@@ -1438,7 +1438,7 @@ impl Stoat {
                                 let hunk_indices = crate::git::diff::compute_staged_hunk_indices(
                                     diff,
                                     wi_diff.as_ref(),
-                                    &buffer_snapshot,
+                                    buffer_snapshot,
                                 );
                                 item.set_staged_hunk_indices(if hunk_indices.is_empty() {
                                     None
@@ -1469,7 +1469,7 @@ impl Stoat {
 
         // Initialize new selections for the new buffer
         let new_snapshot = buffer_item_entity.read(cx).buffer().read(cx).snapshot();
-        self.selections = SelectionsCollection::new(&new_snapshot);
+        self.selections = SelectionsCollection::new(new_snapshot);
 
         if self.blame_state.active {
             self.blame_state = crate::git::blame::BlameState::default();
@@ -1551,7 +1551,7 @@ impl Stoat {
         self.cursor.move_to(Point::new(0, 0));
 
         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        self.selections = SelectionsCollection::new(&snapshot);
+        self.selections = SelectionsCollection::new(snapshot);
 
         cx.notify();
         self.maybe_drop_initial_buffer(cx);
@@ -1576,7 +1576,7 @@ impl Stoat {
 
         self.cursor.move_to(text::Point::new(0, 0));
         let new_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        self.selections = SelectionsCollection::new(&new_snapshot);
+        self.selections = SelectionsCollection::new(new_snapshot);
 
         self.maybe_drop_initial_buffer(cx);
         cx.notify();
@@ -1696,22 +1696,22 @@ impl Stoat {
                     buffer_snapshot.text().len()
                 );
                 let diff =
-                    BufferDiff::new(buffer_id, base_content.clone(), &buffer_snapshot).ok()?;
+                    BufferDiff::new(buffer_id, base_content.clone(), buffer_snapshot).ok()?;
                 let (staged_rows, staged_hunks) = repo
                     .index_content(path)
                     .ok()
                     .map(|index_content| {
                         let wi_diff =
-                            BufferDiff::new(buffer_id, index_content, &buffer_snapshot).ok();
+                            BufferDiff::new(buffer_id, index_content, buffer_snapshot).ok();
                         let rows = crate::git::diff::compute_staged_buffer_rows(
                             &diff,
                             wi_diff.as_ref(),
-                            &buffer_snapshot,
+                            buffer_snapshot,
                         );
                         let hunks = crate::git::diff::compute_staged_hunk_indices(
                             &diff,
                             wi_diff.as_ref(),
-                            &buffer_snapshot,
+                            buffer_snapshot,
                         );
                         (rows, hunks)
                     })
@@ -1729,7 +1729,7 @@ impl Stoat {
                     base_content.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, base_content, &buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, base_content, buffer_snapshot).ok()?;
                 (diff, None, None)
             },
             DiffComparisonMode::IndexVsHead => {
@@ -1739,7 +1739,7 @@ impl Stoat {
                     head_content.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, head_content, &buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, head_content, buffer_snapshot).ok()?;
                 let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
                 (diff, Some(vec![0..u32::MAX]), Some(all_indices))
             },
@@ -1750,22 +1750,22 @@ impl Stoat {
                     parent_content.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, parent_content, &buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, parent_content, buffer_snapshot).ok()?;
 
                 // Detect reverted hunks: rows where working tree differs from HEAD
                 let working_content = self.services.fs.read_to_string(path).ok();
                 let (staged_rows, staged_hunks) = working_content
                     .map(|wc| {
-                        let wh_diff = BufferDiff::new(buffer_id, wc, &buffer_snapshot).ok();
+                        let wh_diff = BufferDiff::new(buffer_id, wc, buffer_snapshot).ok();
                         let rows = crate::git::diff::compute_staged_buffer_rows(
                             &diff,
                             wh_diff.as_ref(),
-                            &buffer_snapshot,
+                            buffer_snapshot,
                         );
                         let hunks = crate::git::diff::compute_staged_hunk_indices(
                             &diff,
                             wh_diff.as_ref(),
-                            &buffer_snapshot,
+                            buffer_snapshot,
                         );
                         (rows, hunks)
                     })

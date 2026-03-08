@@ -29,7 +29,7 @@ impl Stoat {
         // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            let newest_sel = self.selections.newest::<Point>(snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -40,13 +40,13 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
 
         // Operate on all selections
-        let mut selections = self.selections.all::<Point>(&snapshot);
+        let mut selections = self.selections.all::<Point>(snapshot);
         for selection in &mut selections {
             let mut head = selection.head();
             for _ in 0..count {
@@ -62,7 +62,7 @@ impl Stoat {
         }
 
         // Store back and sync cursor
-        self.selections.select(selections.clone(), &snapshot);
+        self.selections.select(selections.clone(), snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
         }

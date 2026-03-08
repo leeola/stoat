@@ -35,7 +35,7 @@ impl Stoat {
         // Only sync if we have exactly one selection (default state)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            let newest_sel = self.selections.newest::<Point>(snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -46,13 +46,13 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
 
         // Get all current selections resolved to Points
-        let mut selections = self.selections.all::<Point>(&snapshot);
+        let mut selections = self.selections.all::<Point>(snapshot);
 
         // Move each selection's head right by one character
         for selection in &mut selections {
@@ -71,7 +71,7 @@ impl Stoat {
         }
 
         // Store updated selections (converts to anchors)
-        self.selections.select(selections.clone(), &snapshot);
+        self.selections.select(selections.clone(), snapshot);
 
         // Update legacy cursor field for backward compatibility
         // Use the newest (last) selection as the primary cursor

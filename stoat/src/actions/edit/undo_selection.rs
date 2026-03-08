@@ -24,7 +24,7 @@ impl Stoat {
         // Sync cursor to newest selection
         let buffer_item = self.active_buffer(cx);
         let snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-        let newest = self.selections.newest::<text::Point>(&snapshot);
+        let newest = self.selections.newest::<text::Point>(snapshot);
         self.cursor.move_to(newest.head());
 
         cx.notify();

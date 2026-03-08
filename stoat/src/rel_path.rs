@@ -41,7 +41,7 @@ impl RelPath {
     ///
     /// Returns an error if the path is absolute.
     /// Converts backslashes to forward slashes for consistency.
-    pub fn from_path(path: &Path) -> Result<Cow<Self>, &'static str> {
+    pub fn from_path(path: &Path) -> Result<Cow<'_, Self>, &'static str> {
         let path_str = path.to_str().ok_or("non-UTF8 path")?;
 
         // Check if absolute

@@ -86,7 +86,7 @@ impl Stoat {
         }
 
         // Update selections
-        self.selections.select(new_selections, &snapshot);
+        self.selections.select(new_selections, snapshot);
         cx.notify();
     }
 }

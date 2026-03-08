@@ -177,7 +177,7 @@ fn run_with_paths_impl(
                     tracing::info!(session = slug.as_str(), "Stoat editor exiting");
                 }
                 tracing::info!("Timeout reached, quitting");
-                let _ = cx.update(|cx| {
+                cx.update(|cx| {
                     cx.quit();
                 });
             })

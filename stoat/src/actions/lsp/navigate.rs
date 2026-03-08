@@ -66,6 +66,7 @@ impl Stoat {
         Ok(total_edits)
     }
 
+    #[allow(clippy::mutable_key_type)]
     fn apply_changes(
         &mut self,
         changes: &std::collections::HashMap<Uri, Vec<TextEdit>>,
@@ -250,8 +251,8 @@ pub(crate) fn apply_text_edits_to_buffer(
     let mut offset_edits: Vec<(usize, usize, String)> = edits
         .iter()
         .filter_map(|edit| {
-            let start = lsp_position_to_point(&edit.range.start, &snapshot).ok()?;
-            let end = lsp_position_to_point(&edit.range.end, &snapshot).ok()?;
+            let start = lsp_position_to_point(&edit.range.start, snapshot).ok()?;
+            let end = lsp_position_to_point(&edit.range.end, snapshot).ok()?;
             let start_off = snapshot.point_to_offset(start);
             let end_off = snapshot.point_to_offset(end);
             Some((start_off, end_off, edit.new_text.clone()))
@@ -272,11 +273,7 @@ pub(crate) fn apply_text_edits_to_buffer(
 
 pub(crate) fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     let s = uri.as_str();
-    if let Some(path) = s.strip_prefix("file://") {
-        Some(PathBuf::from(path))
-    } else {
-        None
-    }
+    s.strip_prefix("file://").map(PathBuf::from)
 }
 
 #[cfg(test)]

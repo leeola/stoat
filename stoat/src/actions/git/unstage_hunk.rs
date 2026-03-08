@@ -53,7 +53,7 @@ impl Stoat {
                 .diff()
                 .ok_or_else(|| "No diff information available".to_string())?;
             let hunk_index = diff
-                .hunk_for_row(cursor_row, &buffer_snapshot)
+                .hunk_for_row(cursor_row, buffer_snapshot)
                 .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
             let hunk = &diff.hunks[hunk_index];
             (hunk.old_start, hunk.old_start + hunk.old_lines)

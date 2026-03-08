@@ -25,17 +25,13 @@ impl Stoat {
             .ok_or_else(|| "No diff information available".to_string())?;
 
         let hunk_index = diff
-            .hunk_for_row(cursor_row, &buffer_snapshot)
+            .hunk_for_row(cursor_row, buffer_snapshot)
             .ok_or_else(|| format!("No hunk at cursor row {cursor_row}"))?;
 
         let hunk = &diff.hunks[hunk_index];
 
-        let patch = super::super::hunk_patch::generate_hunk_patch(
-            diff,
-            hunk,
-            &buffer_snapshot,
-            &file_path,
-        )?;
+        let patch =
+            super::super::hunk_patch::generate_hunk_patch(diff, hunk, buffer_snapshot, &file_path)?;
 
         let repo_dir = self.worktree_root_abs();
         let repo = self

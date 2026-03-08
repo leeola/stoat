@@ -20,7 +20,7 @@ impl Stoat {
 
             let cursor_pos = self.cursor.position();
             if self.selections.count() == 1 {
-                let newest_sel = self.selections.newest::<text::Point>(&buffer_snapshot);
+                let newest_sel = self.selections.newest::<text::Point>(buffer_snapshot);
                 if newest_sel.head() != cursor_pos {
                     let id = self.selections.next_id();
                     self.selections.select(
@@ -31,17 +31,17 @@ impl Stoat {
                             reversed: false,
                             goal: text::SelectionGoal::None,
                         }],
-                        &buffer_snapshot,
+                        buffer_snapshot,
                     );
                 }
             }
 
-            let selections = self.selections.all::<text::Point>(&buffer_snapshot);
+            let selections = self.selections.all::<text::Point>(buffer_snapshot);
             let mut edits = Vec::new();
 
             for selection in &selections {
                 let pos_offset = buffer_snapshot.point_to_offset(selection.head());
-                let end_offset = CharClassifier::next_word_end(&buffer_snapshot, pos_offset);
+                let end_offset = CharClassifier::next_word_end(buffer_snapshot, pos_offset);
 
                 if end_offset > pos_offset {
                     edits.push((pos_offset..end_offset, ""));
@@ -54,7 +54,7 @@ impl Stoat {
                 });
 
                 let snapshot = buffer.read(cx).snapshot();
-                let updated_selections = self.selections.all::<text::Point>(&snapshot);
+                let updated_selections = self.selections.all::<text::Point>(snapshot);
 
                 if let Some(last) = updated_selections.last() {
                     self.cursor.move_to(last.head());

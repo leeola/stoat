@@ -39,7 +39,7 @@ impl Stoat {
         // Auto-sync from cursor if single selection (backward compat)
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<text::Point>(&snapshot);
+            let newest_sel = self.selections.newest::<text::Point>(snapshot);
             if newest_sel.head() != cursor_pos {
                 let id = self.selections.next_id();
                 self.selections.select(
@@ -50,7 +50,7 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
@@ -58,7 +58,7 @@ impl Stoat {
         // Collect insertion points for all selections (sorted by offset ascending)
         let mut selections_with_offsets: Vec<_> = self
             .selections
-            .all::<text::Point>(&snapshot)
+            .all::<text::Point>(snapshot)
             .into_iter()
             .map(|sel| {
                 let offset = snapshot.point_to_offset(sel.head());
@@ -101,7 +101,7 @@ impl Stoat {
         }
 
         // Update selections to new positions
-        self.selections.select(new_selections.clone(), &snapshot);
+        self.selections.select(new_selections.clone(), snapshot);
 
         // Sync cursor to last selection
         if let Some(last) = new_selections.last() {

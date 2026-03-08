@@ -14,7 +14,7 @@ impl Stoat {
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
 
-        let mut selections = self.selections.all::<Point>(&snapshot);
+        let mut selections = self.selections.all::<Point>(snapshot);
         for selection in &mut selections {
             let head = selection.head();
             selection.start = head;
@@ -23,7 +23,7 @@ impl Stoat {
             selection.goal = text::SelectionGoal::None;
         }
 
-        self.selections.select(selections.clone(), &snapshot);
+        self.selections.select(selections.clone(), snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
         }

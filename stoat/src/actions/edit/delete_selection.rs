@@ -11,7 +11,7 @@ impl Stoat {
         buffer.update(cx, |buf, _| buf.start_transaction());
         let snapshot = buffer.read(cx).snapshot();
 
-        let selections = self.selections.all::<text::Point>(&snapshot);
+        let selections = self.selections.all::<text::Point>(snapshot);
         let mut edits = Vec::new();
         for selection in &selections {
             if !selection.is_empty() {
@@ -24,7 +24,7 @@ impl Stoat {
         if !edits.is_empty() {
             buffer.update(cx, |buffer, _| buffer.edit(edits));
             let snapshot = buffer.read(cx).snapshot();
-            let updated = self.selections.all::<text::Point>(&snapshot);
+            let updated = self.selections.all::<text::Point>(snapshot);
             if let Some(first) = updated.first() {
                 self.cursor.move_to(first.head());
             }

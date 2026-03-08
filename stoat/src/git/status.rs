@@ -80,9 +80,10 @@ pub enum GitStatusError {
 ///
 /// Used by [`Stoat`](crate::Stoat) to filter the git status file list based on user selection.
 /// The filter is applied when opening git status or when cycling through filter modes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum GitStatusFilter {
     /// Show all files (staged, unstaged, untracked)
+    #[default]
     All,
     /// Show only staged changes (in index)
     Staged,
@@ -141,12 +142,6 @@ impl GitStatusFilter {
             Self::UnstagedWithUntracked => !entry.staged,
             Self::Untracked => entry.status == "??",
         }
-    }
-}
-
-impl Default for GitStatusFilter {
-    fn default() -> Self {
-        Self::All
     }
 }
 

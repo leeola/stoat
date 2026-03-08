@@ -46,13 +46,13 @@ impl Stoat {
                 .iter()
                 .rev()
                 .find(|hunk| {
-                    let hunk_start_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                    let hunk_start_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
                     hunk_start_row < cursor_row
                 })
                 .or_else(|| diff.hunks.last()); // Wrap to last hunk
 
             if let Some(hunk) = prev_hunk {
-                let target_row = hunk.buffer_range.start.to_point(&buffer_snapshot).row;
+                let target_row = hunk.buffer_range.start.to_point(buffer_snapshot).row;
                 let target_pos = text::Point::new(target_row, 0);
 
                 // Update cursor
@@ -68,7 +68,7 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &buffer_snapshot,
+                    buffer_snapshot,
                 );
 
                 self.ensure_cursor_visible(cx);

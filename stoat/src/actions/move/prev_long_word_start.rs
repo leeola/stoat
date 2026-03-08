@@ -17,7 +17,7 @@ impl Stoat {
 
         let cursor_pos = self.cursor.position();
         if self.selections.count() == 1 {
-            let newest_sel = self.selections.newest::<Point>(&snapshot);
+            let newest_sel = self.selections.newest::<Point>(snapshot);
             let should_reset = if self.is_mode_anchored() {
                 newest_sel.head() != cursor_pos
             } else {
@@ -34,16 +34,16 @@ impl Stoat {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &snapshot,
+                    snapshot,
                 );
             }
         }
 
-        let mut selections = self.selections.all::<Point>(&snapshot);
+        let mut selections = self.selections.all::<Point>(snapshot);
         for selection in &mut selections {
             for _ in 0..count {
                 let cursor_offset = snapshot.point_to_offset(selection.head());
-                let target = CharClassifier::previous_word_start_big(&snapshot, cursor_offset);
+                let target = CharClassifier::previous_word_start_big(snapshot, cursor_offset);
                 let target_point = snapshot.offset_to_point(target);
 
                 if self.is_mode_anchored() {
@@ -57,7 +57,7 @@ impl Stoat {
             }
         }
 
-        self.selections.select(selections.clone(), &snapshot);
+        self.selections.select(selections.clone(), snapshot);
         if let Some(last) = selections.last() {
             self.cursor.move_to(last.head());
         }

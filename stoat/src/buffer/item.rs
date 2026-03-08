@@ -161,7 +161,7 @@ impl BufferItem {
                 let parse_time = parse_start.elapsed();
 
                 self.ensure_highlight_map(&SyntaxTheme::default());
-                self.rebuild_indices(&contents, &buffer_snapshot);
+                self.rebuild_indices(&contents, buffer_snapshot);
 
                 let total = start.elapsed();
                 tracing::debug!(
@@ -192,13 +192,13 @@ impl BufferItem {
 
         match self
             .parser
-            .parse_incremental(&contents, &buffer_snapshot, edits)
+            .parse_incremental(&contents, buffer_snapshot, edits)
         {
             Ok(_changed_ranges) => {
                 let parse_time = start.elapsed();
 
                 self.ensure_highlight_map(&SyntaxTheme::default());
-                self.rebuild_indices(&contents, &buffer_snapshot);
+                self.rebuild_indices(&contents, buffer_snapshot);
 
                 tracing::debug!(
                     "reparse_incremental: total={:?} (parse={:?})",

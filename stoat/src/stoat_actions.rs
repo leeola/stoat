@@ -56,8 +56,8 @@ impl Stoat {
         let hunk = &diff.hunks[self.review_state.hunk_idx];
 
         // Convert hunk anchors to points
-        let hunk_start = hunk.buffer_range.start.to_point(&buffer_snapshot);
-        let hunk_end = hunk.buffer_range.end.to_point(&buffer_snapshot);
+        let hunk_start = hunk.buffer_range.start.to_point(buffer_snapshot);
+        let hunk_end = hunk.buffer_range.end.to_point(buffer_snapshot);
 
         let hunk_idx = self.review_state.hunk_idx;
         let start_row = hunk_start.row;

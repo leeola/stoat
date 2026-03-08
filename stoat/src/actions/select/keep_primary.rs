@@ -14,7 +14,7 @@ impl Stoat {
         let buffer = buffer_item.read(cx).buffer();
         let snapshot = buffer.read(cx).snapshot();
 
-        let primary = self.selections.newest::<Point>(&snapshot);
+        let primary = self.selections.newest::<Point>(snapshot);
         let kept = vec![text::Selection {
             id: self.selections.next_id(),
             start: primary.start,
@@ -23,7 +23,7 @@ impl Stoat {
             goal: primary.goal,
         }];
 
-        self.selections.select(kept.clone(), &snapshot);
+        self.selections.select(kept.clone(), snapshot);
         if let Some(sel) = kept.first() {
             self.cursor.move_to(sel.head());
         }

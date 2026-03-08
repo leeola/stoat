@@ -184,7 +184,7 @@ impl<'a> TestStoat<'a> {
             // Get newest selection from multi-cursor API
             let buffer_item = s.active_buffer(cx);
             let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
-            let sel = s.selections.newest::<text::Point>(&buffer_snapshot);
+            let sel = s.selections.newest::<text::Point>(buffer_snapshot);
 
             // Convert to legacy cursor::Selection format
             crate::cursor::Selection {
@@ -454,7 +454,7 @@ impl<'a> TestStoat<'a> {
                 let diff = crate::git::diff::BufferDiff::new(
                     item.buffer().read(cx).remote_id(),
                     head,
-                    &snapshot,
+                    snapshot,
                 )
                 .unwrap();
                 item.set_diff(Some(diff));
@@ -525,7 +525,7 @@ impl<'a> TestStoat<'a> {
                         reversed: sel.cursor_at_start,
                         goal: text::SelectionGoal::None,
                     }],
-                    &buffer_snapshot,
+                    buffer_snapshot,
                 );
 
                 let cursor_pos = if sel.cursor_at_start { start } else { end };
@@ -543,7 +543,7 @@ impl<'a> TestStoat<'a> {
                         reversed: false,
                         goal: text::SelectionGoal::None,
                     }],
-                    &buffer_snapshot,
+                    buffer_snapshot,
                 );
             }
         });

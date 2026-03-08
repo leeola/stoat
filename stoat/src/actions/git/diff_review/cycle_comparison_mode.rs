@@ -223,7 +223,7 @@ impl Stoat {
                 reversed: false,
                 goal: text::SelectionGoal::None,
             }],
-            &buffer_snapshot,
+            buffer_snapshot,
         );
     }
 }

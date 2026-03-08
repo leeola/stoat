@@ -1023,7 +1023,7 @@ impl Element for EditorElement {
                                 reversed: false,
                                 goal: text::SelectionGoal::None,
                             }],
-                            &snapshot,
+                            snapshot,
                         );
                     });
                     cx.notify();

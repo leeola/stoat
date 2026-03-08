@@ -34,7 +34,7 @@ impl Stoat {
                 reversed: false,
                 goal: SelectionGoal::None,
             }],
-            &snapshot,
+            snapshot,
         );
         self.cursor.move_to(position);
         self.ensure_cursor_visible(cx);
