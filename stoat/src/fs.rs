@@ -1,4 +1,5 @@
 use crate::git::watcher::GitChangeKind;
+use async_trait::async_trait;
 use std::{
     any::Any,
     ffi::OsString,
@@ -22,19 +23,20 @@ pub struct FsDirEntry {
     pub len: u64,
 }
 
+#[async_trait]
 pub trait Fs: Send + Sync {
     fn as_any(&self) -> &dyn Any;
-    fn read_to_string(&self, path: &Path) -> io::Result<String>;
-    fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>>;
-    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
-    fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
-    fn metadata(&self, path: &Path) -> io::Result<FsMetadata>;
-    fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>>;
-    fn exists(&self, path: &Path) -> bool;
-    fn is_dir(&self, path: &Path) -> bool;
-    fn is_file(&self, path: &Path) -> bool;
-    fn create_dir_all(&self, path: &Path) -> io::Result<()>;
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+    async fn read_to_string(&self, path: &Path) -> io::Result<String>;
+    async fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>>;
+    async fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
+    async fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
+    async fn metadata(&self, path: &Path) -> io::Result<FsMetadata>;
+    async fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>>;
+    async fn exists(&self, path: &Path) -> bool;
+    async fn is_dir(&self, path: &Path) -> bool;
+    async fn is_file(&self, path: &Path) -> bool;
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 
     /// Start watching git-relevant paths (.git/index, HEAD, refs/).
     ///
@@ -48,83 +50,109 @@ pub trait Fs: Send + Sync {
 
 pub struct RealFs;
 
+#[async_trait]
 impl Fs for RealFs {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        std::fs::read_to_string(path)
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        let path = path.to_path_buf();
+        smol::unblock(move || std::fs::read_to_string(&path)).await
     }
 
-    fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let mut buf = vec![0u8; max_bytes];
-        let n = file.read(&mut buf)?;
-        buf.truncate(n);
-        Ok(buf)
-    }
-
-    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        std::fs::write(path, contents)
-    }
-
-    fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        let dir = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
-        })?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        tmp.write_all(contents)?;
-        tmp.persist(path).map_err(|e| e.error)?;
-        Ok(())
-    }
-
-    fn metadata(&self, path: &Path) -> io::Result<FsMetadata> {
-        let m = std::fs::metadata(path)?;
-        Ok(FsMetadata {
-            len: m.len(),
-            is_dir: m.is_dir(),
-            is_file: m.is_file(),
-            modified: m.modified().ok(),
+    async fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let path = path.to_path_buf();
+        smol::unblock(move || {
+            use std::io::Read;
+            let mut file = std::fs::File::open(&path)?;
+            let mut buf = vec![0u8; max_bytes];
+            let n = file.read(&mut buf)?;
+            buf.truncate(n);
+            Ok(buf)
         })
+        .await
     }
 
-    fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
-        let mut entries = Vec::new();
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            entries.push(FsDirEntry {
-                path: entry.path(),
-                file_name: entry.file_name(),
-                is_dir: metadata.is_dir(),
-                is_file: metadata.is_file(),
-                len: metadata.len(),
-            });
-        }
-        Ok(entries)
+    async fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        let path = path.to_path_buf();
+        let contents = contents.to_vec();
+        smol::unblock(move || std::fs::write(&path, &contents)).await
     }
 
-    fn exists(&self, path: &Path) -> bool {
-        path.exists()
+    async fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        let path = path.to_path_buf();
+        let contents = contents.to_vec();
+        smol::unblock(move || {
+            use std::io::Write;
+            let dir = path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+            })?;
+            let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+            tmp.write_all(&contents)?;
+            tmp.persist(&path).map_err(|e| e.error)?;
+            Ok(())
+        })
+        .await
     }
 
-    fn is_dir(&self, path: &Path) -> bool {
-        path.is_dir()
+    async fn metadata(&self, path: &Path) -> io::Result<FsMetadata> {
+        let path = path.to_path_buf();
+        smol::unblock(move || {
+            let m = std::fs::metadata(&path)?;
+            Ok(FsMetadata {
+                len: m.len(),
+                is_dir: m.is_dir(),
+                is_file: m.is_file(),
+                modified: m.modified().ok(),
+            })
+        })
+        .await
     }
 
-    fn is_file(&self, path: &Path) -> bool {
-        path.is_file()
+    async fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
+        let path = path.to_path_buf();
+        smol::unblock(move || {
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                entries.push(FsDirEntry {
+                    path: entry.path(),
+                    file_name: entry.file_name(),
+                    is_dir: metadata.is_dir(),
+                    is_file: metadata.is_file(),
+                    len: metadata.len(),
+                });
+            }
+            Ok(entries)
+        })
+        .await
     }
 
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(path)
+    async fn exists(&self, path: &Path) -> bool {
+        let path = path.to_path_buf();
+        smol::unblock(move || path.exists()).await
     }
 
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        std::fs::canonicalize(path)
+    async fn is_dir(&self, path: &Path) -> bool {
+        let path = path.to_path_buf();
+        smol::unblock(move || path.is_dir()).await
+    }
+
+    async fn is_file(&self, path: &Path) -> bool {
+        let path = path.to_path_buf();
+        smol::unblock(move || path.is_file()).await
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        let path = path.to_path_buf();
+        smol::unblock(move || std::fs::create_dir_all(&path)).await
+    }
+
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        let path = path.to_path_buf();
+        smol::unblock(move || std::fs::canonicalize(&path)).await
     }
 
     fn watch_git(
@@ -216,12 +244,13 @@ impl FakeFs {
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+#[async_trait]
 impl Fs for FakeFs {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+    async fn read_to_string(&self, path: &Path) -> io::Result<String> {
         let state = self.state.lock();
         state
             .files
@@ -230,7 +259,7 @@ impl Fs for FakeFs {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path:?} not found")))
     }
 
-    fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    async fn read_bytes(&self, path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
         let state = self.state.lock();
         state
             .files
@@ -239,16 +268,17 @@ impl Fs for FakeFs {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path:?} not found")))
     }
 
-    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+    async fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         self.insert_file(path, contents);
         Ok(())
     }
 
-    fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
-        self.write(path, contents)
+    async fn atomic_write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        self.insert_file(path, contents);
+        Ok(())
     }
 
-    fn metadata(&self, path: &Path) -> io::Result<FsMetadata> {
+    async fn metadata(&self, path: &Path) -> io::Result<FsMetadata> {
         let state = self.state.lock();
         if state.dirs.contains(path) {
             Ok(FsMetadata {
@@ -272,7 +302,7 @@ impl Fs for FakeFs {
         }
     }
 
-    fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
+    async fn read_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
         let state = self.state.lock();
         let mut entries = Vec::new();
 
@@ -303,20 +333,20 @@ impl Fs for FakeFs {
         Ok(entries)
     }
 
-    fn exists(&self, path: &Path) -> bool {
+    async fn exists(&self, path: &Path) -> bool {
         let state = self.state.lock();
         state.files.contains_key(path) || state.dirs.contains(path)
     }
 
-    fn is_dir(&self, path: &Path) -> bool {
+    async fn is_dir(&self, path: &Path) -> bool {
         self.state.lock().dirs.contains(path)
     }
 
-    fn is_file(&self, path: &Path) -> bool {
+    async fn is_file(&self, path: &Path) -> bool {
         self.state.lock().files.contains_key(path)
     }
 
-    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock();
         let mut p = path.to_path_buf();
         while p != Path::new("") && p != Path::new("/") {
@@ -329,7 +359,7 @@ impl Fs for FakeFs {
         Ok(())
     }
 
-    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+    async fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         Ok(path.to_path_buf())
     }
 

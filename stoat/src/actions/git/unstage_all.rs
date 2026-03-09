@@ -12,37 +12,41 @@ use gpui::Context;
 impl Stoat {
     /// Unstage all changes in the repository using `git reset HEAD`.
     ///
-    /// Executes `git reset HEAD` to remove all files from the staging area while
-    /// preserving working directory changes. The current file path must be set to
-    /// determine the repository location via [`set_file_path`](crate::Stoat::set_file_path).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - No file path is set for the current buffer
-    /// - The file path has no parent directory
-    /// - The file is not in a git repository
-    /// - The `git reset HEAD` command fails
+    /// Spawns an async task that executes `git reset HEAD` to remove all files from the
+    /// staging area while preserving working directory changes. The worktree root is used
+    /// to determine the repository location.
     ///
     /// # Related Actions
     ///
     /// - [`git_unstage_file`](crate::Stoat::git_unstage_file) - Unstage only the current file
     /// - [`git_stage_all`](crate::Stoat::git_stage_all) - Stage all changes
     /// - [`git_unstage_hunk`](crate::Stoat::git_unstage_hunk) - Unstage individual hunks
-    pub fn git_unstage_all(&mut self, _cx: &mut Context<Self>) -> Result<(), String> {
+    pub fn git_unstage_all(&mut self, cx: &mut Context<Self>) {
+        let services = self.services.clone();
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = self
-            .services
-            .git
-            .discover(&root_path)
-            .map_err(|e| format!("git unstage all failed: {e}"))?;
-
-        repo.unstage_all()
-            .map_err(|e| format!("git unstage all failed: {e}"))?;
-
-        tracing::info!("Unstaged all changes in repository at {:?}", root_path);
-
-        Ok(())
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let repo = services
+                    .git
+                    .discover(&root_path)
+                    .await
+                    .map_err(|e| format!("git unstage all failed: {e}"))?;
+                repo.unstage_all()
+                    .await
+                    .map_err(|e| format!("git unstage all failed: {e}"))?;
+                tracing::info!("Unstaged all changes in repository at {:?}", root_path);
+                Ok::<(), String>(())
+            }
+            .await;
+            let _ = this.update(cx, |stoat, cx| {
+                if let Err(e) = result {
+                    tracing::error!("git_unstage_all: {e}");
+                    return;
+                }
+                stoat.refresh_git_diff(cx);
+            });
+        })
+        .detach();
     }
 }
 
@@ -67,21 +71,28 @@ mod tests {
                 .set_workdir(PathBuf::from("/fake/repo"));
         });
 
-        // Stage files individually via the fake
         stoat.update(|s, cx| {
             s.current_file_path = Some(file1.clone());
-            s.git_stage_file(cx).unwrap();
-            s.current_file_path = Some(file2.clone());
-            s.git_stage_file(cx).unwrap();
-            s.current_file_path = Some(file3.clone());
-            s.git_stage_file(cx).unwrap();
+            s.git_stage_file(cx);
         });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
+            s.current_file_path = Some(file2.clone());
+            s.git_stage_file(cx);
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
+            s.current_file_path = Some(file3.clone());
+            s.git_stage_file(cx);
+        });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             assert_eq!(s.services.fake_git().staged_files().len(), 3);
         });
 
-        stoat.update(|s, cx| s.git_unstage_all(cx).unwrap());
+        stoat.update(|s, cx| s.git_unstage_all(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             assert!(s.services.fake_git().staged_files().is_empty());
@@ -89,9 +100,9 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "git unstage all failed")]
-    fn fails_outside_git_repo(cx: &mut TestAppContext) {
+    fn logs_error_outside_git_repo(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
-        stoat.update(|s, cx| s.git_unstage_all(cx).unwrap());
+        stoat.update(|s, cx| s.git_unstage_all(cx));
+        stoat.run_until_parked();
     }
 }

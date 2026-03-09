@@ -771,7 +771,7 @@ mod tests {
         provider.set_exists(true);
         provider.set_workdir(workdir.clone());
 
-        let repo = provider.discover(&workdir).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
         assert_eq!(repo.workdir(), workdir);
     }
 
@@ -779,7 +779,7 @@ mod tests {
     fn discover_repository_not_found() {
         let fs = Arc::new(FakeFs::new());
         let provider = FakeGitProvider::new(fs);
-        let result = provider.discover(Path::new("/no/repo"));
+        let result = smol::block_on(provider.discover(Path::new("/no/repo")));
         assert!(matches!(result, Err(GitError::RepositoryNotFound(_))));
     }
 
@@ -793,8 +793,8 @@ mod tests {
         let file_path = workdir.join("test.txt");
         provider.commit_file(&file_path, "hello world\n");
 
-        let repo = provider.discover(&workdir).unwrap();
-        let content = repo.head_content(&file_path).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let content = smol::block_on(repo.head_content(&file_path)).unwrap();
         assert_eq!(content, "hello world\n");
     }
 
@@ -807,9 +807,9 @@ mod tests {
         provider.set_workdir(workdir.clone());
         provider.commit_file(workdir.join("test.txt"), "hello\n");
 
-        let repo = provider.discover(&workdir).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
         let missing_path = workdir.join("missing.txt");
-        let result = repo.head_content(&missing_path);
+        let result = smol::block_on(repo.head_content(&missing_path));
         assert!(matches!(result, Err(GitError::FileNotFound(_))));
     }
 
@@ -824,8 +824,8 @@ mod tests {
         provider.set_parent_content(&file_path, "version 1\n");
         provider.commit_file(&file_path, "version 2\n");
 
-        let repo = provider.discover(&workdir).unwrap();
-        let content = repo.parent_content(&file_path).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let content = smol::block_on(repo.parent_content(&file_path)).unwrap();
         assert_eq!(content, "version 1\n");
     }
 
@@ -845,8 +845,8 @@ mod tests {
             HashMap::new(),
         );
 
-        let repo = provider.discover(&workdir).unwrap();
-        let files = repo.commit_changed_files().unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let files = smol::block_on(repo.commit_changed_files()).unwrap();
         assert_eq!(files, [PathBuf::from("a.txt")]);
     }
 
@@ -872,8 +872,8 @@ mod tests {
             HashMap::new(),
         );
 
-        let repo = provider.discover(&workdir).unwrap();
-        let files = repo.commit_files_by_oid("abc123").unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let files = smol::block_on(repo.commit_files_by_oid("abc123")).unwrap();
         assert_eq!(files.len(), 2);
         let paths: Vec<_> = files
             .iter()
@@ -900,8 +900,8 @@ mod tests {
             HashMap::new(),
         );
 
-        let repo = provider.discover(&workdir).unwrap();
-        let files = repo.commit_files_by_oid("def456").unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let files = smol::block_on(repo.commit_files_by_oid("def456")).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, PathBuf::from("a.txt"));
         assert_eq!(files[0].status, "M");
@@ -928,8 +928,8 @@ mod tests {
             diffs,
         );
 
-        let repo = provider.discover(&workdir).unwrap();
-        let diff = repo.commit_file_diff("abc123", Path::new("a.txt")).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let diff = smol::block_on(repo.commit_file_diff("abc123", Path::new("a.txt"))).unwrap();
         assert!(diff.contains("-line2"));
         assert!(diff.contains("+modified"));
     }

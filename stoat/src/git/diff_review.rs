@@ -117,6 +117,10 @@ pub struct DiffReviewState {
     pub source: DiffSource,
     pub follow: bool,
     pub last_hunk_snapshot: HashMap<PathBuf, usize>,
+    /// Cached `(hunks_before_current_file, total_hunks)` for status bar rendering.
+    /// Recomputed after async operations that change the file list or totals.
+    /// Same-file navigation derives `current_position` from `hunks_before + hunk_idx + 1`.
+    pub cached_hunk_totals: Option<(usize, usize)>,
 }
 
 /// Information about a file in diff review mode.

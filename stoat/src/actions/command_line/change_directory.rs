@@ -11,6 +11,7 @@ impl PaneGroupView {
     ) {
         match self.app_state.change_directory(path.to_path_buf(), cx) {
             Ok(()) => {
+                self.refresh_git_status_async(cx);
                 self.app_state
                     .ensure_lsp_for_language(Language::Rust, cx.weak_entity(), cx);
                 self.handle_command_line_dismiss(_window, cx);

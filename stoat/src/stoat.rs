@@ -1128,63 +1128,33 @@ impl Stoat {
         if !self.is_in_diff_review(cx) {
             return None;
         }
+        let (hunks_before, total) = self.review_state.cached_hunk_totals?;
+        if total == 0 {
+            return Some((0, 0));
+        }
+        Some((hunks_before + self.review_state.hunk_idx + 1, total))
+    }
 
-        let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(e) => {
-                tracing::error!(
-                    "diff_review_hunk_position: failed to discover repository at {:?}: {}",
-                    root_path,
-                    e
-                );
-                return None;
-            },
-        };
-
-        let hunk_counts = match repo.count_hunks_by_file(self.review_comparison_mode()) {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!("diff_review_hunk_position: failed to count hunks: {}", e);
-                return None;
-            },
-        };
-
+    /// Recompute the cached hunk totals from pre-fetched hunk counts.
+    ///
+    /// Called after async operations that change the file list or totals
+    /// (file navigation, opening review, cycling comparison mode).
+    pub(crate) fn update_hunk_position_cache(
+        &mut self,
+        hunk_counts: &std::collections::HashMap<std::path::PathBuf, usize>,
+    ) {
         let mut total_hunks = 0;
         let mut hunks_before_current = 0;
 
         for (file_idx, file_path) in self.review_state.files.iter().enumerate() {
-            // Look up hunk count for this file (0 if not in the map)
             let hunk_count = hunk_counts.get(file_path).copied().unwrap_or(0);
-
             if file_idx < self.review_state.file_idx {
                 hunks_before_current += hunk_count;
             }
-
             total_hunks += hunk_count;
         }
 
-        if total_hunks == 0 {
-            tracing::debug!(
-                "diff_review_hunk_position: no hunks found across {} files in {:?} mode",
-                self.review_state.files.len(),
-                self.review_comparison_mode()
-            );
-            return Some((0, 0));
-        }
-
-        let current_position = hunks_before_current + self.review_state.hunk_idx + 1;
-
-        tracing::debug!(
-            "diff_review_hunk_position: position {}/{} (current_file={}, current_hunk={}, mode={:?})",
-            current_position,
-            total_hunks,
-            self.review_state.file_idx,
-            self.review_state.hunk_idx,
-            self.review_comparison_mode()
-        );
-
-        Some((current_position, total_hunks))
+        self.review_state.cached_hunk_totals = Some((hunks_before_current, total_hunks));
     }
 
     /// Get the parent stoat if this is a minimap.
@@ -1360,12 +1330,46 @@ impl Stoat {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let contents = self
-            .services
-            .fs
-            .read_to_string(path)
+        let contents = smol::block_on(self.services.fs.read_to_string(path))
             .map_err(|e| format!("Failed to read file: {e}"))?;
 
+        let mtime = smol::block_on(self.services.fs.metadata(path))
+            .ok()
+            .and_then(|m| m.modified);
+
+        let (head_content, index_content) =
+            if let Ok(repo) = smol::block_on(self.services.git.discover(path)) {
+                let head = smol::block_on(repo.head_content(path)).ok();
+                let index = smol::block_on(repo.index_content(path)).ok();
+                (head, index)
+            } else {
+                (None, None)
+            };
+
+        self.load_file_from_content(
+            path,
+            &contents,
+            mtime,
+            head_content.as_deref(),
+            index_content.as_deref(),
+            cx,
+        )
+    }
+
+    /// Sync path: load a file from pre-fetched content, git refs, and mtime.
+    ///
+    /// Handles buffer creation, content replacement, git diff computation,
+    /// conflict parsing, and LSP notifications. All IO must be done by the
+    /// caller before invoking this method.
+    pub fn load_file_from_content(
+        &mut self,
+        path: &std::path::Path,
+        contents: &str,
+        mtime: Option<std::time::SystemTime>,
+        head_content: Option<&str>,
+        index_content: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let language = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -1374,42 +1378,30 @@ impl Stoat {
 
         let path_buf = path.to_path_buf();
 
-        // Check if buffer already exists in BufferStore, or create new one
         let (buffer_id, buffer_item_entity) = self
             .buffer_store
             .update(cx, |store, cx| {
                 if let Some(buffer_item) = store.get_buffer_by_path(&path_buf) {
-                    // Buffer exists, get its ID and return it
                     let buffer_id = buffer_item.read(cx).buffer().read(cx).remote_id();
                     Some((buffer_id, buffer_item))
                 } else {
-                    // Create new buffer in BufferStore
                     store.open_buffer(Some(path_buf.clone()), language, cx)
                 }
             })
             .ok_or_else(|| "Failed to create buffer".to_string())?;
 
-        // Get mtime after reading file
-        let mtime = self
-            .services
-            .fs
-            .metadata(path)
-            .ok()
-            .and_then(|m| m.modified);
+        let line_ending = text::LineEnding::detect(contents);
 
-        // Detect line ending from file contents
-        let line_ending = text::LineEnding::detect(&contents);
-
-        self.replace_buffer_content(&contents, &buffer_item_entity, cx);
+        self.replace_buffer_content(contents, &buffer_item_entity, cx);
         buffer_item_entity.update(cx, |item, _cx| {
-            item.set_saved_text(contents.clone());
+            item.set_saved_text(contents.to_string());
             if let Some(mtime) = mtime {
                 item.set_saved_mtime(mtime);
             }
+            item.set_cached_disk_mtime(mtime);
             item.set_line_ending(line_ending);
         });
 
-        // Store strong reference in open_buffers if not already present
         if !self
             .open_buffers
             .iter()
@@ -1418,60 +1410,53 @@ impl Stoat {
             self.open_buffers.push(buffer_item_entity.clone());
         }
 
-        // Compute git diff and staged row ranges
-        buffer_item_entity.update(cx, |item, cx| {
-            if let Ok(repo) = self.services.git.discover(path) {
-                if let Ok(head_content) = repo.head_content(path) {
-                    let buffer_snapshot = item.buffer().read(cx).snapshot();
-                    let buffer_id = buffer_snapshot.remote_id();
-                    match BufferDiff::new(buffer_id, head_content.clone(), buffer_snapshot) {
-                        Ok(ref diff) => {
-                            if let Ok(index_content) = repo.index_content(path) {
-                                let wi_diff =
-                                    BufferDiff::new(buffer_id, index_content, buffer_snapshot).ok();
-                                let ranges = crate::git::diff::compute_staged_buffer_rows(
-                                    diff,
-                                    wi_diff.as_ref(),
-                                    buffer_snapshot,
-                                );
-                                item.set_staged_rows(if ranges.is_empty() {
-                                    None
-                                } else {
-                                    Some(ranges)
-                                });
-                                let hunk_indices = crate::git::diff::compute_staged_hunk_indices(
-                                    diff,
-                                    wi_diff.as_ref(),
-                                    buffer_snapshot,
-                                );
-                                item.set_staged_hunk_indices(if hunk_indices.is_empty() {
-                                    None
-                                } else {
-                                    Some(hunk_indices)
-                                });
-                            }
-                            item.set_diff(Some(diff.clone()));
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to compute diff for {:?}: {}", path, e);
-                        },
-                    }
+        if let Some(head) = head_content {
+            buffer_item_entity.update(cx, |item, cx| {
+                let buffer_snapshot = item.buffer().read(cx).snapshot();
+                let buf_id = buffer_snapshot.remote_id();
+                match BufferDiff::new(buf_id, head.to_string(), buffer_snapshot) {
+                    Ok(ref diff) => {
+                        if let Some(idx) = index_content {
+                            let wi_diff =
+                                BufferDiff::new(buf_id, idx.to_string(), buffer_snapshot).ok();
+                            let ranges = crate::git::diff::compute_staged_buffer_rows(
+                                diff,
+                                wi_diff.as_ref(),
+                                buffer_snapshot,
+                            );
+                            item.set_staged_rows(if ranges.is_empty() {
+                                None
+                            } else {
+                                Some(ranges)
+                            });
+                            let hunk_indices = crate::git::diff::compute_staged_hunk_indices(
+                                diff,
+                                wi_diff.as_ref(),
+                                buffer_snapshot,
+                            );
+                            item.set_staged_hunk_indices(if hunk_indices.is_empty() {
+                                None
+                            } else {
+                                Some(hunk_indices)
+                            });
+                        }
+                        item.set_diff(Some(diff.clone()));
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to compute diff for {:?}: {}", path, e);
+                    },
                 }
-            }
+            });
+        }
 
+        buffer_item_entity.update(cx, |item, cx| {
             item.reparse_conflicts(cx);
         });
 
-        // Update active_buffer_id
         self.active_buffer_id = Some(buffer_id);
-
-        // Update current file path for status bar (normalized)
         self.current_file_path = Some(self.normalize_file_path(&path_buf));
-
-        // Reset cursor and selections to origin
         self.cursor.move_to(text::Point::new(0, 0));
 
-        // Initialize new selections for the new buffer
         let new_snapshot = buffer_item_entity.read(cx).buffer().read(cx).snapshot();
         self.selections = SelectionsCollection::new(new_snapshot);
 
@@ -1483,10 +1468,8 @@ impl Stoat {
 
         cx.notify();
 
-        // Drop initial buffer if it's still empty
         self.maybe_drop_initial_buffer(cx);
 
-        // Send didOpen notification to LSP servers
         let version = self.increment_buffer_version(&path_buf);
         if let Some(lsp_manager) = &self.lsp_manager {
             let uri_str = format!("file://{}", path_buf.display());
@@ -1502,7 +1485,7 @@ impl Stoat {
                     let lsp_manager = lsp_manager.clone();
                     let uri = uri.clone();
                     let language_id = language_id.clone();
-                    let contents = contents.clone();
+                    let contents = contents.to_string();
 
                     executor
                         .spawn(async move {
@@ -1643,34 +1626,18 @@ impl Stoat {
         self.initial_buffer_id = None;
     }
 
-    /// Compute diff for the currently active buffer respecting the diff review comparison mode.
+    /// Compute diff for review mode from pre-fetched git refs.
     ///
-    /// Uses [`diff_review_comparison_mode`](Self::diff_review_comparison_mode) to determine
-    /// which git refs to compare. This method is used by diff review to compute diffs based
-    /// on whether we're reviewing all changes, only unstaged, or only staged changes.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to compute diff for
-    /// * `cx` - GPUI context
-    ///
-    /// # Returns
-    ///
-    /// [`Some(BufferDiff)`] if diff computation succeeds, [`None`] if git operations fail
-    /// or if the file is not in a git repository.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // After loading a file, recompute its diff for review mode
-    /// if let Some(diff) = self.compute_diff_for_review_mode(&file_path, cx) {
-    ///     buffer_item.update(cx, |item, _| item.set_diff(Some(diff)));
-    /// }
-    /// ```
-    #[allow(clippy::single_range_in_vec_init, clippy::type_complexity)]
-    pub(crate) fn compute_diff_for_review_mode(
+    /// Returns `(diff, staged_rows, staged_hunk_indices)` based on the current
+    /// [`DiffComparisonMode`](crate::git::diff_review::DiffComparisonMode).
+    /// All git content must be fetched by the caller.
+    pub(crate) fn compute_diff_from_refs(
         &self,
         path: &std::path::Path,
+        head_content: Option<&str>,
+        index_content: Option<&str>,
+        parent_content: Option<&str>,
+        working_content: Option<&str>,
         cx: &App,
     ) -> Option<(
         BufferDiff,
@@ -1679,34 +1646,30 @@ impl Stoat {
     )> {
         use crate::git::diff_review::DiffComparisonMode;
 
-        let repo = self.services.git.discover(path).ok()?;
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         let buffer_id = buffer_snapshot.remote_id();
 
         let comparison_mode = self.review_comparison_mode();
         tracing::debug!(
-            "compute_diff_for_review_mode: mode={:?}, path={:?}",
+            "compute_diff_from_refs: mode={:?}, path={:?}",
             comparison_mode,
             path
         );
 
         let (diff, staged_rows, staged_hunk_indices) = match comparison_mode {
             DiffComparisonMode::WorkingVsHead => {
-                let base_content = repo.head_content(path).ok()?;
+                let base = head_content?;
                 tracing::debug!(
                     "WorkingVsHead: base_len={}, working_len={}",
-                    base_content.len(),
+                    base.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff =
-                    BufferDiff::new(buffer_id, base_content.clone(), buffer_snapshot).ok()?;
-                let (staged_rows, staged_hunks) = repo
-                    .index_content(path)
-                    .ok()
-                    .map(|index_content| {
+                let diff = BufferDiff::new(buffer_id, base.to_string(), buffer_snapshot).ok()?;
+                let (staged_rows, staged_hunks) = index_content
+                    .map(|idx| {
                         let wi_diff =
-                            BufferDiff::new(buffer_id, index_content, buffer_snapshot).ok();
+                            BufferDiff::new(buffer_id, idx.to_string(), buffer_snapshot).ok();
                         let rows = crate::git::diff::compute_staged_buffer_rows(
                             &diff,
                             wi_diff.as_ref(),
@@ -1727,40 +1690,39 @@ impl Stoat {
                 (diff, staged_rows, staged_hunks)
             },
             DiffComparisonMode::WorkingVsIndex => {
-                let base_content = repo.index_content(path).unwrap_or_else(|_| String::new());
+                let base = index_content.unwrap_or("");
                 tracing::debug!(
                     "WorkingVsIndex: base_len={}, working_len={}",
-                    base_content.len(),
+                    base.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, base_content, buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, base.to_string(), buffer_snapshot).ok()?;
                 (diff, None, None)
             },
             DiffComparisonMode::IndexVsHead => {
-                let head_content = repo.head_content(path).ok()?;
+                let head = head_content?;
                 tracing::debug!(
                     "IndexVsHead: head_len={}, buffer_len={}",
-                    head_content.len(),
+                    head.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, head_content, buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, head.to_string(), buffer_snapshot).ok()?;
                 let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
                 (diff, Some(vec![0..u32::MAX]), Some(all_indices))
             },
             DiffComparisonMode::HeadVsParent => {
-                let parent_content = repo.parent_content(path).unwrap_or_default();
+                let parent = parent_content.unwrap_or("");
                 tracing::debug!(
                     "HeadVsParent: parent_len={}, buffer_len={}",
-                    parent_content.len(),
+                    parent.len(),
                     buffer_snapshot.text().len()
                 );
-                let diff = BufferDiff::new(buffer_id, parent_content, buffer_snapshot).ok()?;
+                let diff = BufferDiff::new(buffer_id, parent.to_string(), buffer_snapshot).ok()?;
 
-                // Detect reverted hunks: rows where working tree differs from HEAD
-                let working_content = self.services.fs.read_to_string(path).ok();
                 let (staged_rows, staged_hunks) = working_content
                     .map(|wc| {
-                        let wh_diff = BufferDiff::new(buffer_id, wc, buffer_snapshot).ok();
+                        let wh_diff =
+                            BufferDiff::new(buffer_id, wc.to_string(), buffer_snapshot).ok();
                         let rows = crate::git::diff::compute_staged_buffer_rows(
                             &diff,
                             wh_diff.as_ref(),
@@ -1793,16 +1755,79 @@ impl Stoat {
         let Some(file_path) = self.current_file_path.clone() else {
             return;
         };
-        if let Some((new_diff, staged_rows, staged_hunk_indices)) =
-            self.compute_diff_for_review_mode(&file_path, cx)
-        {
-            let buffer_item = self.active_buffer(cx);
-            buffer_item.update(cx, |item, _| {
-                item.set_diff(Some(new_diff));
-                item.set_staged_rows(staged_rows);
-                item.set_staged_hunk_indices(staged_hunk_indices);
-            });
-        }
+
+        let comparison_mode = self.review_comparison_mode();
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
+        let root_path = self.worktree.lock().root().to_path_buf();
+
+        cx.spawn(async move |this, cx| {
+            let abs_path = root_path.join(&file_path);
+            let repo = git.discover(&abs_path).await.ok();
+
+            let (head, index, parent, working) = match comparison_mode {
+                crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
+                    let head = if let Some(ref r) = repo {
+                        r.head_content(&abs_path).await.ok()
+                    } else {
+                        None
+                    };
+                    let index = if let Some(ref r) = repo {
+                        r.index_content(&abs_path).await.ok()
+                    } else {
+                        None
+                    };
+                    (head, index, None, None)
+                },
+                crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                    let index = if let Some(ref r) = repo {
+                        Some(r.index_content(&abs_path).await.unwrap_or_default())
+                    } else {
+                        Some(String::new())
+                    };
+                    (None, index, None, None)
+                },
+                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                    let head = if let Some(ref r) = repo {
+                        r.head_content(&abs_path).await.ok()
+                    } else {
+                        None
+                    };
+                    (head, None, None, None)
+                },
+                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                    let parent = if let Some(ref r) = repo {
+                        Some(r.parent_content(&abs_path).await.unwrap_or_default())
+                    } else {
+                        Some(String::new())
+                    };
+                    let working = fs.read_to_string(&abs_path).await.ok();
+                    (None, None, parent, working)
+                },
+            };
+
+            this.update(cx, |s, cx| {
+                if let Some((new_diff, staged_rows, staged_hunk_indices)) = s
+                    .compute_diff_from_refs(
+                        &file_path,
+                        head.as_deref(),
+                        index.as_deref(),
+                        parent.as_deref(),
+                        working.as_deref(),
+                        cx,
+                    )
+                {
+                    let buffer_item = s.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(new_diff));
+                        item.set_staged_rows(staged_rows);
+                        item.set_staged_hunk_indices(staged_hunk_indices);
+                    });
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Replace the buffer content, reparse for syntax highlighting, and recreate
@@ -1852,16 +1877,55 @@ impl Stoat {
         let Some(saved_mtime) = buffer_item.read(cx).saved_mtime() else {
             return;
         };
-        let Ok(metadata) = self.services.fs.metadata(&abs_path) else {
-            return;
-        };
-        let Some(current_mtime) = metadata.modified else {
-            return;
-        };
-        if current_mtime <= saved_mtime {
-            return;
-        }
-        let _ = self.load_file(&abs_path, cx);
+
+        let fs = self.services.fs.clone();
+        let git = self.services.git.clone();
+
+        cx.spawn(async move |this, cx| {
+            let Ok(metadata) = fs.metadata(&abs_path).await else {
+                return;
+            };
+            let Some(current_mtime) = metadata.modified else {
+                return;
+            };
+            if current_mtime <= saved_mtime {
+                return;
+            }
+
+            let contents = match fs.read_to_string(&abs_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        "reload_if_changed_on_disk: failed to read {:?}: {e}",
+                        abs_path
+                    );
+                    return;
+                },
+            };
+
+            let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+
+            let (head, index) = if let Ok(repo) = git.discover(&abs_path).await {
+                let h = repo.head_content(&abs_path).await.ok();
+                let i = repo.index_content(&abs_path).await.ok();
+                (h, i)
+            } else {
+                (None, None)
+            };
+
+            this.update(cx, |s, cx| {
+                let _ = s.load_file_from_content(
+                    &abs_path,
+                    &contents,
+                    mtime,
+                    head.as_deref(),
+                    index.as_deref(),
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Create a minimap instance for this editor.

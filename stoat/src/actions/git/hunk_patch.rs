@@ -156,7 +156,7 @@ pub(super) fn generate_partial_hunk_patch(
 /// When `reverse` is true, the patch is reversed (swapping additions/deletions
 /// and header fields) before application, used for unstaging or reverting.
 /// The `location` parameter controls where the patch is applied (Index or WorkDir).
-pub(super) fn apply_patch(
+pub(super) async fn apply_patch(
     patch: &str,
     repo: &dyn GitRepo,
     reverse: bool,
@@ -169,6 +169,7 @@ pub(super) fn apply_patch(
     };
 
     repo.apply_diff(&patch_str, false, location)
+        .await
         .map_err(|e| format!("Failed to apply patch: {e}"))?;
 
     Ok(())

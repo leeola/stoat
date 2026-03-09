@@ -9,7 +9,7 @@ impl Stoat {
     ///
     /// Searches files on-demand for the next unreviewed hunk (not in
     /// [`Stoat::diff_review_approved_hunks`]). Loads each file, computes diff via
-    /// [`Stoat::compute_diff_for_review_mode`], and checks for unreviewed hunks. Wraps around
+    /// [`Stoat::compute_diff_from_refs`], and checks for unreviewed hunks. Wraps around
     /// to the beginning if needed. Exits review mode via [`Stoat::diff_review_dismiss`] if all
     /// hunks reviewed.
     ///
@@ -19,21 +19,6 @@ impl Stoat {
     /// 2. Search remaining files (load each on-demand)
     /// 3. Search current file from beginning up to start hunk (wrap-around)
     /// 4. If no unreviewed hunks found: dismiss review mode
-    ///
-    /// # Behavior
-    ///
-    /// - Only operates in diff_review mode
-    /// - Returns early if no files in review list
-    /// - Loads files on-demand to check for unreviewed hunks
-    /// - Wraps around to beginning of file list
-    /// - Exits review mode when all hunks reviewed
-    ///
-    /// # Related
-    ///
-    /// - [`Stoat::diff_review_approve_hunk`] - mark hunk as reviewed
-    /// - [`Stoat::diff_review_toggle_approval`] - toggle without advancing
-    /// - [`Stoat::diff_review_next_hunk`] - advance to any next hunk
-    /// - [`Stoat::compute_diff_for_review_mode`] - on-demand diff computation
     pub fn diff_review_next_unreviewed_hunk(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -43,95 +28,12 @@ impl Stoat {
             return;
         }
 
-        let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
-
-        let start_file = self.review_state.file_idx;
-        let start_hunk = self.review_state.hunk_idx + 1; // Start from next hunk
-        let file_count = self.review_state.files.len();
-
         let empty_set = std::collections::HashSet::new();
 
-        // Helper to check if a file has an unreviewed hunk at/after start_hunk_idx
-        let find_unreviewed_in_file =
-            |file_path: &std::path::PathBuf, start_hunk_idx: usize| -> Option<usize> {
-                let approved_hunks = self
-                    .review_state
-                    .approved_hunks
-                    .get(file_path)
-                    .unwrap_or(&empty_set);
+        // First: check current file from next hunk onward (no IO needed)
+        let start_file = self.review_state.file_idx;
+        let start_hunk = self.review_state.hunk_idx + 1;
 
-                // Get hunk count from current buffer diff if this is the current file
-                let hunk_count = {
-                    let buffer_item = self.active_buffer(cx);
-                    let item = buffer_item.read(cx);
-                    item.diff().map(|d| d.hunks.len()).unwrap_or(0)
-                };
-
-                (start_hunk_idx..hunk_count).find(|idx| !approved_hunks.contains(idx))
-            };
-
-        // Search in current file first (from start_hunk onward)
-        if let Some(current_file_path) = self.review_state.files.get(start_file) {
-            if let Some(hunk_idx) = find_unreviewed_in_file(current_file_path, start_hunk) {
-                self.review_state.hunk_idx = hunk_idx;
-                self.jump_to_current_hunk(true, cx);
-                cx.notify();
-                return;
-            }
-        }
-
-        // Search remaining files (load each on-demand)
-        for offset in 1..file_count {
-            let file_idx = (start_file + offset) % file_count;
-            if file_idx == start_file {
-                break; // Back to start - handle this case separately
-            }
-
-            // Clone file path to avoid borrow conflicts
-            let file_path = self.review_state.files[file_idx].clone();
-            let abs_path = repo.workdir().join(&file_path);
-
-            // Load file
-            if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
-                continue;
-            }
-
-            // Compute diff
-            if let Some((diff, staged_rows, staged_hunk_indices)) =
-                self.compute_diff_for_review_mode(&abs_path, cx)
-            {
-                let buffer_item = self.active_buffer(cx);
-                buffer_item.update(cx, |item, _| {
-                    item.set_diff(Some(diff.clone()));
-                    item.set_staged_rows(staged_rows);
-                    item.set_staged_hunk_indices(staged_hunk_indices);
-                });
-
-                // Check for unreviewed hunks in this file
-                let approved_hunks = self
-                    .review_state
-                    .approved_hunks
-                    .get(&file_path)
-                    .unwrap_or(&empty_set);
-
-                if let Some(hunk_idx) =
-                    (0..diff.hunks.len()).find(|idx| !approved_hunks.contains(idx))
-                {
-                    self.review_state.file_idx = file_idx;
-                    self.review_state.hunk_idx = hunk_idx;
-                    self.jump_to_current_hunk(true, cx);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-
-        // Search current file from beginning up to start_hunk
         if let Some(current_file_path) = self.review_state.files.get(start_file) {
             let approved_hunks = self
                 .review_state
@@ -139,7 +41,15 @@ impl Stoat {
                 .get(current_file_path)
                 .unwrap_or(&empty_set);
 
-            if let Some(hunk_idx) = (0..start_hunk).find(|idx| !approved_hunks.contains(idx)) {
+            let hunk_count = {
+                let buffer_item = self.active_buffer(cx);
+                let item = buffer_item.read(cx);
+                item.diff().map(|d| d.hunks.len()).unwrap_or(0)
+            };
+
+            if let Some(hunk_idx) =
+                (start_hunk..hunk_count).find(|idx| !approved_hunks.contains(idx))
+            {
                 self.review_state.hunk_idx = hunk_idx;
                 self.jump_to_current_hunk(true, cx);
                 cx.notify();
@@ -147,9 +57,142 @@ impl Stoat {
             }
         }
 
-        // No unreviewed hunks found - all review complete
-        debug!("All hunks reviewed");
-        self.diff_review_dismiss(cx);
+        // Need to search other files - requires IO
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
+        let root_path = self.worktree.lock().root().to_path_buf();
+        let file_count = self.review_state.files.len();
+        let files = self.review_state.files.clone();
+        let approved_hunks = self.review_state.approved_hunks.clone();
+        let comparison_mode = self.review_comparison_mode();
+
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => return Some(()),
+            };
+
+            let empty_set = std::collections::HashSet::new();
+
+            // Search remaining files
+            for offset in 1..file_count {
+                let file_idx = (start_file + offset) % file_count;
+                if file_idx == start_file {
+                    break;
+                }
+
+                let file_path = files[file_idx].clone();
+                let abs_path = repo.workdir().join(&file_path);
+
+                let content = match fs.read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = if matches!(
+                    comparison_mode,
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent
+                ) {
+                    Some(repo.parent_content(&abs_path).await.unwrap_or_default())
+                } else {
+                    None
+                };
+
+                let found = this
+                    .update(cx, |s, cx| {
+                        if s.load_file_from_content(
+                            &abs_path,
+                            &content,
+                            mtime,
+                            head.as_deref(),
+                            index.as_deref(),
+                            cx,
+                        )
+                        .is_err()
+                        {
+                            return false;
+                        }
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                            .compute_diff_from_refs(
+                                &abs_path,
+                                head.as_deref(),
+                                index.as_deref(),
+                                parent.as_deref(),
+                                Some(&content),
+                                cx,
+                            )
+                        {
+                            let file_approved =
+                                approved_hunks.get(&file_path).unwrap_or(&empty_set);
+
+                            if let Some(hunk_idx) =
+                                (0..diff.hunks.len()).find(|idx| !file_approved.contains(idx))
+                            {
+                                let buffer_item = s.active_buffer(cx);
+                                buffer_item.update(cx, |item, _| {
+                                    item.set_diff(Some(diff));
+                                    item.set_staged_rows(staged_rows);
+                                    item.set_staged_hunk_indices(staged_hunk_indices);
+                                });
+                                s.review_state.file_idx = file_idx;
+                                s.review_state.hunk_idx = hunk_idx;
+                                s.jump_to_current_hunk(true, cx);
+                                cx.notify();
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .ok()
+                    .unwrap_or(false);
+
+                if found {
+                    if let Ok(counts) = repo.count_hunks_by_file(comparison_mode).await {
+                        this.update(cx, |s, _| s.update_hunk_position_cache(&counts))
+                            .ok();
+                    }
+                    return Some(());
+                }
+            }
+
+            // Search current file from beginning up to start_hunk
+            let found_in_current = this
+                .update(cx, |s, cx| {
+                    if let Some(current_file_path) = s.review_state.files.get(start_file) {
+                        let file_approved = s
+                            .review_state
+                            .approved_hunks
+                            .get(current_file_path)
+                            .unwrap_or(&empty_set);
+
+                        if let Some(hunk_idx) =
+                            (0..start_hunk).find(|idx| !file_approved.contains(idx))
+                        {
+                            s.review_state.hunk_idx = hunk_idx;
+                            s.jump_to_current_hunk(true, cx);
+                            cx.notify();
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .ok()
+                .unwrap_or(false);
+
+            if !found_in_current {
+                debug!("All hunks reviewed");
+                this.update(cx, |s, cx| {
+                    s.diff_review_dismiss(cx);
+                })
+                .ok();
+            }
+
+            Some(())
+        })
+        .detach();
     }
 }
 
@@ -161,10 +204,10 @@ mod tests {
     #[gpui::test]
     fn finds_next_unreviewed(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() == "diff_review" {
-                // Just verify it doesn't panic
                 s.diff_review_next_unreviewed_hunk(cx);
             }
         });

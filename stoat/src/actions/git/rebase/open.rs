@@ -19,81 +19,93 @@ impl PaneGroupView {
         let git_dir = root_path.join(".git");
         let services = self.app_state.services.clone();
 
-        let repo = match services.git.open(&root_path) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
+        cx.spawn({
+            let editor = editor.clone();
+            let services = services.clone();
+            let root_path = root_path.clone();
+            let git_dir = git_dir.clone();
+            let current_mode = current_mode.clone();
+            async move |this, cx| {
+                let repo = match services.git.open(&root_path).await {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
 
-        // Detect in-progress rebase (rebase-merge or rebase-apply)
-        if let Some(in_progress) = detect_rebase_state(&git_dir, &*services.fs, &*repo) {
-            self.app_state
-                .open_rebase(current_mode, current_key_context);
-            let phase = phase_from_in_progress(&in_progress, &git_dir, &*services.fs);
-            if matches!(phase, RebasePhase::PausedConflict { .. }) {
-                self.app_state.rebase.conflict_files = repo.conflict_files();
-            }
-            self.app_state.rebase.in_progress = Some(in_progress);
-            self.app_state.rebase.phase = phase;
+                if let Some(in_progress) =
+                    detect_rebase_state(&git_dir, &*services.fs, &*repo).await
+                {
+                    let phase =
+                        phase_from_in_progress(&in_progress, &git_dir, &*services.fs).await;
+                    let conflict_files = if matches!(phase, RebasePhase::PausedConflict { .. }) {
+                        repo.conflict_files().await
+                    } else {
+                        Vec::new()
+                    };
 
-            editor.update(cx, |editor, cx| {
-                editor.stoat.update(cx, |stoat, _cx| {
-                    stoat.set_key_context(KeyContext::Rebase);
-                    stoat.set_mode("rebase_progress");
-                });
-            });
+                    let _ = this.update(cx, |pane_group, cx| {
+                        pane_group
+                            .app_state
+                            .open_rebase(current_mode, current_key_context);
+                        if !conflict_files.is_empty() {
+                            pane_group.app_state.rebase.conflict_files = conflict_files;
+                        }
+                        pane_group.app_state.rebase.in_progress = Some(in_progress);
+                        pane_group.app_state.rebase.phase = phase;
 
-            cx.notify();
-            return;
-        }
+                        editor.update(cx, |editor, cx| {
+                            editor.stoat.update(cx, |stoat, _cx| {
+                                stoat.set_key_context(KeyContext::Rebase);
+                                stoat.set_mode("rebase_progress");
+                            });
+                        });
 
-        // Determine base ref for planning mode
-        let base_ref = match repo.upstream_ref() {
-            Ok(Some(r)) => r,
-            _ => {
-                if repo.merge_base("origin/main", "HEAD").is_ok() {
-                    "origin/main".to_string()
-                } else if repo.merge_base("origin/master", "HEAD").is_ok() {
-                    "origin/master".to_string()
-                } else {
-                    self.app_state.flash_message = Some(
-                        "No upstream branch found (tried upstream, origin/main, origin/master)"
-                            .to_string(),
-                    );
-                    cx.notify();
+                        cx.notify();
+                    });
                     return;
                 }
-            },
-        };
 
-        // Enter planning mode immediately with empty commits, then load async
-        self.app_state
-            .open_rebase(current_mode, current_key_context);
-        self.app_state.rebase.base_ref = base_ref.clone();
-        self.app_state.rebase.phase = RebasePhase::Planning;
+                let base_ref = match repo.upstream_ref().await {
+                    Ok(Some(r)) => r,
+                    _ => {
+                        if repo.merge_base("origin/main", "HEAD").await.is_ok() {
+                            "origin/main".to_string()
+                        } else if repo.merge_base("origin/master", "HEAD").await.is_ok() {
+                            "origin/master".to_string()
+                        } else {
+                            let _ = this.update(cx, |pane_group, cx| {
+                                pane_group.app_state.flash_message = Some(
+                                    "No upstream branch found (tried upstream, origin/main, origin/master)"
+                                        .to_string(),
+                                );
+                                cx.notify();
+                            });
+                            return;
+                        }
+                    },
+                };
 
-        editor.update(cx, |editor, cx| {
-            editor.stoat.update(cx, |stoat, _cx| {
-                stoat.set_key_context(KeyContext::Rebase);
-                stoat.set_mode("rebase_plan");
-            });
-        });
+                let _ = this.update(cx, |pane_group, cx| {
+                    pane_group
+                        .app_state
+                        .open_rebase(current_mode, current_key_context);
+                    pane_group.app_state.rebase.base_ref = base_ref.clone();
+                    pane_group.app_state.rebase.phase = RebasePhase::Planning;
 
-        cx.notify();
+                    editor.update(cx, |editor, cx| {
+                        editor.stoat.update(cx, |stoat, _cx| {
+                            stoat.set_key_context(KeyContext::Rebase);
+                            stoat.set_mode("rebase_plan");
+                        });
+                    });
 
-        // Async: load commits via merge_base + log_commits
-        self.app_state.rebase.preview_task = Some(cx.spawn({
-            let base_ref = base_ref.clone();
-            async move |this, cx| {
-                let result = smol::unblock({
-                    let services = services.clone();
-                    let root_path = root_path.clone();
-                    let base_ref = base_ref.clone();
-                    move || {
-                        let repo = services.git.open(&root_path)?;
-                        let merge_base = repo.merge_base(&base_ref, "HEAD")?;
-                        repo.log_commits(&merge_base, "HEAD", 100)
-                    }
-                })
+                    cx.notify();
+                });
+
+                let result = async {
+                    let repo = services.git.open(&root_path).await?;
+                    let merge_base = repo.merge_base(&base_ref, "HEAD").await?;
+                    repo.log_commits(&merge_base, "HEAD", 100).await
+                }
                 .await;
 
                 let _ = this.update(cx, |pane_group, cx| {
@@ -138,6 +150,7 @@ impl PaneGroupView {
                     cx.notify();
                 });
             }
-        }));
+        })
+        .detach();
     }
 }

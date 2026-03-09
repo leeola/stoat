@@ -194,10 +194,7 @@ impl Stoat {
         path: &std::path::Path,
         cx: &mut Context<Self>,
     ) -> Result<Entity<BufferItem>, String> {
-        let contents = self
-            .services
-            .fs
-            .read_to_string(path)
+        let contents = smol::block_on(self.services.fs.read_to_string(path))
             .map_err(|e| format!("Failed to read file: {e}"))?;
 
         let language = path

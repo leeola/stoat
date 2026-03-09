@@ -66,8 +66,9 @@ mod tests {
     #[gpui::test]
     fn approves_hunk(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
                 s.diff_review_approve_hunk(cx);
                 // Verify hunk was marked as approved

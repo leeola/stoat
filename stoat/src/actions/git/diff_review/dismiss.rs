@@ -53,8 +53,9 @@ mod tests {
     #[gpui::test]
     fn dismisses_diff_review(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() == "diff_review" {
                 s.diff_review_dismiss(cx);
                 // Previous mode cleared

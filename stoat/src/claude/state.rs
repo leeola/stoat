@@ -115,29 +115,32 @@ impl ClaudeState {
             session_slug,
         };
 
-        let session = match provider.create_session(config) {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = ClaudeStatus::Idle;
-                self.messages.push(ChatMessage::Error {
-                    text: format!("Failed to start: {e}"),
-                });
-                cx.emit(ClaudeStateEvent::Updated);
-                cx.notify();
-                return;
-            },
-        };
-
-        self.stdin_tx = Some(session.stdin_tx);
-        let stdout_rx = session.stdout_rx;
-
         cx.spawn(async move |this, cx| {
+            let session = match provider.create_session(config).await {
+                Ok(s) => s,
+                Err(e) => {
+                    this.update(cx, |state, cx| {
+                        state.status = ClaudeStatus::Idle;
+                        state.messages.push(ChatMessage::Error {
+                            text: format!("Failed to start: {e}"),
+                        });
+                        cx.emit(ClaudeStateEvent::Updated);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                },
+            };
+
             this.update(cx, |state, cx| {
+                state.stdin_tx = Some(session.stdin_tx);
                 state.status = ClaudeStatus::Idle;
                 cx.emit(ClaudeStateEvent::Updated);
                 cx.notify();
             })
             .ok();
+
+            let stdout_rx = session.stdout_rx;
 
             while let Ok(msg) = stdout_rx.recv().await {
                 let is_terminal = msg.is_terminal();

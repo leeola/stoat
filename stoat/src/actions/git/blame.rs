@@ -17,30 +17,36 @@ impl Stoat {
         };
 
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(r) => r,
-            Err(_) => {
-                tracing::debug!("No git repository found");
-                return;
-            },
-        };
+        let git = self.services.git.clone();
 
-        let data = match repo.blame_file(&file_path) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::error!("Blame failed: {e}");
-                return;
-            },
-        };
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::debug!("No git repository found");
+                    return;
+                },
+            };
 
-        self.blame_state.active = true;
-        self.blame_state.data = Some(data);
+            let data = match repo.blame_file(&file_path).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!("Blame failed: {e}");
+                    return;
+                },
+            };
 
-        self.key_context = crate::stoat::KeyContext::BlameReview;
-        self.mode = "blame_review".to_string();
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+            this.update(cx, |s, cx| {
+                s.blame_state.active = true;
+                s.blame_state.data = Some(data);
+                s.key_context = crate::stoat::KeyContext::BlameReview;
+                s.mode = "blame_review".to_string();
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn blame_dismiss(&mut self, cx: &mut Context<Self>) {

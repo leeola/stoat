@@ -16,6 +16,7 @@ impl PaneGroupView {
 
             self.app_state
                 .open_git_status(current_mode, current_key_context);
+            self.refresh_git_status_async(cx);
 
             editor.update(cx, |editor, cx| {
                 editor.stoat.update(cx, |stoat, _cx| {

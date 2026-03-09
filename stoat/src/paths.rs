@@ -7,8 +7,11 @@ pub struct StoatPaths {
     pub config_path: Option<PathBuf>,
 }
 
-pub fn discover(start_dir: &Path, fs: &dyn Fs) -> StoatPaths {
-    let dir = walk_ancestors(start_dir, fs).or_else(|| system_config_dir(fs));
+pub async fn discover(start_dir: &Path, fs: &dyn Fs) -> StoatPaths {
+    let dir = match walk_ancestors(start_dir, fs).await {
+        Some(d) => Some(d),
+        None => system_config_dir(fs).await,
+    };
 
     match dir {
         Some(d) => {
@@ -17,7 +20,7 @@ pub fn discover(start_dir: &Path, fs: &dyn Fs) -> StoatPaths {
             } else {
                 tracing::info!("using system config directory: {}", d.display());
             }
-            paths_from_dir(&d, fs)
+            paths_from_dir(&d, fs).await
         },
         None => {
             tracing::debug!("no .stoat directory found");
@@ -30,11 +33,11 @@ pub fn discover(start_dir: &Path, fs: &dyn Fs) -> StoatPaths {
     }
 }
 
-fn walk_ancestors(start_dir: &Path, fs: &dyn Fs) -> Option<PathBuf> {
+async fn walk_ancestors(start_dir: &Path, fs: &dyn Fs) -> Option<PathBuf> {
     let mut current = Some(start_dir);
     while let Some(dir) = current {
         let candidate = dir.join(".stoat");
-        if fs.is_dir(&candidate) {
+        if fs.is_dir(&candidate).await {
             return Some(candidate);
         }
         current = dir.parent();
@@ -42,22 +45,30 @@ fn walk_ancestors(start_dir: &Path, fs: &dyn Fs) -> Option<PathBuf> {
     None
 }
 
-fn system_config_dir(fs: &dyn Fs) -> Option<PathBuf> {
+async fn system_config_dir(fs: &dyn Fs) -> Option<PathBuf> {
     let dir = dirs::config_dir()?.join("stoat");
-    if fs.is_dir(&dir) {
+    if fs.is_dir(&dir).await {
         Some(dir)
     } else {
         None
     }
 }
 
-fn paths_from_dir(dir: &Path, fs: &dyn Fs) -> StoatPaths {
+async fn paths_from_dir(dir: &Path, fs: &dyn Fs) -> StoatPaths {
     let keymap = dir.join("keymap.stcfg");
     let config = dir.join("config.toml");
     StoatPaths {
         stoat_dir: Some(dir.to_path_buf()),
-        keymap_path: fs.is_file(&keymap).then_some(keymap),
-        config_path: fs.is_file(&config).then_some(config),
+        keymap_path: if fs.is_file(&keymap).await {
+            Some(keymap)
+        } else {
+            None
+        },
+        config_path: if fs.is_file(&config).await {
+            Some(config)
+        } else {
+            None
+        },
     }
 }
 
@@ -72,7 +83,7 @@ mod tests {
         fs.insert_file("/project/.stoat/keymap.stcfg", "# keymap");
         fs.insert_file("/project/.stoat/config.toml", "# config");
 
-        let paths = discover(Path::new("/project"), &fs);
+        let paths = smol::block_on(discover(Path::new("/project"), &fs));
         assert_eq!(
             paths.stoat_dir.as_deref(),
             Some(Path::new("/project/.stoat"))
@@ -91,9 +102,9 @@ mod tests {
     fn finds_stoat_dir_in_ancestor() {
         let fs = FakeFs::new();
         fs.insert_file("/project/.stoat/keymap.stcfg", "# keymap");
-        fs.create_dir_all(Path::new("/project/a/b/c")).unwrap();
+        smol::block_on(fs.create_dir_all(Path::new("/project/a/b/c"))).unwrap();
 
-        let paths = discover(Path::new("/project/a/b/c"), &fs);
+        let paths = smol::block_on(discover(Path::new("/project/a/b/c"), &fs));
         assert_eq!(
             paths.stoat_dir.as_deref(),
             Some(Path::new("/project/.stoat"))
@@ -108,7 +119,7 @@ mod tests {
     #[test]
     fn no_stoat_dir_found() {
         let fs = FakeFs::new();
-        let paths = discover(Path::new("/empty"), &fs);
+        let paths = smol::block_on(discover(Path::new("/empty"), &fs));
         assert!(paths.stoat_dir.is_none());
     }
 
@@ -117,7 +128,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_file("/project/.stoat/keymap.stcfg", "# keymap");
 
-        let paths = discover(Path::new("/project"), &fs);
+        let paths = smol::block_on(discover(Path::new("/project"), &fs));
         assert!(paths.keymap_path.is_some());
         assert!(paths.config_path.is_none());
     }
@@ -127,7 +138,7 @@ mod tests {
         let fs = FakeFs::new();
         fs.insert_file("/project/.stoat/config.toml", "# config");
 
-        let paths = discover(Path::new("/project"), &fs);
+        let paths = smol::block_on(discover(Path::new("/project"), &fs));
         assert!(paths.keymap_path.is_none());
         assert!(paths.config_path.is_some());
     }
@@ -135,9 +146,9 @@ mod tests {
     #[test]
     fn empty_stoat_dir() {
         let fs = FakeFs::new();
-        fs.create_dir_all(Path::new("/project/.stoat")).unwrap();
+        smol::block_on(fs.create_dir_all(Path::new("/project/.stoat"))).unwrap();
 
-        let paths = discover(Path::new("/project"), &fs);
+        let paths = smol::block_on(discover(Path::new("/project"), &fs));
         assert_eq!(
             paths.stoat_dir.as_deref(),
             Some(Path::new("/project/.stoat"))

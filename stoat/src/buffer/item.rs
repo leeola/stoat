@@ -42,6 +42,8 @@ pub struct BufferItem {
     conflicts: Vec<ConflictRegion>,
     diagnostics: SmallVec<[(ServerId, DiagnosticSet); 2]>,
     diagnostics_version: u64,
+    /// Last known disk mtime, refreshed asynchronously on window focus / file watcher events.
+    cached_disk_mtime: Option<SystemTime>,
 }
 
 impl EventEmitter<BufferItemEvent> for BufferItem {}
@@ -67,6 +69,7 @@ impl BufferItem {
             conflicts: Vec::new(),
             diagnostics: SmallVec::new(),
             diagnostics_version: 0,
+            cached_disk_mtime: None,
         }
     }
 
@@ -288,12 +291,7 @@ impl BufferItem {
         self.line_ending = line_ending;
     }
 
-    pub fn has_conflict(
-        &self,
-        file_path: &std::path::Path,
-        fs: &dyn crate::fs::Fs,
-        cx: &App,
-    ) -> bool {
+    pub fn has_conflict(&self, cx: &App) -> bool {
         if !self.is_modified(cx) {
             return false;
         }
@@ -302,15 +300,19 @@ impl BufferItem {
             return false;
         };
 
-        let Ok(metadata) = fs.metadata(file_path) else {
-            return false;
-        };
-
-        let Some(current_mtime) = metadata.modified else {
+        let Some(current_mtime) = self.cached_disk_mtime else {
             return false;
         };
 
         current_mtime > saved_mtime
+    }
+
+    pub fn set_cached_disk_mtime(&mut self, mtime: Option<SystemTime>) {
+        self.cached_disk_mtime = mtime;
+    }
+
+    pub fn cached_disk_mtime(&self) -> Option<SystemTime> {
+        self.cached_disk_mtime
     }
 
     pub fn base_text_for_hunk(&self, hunk_idx: usize) -> &str {

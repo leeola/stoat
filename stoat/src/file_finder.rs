@@ -46,55 +46,42 @@ impl PreviewData {
 /// Load plain text preview without syntax highlighting.
 ///
 /// Fast operation suitable for immediate display. Reads up to 100KB.
-/// Uses `smol::unblock` to avoid blocking async executor.
 pub async fn load_text_only(path: &Path, fs: std::sync::Arc<dyn crate::fs::Fs>) -> Option<String> {
-    let path = path.to_path_buf();
+    const MAX_BYTES: usize = 100 * 1024;
 
-    smol::unblock(move || {
-        const MAX_BYTES: usize = 100 * 1024;
+    let buffer = fs.read_bytes(path, MAX_BYTES).await.ok()?;
 
-        let buffer = fs.read_bytes(&path, MAX_BYTES).ok()?;
+    let check_size = buffer.len().min(1024);
+    if buffer[..check_size].contains(&0) {
+        return None;
+    }
 
-        let check_size = buffer.len().min(1024);
-        if buffer[..check_size].contains(&0) {
-            return None;
-        }
-
-        String::from_utf8(buffer).ok()
-    })
-    .await
+    String::from_utf8(buffer).ok()
 }
 
 /// Load syntax-highlighted file preview.
 ///
-/// Reads file and parses for syntax highlighting. Both file I/O and parsing
-/// run on thread pool via `smol::unblock` to avoid blocking executor.
+/// Reads file and parses for syntax highlighting. Parsing runs on thread pool
+/// via `smol::unblock` to avoid blocking executor.
 pub async fn load_file_preview(
     path: &Path,
     fs: std::sync::Arc<dyn crate::fs::Fs>,
 ) -> Option<PreviewData> {
-    let path = path.to_path_buf();
+    const MAX_BYTES: usize = 100 * 1024;
 
-    let (text, language) = smol::unblock(move || {
-        const MAX_BYTES: usize = 100 * 1024;
+    let buffer = fs.read_bytes(path, MAX_BYTES).await.ok()?;
 
-        let buffer = fs.read_bytes(&path, MAX_BYTES).ok()?;
+    let check_size = buffer.len().min(1024);
+    if buffer[..check_size].contains(&0) {
+        return None;
+    }
 
-        let check_size = buffer.len().min(1024);
-        if buffer[..check_size].contains(&0) {
-            return None;
-        }
-
-        let text = String::from_utf8(buffer).ok()?;
-        let language = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(Language::from_extension)
-            .unwrap_or(Language::PlainText);
-
-        Some((text, language))
-    })
-    .await?;
+    let text = String::from_utf8(buffer).ok()?;
+    let language = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(Language::from_extension)
+        .unwrap_or(Language::PlainText);
 
     // Phase 2: Parse and compute captures on thread pool
     smol::unblock(move || {

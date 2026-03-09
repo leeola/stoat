@@ -10,26 +10,6 @@ impl Stoat {
     /// Automatically loads the next file if at the last hunk of the current file
     /// via [`Stoat::load_next_file`]. Following Zed's hunk navigation pattern with
     /// cross-file support.
-    ///
-    /// # Workflow
-    ///
-    /// 1. Gets hunk count from buffer diff
-    /// 2. If next hunk exists in current file: increment hunk index, jump to it
-    /// 3. If at last hunk: load next file (wraps around to first file)
-    ///
-    /// # Behavior
-    ///
-    /// - Only operates in diff_review mode
-    /// - Advances through all hunks sequentially
-    /// - Loads next file automatically when reaching end of current file
-    /// - Wraps around to first file after last file
-    ///
-    /// # Related
-    ///
-    /// - [`Stoat::diff_review_prev_hunk`] - navigate backwards
-    /// - [`Stoat::diff_review_next_unreviewed_hunk`] - skip to next unreviewed
-    /// - [`Stoat::load_next_file`] - cross-file navigation helper
-    /// - [`Stoat::jump_to_current_hunk`] - cursor positioning and scrolling
     pub fn diff_review_next_hunk(&mut self, cx: &mut Context<Self>) {
         if self.mode != "diff_review" {
             return;
@@ -62,13 +42,12 @@ impl Stoat {
             self.review_state.hunk_idx += 1;
             tracing::debug!("Moving to next hunk: {}", self.review_state.hunk_idx);
             self.jump_to_current_hunk(true, cx);
+            cx.notify();
         } else {
-            // At last hunk, try next file
+            // At last hunk, load next file (async, handles its own cache refresh)
             tracing::debug!("At last hunk, loading next file");
             self.load_next_file(cx);
         }
-
-        cx.notify();
     }
 }
 
@@ -80,10 +59,10 @@ mod tests {
     #[gpui::test]
     fn moves_to_next_hunk(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() == "diff_review" {
-                // Just verify it doesn't panic
                 s.diff_review_next_hunk(cx);
             }
         });

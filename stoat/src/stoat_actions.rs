@@ -104,212 +104,326 @@ impl Stoat {
 
     /// Load next file in diff review.
     ///
-    /// Uses pre-computed indices from GitIndex for O(1) navigation to the next file with hunks.
-    /// Wraps to first file if at the end.
+    /// Searches forward through the file list for the next file with hunks,
+    /// wrapping to the first file if at the end.
     pub fn load_next_file(&mut self, cx: &mut Context<Self>) {
         if self.review_state.files.is_empty() {
             return;
         }
 
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
-
         let file_count = self.review_state.files.len();
         let current_idx = self.review_state.file_idx;
+        let files = self.review_state.files.clone();
+        let comparison_mode = self.review_comparison_mode();
 
-        // Loop through files starting from next one, looking for one with hunks
-        for offset in 1..=file_count {
-            let next_idx = (current_idx + offset) % file_count;
-            let file_path = &self.review_state.files[next_idx];
-            let abs_path = repo.workdir().join(file_path);
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => return Some(()),
+            };
 
-            // Load file
-            if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
-                continue;
-            }
+            for offset in 1..=file_count {
+                let next_idx = (current_idx + offset) % file_count;
+                let file_path = &files[next_idx];
+                let abs_path = repo.workdir().join(file_path);
 
-            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.review_comparison_mode() {
-                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                    match repo.index_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
-                        },
+                let content = match fs.read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                        continue;
+                    },
+                };
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = if matches!(
+                    comparison_mode,
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent
+                ) {
+                    Some(repo.parent_content(&abs_path).await.unwrap_or_default())
+                } else {
+                    None
+                };
+
+                let found = this
+                    .update(cx, |s, cx| {
+                        if s.load_file_from_content(
+                            &abs_path,
+                            &content,
+                            mtime,
+                            head.as_deref(),
+                            index.as_deref(),
+                            cx,
+                        )
+                        .is_err()
+                        {
+                            return false;
+                        }
+
+                        // Replace buffer content for non-working modes
+                        match comparison_mode {
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                if let Some(ref idx_content) = index {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(idx_content, &buffer_item, cx);
+                                }
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                if let Some(ref h) = head {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(h, &buffer_item, cx);
+                                }
+                            },
+                            _ => {},
+                        }
+
+                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
+                                (head.as_deref(), index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                                (None, index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                (head.as_deref(), None, None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                (None, None, parent.as_deref(), Some(content.as_str()))
+                            },
+                        };
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                            .compute_diff_from_refs(
+                                &abs_path, d_head, d_index, d_parent, d_working, cx,
+                            )
+                        {
+                            if !diff.hunks.is_empty() {
+                                let buffer_item = s.active_buffer(cx);
+                                buffer_item.update(cx, |item, _| {
+                                    item.set_diff(Some(diff.clone()));
+                                    item.set_staged_rows(staged_rows);
+                                    item.set_staged_hunk_indices(staged_hunk_indices);
+                                });
+
+                                debug!(
+                                    "Loaded next file with {} hunks at idx={}",
+                                    diff.hunks.len(),
+                                    next_idx
+                                );
+
+                                s.review_state.file_idx = next_idx;
+                                s.review_state.hunk_idx = 0;
+                                s.jump_to_current_hunk(true, cx);
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .ok()
+                    .unwrap_or(false);
+
+                if found {
+                    if let Ok(counts) = repo.count_hunks_by_file(comparison_mode).await {
+                        this.update(cx, |s, _| s.update_hunk_position_cache(&counts))
+                            .ok();
                     }
-                },
-                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                    match repo.head_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
-                        },
-                    }
-                },
-                _ => {},
-            }
-
-            // Compute diff and check if it has hunks
-            if let Some((diff, staged_rows, staged_hunk_indices)) =
-                self.compute_diff_for_review_mode(&abs_path, cx)
-            {
-                if !diff.hunks.is_empty() {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, _| {
-                        item.set_diff(Some(diff.clone()));
-                        item.set_staged_rows(staged_rows);
-                        item.set_staged_hunk_indices(staged_hunk_indices);
-                    });
-
-                    debug!(
-                        "Loaded next file with {} hunks at idx={}",
-                        diff.hunks.len(),
-                        next_idx
-                    );
-
-                    self.review_state.file_idx = next_idx;
-                    self.review_state.hunk_idx = 0;
-                    self.jump_to_current_hunk(true, cx);
-                    return;
+                    return Some(());
                 }
             }
-        }
 
-        debug!("No more files with hunks in current comparison mode");
+            debug!("No more files with hunks in current comparison mode");
+            this.update(cx, |s, cx| {
+                let buffer_item = s.active_buffer(cx);
+                buffer_item.update(cx, |item, _| {
+                    item.set_diff(None);
+                });
+                s.cursor.move_to(text::Point::new(0, 0));
+            })
+            .ok();
 
-        // Clear old diff and reset cursor when no files have hunks
-        let buffer_item = self.active_buffer(cx);
-        buffer_item.update(cx, |item, _| {
-            item.set_diff(None);
-        });
-        self.cursor.move_to(text::Point::new(0, 0));
+            Some(())
+        })
+        .detach();
     }
 
     /// Load previous file in diff review.
     ///
-    /// Uses pre-computed indices from GitIndex for O(1) navigation to the previous file with hunks.
-    /// Wraps to last file if at the beginning.
+    /// Searches backward through the file list for the previous file with hunks,
+    /// wrapping to the last file if at the beginning.
     pub fn load_prev_file(&mut self, cx: &mut Context<Self>) {
         if self.review_state.files.is_empty() {
             return;
         }
 
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
-
         let file_count = self.review_state.files.len();
         let current_idx = self.review_state.file_idx;
+        let files = self.review_state.files.clone();
+        let comparison_mode = self.review_comparison_mode();
 
-        // Loop through files backwards starting from previous one, looking for one with hunks
-        for offset in 1..=file_count {
-            let prev_idx = if current_idx >= offset {
-                current_idx - offset
-            } else {
-                file_count - (offset - current_idx)
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => return Some(()),
             };
 
-            let file_path = &self.review_state.files[prev_idx];
-            let abs_path = repo.workdir().join(file_path);
+            for offset in 1..=file_count {
+                let prev_idx = if current_idx >= offset {
+                    current_idx - offset
+                } else {
+                    file_count - (offset - current_idx)
+                };
 
-            // Load file
-            if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
-                continue;
-            }
+                let file_path = &files[prev_idx];
+                let abs_path = repo.workdir().join(file_path);
 
-            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.review_comparison_mode() {
-                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                    match repo.index_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
-                        },
+                let content = match fs.read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
+                        continue;
+                    },
+                };
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = if matches!(
+                    comparison_mode,
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent
+                ) {
+                    Some(repo.parent_content(&abs_path).await.unwrap_or_default())
+                } else {
+                    None
+                };
+
+                let found = this
+                    .update(cx, |s, cx| {
+                        if s.load_file_from_content(
+                            &abs_path,
+                            &content,
+                            mtime,
+                            head.as_deref(),
+                            index.as_deref(),
+                            cx,
+                        )
+                        .is_err()
+                        {
+                            return false;
+                        }
+
+                        match comparison_mode {
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                if let Some(ref idx_content) = index {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(idx_content, &buffer_item, cx);
+                                }
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                if let Some(ref h) = head {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(h, &buffer_item, cx);
+                                }
+                            },
+                            _ => {},
+                        }
+
+                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
+                                (head.as_deref(), index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                                (None, index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                (head.as_deref(), None, None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                (None, None, parent.as_deref(), Some(content.as_str()))
+                            },
+                        };
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                            .compute_diff_from_refs(
+                                &abs_path, d_head, d_index, d_parent, d_working, cx,
+                            )
+                        {
+                            if !diff.hunks.is_empty() {
+                                let buffer_item = s.active_buffer(cx);
+                                buffer_item.update(cx, |item, _| {
+                                    item.set_diff(Some(diff.clone()));
+                                    item.set_staged_rows(staged_rows);
+                                    item.set_staged_hunk_indices(staged_hunk_indices);
+                                });
+
+                                debug!(
+                                    "Loaded prev file with {} hunks at idx={}",
+                                    diff.hunks.len(),
+                                    prev_idx
+                                );
+
+                                let last_hunk_idx = diff.hunks.len().saturating_sub(1);
+                                s.review_state.file_idx = prev_idx;
+                                s.review_state.hunk_idx = last_hunk_idx;
+                                s.jump_to_current_hunk(true, cx);
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .ok()
+                    .unwrap_or(false);
+
+                if found {
+                    if let Ok(counts) = repo.count_hunks_by_file(comparison_mode).await {
+                        this.update(cx, |s, _| s.update_hunk_position_cache(&counts))
+                            .ok();
                     }
-                },
-                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                    match repo.head_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
-                        },
-                    }
-                },
-                _ => {},
-            }
-
-            // Compute diff and check if it has hunks
-            if let Some((diff, staged_rows, staged_hunk_indices)) =
-                self.compute_diff_for_review_mode(&abs_path, cx)
-            {
-                if !diff.hunks.is_empty() {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, _| {
-                        item.set_diff(Some(diff.clone()));
-                        item.set_staged_rows(staged_rows);
-                        item.set_staged_hunk_indices(staged_hunk_indices);
-                    });
-
-                    debug!(
-                        "Loaded prev file with {} hunks at idx={}",
-                        diff.hunks.len(),
-                        prev_idx
-                    );
-
-                    let last_hunk_idx = diff.hunks.len().saturating_sub(1);
-                    self.review_state.file_idx = prev_idx;
-                    self.review_state.hunk_idx = last_hunk_idx;
-                    self.jump_to_current_hunk(true, cx);
-                    return;
+                    return Some(());
                 }
             }
-        }
 
-        debug!("No more files with hunks in current comparison mode");
+            debug!("No more files with hunks in current comparison mode");
+            this.update(cx, |s, cx| {
+                let buffer_item = s.active_buffer(cx);
+                buffer_item.update(cx, |item, _| {
+                    item.set_diff(None);
+                });
+                s.cursor.move_to(text::Point::new(0, 0));
+            })
+            .ok();
 
-        // Clear old diff and reset cursor when no files have hunks
-        let buffer_item = self.active_buffer(cx);
-        buffer_item.update(cx, |item, _| {
-            item.set_diff(None);
-        });
-        self.cursor.move_to(text::Point::new(0, 0));
+            Some(())
+        })
+        .detach();
     }
 
     /// Capture current per-file hunk counts into [`DiffReviewState::last_hunk_snapshot`].
-    pub(crate) fn refresh_review_hunk_snapshot(&mut self) {
+    pub(crate) fn refresh_review_hunk_snapshot(&mut self, cx: &mut Context<Self>) {
+        let git = self.services.git.clone();
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
+        let comparison_mode = self.review_comparison_mode();
 
-        if let Ok(counts) = repo.count_hunks_by_file(self.review_comparison_mode()) {
-            self.review_state.last_hunk_snapshot = counts;
-        }
+        cx.spawn(async move |this, cx| {
+            let repo = git.discover(&root_path).await.ok()?;
+            let counts = repo.count_hunks_by_file(comparison_mode).await.ok()?;
+            this.update(cx, |s, _cx| {
+                s.review_state.last_hunk_snapshot = counts;
+            })
+            .ok();
+            Some(())
+        })
+        .detach();
     }
 
     /// Among files whose hunk count increased (or are entirely new), return the one
     /// with the most recent mtime.
-    fn find_newest_change(
+    async fn find_newest_change_async(
         old_snapshot: &std::collections::HashMap<std::path::PathBuf, usize>,
         new_counts: &std::collections::HashMap<std::path::PathBuf, usize>,
         workdir: &std::path::Path,
@@ -326,6 +440,7 @@ impl Stoat {
             let abs_path = workdir.join(path);
             let mtime = fs
                 .metadata(&abs_path)
+                .await
                 .ok()
                 .and_then(|m| m.modified)
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -347,128 +462,257 @@ impl Stoat {
     /// diff, and when follow mode is on, auto-navigates to the most recently
     /// modified file's new hunks.
     pub(crate) fn refresh_review_state(&mut self, cx: &mut Context<Self>) {
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => return,
-        };
+        let files = self.review_state.files.clone();
+        let file_idx = self.review_state.file_idx;
+        let hunk_idx = self.review_state.hunk_idx;
+        let source = self.review_state.source;
+        let follow = self.review_state.follow;
+        let last_snapshot = self.review_state.last_hunk_snapshot.clone();
+        let comparison_mode = self.review_comparison_mode();
 
-        let new_files: Vec<std::path::PathBuf> = if self.review_state.source.is_commit() {
-            match repo.commit_changed_files() {
-                Ok(paths) => paths,
-                Err(_) => return,
-            }
-        } else {
-            let entries = match repo.gather_status() {
-                Ok(entries) => entries,
-                Err(_) => return,
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => return Some(()),
             };
-            let mut seen = std::collections::HashSet::new();
-            entries
-                .into_iter()
-                .filter(|e| seen.insert(e.path.clone()))
-                .map(|e| e.path)
-                .collect()
-        };
 
-        // Preserve file_idx by matching current file path in new list
-        let current_path = self
-            .review_state
-            .files
-            .get(self.review_state.file_idx)
-            .cloned();
-        self.review_state.files = new_files;
-        if let Some(ref current) = current_path {
-            self.review_state.file_idx = self
-                .review_state
-                .files
-                .iter()
-                .position(|p| p == current)
+            let new_files: Vec<std::path::PathBuf> = if source.is_commit() {
+                match repo.commit_changed_files().await {
+                    Ok(paths) => paths,
+                    Err(_) => return Some(()),
+                }
+            } else {
+                let entries = match repo.gather_status().await {
+                    Ok(entries) => entries,
+                    Err(_) => return Some(()),
+                };
+                let mut seen = std::collections::HashSet::new();
+                entries
+                    .into_iter()
+                    .filter(|e| seen.insert(e.path.clone()))
+                    .map(|e| e.path)
+                    .collect()
+            };
+
+            let new_counts = match repo.count_hunks_by_file(comparison_mode).await {
+                Ok(counts) => counts,
+                Err(_) => return Some(()),
+            };
+
+            // Preserve file_idx by matching current file path in new list
+            let current_path = files.get(file_idx).cloned();
+            let new_file_idx = current_path
+                .as_ref()
+                .and_then(|current| new_files.iter().position(|p| p == current))
                 .unwrap_or(0);
-        } else {
-            self.review_state.file_idx = 0;
-        }
 
-        let new_counts = match repo.count_hunks_by_file(self.review_comparison_mode()) {
-            Ok(counts) => counts,
-            Err(_) => return,
-        };
+            // Clamp hunk_idx
+            let clamped_hunk_idx = if let Some(ref current) = current_path {
+                let max_hunks = new_counts.get(current).copied().unwrap_or(0);
+                if max_hunks == 0 {
+                    0
+                } else if hunk_idx >= max_hunks {
+                    max_hunks.saturating_sub(1)
+                } else {
+                    hunk_idx
+                }
+            } else {
+                0
+            };
 
-        self.reload_if_changed_on_disk(cx);
-        self.refresh_git_diff(cx);
+            // Reload current file content for refresh_git_diff
+            let current_file_data = if let Some(ref current) = current_path {
+                let abs_path = repo.workdir().join(current);
+                let content = fs.read_to_string(&abs_path).await.ok();
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = if matches!(
+                    comparison_mode,
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent
+                ) {
+                    Some(repo.parent_content(&abs_path).await.unwrap_or_default())
+                } else {
+                    None
+                };
+                let working = fs.read_to_string(&abs_path).await.ok();
+                Some((abs_path, content, mtime, head, index, parent, working))
+            } else {
+                None
+            };
 
-        // Clamp hunk_idx if it exceeds new hunk count
-        if let Some(current) = current_path.as_ref() {
-            let max_hunks = new_counts.get(current).copied().unwrap_or(0);
-            if max_hunks == 0 {
-                self.review_state.hunk_idx = 0;
-            } else if self.review_state.hunk_idx >= max_hunks {
-                self.review_state.hunk_idx = max_hunks.saturating_sub(1);
-            }
-        }
+            // Follow mode: find newest change
+            let follow_target = if follow {
+                Self::find_newest_change_async(&last_snapshot, &new_counts, repo.workdir(), &*fs)
+                    .await
+            } else {
+                None
+            };
 
-        if self.review_state.follow {
-            if let Some(target_path) = Self::find_newest_change(
-                &self.review_state.last_hunk_snapshot,
-                &new_counts,
-                repo.workdir(),
-                &*self.services.fs,
-            ) {
-                let old_count = self
-                    .review_state
-                    .last_hunk_snapshot
-                    .get(&target_path)
-                    .copied()
-                    .unwrap_or(0);
+            // If following, fetch target file data
+            let follow_data = if let Some(ref target_path) = follow_target {
+                let target_idx = new_files.iter().position(|p| *p == *target_path);
+                let old_count = last_snapshot.get(target_path).copied().unwrap_or(0);
 
-                if let Some(target_idx) = self
-                    .review_state
-                    .files
-                    .iter()
-                    .position(|p| *p == target_path)
+                if let Some(target_idx) = target_idx {
+                    let abs_path = repo.workdir().join(target_path);
+                    let content = fs.read_to_string(&abs_path).await.ok();
+                    let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                    let head = repo.head_content(&abs_path).await.ok();
+                    let index = repo.index_content(&abs_path).await.ok();
+                    let parent = if matches!(
+                        comparison_mode,
+                        crate::git::diff_review::DiffComparisonMode::HeadVsParent
+                    ) {
+                        Some(repo.parent_content(&abs_path).await.unwrap_or_default())
+                    } else {
+                        None
+                    };
+                    let working = fs.read_to_string(&abs_path).await.ok();
+
+                    Some((
+                        target_idx, old_count, abs_path, content, mtime, head, index, parent,
+                        working,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            this.update(cx, |s, cx| {
+                s.review_state.files = new_files;
+                s.review_state.file_idx = new_file_idx;
+                s.review_state.hunk_idx = clamped_hunk_idx;
+
+                // Reload current file + refresh diff
+                if let Some((abs_path, Some(content), mtime, head, index, parent, working)) =
+                    current_file_data
                 {
-                    let abs_path = repo.workdir().join(&target_path);
+                    let _ = s.load_file_from_content(
+                        &abs_path,
+                        &content,
+                        mtime,
+                        head.as_deref(),
+                        index.as_deref(),
+                        cx,
+                    );
 
-                    if self.load_file(&abs_path, cx).is_ok() {
-                        match self.review_comparison_mode() {
+                    let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                        crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
+                            (head.as_deref(), index.as_deref(), None, None)
+                        },
+                        crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                            (None, index.as_deref(), None, None)
+                        },
+                        crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                            (head.as_deref(), None, None, None)
+                        },
+                        crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                            (None, None, parent.as_deref(), working.as_deref())
+                        },
+                    };
+
+                    if let Some((new_diff, staged_rows, staged_hunk_indices)) = s
+                        .compute_diff_from_refs(&abs_path, d_head, d_index, d_parent, d_working, cx)
+                    {
+                        let buffer_item = s.active_buffer(cx);
+                        buffer_item.update(cx, |item, _| {
+                            item.set_diff(Some(new_diff));
+                            item.set_staged_rows(staged_rows);
+                            item.set_staged_hunk_indices(staged_hunk_indices);
+                        });
+                    }
+                }
+
+                // Follow mode: navigate to target
+                if let Some((
+                    target_idx,
+                    old_count,
+                    abs_path,
+                    Some(content),
+                    mtime,
+                    head,
+                    index,
+                    parent,
+                    working,
+                )) = follow_data
+                {
+                    if s.load_file_from_content(
+                        &abs_path,
+                        &content,
+                        mtime,
+                        head.as_deref(),
+                        index.as_deref(),
+                        cx,
+                    )
+                    .is_ok()
+                    {
+                        match comparison_mode {
                             crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                                if let Ok(content) = repo.index_content(&abs_path) {
-                                    let buffer_item = self.active_buffer(cx);
-                                    self.replace_buffer_content(&content, &buffer_item, cx);
+                                if let Some(ref idx_content) = index {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(idx_content, &buffer_item, cx);
                                 }
                             },
                             crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                                if let Ok(content) = repo.head_content(&abs_path) {
-                                    let buffer_item = self.active_buffer(cx);
-                                    self.replace_buffer_content(&content, &buffer_item, cx);
+                                if let Some(ref h) = head {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(h, &buffer_item, cx);
                                 }
                             },
                             _ => {},
                         }
 
-                        if let Some((diff, staged_rows, staged_hunk_indices)) =
-                            self.compute_diff_for_review_mode(&abs_path, cx)
+                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
+                                (head.as_deref(), index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                                (None, index.as_deref(), None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                                (head.as_deref(), None, None, None)
+                            },
+                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
+                                (None, None, parent.as_deref(), working.as_deref())
+                            },
+                        };
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                            .compute_diff_from_refs(
+                                &abs_path, d_head, d_index, d_parent, d_working, cx,
+                            )
                         {
                             if !diff.hunks.is_empty() {
-                                let buffer_item = self.active_buffer(cx);
+                                let buffer_item = s.active_buffer(cx);
                                 buffer_item.update(cx, |item, _| {
                                     item.set_diff(Some(diff));
                                     item.set_staged_rows(staged_rows);
                                     item.set_staged_hunk_indices(staged_hunk_indices);
                                 });
 
-                                self.review_state.file_idx = target_idx;
-                                self.review_state.hunk_idx = old_count;
-                                self.jump_to_current_hunk(true, cx);
+                                s.review_state.file_idx = target_idx;
+                                s.review_state.hunk_idx = old_count;
+                                s.jump_to_current_hunk(true, cx);
                             }
                         }
                     }
                 }
-            }
-        }
 
-        self.review_state.last_hunk_snapshot = new_counts;
-        cx.notify();
+                s.update_hunk_position_cache(&new_counts);
+                s.review_state.last_hunk_snapshot = new_counts;
+                cx.notify();
+            })
+            .ok();
+
+            Some(())
+        })
+        .detach();
     }
 }
 

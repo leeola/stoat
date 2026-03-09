@@ -74,8 +74,9 @@ mod tests {
     #[gpui::test]
     fn toggles_approval(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() == "diff_review" && !s.review_state.files.is_empty() {
                 let file_path = &s.review_state.files[s.review_state.file_idx].clone();
                 let hunk_idx = s.review_state.hunk_idx;

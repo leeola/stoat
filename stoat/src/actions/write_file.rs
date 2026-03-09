@@ -74,16 +74,19 @@ pub(crate) fn write_buffer_to_disk(
 
     let content_with_line_endings = convert_line_endings(&content, line_ending);
 
-    fs.atomic_write(file_path, content_with_line_endings.as_bytes())
+    smol::block_on(fs.atomic_write(file_path, content_with_line_endings.as_bytes()))
         .map_err(|e| format!("Failed to write file: {e}"))?;
 
-    let mtime = fs.metadata(file_path).ok().and_then(|m| m.modified);
+    let mtime = smol::block_on(fs.metadata(file_path))
+        .ok()
+        .and_then(|m| m.modified);
 
     buffer_item.update(cx, |item, _cx| {
         item.set_saved_text(content);
         if let Some(mtime) = mtime {
             item.set_saved_mtime(mtime);
         }
+        item.set_cached_disk_mtime(mtime);
     });
 
     tracing::info!("Wrote buffer to {:?}", file_path);
@@ -137,21 +140,48 @@ impl Stoat {
     ///     s.write_file(cx).expect("Failed to write file");
     /// });
     /// ```
-    pub fn write_file(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let file_path = self
-            .current_file_path
-            .as_ref()
-            .ok_or_else(|| "No file path set for current buffer".to_string())?
-            .clone();
+    pub fn write_file(&mut self, cx: &mut Context<Self>) {
+        let file_path = match self.current_file_path.as_ref() {
+            Some(p) => p.clone(),
+            None => return,
+        };
 
         let buffer_item = self.active_buffer(cx);
+        let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
+        let line_ending = buffer_item.read(cx).line_ending();
+        let content_with_le = convert_line_endings(&content, line_ending);
+        let fs = self.services.fs.clone();
 
-        write_buffer_to_disk(&buffer_item, &file_path, &*self.services.fs, cx)?;
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = fs
+                .atomic_write(&file_path, content_with_le.as_bytes())
+                .await
+            {
+                tracing::error!("Failed to write file: {e}");
+                return Some(());
+            }
 
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+            let mtime = fs.metadata(&file_path).await.ok().and_then(|m| m.modified);
 
-        Ok(())
+            this.update(cx, |s, cx| {
+                if let Some(buffer_item) = s.buffer_store.read(cx).get_buffer_by_path(&file_path) {
+                    buffer_item.update(cx, |item, _| {
+                        item.set_saved_text(content.clone());
+                        if let Some(mtime) = mtime {
+                            item.set_saved_mtime(mtime);
+                        }
+                        item.set_cached_disk_mtime(mtime);
+                    });
+                }
+                tracing::info!("Wrote buffer to {:?}", file_path);
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
+            })
+            .ok();
+
+            Some(())
+        })
+        .detach();
     }
 
     /// Write all modified buffers to disk.
@@ -184,17 +214,13 @@ impl Stoat {
     ///
     /// `Ok(())` if all writes succeed, or `Err(String)` with an error message for
     /// the first buffer that fails to write
-    pub fn write_all(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        // Collect buffer IDs that need writing (modified + have file path)
+    pub fn write_all(&mut self, cx: &mut Context<Self>) {
         let buffer_ids: Vec<_> = self
             .buffer_store
             .read(cx)
             .buffer_ids_by_activation()
             .to_vec();
 
-        let mut wrote_any = false;
-
-        // Collect (buffer_item, path) pairs for all modified buffers with paths
         let buffers_to_write: Vec<_> = {
             let buffer_store = self.buffer_store.read(cx);
             buffer_ids
@@ -204,26 +230,60 @@ impl Stoat {
                     let file_path = buffer_store.get_path(buffer_id)?.clone();
                     Some((buffer_item, file_path))
                 })
-                .collect()
+                .collect::<Vec<_>>()
         };
 
-        // Write each modified buffer
-        for (buffer_item, file_path) in buffers_to_write {
-            // Skip buffers that are not modified
-            if !buffer_item.read(cx).is_modified(cx) {
-                continue;
+        let write_data: Vec<_> = buffers_to_write
+            .into_iter()
+            .filter(|(buffer_item, _)| buffer_item.read(cx).is_modified(cx))
+            .map(|(buffer_item, file_path)| {
+                let content = buffer_item.read(cx).buffer().read(cx).snapshot().text();
+                let line_ending = buffer_item.read(cx).line_ending();
+                let content_with_le = convert_line_endings(&content, line_ending);
+                (file_path, content, content_with_le)
+            })
+            .collect();
+
+        if write_data.is_empty() {
+            return;
+        }
+
+        let fs = self.services.fs.clone();
+
+        cx.spawn(async move |this, cx| {
+            for (file_path, content, content_with_le) in &write_data {
+                if let Err(e) = fs.atomic_write(file_path, content_with_le.as_bytes()).await {
+                    tracing::error!("Failed to write {:?}: {e}", file_path);
+                    continue;
+                }
+
+                let mtime = fs.metadata(file_path).await.ok().and_then(|m| m.modified);
+
+                this.update(cx, |s, cx| {
+                    if let Some(buffer_item) = s.buffer_store.read(cx).get_buffer_by_path(file_path)
+                    {
+                        buffer_item.update(cx, |item, _| {
+                            item.set_saved_text(content.clone());
+                            if let Some(mtime) = mtime {
+                                item.set_saved_mtime(mtime);
+                            }
+                            item.set_cached_disk_mtime(mtime);
+                        });
+                    }
+                    tracing::info!("Wrote buffer to {:?}", file_path);
+                })
+                .ok();
             }
 
-            write_buffer_to_disk(&buffer_item, &file_path, &*self.services.fs, cx)?;
-            wrote_any = true;
-        }
+            this.update(cx, |_, cx| {
+                cx.emit(crate::stoat::StoatEvent::Changed);
+                cx.notify();
+            })
+            .ok();
 
-        if wrote_any {
-            cx.emit(crate::stoat::StoatEvent::Changed);
-            cx.notify();
-        }
-
-        Ok(())
+            Some(())
+        })
+        .detach();
     }
 }
 
@@ -242,8 +302,9 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Hello from Stoat!", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let contents = s
@@ -256,13 +317,19 @@ mod tests {
     }
 
     #[gpui::test]
-    #[should_panic(expected = "No file path set for current buffer")]
-    fn write_fails_without_file_path(cx: &mut TestAppContext) {
+    fn write_noop_without_file_path(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
 
         stoat.update(|s, cx| {
             s.insert_text("Hello", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, _cx| {
+            assert!(
+                s.services.fake_fs().files().is_empty(),
+                "No files should be written when no file path is set"
+            );
         });
     }
 
@@ -275,8 +342,9 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Line 1\nLine 2\nLine 3", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let contents = s
@@ -296,8 +364,9 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Initial text here", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let contents = s
@@ -321,8 +390,9 @@ mod tests {
             s.move_to_file_start(cx);
             s.move_word_right(cx);
             s.delete_word_right(cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let contents = s
@@ -342,8 +412,9 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Content", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
@@ -369,8 +440,9 @@ mod tests {
             s.load_file(&file_path, cx).expect("Failed to load file");
             s.move_to_line_end(cx);
             s.insert_text(" modified", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let contents = s
@@ -390,12 +462,13 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Atomic write test", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             let parent = file_path.parent().unwrap();
-            let entries = s.services.fs.read_dir(parent).unwrap();
+            let entries = smol::block_on(s.services.fs.read_dir(parent)).unwrap();
             let file_entries: Vec<_> = entries.iter().filter(|e| e.is_file).collect();
             assert_eq!(file_entries.len(), 1, "Should have exactly 1 file");
             assert_eq!(file_entries[0].path, file_path);
@@ -433,11 +506,14 @@ mod tests {
         });
 
         stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
+            let mtime = smol::block_on(s.services.fs.metadata(&file_path))
+                .ok()
+                .and_then(|m| m.modified);
+            s.active_buffer(cx).update(cx, |item, _cx| {
+                item.set_cached_disk_mtime(mtime);
+            });
             assert!(
-                buffer_item
-                    .read(cx)
-                    .has_conflict(&file_path, &*s.services.fs, cx),
+                s.active_buffer(cx).read(cx).has_conflict(cx),
                 "Should detect conflict when file modified externally with unsaved buffer changes"
             );
         });
@@ -466,9 +542,7 @@ mod tests {
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                !buffer_item
-                    .read(cx)
-                    .has_conflict(&file_path, &*s.services.fs, cx),
+                !buffer_item.read(cx).has_conflict(cx),
                 "Should not detect conflict when buffer is clean (no unsaved changes)"
             );
         });
@@ -497,23 +571,25 @@ mod tests {
         });
 
         stoat.update(|s, cx| {
-            let buffer_item = s.active_buffer(cx);
+            let mtime = smol::block_on(s.services.fs.metadata(&file_path))
+                .ok()
+                .and_then(|m| m.modified);
+            s.active_buffer(cx).update(cx, |item, _cx| {
+                item.set_cached_disk_mtime(mtime);
+            });
             assert!(
-                buffer_item
-                    .read(cx)
-                    .has_conflict(&file_path, &*s.services.fs, cx),
+                s.active_buffer(cx).read(cx).has_conflict(cx),
                 "Conflict should exist before write"
             );
         });
 
-        stoat.update(|s, cx| s.write_file(cx).unwrap());
+        stoat.update(|s, cx| s.write_file(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, cx| {
             let buffer_item = s.active_buffer(cx);
             assert!(
-                !buffer_item
-                    .read(cx)
-                    .has_conflict(&file_path, &*s.services.fs, cx),
+                !buffer_item.read(cx).has_conflict(cx),
                 "Conflict should be cleared after write (buffer clean + mtime updated)"
             );
         });
@@ -536,11 +612,12 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("New Line\n", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
-            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            let bytes = smol::block_on(s.services.fs.read_bytes(&file_path, usize::MAX)).unwrap();
             assert!(!bytes.contains(&b'\r'), "Should not contain any CR bytes");
             assert!(bytes.contains(&b'\n'), "Should contain LF");
         });
@@ -572,11 +649,12 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("New Line\n", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
-            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            let bytes = smol::block_on(s.services.fs.read_bytes(&file_path, usize::MAX)).unwrap();
             let contents = String::from_utf8(bytes).expect("Invalid UTF-8");
             assert!(contents.contains("\r\n"), "Should contain CRLF");
             let lf_count = contents.matches('\n').count();
@@ -605,11 +683,12 @@ mod tests {
 
         stoat.update(|s, cx| {
             s.insert_text("Mixed\r\nEndings\rHere\n", cx);
-            s.write_file(cx).unwrap();
+            s.write_file(cx);
         });
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
-            let bytes = s.services.fs.read_bytes(&file_path, usize::MAX).unwrap();
+            let bytes = smol::block_on(s.services.fs.read_bytes(&file_path, usize::MAX)).unwrap();
             assert!(
                 !bytes.contains(&b'\r'),
                 "Should not contain any CR after normalization"
@@ -639,7 +718,8 @@ mod tests {
             });
         }
 
-        stoat.update(|s, cx| s.write_all(cx).unwrap());
+        stoat.update(|s, cx| s.write_all(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
             assert_eq!(
@@ -679,15 +759,23 @@ mod tests {
             s.insert_text(" - modified", cx);
         });
 
-        let file1_mtime_before =
-            stoat.update(|s, _cx| s.services.fs.metadata(&file1).unwrap().modified.unwrap());
-
-        stoat.update(|s, cx| {
-            s.write_all(cx).unwrap();
+        let file1_mtime_before = stoat.update(|s, _cx| {
+            smol::block_on(s.services.fs.metadata(&file1))
+                .unwrap()
+                .modified
+                .unwrap()
         });
 
+        stoat.update(|s, cx| {
+            s.write_all(cx);
+        });
+        stoat.run_until_parked();
+
         stoat.update(|s, _cx| {
-            let file1_mtime_after = s.services.fs.metadata(&file1).unwrap().modified.unwrap();
+            let file1_mtime_after = smol::block_on(s.services.fs.metadata(&file1))
+                .unwrap()
+                .modified
+                .unwrap();
             assert_eq!(
                 file1_mtime_before, file1_mtime_after,
                 "Clean buffer should not be rewritten"
@@ -721,7 +809,8 @@ mod tests {
             s.insert_text("Content 2", cx);
         });
 
-        stoat.update(|s, cx| s.write_all(cx).unwrap());
+        stoat.update(|s, cx| s.write_all(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, cx| {
             let buffer_store = s.buffer_store.read(cx);
@@ -757,10 +846,11 @@ mod tests {
             s.insert_text("Atomic 2", cx);
         });
 
-        stoat.update(|s, cx| s.write_all(cx).unwrap());
+        stoat.update(|s, cx| s.write_all(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
-            let entries = s.services.fs.read_dir(Path::new("/fake")).unwrap();
+            let entries = smol::block_on(s.services.fs.read_dir(Path::new("/fake"))).unwrap();
             let file_entries: Vec<_> = entries.iter().filter(|e| e.is_file).collect();
             assert_eq!(
                 file_entries.len(),
@@ -804,16 +894,19 @@ mod tests {
             s.insert_text("New\n", cx);
         });
 
-        stoat.update(|s, cx| s.write_all(cx).unwrap());
+        stoat.update(|s, cx| s.write_all(cx));
+        stoat.run_until_parked();
 
         stoat.update(|s, _cx| {
-            let unix_bytes = s.services.fs.read_bytes(&unix_file, usize::MAX).unwrap();
+            let unix_bytes =
+                smol::block_on(s.services.fs.read_bytes(&unix_file, usize::MAX)).unwrap();
             assert!(
                 !unix_bytes.contains(&b'\r'),
                 "Unix file should have LF only"
             );
 
-            let windows_bytes = s.services.fs.read_bytes(&windows_file, usize::MAX).unwrap();
+            let windows_bytes =
+                smol::block_on(s.services.fs.read_bytes(&windows_file, usize::MAX)).unwrap();
             let windows_content = String::from_utf8(windows_bytes).unwrap();
             assert!(
                 windows_content.contains("\r\n"),

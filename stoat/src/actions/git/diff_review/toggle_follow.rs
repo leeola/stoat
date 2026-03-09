@@ -13,7 +13,7 @@ impl Stoat {
     pub fn diff_review_toggle_follow(&mut self, cx: &mut Context<Self>) {
         self.review_state.follow = !self.review_state.follow;
         if self.review_state.follow {
-            self.refresh_review_hunk_snapshot();
+            self.refresh_review_hunk_snapshot(cx);
         }
         debug!(follow = self.review_state.follow, "Toggled follow mode");
         cx.notify();
@@ -28,8 +28,9 @@ mod tests {
     #[gpui::test]
     fn toggles_follow(cx: &mut TestAppContext) {
         let mut stoat = Stoat::test(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             if s.mode() != "diff_review" {
                 return;
             }

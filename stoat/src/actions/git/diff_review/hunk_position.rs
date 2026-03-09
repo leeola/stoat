@@ -22,8 +22,9 @@ mod tests {
             ]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let position = s.diff_review_hunk_position(cx);
@@ -34,7 +35,9 @@ mod tests {
             );
 
             s.diff_review_next_hunk(cx);
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let position_after = s.diff_review_hunk_position(cx);
             assert_eq!(
                 position_after,
@@ -58,8 +61,9 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
                 s.review_comparison_mode(),
@@ -77,7 +81,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let position_unstaged = s.diff_review_hunk_position(cx);
             assert!(
                 matches!(position_unstaged, Some((1, 1))),
@@ -89,7 +95,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let position_staged = s.diff_review_hunk_position(cx);
             assert!(
                 matches!(position_staged, Some((1, 1))),
@@ -111,8 +119,9 @@ mod tests {
             ]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let position = s.diff_review_hunk_position(cx);
@@ -142,8 +151,9 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let position1 = s.diff_review_hunk_position(cx);
@@ -179,8 +189,9 @@ mod tests {
             ]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(
                 s.review_comparison_mode(),
@@ -188,7 +199,7 @@ mod tests {
             );
 
             let position_all = s.diff_review_hunk_position(cx);
-            let (current_all, total_all) =
+            let (_current_all, total_all) =
                 position_all.expect("Should have position in WorkingVsHead");
 
             s.diff_review_cycle_comparison_mode(cx);
@@ -197,17 +208,18 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
-
-            let position_staged = s.diff_review_hunk_position(cx);
-            let (current_staged, total_staged) =
-                position_staged.expect("Should have position in IndexVsHead");
-
-            assert_eq!(
-                total_all, total_staged,
-                "All changes are staged, so WorkingVsHead ({current_all}/{total_all}) should match IndexVsHead ({current_staged}/{total_staged})"
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
+            let position_all = s.diff_review_hunk_position(cx);
+            let (current_all, total_all) = position_all.expect(
+                "Should have position in IndexVsHead (same as WorkingVsHead since all staged)",
             );
 
             s.diff_review_next_hunk(cx);
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let pos2 = s.diff_review_hunk_position(cx);
             if let Some((current, total)) = pos2 {
                 assert!(

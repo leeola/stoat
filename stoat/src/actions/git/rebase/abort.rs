@@ -7,11 +7,22 @@ impl PaneGroupView {
         let services = self.app_state.services.clone();
 
         self.app_state.rebase.preview_task = Some(cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                let repo = services.git.open(&root_path)?;
-                repo.rebase_abort()
-            })
-            .await;
+            let result = {
+                let repo = services.git.open(&root_path).await;
+                match repo {
+                    Ok(repo) => repo.rebase_abort().await,
+                    Err(e) => Err(e),
+                }
+            };
+
+            let (branch_info, status_files) =
+                if let Ok(repo) = services.git.discover(&root_path).await {
+                    let bi = repo.gather_branch_info().await;
+                    let sf = repo.gather_status().await.unwrap_or_default();
+                    (bi, sf)
+                } else {
+                    (None, Vec::new())
+                };
 
             let _ = this.update(cx, |pane_group, cx| {
                 let msg = match &result {
@@ -29,7 +40,9 @@ impl PaneGroupView {
                         });
                     }
                 }
-                pane_group.app_state.refresh_git_status();
+                pane_group
+                    .app_state
+                    .set_git_status(branch_info, status_files);
                 cx.notify();
             });
         }));

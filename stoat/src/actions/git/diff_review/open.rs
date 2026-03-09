@@ -17,7 +17,7 @@ impl Stoat {
     /// ## Restoring Previous Session
     /// 1. Checks if [`Stoat::diff_review_files`] is non-empty
     /// 2. Loads the saved file at [`Stoat::diff_review_current_file_idx`]
-    /// 3. Computes diff via [`Stoat::compute_diff_for_review_mode`]
+    /// 3. Computes diff via [`Stoat::compute_diff_from_refs`]
     /// 4. Jumps to saved hunk index via [`Stoat::jump_to_current_hunk`]
     ///
     /// ## Starting Fresh Session
@@ -44,223 +44,293 @@ impl Stoat {
     /// - [`Stoat::diff_review_approve_hunk`] - mark hunk as reviewed
     /// - [`Stoat::diff_review_dismiss`] - exit review mode
     /// - [`Stoat::diff_review_reset_progress`] - clear all progress
-    /// - [`Stoat::compute_diff_for_review_mode`] - centralized diff computation
+    /// - [`Stoat::compute_diff_from_refs`] - diff computation from pre-fetched refs
     pub fn open_diff_review(&mut self, cx: &mut Context<Self>) {
-        tracing::info!("Opening diff review");
-        debug!("Opening diff review");
+        use crate::git::diff_review::DiffComparisonMode;
 
-        // Save current mode to restore later
+        tracing::info!("Opening diff review");
+
         self.diff_review_previous_mode = Some(self.mode.clone());
 
-        // Use worktree root to discover repository
         let root_path = self.worktree.lock().root().to_path_buf();
-        let repo = match self.services.git.discover(&root_path) {
-            Ok(repo) => repo,
-            Err(_) => {
-                debug!("No git repository found");
-                return;
-            },
-        };
+        let git = self.services.git.clone();
+        let fs = self.services.fs.clone();
+        let comparison_mode = self.review_comparison_mode();
+        let restoring = !self.review_state.files.is_empty();
+        let restore_file_idx = self.review_state.file_idx;
+        let restore_files = self.review_state.files.clone();
 
-        // Check if we have existing review state to restore
-        if !self.review_state.files.is_empty() {
-            // Restore previous review session
-            debug!(
-                "Restoring review session at file {}, hunk {}",
-                self.review_state.file_idx, self.review_state.hunk_idx
-            );
-
-            // Load the saved file
-            if let Some(saved_file_path) = self.review_state.files.get(self.review_state.file_idx) {
-                let abs_path = repo.workdir().join(saved_file_path);
-
-                if let Err(e) = self.load_file(&abs_path, cx) {
-                    tracing::error!("Failed to load saved file {:?}: {}", abs_path, e);
+        cx.spawn(async move |this, cx| {
+            let repo = match git.discover(&root_path).await {
+                Ok(r) => r,
+                Err(_) => {
+                    debug!("No git repository found");
                     return;
-                }
-
-                // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-                match self.review_comparison_mode() {
-                    crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                        match repo.index_content(&abs_path) {
-                            Ok(content) => {
-                                let buffer_item = self.active_buffer(cx);
-                                self.replace_buffer_content(&content, &buffer_item, cx);
-                            },
-                            Err(e) => {
-                                tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
-                            },
-                        }
-                    },
-                    crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                        match repo.head_content(&abs_path) {
-                            Ok(content) => {
-                                let buffer_item = self.active_buffer(cx);
-                                self.replace_buffer_content(&content, &buffer_item, cx);
-                            },
-                            Err(e) => {
-                                tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
-                            },
-                        }
-                    },
-                    _ => {},
-                }
-
-                // Compute diff respecting the comparison mode
-                if let Some((diff, staged_rows, staged_hunk_indices)) =
-                    self.compute_diff_for_review_mode(&abs_path, cx)
-                {
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, _| {
-                        item.set_diff(Some(diff));
-                        item.set_staged_rows(staged_rows);
-                        item.set_staged_hunk_indices(staged_hunk_indices);
-                    });
-                }
-            }
-
-            // Enter diff_review mode
-            self.key_context = crate::stoat::KeyContext::DiffReview;
-            self.mode = "diff_review".to_string();
-
-            // Jump to saved hunk
-            self.jump_to_current_hunk(false, cx);
-
-            cx.emit(crate::stoat::StoatEvent::Changed);
-            cx.notify();
-            return;
-        }
-
-        // No existing state - start fresh review session
-        // Scan git status to get list of modified files
-        let entries = match repo.gather_status() {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::error!("Failed to gather git status: {}", e);
-                return;
-            },
-        };
-
-        if entries.is_empty() {
-            debug!("No modified files to review, entering empty diff review mode");
-            self.review_state.files = Vec::new();
-            self.review_state.file_idx = 0;
-            self.review_state.hunk_idx = 0;
-            self.review_state.approved_hunks.clear();
-            self.key_context = crate::stoat::KeyContext::DiffReview;
-            self.mode = "diff_review".to_string();
-            cx.emit(crate::stoat::StoatEvent::Changed);
-            cx.notify();
-            return;
-        }
-
-        // Deduplicate files and store paths
-        let mut seen = std::collections::HashSet::new();
-        let file_paths: Vec<std::path::PathBuf> = entries
-            .into_iter()
-            .filter(|e| seen.insert(e.path.clone()))
-            .map(|e| e.path)
-            .collect();
-
-        if file_paths.is_empty() {
-            debug!("No unique files to review");
-            return;
-        }
-
-        // Store file list
-        self.review_state.files = file_paths.clone();
-
-        // Find first file with hunks by loading and checking on-demand
-        let mut first_file_idx = None;
-        for (idx, file_path) in file_paths.iter().enumerate() {
-            let abs_path = repo.workdir().join(file_path);
-
-            // Load file
-            if let Err(e) = self.load_file(&abs_path, cx) {
-                tracing::warn!("Failed to load file {:?}: {}", abs_path, e);
-                continue;
-            }
-
-            // For IndexVsHead/HeadVsParent, replace buffer content so anchors resolve correctly
-            match self.review_comparison_mode() {
-                crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                    match repo.index_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read index content for {abs_path:?}: {e}")
-                        },
-                    }
                 },
-                crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                    match repo.head_content(&abs_path) {
-                        Ok(content) => {
-                            let buffer_item = self.active_buffer(cx);
-                            self.replace_buffer_content(&content, &buffer_item, cx);
-                        },
-                        Err(e) => {
-                            tracing::warn!("Failed to read head content for {abs_path:?}: {e}")
-                        },
-                    }
-                },
-                _ => {},
-            }
+            };
+            let workdir = repo.workdir().to_path_buf();
 
-            // Compute diff
-            if let Some((diff, staged_rows, staged_hunk_indices)) =
-                self.compute_diff_for_review_mode(&abs_path, cx)
-            {
-                if !diff.hunks.is_empty() {
-                    // Found first file with hunks
-                    let buffer_item = self.active_buffer(cx);
-                    buffer_item.update(cx, |item, _| {
-                        item.set_diff(Some(diff.clone()));
-                        item.set_staged_rows(staged_rows);
-                        item.set_staged_hunk_indices(staged_hunk_indices);
-                    });
+            if restoring {
+                let Some(saved_file_path) = restore_files.get(restore_file_idx) else {
+                    return;
+                };
+                let abs_path = workdir.join(saved_file_path);
 
-                    first_file_idx = Some(idx);
-                    tracing::info!(
-                        "Diff review: found first file with {} hunks in {} mode",
-                        diff.hunks.len(),
-                        self.review_comparison_mode().display_name()
+                let contents = match fs.read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Failed to read saved file {:?}: {e}", abs_path);
+                        return;
+                    },
+                };
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = repo.parent_content(&abs_path).await.ok();
+                let working = if comparison_mode == DiffComparisonMode::HeadVsParent {
+                    Some(contents.clone())
+                } else {
+                    None
+                };
+                let hunk_counts = repo.count_hunks_by_file(comparison_mode).await.ok();
+
+                this.update(cx, |s, cx| {
+                    let _ = s.load_file_from_content(
+                        &abs_path,
+                        &contents,
+                        mtime,
+                        head.as_deref(),
+                        index.as_deref(),
+                        cx,
                     );
+
+                    match comparison_mode {
+                        DiffComparisonMode::IndexVsHead => {
+                            if let Some(ref content) = index {
+                                let buffer_item = s.active_buffer(cx);
+                                s.replace_buffer_content(content, &buffer_item, cx);
+                            }
+                        },
+                        DiffComparisonMode::HeadVsParent => {
+                            if let Some(ref content) = head {
+                                let buffer_item = s.active_buffer(cx);
+                                s.replace_buffer_content(content, &buffer_item, cx);
+                            }
+                        },
+                        _ => {},
+                    }
+
+                    let diff_refs = match comparison_mode {
+                        DiffComparisonMode::WorkingVsHead => {
+                            (head.as_deref(), index.as_deref(), None, None)
+                        },
+                        DiffComparisonMode::WorkingVsIndex => (None, index.as_deref(), None, None),
+                        DiffComparisonMode::IndexVsHead => (head.as_deref(), None, None, None),
+                        DiffComparisonMode::HeadVsParent => {
+                            (None, None, parent.as_deref(), working.as_deref())
+                        },
+                    };
+
+                    if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                        .compute_diff_from_refs(
+                            saved_file_path,
+                            diff_refs.0,
+                            diff_refs.1,
+                            diff_refs.2,
+                            diff_refs.3,
+                            cx,
+                        )
+                    {
+                        let buffer_item = s.active_buffer(cx);
+                        buffer_item.update(cx, |item, _| {
+                            item.set_diff(Some(diff));
+                            item.set_staged_rows(staged_rows);
+                            item.set_staged_hunk_indices(staged_hunk_indices);
+                        });
+                    }
+
+                    s.key_context = crate::stoat::KeyContext::DiffReview;
+                    s.mode = "diff_review".to_string();
+                    s.jump_to_current_hunk(false, cx);
+                    if let Some(ref counts) = hunk_counts {
+                        s.update_hunk_position_cache(counts);
+                    }
+                    cx.emit(crate::stoat::StoatEvent::Changed);
+                    cx.notify();
+                })
+                .ok();
+
+                return;
+            }
+
+            // Fresh session: gather status
+            let entries = match repo.gather_status().await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!("Failed to gather git status: {e}");
+                    return;
+                },
+            };
+
+            if entries.is_empty() {
+                debug!("No modified files to review, entering empty diff review mode");
+                this.update(cx, |s, cx| {
+                    s.review_state.files = Vec::new();
+                    s.review_state.file_idx = 0;
+                    s.review_state.hunk_idx = 0;
+                    s.review_state.approved_hunks.clear();
+                    s.review_state.cached_hunk_totals = Some((0, 0));
+                    s.key_context = crate::stoat::KeyContext::DiffReview;
+                    s.mode = "diff_review".to_string();
+                    cx.emit(crate::stoat::StoatEvent::Changed);
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+
+            let mut seen = std::collections::HashSet::new();
+            let file_paths: Vec<std::path::PathBuf> = entries
+                .into_iter()
+                .filter(|e| seen.insert(e.path.clone()))
+                .map(|e| e.path)
+                .collect();
+
+            if file_paths.is_empty() {
+                debug!("No unique files to review");
+                return;
+            }
+
+            // Store file list immediately
+            this.update(cx, |s, _cx| {
+                s.review_state.files = file_paths.clone();
+            })
+            .ok();
+
+            // Find first file with hunks
+            let mut first_file_idx = None;
+            for (idx, file_path) in file_paths.iter().enumerate() {
+                let abs_path = workdir.join(file_path);
+
+                let contents = match fs.read_to_string(&abs_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Failed to read file {:?}: {e}", abs_path);
+                        continue;
+                    },
+                };
+                let mtime = fs.metadata(&abs_path).await.ok().and_then(|m| m.modified);
+                let head = repo.head_content(&abs_path).await.ok();
+                let index = repo.index_content(&abs_path).await.ok();
+                let parent = repo.parent_content(&abs_path).await.ok();
+                let working = if comparison_mode == DiffComparisonMode::HeadVsParent {
+                    Some(contents.clone())
+                } else {
+                    None
+                };
+
+                let has_hunks = this
+                    .update(cx, |s, cx| {
+                        let _ = s.load_file_from_content(
+                            &abs_path,
+                            &contents,
+                            mtime,
+                            head.as_deref(),
+                            index.as_deref(),
+                            cx,
+                        );
+
+                        match comparison_mode {
+                            DiffComparisonMode::IndexVsHead => {
+                                if let Some(ref content) = index {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(content, &buffer_item, cx);
+                                }
+                            },
+                            DiffComparisonMode::HeadVsParent => {
+                                if let Some(ref content) = head {
+                                    let buffer_item = s.active_buffer(cx);
+                                    s.replace_buffer_content(content, &buffer_item, cx);
+                                }
+                            },
+                            _ => {},
+                        }
+
+                        let diff_refs = match comparison_mode {
+                            DiffComparisonMode::WorkingVsHead => {
+                                (head.as_deref(), index.as_deref(), None, None)
+                            },
+                            DiffComparisonMode::WorkingVsIndex => {
+                                (None, index.as_deref(), None, None)
+                            },
+                            DiffComparisonMode::IndexVsHead => (head.as_deref(), None, None, None),
+                            DiffComparisonMode::HeadVsParent => {
+                                (None, None, parent.as_deref(), working.as_deref())
+                            },
+                        };
+
+                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
+                            .compute_diff_from_refs(
+                                file_path,
+                                diff_refs.0,
+                                diff_refs.1,
+                                diff_refs.2,
+                                diff_refs.3,
+                                cx,
+                            )
+                        {
+                            if !diff.hunks.is_empty() {
+                                let buffer_item = s.active_buffer(cx);
+                                buffer_item.update(cx, |item, _| {
+                                    item.set_diff(Some(diff));
+                                    item.set_staged_rows(staged_rows);
+                                    item.set_staged_hunk_indices(staged_hunk_indices);
+                                });
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                    .ok()
+                    .unwrap_or(false);
+
+                if has_hunks {
+                    first_file_idx = Some(idx);
                     break;
                 }
             }
-        }
 
-        let first_idx = match first_file_idx {
-            Some(idx) => idx,
-            None => {
-                debug!("No files with hunks in current comparison mode, entering empty diff review mode");
-                self.review_state.file_idx = 0;
-                self.review_state.hunk_idx = 0;
-                self.review_state.approved_hunks.clear();
-                self.key_context = crate::stoat::KeyContext::DiffReview;
-                self.mode = "diff_review".to_string();
+            let hunk_counts = repo.count_hunks_by_file(comparison_mode).await.ok();
+
+            this.update(cx, |s, cx| {
+                match first_file_idx {
+                    Some(idx) => {
+                        s.review_state.file_idx = idx;
+                        s.review_state.hunk_idx = 0;
+                        s.review_state.approved_hunks.clear();
+                        s.key_context = crate::stoat::KeyContext::DiffReview;
+                        s.mode = "diff_review".to_string();
+                        s.jump_to_current_hunk(false, cx);
+                        if let Some(ref counts) = hunk_counts {
+                            s.update_hunk_position_cache(counts);
+                        }
+                    },
+                    None => {
+                        debug!("No files with hunks in current comparison mode");
+                        s.review_state.file_idx = 0;
+                        s.review_state.hunk_idx = 0;
+                        s.review_state.approved_hunks.clear();
+                        s.review_state.cached_hunk_totals = Some((0, 0));
+                        s.key_context = crate::stoat::KeyContext::DiffReview;
+                        s.mode = "diff_review".to_string();
+                    },
+                }
                 cx.emit(crate::stoat::StoatEvent::Changed);
                 cx.notify();
-                return;
-            },
-        };
-
-        // Initialize state to start at first file with hunks
-        self.review_state.file_idx = first_idx;
-        self.review_state.hunk_idx = 0;
-        self.review_state.approved_hunks.clear();
-
-        // Enter diff_review mode
-        self.key_context = crate::stoat::KeyContext::DiffReview;
-        self.mode = "diff_review".to_string();
-
-        // Jump to first hunk
-        self.jump_to_current_hunk(false, cx);
-
-        cx.emit(crate::stoat::StoatEvent::Changed);
-        cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 
@@ -335,9 +405,10 @@ mod tests {
             ]);
         });
 
-        stoat.update(|s, cx| {
-            s.open_diff_review(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
 
+        stoat.update(|s, cx| {
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.key_context, crate::stoat::KeyContext::DiffReview);
 
@@ -393,9 +464,10 @@ mod tests {
             )]);
         });
 
-        stoat.update(|s, cx| {
-            s.open_diff_review(cx);
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
 
+        stoat.update(|s, cx| {
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.review_state.files.len(), 1);
 
@@ -484,8 +556,10 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
             assert_eq!(s.review_state.files.len(), 1);
 
@@ -523,8 +597,10 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let buffer_item = s.active_buffer(cx);
@@ -540,7 +616,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let buffer_item_after = s.active_buffer(cx);
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
@@ -578,8 +656,10 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             s.diff_review_cycle_comparison_mode(cx);
@@ -588,7 +668,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             assert_cursor_at_hunk(s, cx);
             let buffer_item_before = s.active_buffer(cx);
             let buffer_text_before = buffer_item_before.read(cx).buffer().read(cx).text();
@@ -598,7 +680,9 @@ mod tests {
             );
 
             s.diff_review_next_hunk(cx);
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let buffer_item_after = s.active_buffer(cx);
             let buffer_text_after = buffer_item_after.read(cx).buffer().read(cx).text();
             assert!(
@@ -639,13 +723,18 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let buffer_item_before = s.active_buffer(cx);
             let diff_before = buffer_item_before.read(cx).diff();
-            assert!(diff_before.is_some(), "Should have diff in WorkingVsHead mode");
+            assert!(
+                diff_before.is_some(),
+                "Should have diff in WorkingVsHead mode"
+            );
             assert_eq!(
                 diff_before.unwrap().hunks.len(),
                 1,
@@ -664,7 +753,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let buffer_item_after = s.active_buffer(cx);
             let diff_after = buffer_item_after.read(cx).diff();
 
@@ -703,8 +794,10 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             s.diff_review_cycle_comparison_mode(cx);
@@ -712,9 +805,13 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::WorkingVsIndex
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             s.diff_review_next_hunk(cx);
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let buffer_item_after_next = s.active_buffer(cx);
             let diff_after_next = buffer_item_after_next.read(cx).diff();
 
@@ -763,8 +860,10 @@ mod tests {
             )]);
         });
 
+        stoat.update(|s, cx| s.open_diff_review(cx));
+        stoat.run_until_parked();
+
         stoat.update(|s, cx| {
-            s.open_diff_review(cx);
             assert_eq!(s.mode(), "diff_review");
 
             let buffer_item_before = s.active_buffer(cx);
@@ -784,7 +883,9 @@ mod tests {
                 s.review_comparison_mode(),
                 crate::git::diff_review::DiffComparisonMode::IndexVsHead
             );
-
+        });
+        stoat.run_until_parked();
+        stoat.update(|s, cx| {
             let buffer_item_after = s.active_buffer(cx);
 
             let buffer_text = buffer_item_after.read(cx).buffer().read(cx).text();

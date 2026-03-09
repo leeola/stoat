@@ -151,8 +151,8 @@ mod tests {
         };
         provider.set_blame_data(&file, data);
 
-        let repo = provider.discover(&workdir).unwrap();
-        let result = repo.blame_file(&file).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let result = smol::block_on(repo.blame_file(&file)).unwrap();
 
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.line_to_entry.len(), 3);
@@ -196,8 +196,8 @@ mod tests {
         };
         provider.set_blame_data(&file, data);
 
-        let repo = provider.discover(&workdir).unwrap();
-        let result = repo.blame_file(&file).unwrap();
+        let repo = smol::block_on(provider.discover(&workdir)).unwrap();
+        let result = smol::block_on(repo.blame_file(&file)).unwrap();
 
         assert_eq!(result.entries.len(), 2);
         assert_eq!(result.line_to_entry.len(), 3);

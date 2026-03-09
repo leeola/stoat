@@ -129,23 +129,23 @@ impl Default for RebaseState {
 ///
 /// Uses the [`Fs`] abstraction for file reads and [`GitRepo::has_unmerged_paths`]
 /// for conflict detection, making this testable with `FakeFs`/`FakeGitRepo`.
-pub fn detect_rebase_state(
+pub async fn detect_rebase_state(
     git_dir: &Path,
     fs: &dyn Fs,
     repo: &dyn GitRepo,
 ) -> Option<RebaseInProgress> {
     let rebase_merge = git_dir.join("rebase-merge");
-    if fs.exists(&rebase_merge) {
-        return detect_rebase_merge(git_dir, fs, repo);
+    if fs.exists(&rebase_merge).await {
+        return detect_rebase_merge(git_dir, fs, repo).await;
     }
     let rebase_apply = git_dir.join("rebase-apply");
-    if fs.exists(&rebase_apply) {
-        return detect_rebase_apply(git_dir, fs, repo);
+    if fs.exists(&rebase_apply).await {
+        return detect_rebase_apply(git_dir, fs, repo).await;
     }
     None
 }
 
-fn detect_rebase_merge(
+async fn detect_rebase_merge(
     git_dir: &Path,
     fs: &dyn Fs,
     repo: &dyn GitRepo,
@@ -154,39 +154,46 @@ fn detect_rebase_merge(
 
     let head_name = fs
         .read_to_string(&rebase_merge.join("head-name"))
+        .await
         .ok()?
         .trim()
         .to_string();
     let onto = fs
         .read_to_string(&rebase_merge.join("onto"))
+        .await
         .ok()?
         .trim()
         .to_string();
     let step: usize = fs
         .read_to_string(&rebase_merge.join("msgnum"))
+        .await
         .ok()?
         .trim()
         .parse()
         .ok()?;
     let total: usize = fs
         .read_to_string(&rebase_merge.join("end"))
+        .await
         .ok()?
         .trim()
         .parse()
         .ok()?;
     let stopped_sha = fs
         .read_to_string(&rebase_merge.join("stopped-sha"))
+        .await
         .ok()
         .map(|s| s.trim().to_string());
-    let has_conflicts = repo.has_unmerged_paths();
+    let has_conflicts = repo.has_unmerged_paths().await;
 
     let done_commits = fs
         .read_to_string(&rebase_merge.join("done"))
+        .await
         .ok()
         .map(|s| parse_todo(&s))
         .unwrap_or_default();
     let pending_commits = fs
         .read_to_string(&rebase_merge.join("git-rebase-todo"))
+        .await
         .ok()
         .map(|s| parse_todo(&s))
         .unwrap_or_default();
@@ -203,7 +210,7 @@ fn detect_rebase_merge(
     })
 }
 
-fn detect_rebase_apply(
+async fn detect_rebase_apply(
     git_dir: &Path,
     fs: &dyn Fs,
     repo: &dyn GitRepo,
@@ -212,31 +219,36 @@ fn detect_rebase_apply(
 
     let head_name = fs
         .read_to_string(&rebase_apply.join("head-name"))
+        .await
         .ok()?
         .trim()
         .to_string();
     let onto = fs
         .read_to_string(&rebase_apply.join("onto"))
+        .await
         .ok()?
         .trim()
         .to_string();
     let step: usize = fs
         .read_to_string(&rebase_apply.join("next"))
+        .await
         .ok()?
         .trim()
         .parse()
         .ok()?;
     let total: usize = fs
         .read_to_string(&rebase_apply.join("last"))
+        .await
         .ok()?
         .trim()
         .parse()
         .ok()?;
     let stopped_sha = fs
         .read_to_string(&rebase_apply.join("original-commit"))
+        .await
         .ok()
         .map(|s| s.trim().to_string());
-    let has_conflicts = repo.has_unmerged_paths();
+    let has_conflicts = repo.has_unmerged_paths().await;
 
     Some(RebaseInProgress {
         head_name,
@@ -253,15 +265,19 @@ fn detect_rebase_apply(
 /// Determine the [`RebasePhase`] from an in-progress rebase state.
 ///
 /// Distinguishes reword (`.git/rebase-merge/amend` exists) from edit pauses.
-pub fn phase_from_in_progress(ip: &RebaseInProgress, git_dir: &Path, fs: &dyn Fs) -> RebasePhase {
+pub async fn phase_from_in_progress(
+    ip: &RebaseInProgress,
+    git_dir: &Path,
+    fs: &dyn Fs,
+) -> RebasePhase {
     if ip.has_conflicts {
         return RebasePhase::PausedConflict {
             step: ip.step,
             total: ip.total,
         };
     }
-    if fs.exists(&git_dir.join("rebase-merge/amend"))
-        || fs.exists(&git_dir.join("rebase-apply/amend"))
+    if fs.exists(&git_dir.join("rebase-merge/amend")).await
+        || fs.exists(&git_dir.join("rebase-apply/amend")).await
     {
         return RebasePhase::PausedReword {
             step: ip.step,
@@ -451,122 +467,134 @@ mod tests {
 
     #[test]
     fn detect_no_rebase_dir() {
-        let fs = Arc::new(FakeFs::new());
-        let provider = FakeGitProvider::new(fs.clone());
-        let workdir = PathBuf::from("/fake/repo");
-        provider.set_exists(true);
-        provider.set_workdir(workdir.clone());
-        let repo = provider.open(&workdir).unwrap();
-        let git_dir = workdir.join(".git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let provider = FakeGitProvider::new(fs.clone());
+            let workdir = PathBuf::from("/fake/repo");
+            provider.set_exists(true);
+            provider.set_workdir(workdir.clone());
+            let repo = provider.open(&workdir).await.unwrap();
+            let git_dir = workdir.join(".git");
 
-        assert!(detect_rebase_state(&git_dir, &*fs, &*repo).is_none());
+            assert!(detect_rebase_state(&git_dir, &*fs, &*repo).await.is_none());
+        });
     }
 
     #[test]
     fn detect_with_rebase_dir() {
-        let fs = Arc::new(FakeFs::new());
-        let provider = FakeGitProvider::new(fs.clone());
-        let workdir = PathBuf::from("/fake/repo");
-        provider.set_exists(true);
-        provider.set_workdir(workdir.clone());
-        let repo = provider.open(&workdir).unwrap();
-        let git_dir = workdir.join(".git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let provider = FakeGitProvider::new(fs.clone());
+            let workdir = PathBuf::from("/fake/repo");
+            provider.set_exists(true);
+            provider.set_workdir(workdir.clone());
+            let repo = provider.open(&workdir).await.unwrap();
+            let git_dir = workdir.join(".git");
 
-        setup_rebase_fs(&git_dir, &fs);
+            setup_rebase_fs(&git_dir, &fs);
 
-        let state = detect_rebase_state(&git_dir, &*fs, &*repo).unwrap();
-        assert_eq!(state.head_name, "refs/heads/feature");
-        assert_eq!(state.onto, "abc123def456");
-        assert_eq!(state.step, 2);
-        assert_eq!(state.total, 5);
-        assert!(!state.has_conflicts);
-        assert_eq!(state.stopped_sha.as_deref(), Some("deadbeef"));
+            let state = detect_rebase_state(&git_dir, &*fs, &*repo).await.unwrap();
+            assert_eq!(state.head_name, "refs/heads/feature");
+            assert_eq!(state.onto, "abc123def456");
+            assert_eq!(state.step, 2);
+            assert_eq!(state.total, 5);
+            assert!(!state.has_conflicts);
+            assert_eq!(state.stopped_sha.as_deref(), Some("deadbeef"));
+        });
     }
 
     #[test]
     fn detect_missing_required_files() {
-        let fs = Arc::new(FakeFs::new());
-        let provider = FakeGitProvider::new(fs.clone());
-        let workdir = PathBuf::from("/fake/repo");
-        provider.set_exists(true);
-        provider.set_workdir(workdir.clone());
-        let repo = provider.open(&workdir).unwrap();
-        let git_dir = workdir.join(".git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let provider = FakeGitProvider::new(fs.clone());
+            let workdir = PathBuf::from("/fake/repo");
+            provider.set_exists(true);
+            provider.set_workdir(workdir.clone());
+            let repo = provider.open(&workdir).await.unwrap();
+            let git_dir = workdir.join(".git");
 
-        // Only head-name, missing other required files
-        fs.insert_file(
-            git_dir.join("rebase-merge/head-name"),
-            "refs/heads/feature\n",
-        );
+            // Only head-name, missing other required files
+            fs.insert_file(
+                git_dir.join("rebase-merge/head-name"),
+                "refs/heads/feature\n",
+            );
 
-        assert!(detect_rebase_state(&git_dir, &*fs, &*repo).is_none());
+            assert!(detect_rebase_state(&git_dir, &*fs, &*repo).await.is_none());
+        });
     }
 
     #[test]
     fn phase_from_in_progress_reword() {
-        let fs = Arc::new(FakeFs::new());
-        let git_dir = PathBuf::from("/fake/repo/.git");
-        fs.insert_file(git_dir.join("rebase-merge/amend"), "");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let git_dir = PathBuf::from("/fake/repo/.git");
+            fs.insert_file(git_dir.join("rebase-merge/amend"), "");
 
-        let ip = RebaseInProgress {
-            head_name: "refs/heads/feature".into(),
-            onto: "abc123".into(),
-            step: 3,
-            total: 5,
-            has_conflicts: false,
-            stopped_sha: Some("deadbeef".into()),
-            done_commits: Vec::new(),
-            pending_commits: Vec::new(),
-        };
+            let ip = RebaseInProgress {
+                head_name: "refs/heads/feature".into(),
+                onto: "abc123".into(),
+                step: 3,
+                total: 5,
+                has_conflicts: false,
+                stopped_sha: Some("deadbeef".into()),
+                done_commits: Vec::new(),
+                pending_commits: Vec::new(),
+            };
 
-        assert_eq!(
-            phase_from_in_progress(&ip, &git_dir, &*fs),
-            RebasePhase::PausedReword { step: 3, total: 5 }
-        );
+            assert_eq!(
+                phase_from_in_progress(&ip, &git_dir, &*fs).await,
+                RebasePhase::PausedReword { step: 3, total: 5 }
+            );
+        });
     }
 
     #[test]
     fn phase_from_in_progress_conflict() {
-        let fs = Arc::new(FakeFs::new());
-        let git_dir = PathBuf::from("/fake/repo/.git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let git_dir = PathBuf::from("/fake/repo/.git");
 
-        let ip = RebaseInProgress {
-            head_name: "refs/heads/feature".into(),
-            onto: "abc123".into(),
-            step: 1,
-            total: 3,
-            has_conflicts: true,
-            stopped_sha: None,
-            done_commits: Vec::new(),
-            pending_commits: Vec::new(),
-        };
+            let ip = RebaseInProgress {
+                head_name: "refs/heads/feature".into(),
+                onto: "abc123".into(),
+                step: 1,
+                total: 3,
+                has_conflicts: true,
+                stopped_sha: None,
+                done_commits: Vec::new(),
+                pending_commits: Vec::new(),
+            };
 
-        assert_eq!(
-            phase_from_in_progress(&ip, &git_dir, &*fs),
-            RebasePhase::PausedConflict { step: 1, total: 3 }
-        );
+            assert_eq!(
+                phase_from_in_progress(&ip, &git_dir, &*fs).await,
+                RebasePhase::PausedConflict { step: 1, total: 3 }
+            );
+        });
     }
 
     #[test]
     fn phase_from_in_progress_edit() {
-        let fs = Arc::new(FakeFs::new());
-        let git_dir = PathBuf::from("/fake/repo/.git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let git_dir = PathBuf::from("/fake/repo/.git");
 
-        let ip = RebaseInProgress {
-            head_name: "refs/heads/feature".into(),
-            onto: "abc123".into(),
-            step: 2,
-            total: 4,
-            has_conflicts: false,
-            stopped_sha: Some("cafe1234".into()),
-            done_commits: Vec::new(),
-            pending_commits: Vec::new(),
-        };
+            let ip = RebaseInProgress {
+                head_name: "refs/heads/feature".into(),
+                onto: "abc123".into(),
+                step: 2,
+                total: 4,
+                has_conflicts: false,
+                stopped_sha: Some("cafe1234".into()),
+                done_commits: Vec::new(),
+                pending_commits: Vec::new(),
+            };
 
-        assert_eq!(
-            phase_from_in_progress(&ip, &git_dir, &*fs),
-            RebasePhase::PausedEdit { step: 2, total: 4 }
-        );
+            assert_eq!(
+                phase_from_in_progress(&ip, &git_dir, &*fs).await,
+                RebasePhase::PausedEdit { step: 2, total: 4 }
+            );
+        });
     }
 
     #[test]
@@ -741,58 +769,62 @@ mod tests {
 
     #[test]
     fn detect_rebase_apply() {
-        let fs = Arc::new(FakeFs::new());
-        let provider = FakeGitProvider::new(fs.clone());
-        let workdir = PathBuf::from("/fake/repo");
-        provider.set_exists(true);
-        provider.set_workdir(workdir.clone());
-        let repo = provider.open(&workdir).unwrap();
-        let git_dir = workdir.join(".git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let provider = FakeGitProvider::new(fs.clone());
+            let workdir = PathBuf::from("/fake/repo");
+            provider.set_exists(true);
+            provider.set_workdir(workdir.clone());
+            let repo = provider.open(&workdir).await.unwrap();
+            let git_dir = workdir.join(".git");
 
-        fs.insert_file(
-            git_dir.join("rebase-apply/head-name"),
-            "refs/heads/feature\n",
-        );
-        fs.insert_file(git_dir.join("rebase-apply/onto"), "abc123\n");
-        fs.insert_file(git_dir.join("rebase-apply/next"), "3\n");
-        fs.insert_file(git_dir.join("rebase-apply/last"), "7\n");
-        fs.insert_file(git_dir.join("rebase-apply/original-commit"), "cafe1234\n");
+            fs.insert_file(
+                git_dir.join("rebase-apply/head-name"),
+                "refs/heads/feature\n",
+            );
+            fs.insert_file(git_dir.join("rebase-apply/onto"), "abc123\n");
+            fs.insert_file(git_dir.join("rebase-apply/next"), "3\n");
+            fs.insert_file(git_dir.join("rebase-apply/last"), "7\n");
+            fs.insert_file(git_dir.join("rebase-apply/original-commit"), "cafe1234\n");
 
-        let state = detect_rebase_state(&git_dir, &*fs, &*repo).unwrap();
-        assert_eq!(state.head_name, "refs/heads/feature");
-        assert_eq!(state.onto, "abc123");
-        assert_eq!(state.step, 3);
-        assert_eq!(state.total, 7);
-        assert_eq!(state.stopped_sha.as_deref(), Some("cafe1234"));
-        assert!(state.done_commits.is_empty());
-        assert!(state.pending_commits.is_empty());
+            let state = detect_rebase_state(&git_dir, &*fs, &*repo).await.unwrap();
+            assert_eq!(state.head_name, "refs/heads/feature");
+            assert_eq!(state.onto, "abc123");
+            assert_eq!(state.step, 3);
+            assert_eq!(state.total, 7);
+            assert_eq!(state.stopped_sha.as_deref(), Some("cafe1234"));
+            assert!(state.done_commits.is_empty());
+            assert!(state.pending_commits.is_empty());
+        });
     }
 
     #[test]
     fn detect_with_done_and_pending() {
-        let fs = Arc::new(FakeFs::new());
-        let provider = FakeGitProvider::new(fs.clone());
-        let workdir = PathBuf::from("/fake/repo");
-        provider.set_exists(true);
-        provider.set_workdir(workdir.clone());
-        let repo = provider.open(&workdir).unwrap();
-        let git_dir = workdir.join(".git");
+        smol::block_on(async {
+            let fs = Arc::new(FakeFs::new());
+            let provider = FakeGitProvider::new(fs.clone());
+            let workdir = PathBuf::from("/fake/repo");
+            provider.set_exists(true);
+            provider.set_workdir(workdir.clone());
+            let repo = provider.open(&workdir).await.unwrap();
+            let git_dir = workdir.join(".git");
 
-        setup_rebase_fs(&git_dir, &fs);
-        fs.insert_file(
-            git_dir.join("rebase-merge/done"),
-            "pick aaa1111 Done commit\n",
-        );
-        fs.insert_file(
-            git_dir.join("rebase-merge/git-rebase-todo"),
-            "pick bbb2222 Pending one\npick ccc3333 Pending two\n",
-        );
+            setup_rebase_fs(&git_dir, &fs);
+            fs.insert_file(
+                git_dir.join("rebase-merge/done"),
+                "pick aaa1111 Done commit\n",
+            );
+            fs.insert_file(
+                git_dir.join("rebase-merge/git-rebase-todo"),
+                "pick bbb2222 Pending one\npick ccc3333 Pending two\n",
+            );
 
-        let state = detect_rebase_state(&git_dir, &*fs, &*repo).unwrap();
-        assert_eq!(state.done_commits.len(), 1);
-        assert_eq!(state.done_commits[0].short_hash, "aaa1111");
-        assert_eq!(state.pending_commits.len(), 2);
-        assert_eq!(state.pending_commits[0].short_hash, "bbb2222");
-        assert_eq!(state.pending_commits[1].short_hash, "ccc3333");
+            let state = detect_rebase_state(&git_dir, &*fs, &*repo).await.unwrap();
+            assert_eq!(state.done_commits.len(), 1);
+            assert_eq!(state.done_commits[0].short_hash, "aaa1111");
+            assert_eq!(state.pending_commits.len(), 2);
+            assert_eq!(state.pending_commits[0].short_hash, "bbb2222");
+            assert_eq!(state.pending_commits[1].short_hash, "ccc3333");
+        });
     }
 }

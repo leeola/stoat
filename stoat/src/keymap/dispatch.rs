@@ -231,13 +231,7 @@ pub fn dispatch_editor_action<C: AppContext>(
         "DiffReviewCycleComparisonMode" => {
             ed!(stoat, cx, |s, cx| s.diff_review_cycle_comparison_mode(cx))
         },
-        "DiffReviewRevertHunk" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.diff_review_revert_hunk(cx) {
-                    tracing::error!("DiffReviewRevertHunk failed: {e}");
-                }
-            });
-        },
+        "DiffReviewRevertHunk" => ed!(stoat, cx, |s, cx| s.diff_review_revert_hunk(cx)),
         "DiffReviewToggleFollow" => ed!(stoat, cx, |s, cx| s.diff_review_toggle_follow(cx)),
 
         "DiffReviewEnterLineSelect" => {
@@ -268,34 +262,10 @@ pub fn dispatch_editor_action<C: AppContext>(
             ed!(stoat, cx, |s, cx| s.diff_review_line_select_up(cx))
         },
 
-        "GitStageHunk" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.git_stage_hunk(cx) {
-                    tracing::error!("GitStageHunk failed: {e}");
-                }
-            });
-        },
-        "GitUnstageHunk" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.git_unstage_hunk(cx) {
-                    tracing::error!("GitUnstageHunk failed: {e}");
-                }
-            });
-        },
-        "GitToggleStageHunk" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.git_toggle_stage_hunk(cx) {
-                    tracing::error!("GitToggleStageHunk failed: {e}");
-                }
-            });
-        },
-        "GitToggleStageLine" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.git_toggle_stage_line(cx) {
-                    tracing::error!("GitToggleStageLine failed: {e}");
-                }
-            });
-        },
+        "GitStageHunk" => ed!(stoat, cx, |s, cx| s.git_stage_hunk(cx)),
+        "GitUnstageHunk" => ed!(stoat, cx, |s, cx| s.git_unstage_hunk(cx)),
+        "GitToggleStageHunk" => ed!(stoat, cx, |s, cx| s.git_toggle_stage_hunk(cx)),
+        "GitToggleStageLine" => ed!(stoat, cx, |s, cx| s.git_toggle_stage_line(cx)),
 
         "BlameToggleAuthor" => ed!(stoat, cx, |s, cx| s.blame_toggle_author(cx)),
         "BlameToggleDate" => ed!(stoat, cx, |s, cx| s.blame_toggle_date(cx)),
@@ -309,20 +279,8 @@ pub fn dispatch_editor_action<C: AppContext>(
         "ConflictReviewDismiss" => ed!(stoat, cx, |s, cx| s.conflict_review_dismiss(cx)),
         "ConflictToggleView" => ed!(stoat, cx, |s, cx| s.conflict_toggle_view(cx)),
 
-        "WriteFile" | "Save" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.write_file(cx) {
-                    tracing::error!("WriteFile failed: {}", e);
-                }
-            });
-        },
-        "WriteAll" => {
-            stoat.update(cx, |s, cx| {
-                if let Err(e) = s.write_all(cx) {
-                    tracing::error!("WriteAll failed: {}", e);
-                }
-            });
-        },
+        "WriteFile" | "Save" => ed!(stoat, cx, |s, cx| s.write_file(cx)),
+        "WriteAll" => ed!(stoat, cx, |s, cx| s.write_all(cx)),
 
         _ => return false,
     }

@@ -861,12 +861,12 @@ impl PaneGroupView {
         let oid = commit.oid.clone();
 
         self.app_state.rebase.preview_task = Some(cx.spawn(async move |this, cx| {
-            let diff_text = smol::unblock(move || -> Option<String> {
-                let repo = services.git.open(&root_path).ok()?;
-                let files = repo.commit_files_by_oid(&oid).ok()?;
+            let diff_text = async {
+                let repo = services.git.open(&root_path).await.ok()?;
+                let files = repo.commit_files_by_oid(&oid).await.ok()?;
                 let mut combined = String::new();
                 for file in &files {
-                    if let Ok(diff) = repo.commit_file_diff(&oid, &file.path) {
+                    if let Ok(diff) = repo.commit_file_diff(&oid, &file.path).await {
                         if !combined.is_empty() {
                             combined.push('\n');
                         }
@@ -878,7 +878,7 @@ impl PaneGroupView {
                 } else {
                     Some(combined)
                 }
-            })
+            }
             .await;
 
             if let Some(text) = diff_text {
@@ -889,6 +889,29 @@ impl PaneGroupView {
                 });
             }
         }));
+    }
+
+    /// Refresh git status asynchronously via [`AppState::set_git_status`].
+    pub(crate) fn refresh_git_status_async(&mut self, cx: &mut Context<Self>) {
+        let git = self.app_state.services.git.clone();
+        let root_path = self.app_state.worktree.lock().root().to_path_buf();
+
+        cx.spawn(async move |this, cx| {
+            let (branch_info, status_files) = if let Ok(repo) = git.discover(&root_path).await {
+                let branch_info = repo.gather_branch_info().await;
+                let files = repo.gather_status().await.unwrap_or_default();
+                (branch_info, files)
+            } else {
+                (None, Vec::new())
+            };
+            this.update(cx, |this, cx| {
+                this.app_state.set_git_status(branch_info, status_files);
+                cx.notify();
+            })
+            .ok();
+            Some(())
+        })
+        .detach();
     }
 
     /// Split the active pane in the given direction.
@@ -1037,12 +1060,12 @@ impl Focusable for PaneGroupView {
     }
 }
 
-fn git_index_changed(
+async fn git_index_changed(
     root: &std::path::Path,
     last_mtime: &mut Option<SystemTime>,
     fs: &dyn crate::fs::Fs,
 ) -> bool {
-    let Ok(metadata) = fs.metadata(&root.join(".git/index")) else {
+    let Ok(metadata) = fs.metadata(&root.join(".git/index")).await else {
         return false;
     };
     let Some(mtime) = metadata.modified else {
@@ -1061,7 +1084,7 @@ impl Render for PaneGroupView {
                 if !window.is_window_active() {
                     return;
                 }
-                this.app_state.refresh_git_status();
+                this.refresh_git_status_async(cx);
                 if let Some(editor) = this.active_editor().cloned() {
                     editor.update(cx, |editor, cx| {
                         editor.stoat.update(cx, |stoat, cx| {
@@ -1101,7 +1124,7 @@ impl Render for PaneGroupView {
 
                         let is_poll = matches!(event, futures::future::Either::Right(_));
 
-                        if is_poll && !git_index_changed(&root, &mut last_index_mtime, &*fs) {
+                        if is_poll && !git_index_changed(&root, &mut last_index_mtime, &*fs).await {
                             let follow_active = this.update(cx, |this, cx| {
                                 this.active_editor()
                                     .map(|e| {
@@ -1119,33 +1142,66 @@ impl Render for PaneGroupView {
                         smol::Timer::after(debounce).await;
                         while receiver.try_recv().is_ok() {}
 
-                        let ok = this.update(cx, |this, cx| {
-                            this.app_state.refresh_git_status();
+                        let has_rebase = this
+                            .update(cx, |this, _cx| this.app_state.rebase.in_progress.is_some())
+                            .unwrap_or(false);
 
-                            if this.app_state.rebase.in_progress.is_some() {
-                                let git_dir = root.join(".git");
-                                let repo = services.git.open(&root).ok();
-                                let detected = repo.as_deref().and_then(|r| {
+                        let git_dir = root.join(".git");
+                        let (rebase_detected, rebase_phase, rebase_conflicts) = if has_rebase {
+                            let repo_for_detect = services.git.open(&root).await.ok();
+                            let detected = match repo_for_detect {
+                                Some(ref repo) => {
                                     crate::git::rebase::detect_rebase_state(
                                         &git_dir,
                                         &*services.fs,
-                                        r,
+                                        &**repo,
                                     )
-                                });
-                                if let Some(ip) = detected {
-                                    let phase = crate::git::rebase::phase_from_in_progress(
-                                        &ip,
-                                        &git_dir,
-                                        &*services.fs,
-                                    );
-                                    if matches!(
-                                        phase,
-                                        crate::git::rebase::RebasePhase::PausedConflict { .. }
-                                    ) {
-                                        if let Some(repo) = repo.as_deref() {
-                                            this.app_state.rebase.conflict_files =
-                                                repo.conflict_files();
-                                        }
+                                    .await
+                                },
+                                None => None,
+                            };
+                            if let Some(ref ip) = detected {
+                                let phase = crate::git::rebase::phase_from_in_progress(
+                                    ip,
+                                    &git_dir,
+                                    &*services.fs,
+                                )
+                                .await;
+                                let conflicts = if matches!(
+                                    phase,
+                                    crate::git::rebase::RebasePhase::PausedConflict { .. }
+                                ) {
+                                    match repo_for_detect {
+                                        Some(ref repo) => repo.conflict_files().await,
+                                        None => vec![],
+                                    }
+                                } else {
+                                    vec![]
+                                };
+                                (detected, Some(phase), conflicts)
+                            } else {
+                                (detected, None, vec![])
+                            }
+                        } else {
+                            (None, None, vec![])
+                        };
+
+                        let (branch_info, status_files) =
+                            if let Ok(repo) = services.git.discover(&root).await {
+                                let bi = repo.gather_branch_info().await;
+                                let sf = repo.gather_status().await.unwrap_or_default();
+                                (bi, sf)
+                            } else {
+                                (None, Vec::new())
+                            };
+
+                        let ok = this.update(cx, |this, cx| {
+                            this.app_state.set_git_status(branch_info, status_files);
+
+                            if has_rebase {
+                                if let (Some(ip), Some(phase)) = (rebase_detected, rebase_phase) {
+                                    if !rebase_conflicts.is_empty() {
+                                        this.app_state.rebase.conflict_files = rebase_conflicts;
                                     } else {
                                         this.app_state.rebase.conflict_files.clear();
                                     }

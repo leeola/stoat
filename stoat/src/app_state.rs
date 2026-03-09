@@ -400,16 +400,7 @@ impl AppState {
         let worktree = Arc::new(Mutex::new(Worktree::new(root.clone())));
         let buffer_store = cx.new(|_| BufferStore::new());
 
-        // Initialize git status for status bar
-        let (branch_info, git_status_files, dirty_count) =
-            if let Ok(repo) = services.git.open(&root) {
-                let branch_info = repo.gather_branch_info();
-                let status_files = repo.gather_status().unwrap_or_else(|_| Vec::new());
-                let dirty_count = status_files.len();
-                (branch_info, status_files, dirty_count)
-            } else {
-                (None, Vec::new(), 0)
-            };
+        let (branch_info, git_status_files, dirty_count) = (None, Vec::new(), 0);
 
         let project_env: Arc<RwLock<Option<ProjectEnvironment>>> = Arc::new(RwLock::new(None));
 
@@ -1035,25 +1026,15 @@ impl AppState {
         (prev_mode, prev_ctx)
     }
 
-    /// Refresh git status (branch info, dirty count, file list) from the repository.
-    ///
-    /// Used by the window activation handler, filesystem watcher, and modals to keep
-    /// the status bar and git state current after external git operations.
-    pub fn refresh_git_status(&mut self) {
-        let root_path = self.worktree.lock().root().to_path_buf();
-        if let Ok(repo) = self.services.git.discover(&root_path) {
-            let branch_info = repo.gather_branch_info();
-            let status_files = repo.gather_status().unwrap_or_default();
-            self.git_status.dirty_count = status_files.len();
-            self.git_status.branch_info = branch_info;
-            self.git_status.files = status_files;
-            self.git_status.filtered = self.git_status.filter_files(&self.git_status.files);
-        } else {
-            self.git_status.files.clear();
-            self.git_status.filtered.clear();
-            self.git_status.branch_info = None;
-            self.git_status.dirty_count = 0;
-        }
+    pub fn set_git_status(
+        &mut self,
+        branch_info: Option<crate::git::status::GitBranchInfo>,
+        status_files: Vec<crate::git::status::GitStatusEntry>,
+    ) {
+        self.git_status.dirty_count = status_files.len();
+        self.git_status.branch_info = branch_info;
+        self.git_status.files = status_files;
+        self.git_status.filtered = self.git_status.filter_files(&self.git_status.files);
     }
 
     /// Open git status modal.
@@ -1074,7 +1055,6 @@ impl AppState {
         self.git_status.previous_mode = Some(current_mode);
         self.git_status.previous_key_context = Some(current_key_context);
 
-        self.refresh_git_status();
         self.git_status.selected = 0;
 
         // Clear any existing preview (caller will load new preview)
@@ -1178,8 +1158,7 @@ impl AppState {
         // Replace worktree with new root
         *self.worktree.lock() = Worktree::new(canonical_path.clone());
 
-        // Update git repository
-        self.refresh_git_status();
+        // Git status refresh handled by caller (PaneGroupView) asynchronously
 
         let needs_lsp_restart = self
             .lsp_state

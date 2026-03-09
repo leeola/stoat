@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
 use parking_lot::Mutex;
 use smol::channel;
@@ -15,10 +16,14 @@ pub struct ClaudeSessionConfig {
 
 pub type StdinMessage = (String, PermissionMode);
 
+#[async_trait]
 pub trait ClaudeProvider: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
-    fn create_session(&self, config: ClaudeSessionConfig) -> Result<ClaudeSession, anyhow::Error>;
+    async fn create_session(
+        &self,
+        config: ClaudeSessionConfig,
+    ) -> Result<ClaudeSession, anyhow::Error>;
 }
 
 pub struct ClaudeSession {
@@ -30,12 +35,16 @@ pub struct ClaudeSession {
 
 pub struct RealClaudeProvider;
 
+#[async_trait]
 impl ClaudeProvider for RealClaudeProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn create_session(&self, config: ClaudeSessionConfig) -> Result<ClaudeSession, anyhow::Error> {
+    async fn create_session(
+        &self,
+        config: ClaudeSessionConfig,
+    ) -> Result<ClaudeSession, anyhow::Error> {
         let (stdin_tx, stdin_rx) = channel::bounded::<StdinMessage>(32);
         let (stdout_tx, stdout_rx) = channel::bounded::<SdkMessage>(256);
 
@@ -176,12 +185,16 @@ impl FakeClaudeProvider {
 }
 
 #[cfg(any(test, feature = "test-support", feature = "dev-tools"))]
+#[async_trait]
 impl ClaudeProvider for FakeClaudeProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn create_session(&self, _config: ClaudeSessionConfig) -> Result<ClaudeSession, anyhow::Error> {
+    async fn create_session(
+        &self,
+        _config: ClaudeSessionConfig,
+    ) -> Result<ClaudeSession, anyhow::Error> {
         let (stdin_tx, stdin_rx) = channel::bounded::<StdinMessage>(32);
         let (stdout_tx, stdout_rx) = channel::bounded::<SdkMessage>(256);
 

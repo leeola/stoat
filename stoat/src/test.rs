@@ -438,7 +438,7 @@ impl<'a> TestStoat<'a> {
         self.update(|s, cx| {
             // Set file path and load content into buffer
             s.current_file_path = Some(abs.clone());
-            let content = s.services.fs.read_to_string(&abs).unwrap_or_default();
+            let content = smol::block_on(s.services.fs.read_to_string(&abs)).unwrap_or_default();
             let buffer_item = s.active_buffer(cx);
             buffer_item.update(cx, |item, cx| {
                 item.buffer().update(cx, |buffer, _| {
@@ -733,6 +733,11 @@ impl<'a> TestStoat<'a> {
                 .timer(Duration::from_millis(100))
                 .await;
         }
+    }
+
+    /// Run the executor until all spawned tasks have parked.
+    pub fn run_until_parked(&mut self) {
+        self.cx.run_until_parked();
     }
 
     /// Yield to both foreground and background executors for the given duration.
