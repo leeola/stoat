@@ -16,6 +16,7 @@ use crate::{
 };
 use git2::DiffOptions;
 use gpui::Context;
+use std::sync::Arc;
 use text::ToPoint;
 
 impl Stoat {
@@ -76,8 +77,12 @@ impl Stoat {
                     .map_err(|e| format!("Repository not found: {e}"))?;
                 let index_content = repo.index_content(&file_path).await.unwrap_or_default();
 
-                let wi_diff = BufferDiff::new(buffer_id, index_content.clone(), &buffer_snapshot)
-                    .map_err(|e| format!("Working-vs-index diff failed: {e}"))?;
+                let wi_diff = BufferDiff::new(
+                    buffer_id,
+                    Arc::from(index_content.as_str()),
+                    &buffer_snapshot,
+                )
+                .map_err(|e| format!("Working-vs-index diff failed: {e}"))?;
 
                 let line_is_staged = if is_deletion {
                     !wi_diff.hunks.iter().any(|h| {

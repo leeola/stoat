@@ -584,7 +584,7 @@ fn compute_word_diff(base_line: &str, new_line: &str) -> Vec<Range<usize>> {
 mod tests {
     use super::*;
     use crate::git::diff::BufferDiff;
-    use std::num::NonZeroU64;
+    use std::{num::NonZeroU64, sync::Arc};
     use text::{Buffer, BufferId, ReplicaId};
 
     fn create_buffer(text: &str) -> Buffer {
@@ -621,7 +621,7 @@ mod tests {
 
         // Base text without the added line
         let base_text = "line 1\nline 2\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
@@ -647,7 +647,7 @@ mod tests {
 
         // Base text with the deleted line
         let base_text = "line 1\nline 2\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
@@ -677,7 +677,7 @@ mod tests {
 
         // Base text with original line
         let base_text = "line 1\nline 2\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
@@ -711,7 +711,7 @@ mod tests {
 
         // Base text with original mid-line content
         let base_text = "line 1\nhello world\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
@@ -770,7 +770,7 @@ mod tests {
         let snapshot = buffer.snapshot().clone();
 
         let base_text = "line 1\nline 2\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);
@@ -801,7 +801,7 @@ mod tests {
         let snapshot = buffer.snapshot().clone();
 
         let base_text = "line 1\nline 2\nline 3";
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Failed to create diff");
 
         let display_buffer = DisplayBuffer::new(snapshot, Some(diff), true, None, None, None);

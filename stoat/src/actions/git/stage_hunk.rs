@@ -8,6 +8,7 @@
 
 use crate::{git::diff::BufferDiff, stoat::Stoat};
 use gpui::Context;
+use std::sync::Arc;
 use text::ToPoint;
 
 impl Stoat {
@@ -117,8 +118,9 @@ impl Stoat {
                     .await
                     .map_err(|e| format!("Repository not found: {e}"))?;
                 let index_content = repo.index_content(&file_path).await.unwrap_or_default();
-                let stage_diff = BufferDiff::new(buffer_id, index_content, &buffer_snapshot_clone)
-                    .map_err(|e| format!("Working-vs-index diff failed: {e}"))?;
+                let stage_diff =
+                    BufferDiff::new(buffer_id, Arc::from(index_content), &buffer_snapshot_clone)
+                        .map_err(|e| format!("Working-vs-index diff failed: {e}"))?;
 
                 let stage_hunk = stage_diff.hunks.iter().find(|h| {
                     let start = h.buffer_range.start.to_point(&buffer_snapshot_clone).row;

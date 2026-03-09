@@ -453,7 +453,7 @@ impl<'a> TestStoat<'a> {
                 let snapshot = item.buffer().read(cx).snapshot();
                 let diff = crate::git::diff::BufferDiff::new(
                     item.buffer().read(cx).remote_id(),
-                    head,
+                    Arc::from(head),
                     snapshot,
                 )
                 .unwrap();

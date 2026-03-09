@@ -1400,6 +1400,8 @@ impl Stoat {
             }
             item.set_cached_disk_mtime(mtime);
             item.set_line_ending(line_ending);
+            item.set_cached_head_text(None);
+            item.set_cached_index_text(None);
         });
 
         if !self
@@ -1414,11 +1416,11 @@ impl Stoat {
             buffer_item_entity.update(cx, |item, cx| {
                 let buffer_snapshot = item.buffer().read(cx).snapshot();
                 let buf_id = buffer_snapshot.remote_id();
-                match BufferDiff::new(buf_id, head.to_string(), buffer_snapshot) {
+                match BufferDiff::new(buf_id, Arc::from(head), buffer_snapshot) {
                     Ok(ref diff) => {
                         if let Some(idx) = index_content {
                             let wi_diff =
-                                BufferDiff::new(buf_id, idx.to_string(), buffer_snapshot).ok();
+                                BufferDiff::new(buf_id, Arc::from(idx), buffer_snapshot).ok();
                             let ranges = crate::git::diff::compute_staged_buffer_rows(
                                 diff,
                                 wi_diff.as_ref(),
@@ -1633,7 +1635,7 @@ impl Stoat {
     /// All git content must be fetched by the caller.
     pub(crate) fn compute_diff_from_refs(
         &self,
-        path: &std::path::Path,
+        _path: &std::path::Path,
         head_content: Option<&str>,
         index_content: Option<&str>,
         parent_content: Option<&str>,
@@ -1644,108 +1646,25 @@ impl Stoat {
         Option<Vec<std::ops::Range<u32>>>,
         Option<Vec<usize>>,
     )> {
-        use crate::git::diff_review::DiffComparisonMode;
-
         let buffer_item = self.active_buffer(cx);
         let buffer_snapshot = buffer_item.read(cx).buffer().read(cx).snapshot();
         let buffer_id = buffer_snapshot.remote_id();
-
         let comparison_mode = self.review_comparison_mode();
-        tracing::debug!(
-            "compute_diff_from_refs: mode={:?}, path={:?}",
+
+        let head: Option<Arc<str>> = head_content.map(Arc::from);
+        let index: Option<Arc<str>> = index_content.map(Arc::from);
+        let parent: Option<Arc<str>> = parent_content.map(Arc::from);
+        let working: Option<Arc<str>> = working_content.map(Arc::from);
+
+        crate::git::diff::compute_diff_from_refs(
+            buffer_id,
             comparison_mode,
-            path
-        );
-
-        let (diff, staged_rows, staged_hunk_indices) = match comparison_mode {
-            DiffComparisonMode::WorkingVsHead => {
-                let base = head_content?;
-                tracing::debug!(
-                    "WorkingVsHead: base_len={}, working_len={}",
-                    base.len(),
-                    buffer_snapshot.text().len()
-                );
-                let diff = BufferDiff::new(buffer_id, base.to_string(), buffer_snapshot).ok()?;
-                let (staged_rows, staged_hunks) = index_content
-                    .map(|idx| {
-                        let wi_diff =
-                            BufferDiff::new(buffer_id, idx.to_string(), buffer_snapshot).ok();
-                        let rows = crate::git::diff::compute_staged_buffer_rows(
-                            &diff,
-                            wi_diff.as_ref(),
-                            buffer_snapshot,
-                        );
-                        let hunks = crate::git::diff::compute_staged_hunk_indices(
-                            &diff,
-                            wi_diff.as_ref(),
-                            buffer_snapshot,
-                        );
-                        (rows, hunks)
-                    })
-                    .unzip();
-                let staged_rows =
-                    staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
-                let staged_hunks =
-                    staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
-                (diff, staged_rows, staged_hunks)
-            },
-            DiffComparisonMode::WorkingVsIndex => {
-                let base = index_content.unwrap_or("");
-                tracing::debug!(
-                    "WorkingVsIndex: base_len={}, working_len={}",
-                    base.len(),
-                    buffer_snapshot.text().len()
-                );
-                let diff = BufferDiff::new(buffer_id, base.to_string(), buffer_snapshot).ok()?;
-                (diff, None, None)
-            },
-            DiffComparisonMode::IndexVsHead => {
-                let head = head_content?;
-                tracing::debug!(
-                    "IndexVsHead: head_len={}, buffer_len={}",
-                    head.len(),
-                    buffer_snapshot.text().len()
-                );
-                let diff = BufferDiff::new(buffer_id, head.to_string(), buffer_snapshot).ok()?;
-                let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
-                (diff, Some(vec![0..u32::MAX]), Some(all_indices))
-            },
-            DiffComparisonMode::HeadVsParent => {
-                let parent = parent_content.unwrap_or("");
-                tracing::debug!(
-                    "HeadVsParent: parent_len={}, buffer_len={}",
-                    parent.len(),
-                    buffer_snapshot.text().len()
-                );
-                let diff = BufferDiff::new(buffer_id, parent.to_string(), buffer_snapshot).ok()?;
-
-                let (staged_rows, staged_hunks) = working_content
-                    .map(|wc| {
-                        let wh_diff =
-                            BufferDiff::new(buffer_id, wc.to_string(), buffer_snapshot).ok();
-                        let rows = crate::git::diff::compute_staged_buffer_rows(
-                            &diff,
-                            wh_diff.as_ref(),
-                            buffer_snapshot,
-                        );
-                        let hunks = crate::git::diff::compute_staged_hunk_indices(
-                            &diff,
-                            wh_diff.as_ref(),
-                            buffer_snapshot,
-                        );
-                        (rows, hunks)
-                    })
-                    .unzip();
-                let staged_rows =
-                    staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
-                let staged_hunks =
-                    staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
-                (diff, staged_rows, staged_hunks)
-            },
-        };
-
-        tracing::debug!("Computed diff with {} hunks", diff.hunks.len());
-        Some((diff, staged_rows, staged_hunk_indices))
+            buffer_snapshot,
+            head.as_ref(),
+            index.as_ref(),
+            parent.as_ref(),
+            working.as_ref(),
+        )
     }
 
     /// Recompute the diff display for the current file and push results into
@@ -1806,22 +1725,59 @@ impl Stoat {
                 },
             };
 
+            let head: Option<Arc<str>> = head.map(Arc::from);
+            let index: Option<Arc<str>> = index.map(Arc::from);
+            let parent: Option<Arc<str>> = parent.map(Arc::from);
+            let working: Option<Arc<str>> = working.map(Arc::from);
+
+            let Ok((buffer_id, snapshot, buffer_modified, cached_head, cached_index)) = this
+                .update(cx, |s, cx| {
+                    let buffer_item = s.active_buffer(cx);
+                    let item = buffer_item.read(cx);
+                    let snap = item.buffer().read(cx).snapshot().clone();
+                    let modified = item.is_modified(cx);
+                    let ch = item.cached_head_text().cloned();
+                    let ci = item.cached_index_text().cloned();
+                    (snap.remote_id(), snap, modified, ch, ci)
+                })
+            else {
+                return;
+            };
+
+            let head_unchanged = cached_head.as_ref() == head.as_ref();
+            let index_unchanged = cached_index.as_ref() == index.as_ref();
+            if head_unchanged && index_unchanged && !buffer_modified {
+                return;
+            }
+
+            let result = cx
+                .background_executor()
+                .spawn({
+                    let head = head.clone();
+                    let index = index.clone();
+                    async move {
+                        crate::git::diff::compute_diff_from_refs(
+                            buffer_id,
+                            comparison_mode,
+                            &snapshot,
+                            head.as_ref(),
+                            index.as_ref(),
+                            parent.as_ref(),
+                            working.as_ref(),
+                        )
+                    }
+                })
+                .await;
+
             this.update(cx, |s, cx| {
-                if let Some((new_diff, staged_rows, staged_hunk_indices)) = s
-                    .compute_diff_from_refs(
-                        &file_path,
-                        head.as_deref(),
-                        index.as_deref(),
-                        parent.as_deref(),
-                        working.as_deref(),
-                        cx,
-                    )
-                {
+                if let Some((new_diff, staged_rows, staged_hunk_indices)) = result {
                     let buffer_item = s.active_buffer(cx);
                     buffer_item.update(cx, |item, _| {
                         item.set_diff(Some(new_diff));
                         item.set_staged_rows(staged_rows);
                         item.set_staged_hunk_indices(staged_hunk_indices);
+                        item.set_cached_head_text(head);
+                        item.set_cached_index_text(index);
                     });
                 }
             })

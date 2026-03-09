@@ -15,6 +15,7 @@ use gpui::{App, Context, Entity, EventEmitter};
 use smallvec::SmallVec;
 use std::{
     ops::Range,
+    sync::Arc,
     time::{Instant, SystemTime},
 };
 use stoat_lsp::{BufferDiagnostic, DiagnosticSet, ServerId};
@@ -44,6 +45,8 @@ pub struct BufferItem {
     diagnostics_version: u64,
     /// Last known disk mtime, refreshed asynchronously on window focus / file watcher events.
     cached_disk_mtime: Option<SystemTime>,
+    cached_head_text: Option<Arc<str>>,
+    cached_index_text: Option<Arc<str>>,
 }
 
 impl EventEmitter<BufferItemEvent> for BufferItem {}
@@ -70,6 +73,8 @@ impl BufferItem {
             diagnostics: SmallVec::new(),
             diagnostics_version: 0,
             cached_disk_mtime: None,
+            cached_head_text: None,
+            cached_index_text: None,
         }
     }
 
@@ -313,6 +318,22 @@ impl BufferItem {
 
     pub fn cached_disk_mtime(&self) -> Option<SystemTime> {
         self.cached_disk_mtime
+    }
+
+    pub fn cached_head_text(&self) -> Option<&Arc<str>> {
+        self.cached_head_text.as_ref()
+    }
+
+    pub fn set_cached_head_text(&mut self, text: Option<Arc<str>>) {
+        self.cached_head_text = text;
+    }
+
+    pub fn cached_index_text(&self) -> Option<&Arc<str>> {
+        self.cached_index_text.as_ref()
+    }
+
+    pub fn set_cached_index_text(&mut self, text: Option<Arc<str>>) {
+        self.cached_index_text = text;
     }
 
     pub fn base_text_for_hunk(&self, hunk_idx: usize) -> &str {

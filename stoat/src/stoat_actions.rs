@@ -149,7 +149,10 @@ impl Stoat {
                     None
                 };
 
-                let found = this
+                use std::sync::Arc;
+
+                // Load file on main thread and extract snapshot
+                let snapshot = this
                     .update(cx, |s, cx| {
                         if s.load_file_from_content(
                             &abs_path,
@@ -161,10 +164,9 @@ impl Stoat {
                         )
                         .is_err()
                         {
-                            return false;
+                            return None;
                         }
 
-                        // Replace buffer content for non-working modes
                         match comparison_mode {
                             crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                                 if let Some(ref idx_content) = index {
@@ -181,50 +183,77 @@ impl Stoat {
                             _ => {},
                         }
 
-                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
-                                (head.as_deref(), index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
-                                (None, index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                                (head.as_deref(), None, None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                                (None, None, parent.as_deref(), Some(content.as_str()))
-                            },
-                        };
-
-                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
-                            .compute_diff_from_refs(
-                                &abs_path, d_head, d_index, d_parent, d_working, cx,
-                            )
-                        {
-                            if !diff.hunks.is_empty() {
-                                let buffer_item = s.active_buffer(cx);
-                                buffer_item.update(cx, |item, _| {
-                                    item.set_diff(Some(diff.clone()));
-                                    item.set_staged_rows(staged_rows);
-                                    item.set_staged_hunk_indices(staged_hunk_indices);
-                                });
-
-                                debug!(
-                                    "Loaded next file with {} hunks at idx={}",
-                                    diff.hunks.len(),
-                                    next_idx
-                                );
-
-                                s.review_state.file_idx = next_idx;
-                                s.review_state.hunk_idx = 0;
-                                s.jump_to_current_hunk(true, cx);
-                                return true;
-                            }
-                        }
-                        false
+                        let buffer_item = s.active_buffer(cx);
+                        let snap = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
+                        Some((snap.remote_id(), snap))
                     })
                     .ok()
-                    .unwrap_or(false);
+                    .flatten();
+
+                let Some((buffer_id, snapshot)) = snapshot else {
+                    continue;
+                };
+
+                // Build Arc refs for diff mode
+                let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                    crate::git::diff_review::DiffComparisonMode::WorkingVsHead => (
+                        head.as_deref().map(Arc::from),
+                        index.as_deref().map(Arc::from),
+                        None,
+                        None,
+                    ),
+                    crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                        (None, index.as_deref().map(Arc::from), None, None)
+                    },
+                    crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                        (head.as_deref().map(Arc::from), None, None, None)
+                    },
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent => (
+                        None,
+                        None,
+                        parent.as_deref().map(Arc::from),
+                        Some(Arc::from(content.as_str())),
+                    ),
+                };
+
+                // Compute diff on background thread
+                let diff_result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::git::diff::compute_diff_from_refs(
+                            buffer_id,
+                            comparison_mode,
+                            &snapshot,
+                            d_head.as_ref(),
+                            d_index.as_ref(),
+                            d_parent.as_ref(),
+                            d_working.as_ref(),
+                        )
+                    })
+                    .await;
+
+                // Apply result on main thread
+                let found = if let Some((diff, staged_rows, staged_hunk_indices)) = diff_result {
+                    if !diff.hunks.is_empty() {
+                        this.update(cx, |s, cx| {
+                            let buffer_item = s.active_buffer(cx);
+                            buffer_item.update(cx, |item, _| {
+                                item.set_diff(Some(diff));
+                                item.set_staged_rows(staged_rows);
+                                item.set_staged_hunk_indices(staged_hunk_indices);
+                            });
+                            s.review_state.file_idx = next_idx;
+                            s.review_state.hunk_idx = 0;
+                            s.jump_to_current_hunk(true, cx);
+                        })
+                        .ok();
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
 
                 if found {
                     if let Ok(counts) = repo.count_hunks_by_file(comparison_mode).await {
@@ -302,7 +331,9 @@ impl Stoat {
                     None
                 };
 
-                let found = this
+                use std::sync::Arc;
+
+                let snapshot = this
                     .update(cx, |s, cx| {
                         if s.load_file_from_content(
                             &abs_path,
@@ -314,7 +345,7 @@ impl Stoat {
                         )
                         .is_err()
                         {
-                            return false;
+                            return None;
                         }
 
                         match comparison_mode {
@@ -333,51 +364,75 @@ impl Stoat {
                             _ => {},
                         }
 
-                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
-                                (head.as_deref(), index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
-                                (None, index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                                (head.as_deref(), None, None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                                (None, None, parent.as_deref(), Some(content.as_str()))
-                            },
-                        };
-
-                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
-                            .compute_diff_from_refs(
-                                &abs_path, d_head, d_index, d_parent, d_working, cx,
-                            )
-                        {
-                            if !diff.hunks.is_empty() {
-                                let buffer_item = s.active_buffer(cx);
-                                buffer_item.update(cx, |item, _| {
-                                    item.set_diff(Some(diff.clone()));
-                                    item.set_staged_rows(staged_rows);
-                                    item.set_staged_hunk_indices(staged_hunk_indices);
-                                });
-
-                                debug!(
-                                    "Loaded prev file with {} hunks at idx={}",
-                                    diff.hunks.len(),
-                                    prev_idx
-                                );
-
-                                let last_hunk_idx = diff.hunks.len().saturating_sub(1);
-                                s.review_state.file_idx = prev_idx;
-                                s.review_state.hunk_idx = last_hunk_idx;
-                                s.jump_to_current_hunk(true, cx);
-                                return true;
-                            }
-                        }
-                        false
+                        let buffer_item = s.active_buffer(cx);
+                        let snap = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
+                        Some((snap.remote_id(), snap))
                     })
                     .ok()
-                    .unwrap_or(false);
+                    .flatten();
+
+                let Some((buffer_id, snapshot)) = snapshot else {
+                    continue;
+                };
+
+                let (d_head, d_index, d_parent, d_working) = match comparison_mode {
+                    crate::git::diff_review::DiffComparisonMode::WorkingVsHead => (
+                        head.as_deref().map(Arc::from),
+                        index.as_deref().map(Arc::from),
+                        None,
+                        None,
+                    ),
+                    crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
+                        (None, index.as_deref().map(Arc::from), None, None)
+                    },
+                    crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
+                        (head.as_deref().map(Arc::from), None, None, None)
+                    },
+                    crate::git::diff_review::DiffComparisonMode::HeadVsParent => (
+                        None,
+                        None,
+                        parent.as_deref().map(Arc::from),
+                        Some(Arc::from(content.as_str())),
+                    ),
+                };
+
+                let diff_result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::git::diff::compute_diff_from_refs(
+                            buffer_id,
+                            comparison_mode,
+                            &snapshot,
+                            d_head.as_ref(),
+                            d_index.as_ref(),
+                            d_parent.as_ref(),
+                            d_working.as_ref(),
+                        )
+                    })
+                    .await;
+
+                let found = if let Some((diff, staged_rows, staged_hunk_indices)) = diff_result {
+                    if !diff.hunks.is_empty() {
+                        let last_hunk_idx = diff.hunks.len().saturating_sub(1);
+                        this.update(cx, |s, cx| {
+                            let buffer_item = s.active_buffer(cx);
+                            buffer_item.update(cx, |item, _| {
+                                item.set_diff(Some(diff));
+                                item.set_staged_rows(staged_rows);
+                                item.set_staged_hunk_indices(staged_hunk_indices);
+                            });
+                            s.review_state.file_idx = prev_idx;
+                            s.review_state.hunk_idx = last_hunk_idx;
+                            s.jump_to_current_hunk(true, cx);
+                        })
+                        .ok();
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
 
                 if found {
                     if let Ok(counts) = repo.count_hunks_by_file(comparison_mode).await {
@@ -584,74 +639,111 @@ impl Stoat {
                 None
             };
 
-            this.update(cx, |s, cx| {
-                s.review_state.files = new_files;
-                s.review_state.file_idx = new_file_idx;
-                s.review_state.hunk_idx = clamped_hunk_idx;
+            // Load current file on main thread, extract snapshot for background diff
+            let current_snapshot = if let Some((abs_path, Some(content), mtime, head, index, ..)) =
+                &current_file_data
+            {
+                this.update(cx, |s, cx| {
+                    s.review_state.files = new_files.clone();
+                    s.review_state.file_idx = new_file_idx;
+                    s.review_state.hunk_idx = clamped_hunk_idx;
 
-                // Reload current file + refresh diff
-                if let Some((abs_path, Some(content), mtime, head, index, parent, working)) =
-                    current_file_data
-                {
                     let _ = s.load_file_from_content(
-                        &abs_path,
-                        &content,
-                        mtime,
+                        abs_path,
+                        content,
+                        *mtime,
                         head.as_deref(),
                         index.as_deref(),
                         cx,
                     );
+                    let buffer_item = s.active_buffer(cx);
+                    let snap = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
+                    (snap.remote_id(), snap)
+                })
+                .ok()
+            } else {
+                this.update(cx, |s, _| {
+                    s.review_state.files = new_files.clone();
+                    s.review_state.file_idx = new_file_idx;
+                    s.review_state.hunk_idx = clamped_hunk_idx;
+                })
+                .ok();
+                None
+            };
 
-                    let (d_head, d_index, d_parent, d_working) = match comparison_mode {
-                        crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
-                            (head.as_deref(), index.as_deref(), None, None)
-                        },
-                        crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
-                            (None, index.as_deref(), None, None)
-                        },
-                        crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                            (head.as_deref(), None, None, None)
-                        },
-                        crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                            (None, None, parent.as_deref(), working.as_deref())
-                        },
-                    };
+            // Background: compute diff for current file
+            let current_diff_result = if let (
+                Some((buffer_id, snapshot)),
+                Some((_, _, _, head, index, parent, working)),
+            ) = (current_snapshot, &current_file_data)
+            {
+                use std::sync::Arc;
+                let head: Option<Arc<str>> = head.as_deref().map(Arc::from);
+                let index: Option<Arc<str>> = index.as_deref().map(Arc::from);
+                let parent: Option<Arc<str>> = parent.as_deref().map(Arc::from);
+                let working: Option<Arc<str>> = working.as_deref().map(Arc::from);
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::git::diff::compute_diff_from_refs(
+                            buffer_id,
+                            comparison_mode,
+                            &snapshot,
+                            head.as_ref(),
+                            index.as_ref(),
+                            parent.as_ref(),
+                            working.as_ref(),
+                        )
+                    })
+                    .await;
+                result
+            } else {
+                None
+            };
 
-                    if let Some((new_diff, staged_rows, staged_hunk_indices)) = s
-                        .compute_diff_from_refs(&abs_path, d_head, d_index, d_parent, d_working, cx)
-                    {
-                        let buffer_item = s.active_buffer(cx);
-                        buffer_item.update(cx, |item, _| {
-                            item.set_diff(Some(new_diff));
-                            item.set_staged_rows(staged_rows);
-                            item.set_staged_hunk_indices(staged_hunk_indices);
-                        });
-                    }
-                }
+            // Apply current file diff result
+            if let Some((new_diff, staged_rows, staged_hunk_indices)) = current_diff_result {
+                this.update(cx, |s, cx| {
+                    let buffer_item = s.active_buffer(cx);
+                    buffer_item.update(cx, |item, _| {
+                        item.set_diff(Some(new_diff));
+                        item.set_staged_rows(staged_rows);
+                        item.set_staged_hunk_indices(staged_hunk_indices);
+                    });
+                })
+                .ok();
+            }
 
-                // Follow mode: navigate to target
-                if let Some((
-                    target_idx,
-                    old_count,
-                    abs_path,
-                    Some(content),
-                    mtime,
-                    head,
-                    index,
-                    parent,
-                    working,
-                )) = follow_data
-                {
-                    if s.load_file_from_content(
-                        &abs_path,
-                        &content,
-                        mtime,
-                        head.as_deref(),
-                        index.as_deref(),
-                        cx,
-                    )
-                    .is_ok()
-                    {
+            // Follow mode: load target file + compute diff
+            if let Some((
+                target_idx,
+                old_count,
+                abs_path,
+                Some(content),
+                mtime,
+                head,
+                index,
+                parent,
+                working,
+            )) = follow_data
+            {
+                use std::sync::Arc;
+
+                let follow_snapshot = this
+                    .update(cx, |s, cx| {
+                        if s.load_file_from_content(
+                            &abs_path,
+                            &content,
+                            mtime,
+                            head.as_deref(),
+                            index.as_deref(),
+                            cx,
+                        )
+                        .is_err()
+                        {
+                            return None;
+                        }
+
                         match comparison_mode {
                             crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
                                 if let Some(ref idx_content) = index {
@@ -668,27 +760,37 @@ impl Stoat {
                             _ => {},
                         }
 
-                        let (d_head, d_index, d_parent, d_working) = match comparison_mode {
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsHead => {
-                                (head.as_deref(), index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::WorkingVsIndex => {
-                                (None, index.as_deref(), None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::IndexVsHead => {
-                                (head.as_deref(), None, None, None)
-                            },
-                            crate::git::diff_review::DiffComparisonMode::HeadVsParent => {
-                                (None, None, parent.as_deref(), working.as_deref())
-                            },
-                        };
+                        let buffer_item = s.active_buffer(cx);
+                        let snap = buffer_item.read(cx).buffer().read(cx).snapshot().clone();
+                        Some((snap.remote_id(), snap))
+                    })
+                    .ok()
+                    .flatten();
 
-                        if let Some((diff, staged_rows, staged_hunk_indices)) = s
-                            .compute_diff_from_refs(
-                                &abs_path, d_head, d_index, d_parent, d_working, cx,
+                if let Some((buffer_id, snapshot)) = follow_snapshot {
+                    let head: Option<Arc<str>> = head.map(Arc::from);
+                    let index: Option<Arc<str>> = index.map(Arc::from);
+                    let parent: Option<Arc<str>> = parent.map(Arc::from);
+                    let working: Option<Arc<str>> = working.map(Arc::from);
+
+                    let follow_result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::git::diff::compute_diff_from_refs(
+                                buffer_id,
+                                comparison_mode,
+                                &snapshot,
+                                head.as_ref(),
+                                index.as_ref(),
+                                parent.as_ref(),
+                                working.as_ref(),
                             )
-                        {
-                            if !diff.hunks.is_empty() {
+                        })
+                        .await;
+
+                    if let Some((diff, staged_rows, staged_hunk_indices)) = follow_result {
+                        if !diff.hunks.is_empty() {
+                            this.update(cx, |s, cx| {
                                 let buffer_item = s.active_buffer(cx);
                                 buffer_item.update(cx, |item, _| {
                                     item.set_diff(Some(diff));
@@ -699,11 +801,14 @@ impl Stoat {
                                 s.review_state.file_idx = target_idx;
                                 s.review_state.hunk_idx = old_count;
                                 s.jump_to_current_hunk(true, cx);
-                            }
+                            })
+                            .ok();
                         }
                     }
                 }
+            }
 
+            this.update(cx, |s, cx| {
                 s.update_hunk_position_cache(&new_counts);
                 s.review_state.last_hunk_snapshot = new_counts;
                 cx.notify();

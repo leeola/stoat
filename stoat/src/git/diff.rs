@@ -55,7 +55,7 @@
 //! - [`git_repository`](crate::git::repository) - Provides access to git HEAD content
 //! - [`BufferItem`](crate::BufferItem) - Stores computed diffs for display
 
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use sum_tree::Bias;
 use text::{Anchor, BufferId, BufferSnapshot, ToPoint};
 use thiserror::Error;
@@ -203,7 +203,7 @@ pub struct BufferDiff {
     ///
     /// This is the "old" text that the buffer is compared against. Byte ranges
     /// in [`DiffHunk::diff_base_byte_range`] index into this string.
-    pub base_text: String,
+    pub base_text: Arc<str>,
 
     /// All hunks in this buffer, in order by position.
     ///
@@ -232,7 +232,7 @@ impl BufferDiff {
     /// Returns error if libgit2 diff fails. This shouldn't happen with valid UTF-8 text.
     pub fn new(
         buffer_id: BufferId,
-        base_text: String,
+        base_text: Arc<str>,
         buffer_snapshot: &BufferSnapshot,
     ) -> Result<Self, DiffError> {
         let hunks = compute_diff(&base_text, buffer_snapshot)?;
@@ -391,6 +391,75 @@ fn compute_diff(
     }
 
     Ok(hunks)
+}
+
+/// Pure diff computation from pre-fetched git refs.
+///
+/// Computes the display diff, staged rows, and staged hunk indices based on
+/// the comparison mode. All inputs are passed explicitly so this function is
+/// `Send` and can run on a background thread.
+pub fn compute_diff_from_refs(
+    buffer_id: BufferId,
+    comparison_mode: crate::git::diff_review::DiffComparisonMode,
+    buffer_snapshot: &BufferSnapshot,
+    head: Option<&Arc<str>>,
+    index: Option<&Arc<str>>,
+    parent: Option<&Arc<str>>,
+    working: Option<&Arc<str>>,
+) -> Option<(BufferDiff, Option<Vec<Range<u32>>>, Option<Vec<usize>>)> {
+    use crate::git::diff_review::DiffComparisonMode;
+
+    let (diff, staged_rows, staged_hunk_indices) = match comparison_mode {
+        DiffComparisonMode::WorkingVsHead => {
+            let base = head?;
+            let diff = BufferDiff::new(buffer_id, Arc::clone(base), buffer_snapshot).ok()?;
+            let (staged_rows, staged_hunks) = index
+                .map(|idx| {
+                    let wi_diff = BufferDiff::new(buffer_id, Arc::clone(idx), buffer_snapshot).ok();
+                    let rows = compute_staged_buffer_rows(&diff, wi_diff.as_ref(), buffer_snapshot);
+                    let hunks =
+                        compute_staged_hunk_indices(&diff, wi_diff.as_ref(), buffer_snapshot);
+                    (rows, hunks)
+                })
+                .unzip();
+            let staged_rows =
+                staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+            let staged_hunks =
+                staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+            (diff, staged_rows, staged_hunks)
+        },
+        DiffComparisonMode::WorkingVsIndex => {
+            let base = index.cloned().unwrap_or_else(|| Arc::from(""));
+            let diff = BufferDiff::new(buffer_id, base, buffer_snapshot).ok()?;
+            (diff, None, None)
+        },
+        DiffComparisonMode::IndexVsHead => {
+            let base = head?;
+            let diff = BufferDiff::new(buffer_id, Arc::clone(base), buffer_snapshot).ok()?;
+            let all_indices: Vec<usize> = (0..diff.hunks.len()).collect();
+            (diff, Some(vec![0..u32::MAX]), Some(all_indices))
+        },
+        DiffComparisonMode::HeadVsParent => {
+            let base = parent.cloned().unwrap_or_else(|| Arc::from(""));
+            let diff = BufferDiff::new(buffer_id, base, buffer_snapshot).ok()?;
+            let (staged_rows, staged_hunks) = working
+                .map(|wc| {
+                    let wh_diff = BufferDiff::new(buffer_id, Arc::clone(wc), buffer_snapshot).ok();
+                    let rows = compute_staged_buffer_rows(&diff, wh_diff.as_ref(), buffer_snapshot);
+                    let hunks =
+                        compute_staged_hunk_indices(&diff, wh_diff.as_ref(), buffer_snapshot);
+                    (rows, hunks)
+                })
+                .unzip();
+            let staged_rows =
+                staged_rows.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+            let staged_hunks =
+                staged_hunks.and_then(|v: Vec<_>| if v.is_empty() { None } else { Some(v) });
+            (diff, staged_rows, staged_hunks)
+        },
+    };
+
+    Some((diff, staged_rows, staged_hunk_indices))
 }
 
 /// Count hunks in a diff without creating full BufferDiff.
@@ -640,7 +709,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 2\nline 3\n");
         let snapshot = buffer.snapshot();
 
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Diff computation failed");
 
         assert_eq!(diff.hunks.len(), 1);
@@ -653,7 +722,7 @@ mod tests {
         let buffer = create_buffer("line 1\nmodified\nline 3\n");
         let snapshot = buffer.snapshot();
 
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Diff computation failed");
 
         assert_eq!(diff.hunks.len(), 1);
@@ -666,7 +735,7 @@ mod tests {
         let buffer = create_buffer("line 1\nline 3\n");
         let snapshot = buffer.snapshot();
 
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Diff computation failed");
 
         assert_eq!(diff.hunks.len(), 1);
@@ -679,7 +748,7 @@ mod tests {
         let buffer = create_buffer("line 1\nmodified\nline 3\n");
         let snapshot = buffer.snapshot();
 
-        let diff = BufferDiff::new(buffer.remote_id(), base_text.to_string(), &snapshot)
+        let diff = BufferDiff::new(buffer.remote_id(), Arc::from(base_text), &snapshot)
             .expect("Diff computation failed");
 
         let base_content = diff.base_text_for_hunk(0);
@@ -759,7 +828,7 @@ mod tests {
     fn make_diff(base: &str, working: &str) -> (BufferDiff, Buffer) {
         let buf = create_buffer(working);
         let snap = buf.snapshot();
-        let diff = BufferDiff::new(snap.remote_id(), base.to_string(), &snap).unwrap();
+        let diff = BufferDiff::new(snap.remote_id(), Arc::from(base), &snap).unwrap();
         (diff, buf)
     }
 
