@@ -21,7 +21,7 @@ use gpui::{
     WrappedLine,
 };
 use std::{collections::HashMap, sync::Arc, time::Instant};
-use stoat_lsp::{response::HoverBlockKind, BufferDiagnostic};
+use stoat_lsp::BufferDiagnostic;
 use text::{BufferSnapshot, ToPoint};
 
 pub struct EditorElement {
@@ -1445,11 +1445,12 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        use crate::hover::SectionKind;
+
         let stoat = self.view.read(cx).stoat.read(cx);
-        if !stoat.hover_state.visible || stoat.hover_state.blocks.is_empty() {
+        if !stoat.hover_state.visible || stoat.hover_state.sections.is_empty() {
             return;
         }
-
         let primary_cursor = match prepaint.cursor_layouts.first() {
             Some(b) => b,
             None => return,
@@ -1464,10 +1465,9 @@ impl EditorElement {
             fallbacks: None,
         };
         let font_size = px(stoat.config().buffer_font_size);
-        let text_color = self.style.text_color;
         let padding = px(8.0);
         let max_width = editor_bounds.size.width * 0.5;
-        let max_lines = 10u32;
+        let max_lines = 10usize;
 
         let bg_color = Hsla {
             h: 0.0,
@@ -1481,62 +1481,88 @@ impl EditorElement {
             l: 0.35,
             a: 1.0,
         };
-        let doc_color = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.65,
-            a: 1.0,
-        };
         let wrap_width = max_width - padding * 2.0;
-        let mut wrapped_lines: Vec<WrappedLine> = Vec::new();
-        let mut visual_line_count: usize = 0;
 
-        for block in &stoat.hover_state.blocks {
-            if visual_line_count >= max_lines as usize {
+        #[allow(clippy::large_enum_variant)]
+        enum HoverLine {
+            Wrapped(WrappedLine),
+            Shaped(gpui::ShapedLine),
+        }
+
+        let mut hover_lines: Vec<HoverLine> = Vec::new();
+        let mut visual_line_count: usize = 0;
+        let mut content_width = Pixels::ZERO;
+
+        for section in &stoat.hover_state.sections {
+            if visual_line_count >= max_lines {
                 break;
             }
-            let (color, weight) = match &block.kind {
-                HoverBlockKind::Code { .. } => (text_color, FontWeight::MEDIUM),
-                HoverBlockKind::Markdown | HoverBlockKind::PlainText => {
-                    (doc_color, FontWeight::NORMAL)
-                },
-            };
-            let block_font = Font {
-                weight,
-                ..font.clone()
-            };
-            let text = SharedString::from(block.text.clone());
-            let run = TextRun {
-                len: text.len(),
-                font: block_font,
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            if let Ok(lines) =
-                window
-                    .text_system()
-                    .shape_text(text, font_size, &[run], Some(wrap_width), None)
-            {
-                for line in lines {
-                    visual_line_count += line.wrap_boundaries.len() + 1;
-                    wrapped_lines.push(line);
-                    if visual_line_count >= max_lines as usize {
-                        break;
+
+            let runs: Vec<TextRun> = section
+                .spans
+                .iter()
+                .map(|span| TextRun {
+                    len: span.text.len(),
+                    font: Font {
+                        weight: span.font_weight,
+                        style: span.font_style,
+                        ..font.clone()
+                    },
+                    color: span.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                })
+                .collect();
+
+            let full_text: String = section.spans.iter().map(|s| s.text.as_str()).collect();
+
+            match section.kind {
+                SectionKind::Prose => {
+                    let text = SharedString::from(full_text);
+                    if let Ok(lines) = window.text_system().shape_text(
+                        text,
+                        font_size,
+                        &runs,
+                        Some(wrap_width),
+                        None,
+                    ) {
+                        for line in lines {
+                            let vl = line.wrap_boundaries.len() + 1;
+                            content_width = content_width.max(line.width());
+                            visual_line_count += vl;
+                            hover_lines.push(HoverLine::Wrapped(line));
+                            if visual_line_count >= max_lines {
+                                break;
+                            }
+                        }
                     }
-                }
+                },
+                SectionKind::Code => {
+                    for line_str in full_text.split('\n') {
+                        if visual_line_count >= max_lines {
+                            break;
+                        }
+                        let line_runs =
+                            distribute_runs_for_line(&section.spans, line_str, &full_text, &font);
+                        let shaped = window.text_system().shape_line(
+                            SharedString::from(line_str.to_string()),
+                            font_size,
+                            &line_runs,
+                            None,
+                        );
+                        content_width = content_width.max(shaped.width);
+                        visual_line_count += 1;
+                        hover_lines.push(HoverLine::Shaped(shaped));
+                    }
+                },
             }
         }
 
-        if wrapped_lines.is_empty() {
+        if hover_lines.is_empty() {
             return;
         }
 
-        let content_width = wrapped_lines
-            .iter()
-            .map(|l| l.width())
-            .fold(Pixels::ZERO, |a, b| a.max(b));
         let popup_width = content_width + padding * 2.0;
         let popup_height = line_height * visual_line_count as f32 + padding * 2.0;
 
@@ -1558,7 +1584,6 @@ impl EditorElement {
             size: size(popup_width, popup_height),
         };
 
-        // Border
         window.paint_quad(gpui::PaintQuad {
             bounds: popup_bounds,
             corner_radii: gpui::Corners::all(px(4.0)),
@@ -1570,17 +1595,32 @@ impl EditorElement {
 
         let text_x = popup_bounds.origin.x + padding;
         let mut text_y = popup_bounds.origin.y + padding;
-        for wrapped in &wrapped_lines {
-            let visual_lines = wrapped.wrap_boundaries.len() + 1;
-            let _ = wrapped.paint(
-                point(text_x, text_y),
-                line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-            text_y += line_height * visual_lines as f32;
+        for hover_line in &hover_lines {
+            match hover_line {
+                HoverLine::Wrapped(wrapped) => {
+                    let visual_lines = wrapped.wrap_boundaries.len() + 1;
+                    let _ = wrapped.paint(
+                        point(text_x, text_y),
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                    text_y += line_height * visual_lines as f32;
+                },
+                HoverLine::Shaped(shaped) => {
+                    let _ = shaped.paint(
+                        point(text_x, text_y),
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                    text_y += line_height;
+                },
+            }
         }
     }
 
@@ -2003,4 +2043,56 @@ impl IntoElement for EditorElement {
     fn into_element(self) -> Self::Element {
         self
     }
+}
+
+fn distribute_runs_for_line(
+    spans: &[crate::hover::StyledSpan],
+    line_str: &str,
+    full_text: &str,
+    base_font: &Font,
+) -> Vec<TextRun> {
+    let line_start = line_str.as_ptr() as usize - full_text.as_ptr() as usize;
+    let line_end = line_start + line_str.len();
+
+    let mut runs = Vec::new();
+    let mut span_offset = 0;
+
+    for span in spans {
+        let span_end = span_offset + span.text.len();
+        let overlap_start = span_offset.max(line_start);
+        let overlap_end = span_end.min(line_end);
+        if overlap_start < overlap_end {
+            runs.push(TextRun {
+                len: overlap_end - overlap_start,
+                font: Font {
+                    weight: span.font_weight,
+                    style: span.font_style,
+                    ..base_font.clone()
+                },
+                color: span.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+        span_offset = span_end;
+    }
+
+    if runs.is_empty() {
+        runs.push(TextRun {
+            len: line_str.len(),
+            font: base_font.clone(),
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 0.65,
+                a: 1.0,
+            },
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+
+    runs
 }

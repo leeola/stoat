@@ -17,6 +17,7 @@ impl HighlightQuery {
         let ts_language = match language {
             Language::Rust => tree_sitter_rust::language(),
             Language::Markdown => tree_sitter_md::language(),
+            Language::MarkdownInline => tree_sitter_md::inline_language(),
             Language::Json => tree_sitter_json::language(),
             Language::Toml => tree_sitter_toml::language(),
             Language::PlainText => return None,
@@ -27,6 +28,7 @@ impl HighlightQuery {
             Language::Json => include_str!("../queries/json.scm"),
             Language::Toml => include_str!("../queries/toml.scm"),
             Language::Markdown => include_str!("../queries/markdown.scm"),
+            Language::MarkdownInline => include_str!("../queries/markdown_inline.scm"),
             Language::PlainText => return None,
         };
 
@@ -88,6 +90,17 @@ mod tests {
     #[test]
     fn markdown_query_compiles() {
         assert!(HighlightQuery::new(Language::Markdown).is_some());
+    }
+
+    #[test]
+    fn markdown_inline_query_compiles() {
+        let query = HighlightQuery::new(Language::MarkdownInline);
+        assert!(query.is_some());
+        let query = query.unwrap();
+        let names = query.capture_names();
+        assert!(names.contains(&"markup.italic".to_string()));
+        assert!(names.contains(&"markup.bold".to_string()));
+        assert!(names.contains(&"markup.code".to_string()));
     }
 
     #[test]

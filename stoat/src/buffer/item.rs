@@ -115,7 +115,24 @@ impl BufferItem {
             Some(q) => q,
             None => return vec![],
         };
-        query.captures(tree, source.as_bytes(), range)
+        let mut result = query.captures(tree, source.as_bytes(), range.clone());
+
+        if self.language == Language::Markdown {
+            if let (Some(inline_tree), Some(inline_query)) = (
+                self.parser.inline_tree(),
+                self.parser.inline_highlight_query(),
+            ) {
+                let block_capture_count = query.capture_names().len() as u32;
+                let inline_captures = inline_query.captures(inline_tree, source.as_bytes(), range);
+                result.extend(inline_captures.into_iter().map(|mut c| {
+                    c.capture_index += block_capture_count;
+                    c
+                }));
+                result.sort_by_key(|c| c.byte_range.start);
+            }
+        }
+
+        result
     }
 
     pub fn highlight_map(&self) -> Option<&HighlightMap> {
@@ -149,7 +166,11 @@ impl BufferItem {
     fn ensure_highlight_map(&mut self, theme: &SyntaxTheme) {
         if self.highlight_map.is_none() {
             if let Some(query) = self.parser.highlight_query() {
-                self.highlight_map = Some(HighlightMap::new(theme, query.capture_names()));
+                let mut names: Vec<String> = query.capture_names().to_vec();
+                if let Some(inline_query) = self.parser.inline_highlight_query() {
+                    names.extend(inline_query.capture_names().iter().cloned());
+                }
+                self.highlight_map = Some(HighlightMap::new(theme, &names));
             }
         }
     }

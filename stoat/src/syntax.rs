@@ -392,6 +392,13 @@ impl SyntaxTheme {
                 ..Default::default()
             },
         );
+        theme.add_highlight(
+            "text.reference",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
 
         theme
     }
@@ -681,6 +688,13 @@ impl SyntaxTheme {
         );
         theme.add_highlight(
             "text.uri",
+            HighlightStyle {
+                color: Some(cyan.into()),
+                ..Default::default()
+            },
+        );
+        theme.add_highlight(
+            "text.reference",
             HighlightStyle {
                 color: Some(cyan.into()),
                 ..Default::default()

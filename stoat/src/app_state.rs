@@ -685,6 +685,9 @@ impl AppState {
                     "rootUri": format!("file://{}", root.display()),
                     "capabilities": {
                         "textDocument": {
+                            "hover": {
+                                "contentFormat": ["markdown", "plaintext"],
+                            },
                             "publishDiagnostics": {
                                 "relatedInformation": true,
                                 "versionSupport": true,

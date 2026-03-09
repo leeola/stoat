@@ -8,6 +8,9 @@ pub struct Parser {
     ts_parser: Option<TsParser>,
     old_tree: Option<tree_sitter::Tree>,
     highlight_query: Option<HighlightQuery>,
+    inline_parser: Option<TsParser>,
+    inline_tree: Option<tree_sitter::Tree>,
+    inline_query: Option<HighlightQuery>,
 }
 
 impl Clone for Parser {
@@ -33,6 +36,13 @@ impl Parser {
                     .map_err(|e| anyhow::anyhow!("Failed to set Markdown language: {e}"))?;
                 Some(parser)
             },
+            Language::MarkdownInline => {
+                let mut parser = TsParser::new();
+                parser
+                    .set_language(tree_sitter_md::inline_language())
+                    .map_err(|e| anyhow::anyhow!("Failed to set Markdown Inline language: {e}"))?;
+                Some(parser)
+            },
             Language::Json => {
                 let mut parser = TsParser::new();
                 parser
@@ -52,18 +62,31 @@ impl Parser {
 
         let highlight_query = HighlightQuery::new(language);
 
+        let (inline_parser, inline_query) = if language == Language::Markdown {
+            let mut ip = TsParser::new();
+            ip.set_language(tree_sitter_md::inline_language())
+                .map_err(|e| anyhow::anyhow!("Failed to set Markdown Inline language: {e}"))?;
+            let iq = HighlightQuery::new(Language::MarkdownInline);
+            (Some(ip), iq)
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             language,
             ts_parser,
             old_tree: None,
             highlight_query,
+            inline_parser,
+            inline_tree: None,
+            inline_query,
         })
     }
 
     /// Full parse (resets incremental state). Stores tree internally.
     pub fn parse(&mut self, text: &str) -> anyhow::Result<()> {
         match self.language {
-            Language::PlainText => {
+            Language::PlainText | Language::MarkdownInline => {
                 self.old_tree = None;
                 Ok(())
             },
@@ -76,6 +99,11 @@ impl Parser {
                     .ok_or_else(|| anyhow::anyhow!("Tree-sitter parse failed"))?;
 
                 self.old_tree = Some(tree);
+
+                if self.language == Language::Markdown {
+                    self.parse_inline_content(text);
+                }
+
                 Ok(())
             },
         }
@@ -90,7 +118,7 @@ impl Parser {
         edits: &[text::Edit<usize>],
     ) -> anyhow::Result<Vec<Range<usize>>> {
         match self.language {
-            Language::PlainText => Ok(vec![0..text.len()]),
+            Language::PlainText | Language::MarkdownInline => Ok(vec![0..text.len()]),
             Language::Rust | Language::Markdown | Language::Json | Language::Toml => {
                 for edit in edits {
                     if let Some(ref mut old_tree) = self.old_tree {
@@ -115,6 +143,11 @@ impl Parser {
                 };
 
                 self.old_tree = Some(new_tree);
+
+                if self.language == Language::Markdown {
+                    self.parse_inline_content(text);
+                }
+
                 Ok(changed_ranges)
             },
         }
@@ -133,10 +166,70 @@ impl Parser {
 
     pub fn reset(&mut self) {
         self.old_tree = None;
+        self.inline_tree = None;
     }
 
     pub fn language(&self) -> Language {
         self.language
+    }
+
+    pub fn inline_tree(&self) -> Option<&tree_sitter::Tree> {
+        self.inline_tree.as_ref()
+    }
+
+    pub fn inline_highlight_query(&self) -> Option<&HighlightQuery> {
+        self.inline_query.as_ref()
+    }
+
+    fn parse_inline_content(&mut self, text: &str) {
+        let block_tree = match &self.old_tree {
+            Some(t) => t,
+            None => return,
+        };
+        let inline_parser = match &mut self.inline_parser {
+            Some(p) => p,
+            None => return,
+        };
+
+        let mut ranges = Vec::new();
+        collect_inline_ranges(block_tree.root_node(), &mut ranges);
+
+        if ranges.is_empty() {
+            self.inline_tree = None;
+            return;
+        }
+
+        let ts_ranges: Vec<tree_sitter::Range> = ranges
+            .iter()
+            .map(|r| tree_sitter::Range {
+                start_byte: r.start,
+                end_byte: r.end,
+                start_point: tree_sitter::Point::new(0, 0),
+                end_point: tree_sitter::Point::new(0, 0),
+            })
+            .collect();
+
+        if inline_parser.set_included_ranges(&ts_ranges).is_err() {
+            self.inline_tree = None;
+            return;
+        }
+
+        self.inline_tree = inline_parser.parse(text, None);
+    }
+}
+
+fn collect_inline_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<Range<usize>>) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "inline" | "pipe_table_cell" => {
+                let range = child.start_byte()..child.end_byte();
+                if !range.is_empty() {
+                    ranges.push(range);
+                }
+            },
+            _ => collect_inline_ranges(child, ranges),
+        }
     }
 }
 

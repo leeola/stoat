@@ -7,6 +7,8 @@ pub enum Language {
     Rust,
     /// Markdown formatted text
     Markdown,
+    /// Markdown inline content (emphasis, links, code spans, etc.)
+    MarkdownInline,
     /// JSON data format
     Json,
     /// TOML configuration format
@@ -16,6 +18,17 @@ pub enum Language {
 }
 
 impl Language {
+    /// Detect language from name (e.g. code fence tags like "rust", "json")
+    pub fn from_name(name: &str) -> Self {
+        match name.to_lowercase().as_str() {
+            "rust" | "rs" => Language::Rust,
+            "markdown" | "md" => Language::Markdown,
+            "json" => Language::Json,
+            "toml" => Language::Toml,
+            _ => Language::PlainText,
+        }
+    }
+
     /// Detect language from file extension
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
@@ -32,6 +45,7 @@ impl Language {
         match self {
             Language::Rust => &["rs"],
             Language::Markdown => &["md", "markdown"],
+            Language::MarkdownInline => &[],
             Language::Json => &["json"],
             Language::Toml => &["toml"],
             Language::PlainText => &["txt"],
@@ -43,6 +57,7 @@ impl Language {
         match self {
             Language::Rust => "Rust",
             Language::Markdown => "Markdown",
+            Language::MarkdownInline => "Markdown Inline",
             Language::Json => "JSON",
             Language::Toml => "TOML",
             Language::PlainText => "Plain Text",

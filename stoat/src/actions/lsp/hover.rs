@@ -1,4 +1,7 @@
-use crate::stoat::{Stoat, StoatEvent};
+use crate::{
+    stoat::{Stoat, StoatEvent},
+    syntax::SyntaxTheme,
+};
 use gpui::Context;
 use stoat_lsp::point_to_lsp_position;
 
@@ -38,8 +41,8 @@ impl Stoat {
                 if let Ok(Some(blocks)) = stoat_lsp::response::parse_hover_blocks(&response) {
                     let summary = truncate_hover(&blocks[0].text, 200);
                     this.update(cx, |stoat, cx| {
-                        stoat.hover_state.blocks = blocks;
-                        stoat.hover_state.visible = true;
+                        let theme = SyntaxTheme::monokai_dark();
+                        stoat.hover_state.set_blocks(blocks, &theme);
                         cx.emit(StoatEvent::FlashMessage(summary));
                     })
                     .ok();

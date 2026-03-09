@@ -628,52 +628,69 @@ fn is_sub_agent(session_id: &str, primary: &Option<String>) -> bool {
 }
 
 fn render_text_blocks(text: &str, msg_idx: usize, block_idx: usize) -> gpui::Div {
-    use crate::claude::text_format::{parse_blocks, TextBlock};
+    use crate::{
+        hover::{render_markdown, SectionKind},
+        syntax::SyntaxTheme,
+    };
+    use gpui::{Hsla, SharedString};
 
-    let blocks = parse_blocks(text);
+    let theme = SyntaxTheme::monokai_dark();
+    let sections = render_markdown(text, &theme);
     let mut container = div()
         .min_w(px(0.0))
         .text_color(rgb(TEXT_PRIMARY))
         .text_size(px(13.0))
         .mb(px(4.0));
 
-    for (ti, block) in blocks.iter().enumerate() {
-        container = match block {
-            TextBlock::Prose(line) => container.child(
-                div()
+    for (ti, section) in sections.iter().enumerate() {
+        container = match section.kind {
+            SectionKind::Prose => {
+                let mut row = div()
                     .id(gpui::ElementId::Name(
                         format!("prose-{msg_idx}-{block_idx}-{ti}").into(),
                     ))
-                    .child(line.clone()),
-            ),
-            TextBlock::CodeFence { language, content } => container.child(
-                div()
-                    .id(gpui::ElementId::Name(
-                        format!("code-{msg_idx}-{block_idx}-{ti}").into(),
-                    ))
-                    .mb(px(4.0))
-                    .bg(rgb(BG_CODE))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded(px(4.0))
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .child(if let Some(lang) = language {
-                        div()
-                            .text_color(rgb(TEXT_MUTED))
-                            .text_size(px(10.0))
-                            .mb(px(2.0))
-                            .child(lang.clone())
-                    } else {
-                        div()
-                    })
-                    .child(
-                        div()
-                            .text_color(rgb(TEXT_PRIMARY))
-                            .text_size(px(12.0))
-                            .child(content.clone()),
-                    ),
-            ),
+                    .flex()
+                    .flex_row()
+                    .flex_wrap();
+                for span in &section.spans {
+                    let mut span_el = div().child(SharedString::from(span.text.clone()));
+                    let default_prose: Hsla = rgb(TEXT_PRIMARY).into();
+                    if span.color != default_prose {
+                        span_el = span_el.text_color(span.color);
+                    }
+                    if span.font_weight != gpui::FontWeight::NORMAL {
+                        span_el = span_el.font_weight(span.font_weight);
+                    }
+                    if span.font_style == gpui::FontStyle::Italic {
+                        span_el = span_el.italic();
+                    }
+                    row = row.child(span_el);
+                }
+                container.child(row)
+            },
+            SectionKind::Code => {
+                let mut code_row = div().flex().flex_row().flex_wrap().text_size(px(12.0));
+                for span in &section.spans {
+                    let span_el = div()
+                        .child(SharedString::from(span.text.clone()))
+                        .text_color(span.color);
+                    code_row = code_row.child(span_el);
+                }
+                container.child(
+                    div()
+                        .id(gpui::ElementId::Name(
+                            format!("code-{msg_idx}-{block_idx}-{ti}").into(),
+                        ))
+                        .mb(px(4.0))
+                        .bg(rgb(BG_CODE))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .rounded(px(4.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .child(code_row),
+                )
+            },
         };
     }
     container
