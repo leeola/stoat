@@ -465,6 +465,17 @@ mod tests {
         fs.insert_file(git_dir.join("rebase-merge/stopped-sha"), "deadbeef\n");
     }
 
+    fn make_commit(hash: &str, msg: &str, op: RebaseOperation) -> RebaseCommit {
+        RebaseCommit {
+            oid: hash.into(),
+            short_hash: hash.into(),
+            author: String::new(),
+            date: String::new(),
+            message: msg.into(),
+            operation: op,
+        }
+    }
+
     #[test]
     fn detect_no_rebase_dir() {
         smol::block_on(async {
@@ -826,5 +837,327 @@ mod tests {
             assert_eq!(state.pending_commits[0].short_hash, "bbb2222");
             assert_eq!(state.pending_commits[1].short_hash, "ccc3333");
         });
+    }
+
+    #[test]
+    fn reorder_swap_adjacent() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+        ];
+        commits.swap(0, 1);
+        let todo = format_todo(&commits);
+        assert_eq!(todo, "pick bbb B\npick aaa A\npick ccc C\n");
+    }
+
+    #[test]
+    fn reorder_move_to_end() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+            make_commit("ddd", "D", RebaseOperation::Pick),
+        ];
+        commits.swap(0, 1);
+        commits.swap(1, 2);
+        commits.swap(2, 3);
+        assert_eq!(
+            format_todo(&commits),
+            "pick bbb B\npick ccc C\npick ddd D\npick aaa A\n"
+        );
+    }
+
+    #[test]
+    fn reorder_reverse_entire_list() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+            make_commit("ddd", "D", RebaseOperation::Pick),
+        ];
+        commits.reverse();
+        assert_eq!(
+            format_todo(&commits),
+            "pick ddd D\npick ccc C\npick bbb B\npick aaa A\n"
+        );
+    }
+
+    #[test]
+    fn reorder_single_commit_noop() {
+        let mut commits = vec![make_commit("aaa", "A", RebaseOperation::Pick)];
+        if commits.len() > 1 {
+            commits.swap(0, 1);
+        }
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].short_hash, "aaa");
+    }
+
+    #[test]
+    fn drop_middle_commit() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Drop),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+        ];
+        let todo = format_todo(&commits);
+        assert_eq!(todo, "pick aaa A\ndrop bbb B\npick ccc C\n");
+        let parsed = parse_todo(&todo);
+        assert_eq!(parsed[1].operation, RebaseOperation::Drop);
+    }
+
+    #[test]
+    fn drop_all_but_one() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Drop),
+            make_commit("ccc", "C", RebaseOperation::Drop),
+            make_commit("ddd", "D", RebaseOperation::Drop),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        let todo = format_todo(&commits);
+        assert_eq!(todo.matches("drop").count(), 3);
+        assert_eq!(todo.matches("pick").count(), 1);
+    }
+
+    #[test]
+    fn drop_all_commits() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Drop),
+            make_commit("bbb", "B", RebaseOperation::Drop),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn squash_second_into_first() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Squash),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        assert_eq!(format_todo(&commits), "pick aaa A\nsquash bbb B\n");
+    }
+
+    #[test]
+    fn squash_chain() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Squash),
+            make_commit("ccc", "C", RebaseOperation::Squash),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        assert_eq!(format_todo(&commits).matches("squash").count(), 2);
+    }
+
+    #[test]
+    fn squash_with_gap() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+            make_commit("ccc", "C", RebaseOperation::Squash),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        assert_eq!(
+            format_todo(&commits),
+            "pick aaa A\npick bbb B\nsquash ccc C\n"
+        );
+    }
+
+    #[test]
+    fn fixup_second_into_first() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Fixup),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        assert_eq!(format_todo(&commits), "pick aaa A\nfixup bbb B\n");
+    }
+
+    #[test]
+    fn fixup_chain() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Fixup),
+            make_commit("ccc", "C", RebaseOperation::Fixup),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        assert_eq!(format_todo(&commits).matches("fixup").count(), 2);
+    }
+
+    #[test]
+    fn mixed_all_operations() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Reword),
+            make_commit("ccc", "C", RebaseOperation::Edit),
+            make_commit("ddd", "D", RebaseOperation::Squash),
+            make_commit("eee", "E", RebaseOperation::Fixup),
+            make_commit("fff", "F", RebaseOperation::Drop),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+        let todo = format_todo(&commits);
+        let parsed = parse_todo(&todo);
+        assert_eq!(parsed.len(), 6);
+        assert_eq!(parsed[0].operation, RebaseOperation::Pick);
+        assert_eq!(parsed[1].operation, RebaseOperation::Reword);
+        assert_eq!(parsed[2].operation, RebaseOperation::Edit);
+        assert_eq!(parsed[3].operation, RebaseOperation::Squash);
+        assert_eq!(parsed[4].operation, RebaseOperation::Fixup);
+        assert_eq!(parsed[5].operation, RebaseOperation::Drop);
+    }
+
+    #[test]
+    fn reorder_then_squash() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+        ];
+        commits.swap(0, 1);
+        commits[0].operation = RebaseOperation::Squash;
+        assert!(validate_todo(&commits).is_err());
+    }
+
+    #[test]
+    fn reorder_breaks_squash_chain() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Squash),
+            make_commit("ccc", "C", RebaseOperation::Pick),
+        ];
+        commits.swap(1, 2);
+        // [pick A, pick C, squash B] -- still valid (B squashes into C)
+        assert_eq!(commits[0].short_hash, "aaa");
+        assert_eq!(commits[1].short_hash, "ccc");
+        assert_eq!(commits[2].short_hash, "bbb");
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn reorder_creates_valid_from_invalid() {
+        let mut commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Squash),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+        ];
+        assert!(validate_todo(&commits).is_err());
+        commits.swap(0, 1);
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn drop_then_squash_adjacent() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Drop),
+            make_commit("ccc", "C", RebaseOperation::Squash),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn fixup_after_drop_chain() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Pick),
+            make_commit("bbb", "B", RebaseOperation::Drop),
+            make_commit("ccc", "C", RebaseOperation::Drop),
+            make_commit("ddd", "D", RebaseOperation::Fixup),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn validate_reword_first() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Reword),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn validate_edit_first() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Edit),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn validate_drop_first() {
+        let commits = vec![
+            make_commit("aaa", "A", RebaseOperation::Drop),
+            make_commit("bbb", "B", RebaseOperation::Pick),
+        ];
+        assert!(validate_todo(&commits).is_ok());
+    }
+
+    #[test]
+    fn validate_single_squash() {
+        let commits = vec![make_commit("aaa", "A", RebaseOperation::Squash)];
+        assert!(validate_todo(&commits).is_err());
+    }
+
+    #[test]
+    fn validate_single_fixup() {
+        let commits = vec![make_commit("aaa", "A", RebaseOperation::Fixup)];
+        assert!(validate_todo(&commits).is_err());
+    }
+
+    #[test]
+    fn parse_todo_short_form_operations() {
+        let content =
+            "p aaa First\nr bbb Second\ne ccc Third\ns ddd Fourth\nf eee Fifth\nd fff Sixth\n";
+        let parsed = parse_todo(content);
+        assert_eq!(parsed.len(), 6);
+        assert_eq!(parsed[0].operation, RebaseOperation::Pick);
+        assert_eq!(parsed[1].operation, RebaseOperation::Reword);
+        assert_eq!(parsed[2].operation, RebaseOperation::Edit);
+        assert_eq!(parsed[3].operation, RebaseOperation::Squash);
+        assert_eq!(parsed[4].operation, RebaseOperation::Fixup);
+        assert_eq!(parsed[5].operation, RebaseOperation::Drop);
+    }
+
+    #[test]
+    fn parse_todo_message_with_spaces() {
+        let content = "pick abc123 This is a commit with many spaces\n";
+        let parsed = parse_todo(content);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].message, "This is a commit with many spaces");
+    }
+
+    #[test]
+    fn parse_todo_unknown_operation_skipped() {
+        let content = "pick aaa Valid\nunknownop bbb Invalid\npick ccc Also valid\n";
+        let parsed = parse_todo(content);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].short_hash, "aaa");
+        assert_eq!(parsed[1].short_hash, "ccc");
+    }
+
+    #[test]
+    fn format_parse_roundtrip_all_operations() {
+        let ops = [
+            RebaseOperation::Pick,
+            RebaseOperation::Reword,
+            RebaseOperation::Edit,
+            RebaseOperation::Squash,
+            RebaseOperation::Fixup,
+            RebaseOperation::Drop,
+        ];
+        let commits: Vec<_> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, &op)| make_commit(&format!("hash{i}"), &format!("msg {i}"), op))
+            .collect();
+        let todo = format_todo(&commits);
+        let parsed = parse_todo(&todo);
+        assert_eq!(parsed.len(), commits.len());
+        for (original, roundtripped) in commits.iter().zip(parsed.iter()) {
+            assert_eq!(original.operation, roundtripped.operation);
+            assert_eq!(original.short_hash, roundtripped.short_hash);
+            assert_eq!(original.message, roundtripped.message);
+        }
     }
 }
