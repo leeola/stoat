@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:07 +0000
+Subject: [PATCH] update database
+
+---
+ app.txt | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -10,6 +10,6 @@
+ contact = /get-in-touch
+ 
+ [database]
+-host = localhost
+-port = 5432
++host = db.prod.internal
++port = 5433
+ name = mydb
+--
+2.39.0
+

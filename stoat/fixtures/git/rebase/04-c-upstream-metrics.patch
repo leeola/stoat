@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:03 +0000
+Subject: [PATCH] add metrics config
+
+---
+ app.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -17,3 +17,7 @@
+ [cache]
+ enabled = true
+ ttl = 3600
++
++[metrics]
++enabled = true
++port = 9090
+--
+2.39.0
+

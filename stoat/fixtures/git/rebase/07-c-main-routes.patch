@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:06 +0000
+Subject: [PATCH] update routes
+
+---
+ app.txt | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -5,9 +5,9 @@
+ workers = 4
+ 
+ [routes]
+-home = /
+-about = /about
+-contact = /contact
++home = /home
++about = /about-us
++contact = /get-in-touch
+ 
+ [database]
+ host = localhost
+--
+2.39.0
+

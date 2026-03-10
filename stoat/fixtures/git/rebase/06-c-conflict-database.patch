@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:05 +0000
+Subject: [PATCH] update database for cloud
+
+---
+ app.txt | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -10,8 +10,8 @@
+ contact = /reach-us
+ 
+ [database]
+-host = localhost
+-port = 5432
++host = database.cloud.io
++port = 3306
+ name = mydb
+ 
+ [cache]
+--
+2.39.0
+

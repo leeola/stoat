@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:02 +0000
+Subject: [PATCH] add deploy config
+
+---
+ deploy.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+ create mode 100644 deploy.txt
+
+diff --git a/deploy.txt b/deploy.txt
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/deploy.txt
+@@ -0,0 +1,4 @@
++[deploy]
++target = production
++replicas = 3
++strategy = rolling
+--
+2.39.0
+

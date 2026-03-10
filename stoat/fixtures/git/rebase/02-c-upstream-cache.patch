@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:01 +0000
+Subject: [PATCH] add cache config
+
+---
+ app.txt | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -13,3 +13,7 @@
+ host = localhost
+ port = 5432
+ name = mydb
++
++[cache]
++enabled = true
++ttl = 3600
+--
+2.39.0
+
