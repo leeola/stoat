@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:12 +0000
+Subject: [PATCH] add middleware config
+
+---
+ app.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -23,3 +23,8 @@
+ provider = oauth2
+ token_expiry = 3600
+ refresh_enabled = true
++
++[middleware]
++rate_limit = 100
++cors = false
++compression = gzip
+--
+2.39.0
+

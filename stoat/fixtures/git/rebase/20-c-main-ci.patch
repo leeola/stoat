@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:20 +0000
+Subject: [PATCH] add ci pipeline config
+
+---
+ ci.txt | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+ create mode 100644 ci.txt
+
+diff --git a/ci.txt b/ci.txt
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/ci.txt
+@@ -0,0 +1,12 @@
++ci pipeline
++provider = github-actions
++
++[build]
++image = rust:latest
++steps = check,test,clippy
++
++[deploy]
++target = production
++strategy = rolling
++replicas = 3
++health_check = /health
+--
+2.39.0
+

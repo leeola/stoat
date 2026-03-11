@@ -413,7 +413,7 @@ pub fn parse_todo(content: &str) -> Vec<RebaseCommit> {
     commits
 }
 
-fn format_relative_time(timestamp: i64) -> String {
+pub fn format_relative_time(timestamp: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -616,6 +616,7 @@ mod tests {
             author: "Alice".into(),
             timestamp: 0,
             message: "Add feature".into(),
+            parent_oids: vec![],
         };
         let commit = RebaseCommit::from_log_entry(entry);
         assert_eq!(commit.oid, "abc1234567890");

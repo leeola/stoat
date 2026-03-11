@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:14 +0000
+Subject: [PATCH] add search filters
+
+---
+ search.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/search.txt b/search.txt
+--- a/search.txt
++++ b/search.txt
+@@ -6,3 +6,8 @@
+ fuzzy = true
+ highlight = true
+ max_results = 50
++
++[filters]
++by_date = true
++by_author = true
++by_status = true
+--
+2.39.0
+

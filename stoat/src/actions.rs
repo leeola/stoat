@@ -411,6 +411,31 @@ actions!(
     ]
 );
 
+// Git log actions
+actions!(
+    stoat,
+    [
+        /// Open git log viewer
+        OpenGitLog,
+        /// Next commit in git log
+        GitLogNext,
+        /// Previous commit in git log
+        GitLogPrev,
+        /// Show commit details
+        GitLogSelect,
+        /// Dismiss git log
+        GitLogDismiss,
+        /// Next file in detail panel
+        GitLogDetailNextFile,
+        /// Previous file in detail panel
+        GitLogDetailPrevFile,
+        /// Open search in git log
+        GitLogSearchOpen,
+        /// Confirm search query
+        GitLogSearchConfirm,
+    ]
+);
+
 // Line selection actions (partial hunk staging)
 actions!(
     stoat,
@@ -1505,6 +1530,37 @@ action_metadata!(
     hidden
 );
 
+// Git log actions
+action_metadata!(
+    OpenGitLog,
+    "git log",
+    "Open the git log viewer",
+    ["git-log"]
+);
+action_metadata!(GitLogNext, "next commit", "Move to next commit", hidden);
+action_metadata!(GitLogPrev, "prev commit", "Move to previous commit", hidden);
+action_metadata!(GitLogSelect, "details", "Show commit details", hidden);
+action_metadata!(GitLogDismiss, "close log", "Close git log viewer", hidden);
+action_metadata!(
+    GitLogDetailNextFile,
+    "next file",
+    "Next file in details",
+    hidden
+);
+action_metadata!(
+    GitLogDetailPrevFile,
+    "prev file",
+    "Previous file in details",
+    hidden
+);
+action_metadata!(GitLogSearchOpen, "search", "Search commits", hidden);
+action_metadata!(
+    GitLogSearchConfirm,
+    "confirm search",
+    "Execute search query",
+    hidden
+);
+
 // Line selection actions
 action_metadata!(
     DiffReviewEnterLineSelect,
@@ -2201,6 +2257,29 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         RebaseEditMessage::action_name(),
     );
 
+    // Git log actions
+    names.insert(TypeId::of::<OpenGitLog>(), OpenGitLog::action_name());
+    names.insert(TypeId::of::<GitLogNext>(), GitLogNext::action_name());
+    names.insert(TypeId::of::<GitLogPrev>(), GitLogPrev::action_name());
+    names.insert(TypeId::of::<GitLogSelect>(), GitLogSelect::action_name());
+    names.insert(TypeId::of::<GitLogDismiss>(), GitLogDismiss::action_name());
+    names.insert(
+        TypeId::of::<GitLogDetailNextFile>(),
+        GitLogDetailNextFile::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitLogDetailPrevFile>(),
+        GitLogDetailPrevFile::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitLogSearchOpen>(),
+        GitLogSearchOpen::action_name(),
+    );
+    names.insert(
+        TypeId::of::<GitLogSearchConfirm>(),
+        GitLogSearchConfirm::action_name(),
+    );
+
     // Line selection actions
     names.insert(
         TypeId::of::<DiffReviewEnterLineSelect>(),
@@ -2812,6 +2891,29 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         RebaseEditMessage::description(),
     );
 
+    // Git log actions
+    descriptions.insert(TypeId::of::<OpenGitLog>(), OpenGitLog::description());
+    descriptions.insert(TypeId::of::<GitLogNext>(), GitLogNext::description());
+    descriptions.insert(TypeId::of::<GitLogPrev>(), GitLogPrev::description());
+    descriptions.insert(TypeId::of::<GitLogSelect>(), GitLogSelect::description());
+    descriptions.insert(TypeId::of::<GitLogDismiss>(), GitLogDismiss::description());
+    descriptions.insert(
+        TypeId::of::<GitLogDetailNextFile>(),
+        GitLogDetailNextFile::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitLogDetailPrevFile>(),
+        GitLogDetailPrevFile::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitLogSearchOpen>(),
+        GitLogSearchOpen::description(),
+    );
+    descriptions.insert(
+        TypeId::of::<GitLogSearchConfirm>(),
+        GitLogSearchConfirm::description(),
+    );
+
     // Line selection actions
     descriptions.insert(
         TypeId::of::<DiffReviewEnterLineSelect>(),
@@ -3392,6 +3494,29 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
     help.insert(
         TypeId::of::<RebaseEditMessage>(),
         RebaseEditMessage::help_text(),
+    );
+
+    // Git log actions
+    help.insert(TypeId::of::<OpenGitLog>(), OpenGitLog::help_text());
+    help.insert(TypeId::of::<GitLogNext>(), GitLogNext::help_text());
+    help.insert(TypeId::of::<GitLogPrev>(), GitLogPrev::help_text());
+    help.insert(TypeId::of::<GitLogSelect>(), GitLogSelect::help_text());
+    help.insert(TypeId::of::<GitLogDismiss>(), GitLogDismiss::help_text());
+    help.insert(
+        TypeId::of::<GitLogDetailNextFile>(),
+        GitLogDetailNextFile::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitLogDetailPrevFile>(),
+        GitLogDetailPrevFile::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitLogSearchOpen>(),
+        GitLogSearchOpen::help_text(),
+    );
+    help.insert(
+        TypeId::of::<GitLogSearchConfirm>(),
+        GitLogSearchConfirm::help_text(),
     );
 
     // Line selection actions

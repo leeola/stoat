@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:13 +0000
+Subject: [PATCH] add search module
+
+---
+ search.txt | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+ create mode 100644 search.txt
+
+diff --git a/search.txt b/search.txt
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/search.txt
+@@ -0,0 +1,8 @@
++search config
++engine = elasticsearch
++index = primary
++
++[options]
++fuzzy = true
++highlight = true
++max_results = 50
+--
+2.39.0
+

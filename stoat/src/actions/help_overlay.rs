@@ -56,12 +56,14 @@ impl PaneGroupView {
                                 .get_mode(&mode)
                                 .map(|m| m.display_name.clone())
                                 .unwrap_or_else(|| mode.to_uppercase());
+                            let focus = stoat.key_context.as_str();
                             let usage = stoat.usage_tracker.lock();
                             stoat.autoinfo = Some(crate::keymap::query::bindings_for_infobox(
                                 &stoat.compiled_keymap,
                                 &mode,
                                 &display_name,
                                 &usage,
+                                focus,
                             ));
                             stoat.autoinfo_expanded = true;
                         });

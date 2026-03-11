@@ -276,7 +276,24 @@ on key {
         b -> OpenGitBlame();
         d -> OpenDiffReview();
         r -> OpenRebase();
+        l -> OpenGitLog();
         x -> OpenConflictReview();
+    }
+
+    # Git Log Context
+    focus == "GitLog" {
+        mode == "git_log" {
+            escape -> GitLogDismiss();
+            q -> GitLogDismiss();
+            j -> GitLogNext();
+            k -> GitLogPrev();
+            down -> GitLogNext();
+            up -> GitLogPrev();
+            enter -> GitLogSelect();
+            l -> GitLogDetailNextFile();
+            h -> GitLogDetailPrevFile();
+            / -> GitLogSearchOpen();
+        }
     }
 
     # Claude Context

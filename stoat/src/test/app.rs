@@ -766,5 +766,6 @@ pub(crate) fn key_context_label(ctx: KeyContext) -> &'static str {
         KeyContext::BlameReview => "BlameReview",
         KeyContext::BlameCommitDiff => "BlameCommitDiff",
         KeyContext::Rebase => "Rebase",
+        KeyContext::GitLog => "GitLog",
     }
 }

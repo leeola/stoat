@@ -107,12 +107,14 @@ impl Stoat {
         if let Some(mode_meta) = self.get_mode(mode_name) {
             if mode_meta.show_infobox {
                 let display_name = mode_meta.display_name.clone();
+                let focus = self.key_context.as_str();
                 let usage = self.usage_tracker.lock();
                 self.autoinfo = Some(crate::keymap::query::bindings_for_infobox(
                     &self.compiled_keymap,
                     mode_name,
                     &display_name,
                     &usage,
+                    focus,
                 ));
                 self.autoinfo_expanded = false;
             } else {

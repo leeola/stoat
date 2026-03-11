@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:16 +0000
+Subject: [PATCH] add sort config
+
+---
+ search.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/search.txt b/search.txt
+--- a/search.txt
++++ b/search.txt
+@@ -16,3 +16,8 @@
+ page_size = 20
+ max_page = 100
+ cursor = true
++
++[sort]
++default = relevance
++allowed = relevance,date,name
++direction = desc
+--
+2.39.0
+

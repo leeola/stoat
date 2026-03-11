@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:17 +0000
+Subject: [PATCH] tighten security settings
+
+---
+ app.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -2,7 +2,7 @@
+ name = myapp
+ version = 1.0
+ debug = false
+-workers = 4
++workers = 2
+
+ [routes]
+ home = /home
+--
+2.39.0
+

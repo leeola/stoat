@@ -97,6 +97,14 @@ pub fn default_modes() -> HashMap<String, Mode> {
         "rebase_progress".into(),
         Mode::with_previous("rebase_progress", "REBASE", "normal", false, true),
     );
+    modes.insert(
+        "git_log".into(),
+        Mode::with_previous("git_log", "LOG", "normal", false, true),
+    );
+    modes.insert(
+        "git_log_search".into(),
+        Mode::with_previous("git_log_search", "LOG/", "git_log", false, true),
+    );
 
     modes
 }
@@ -151,6 +159,7 @@ pub fn default_contexts() -> HashMap<KeyContext, KeyContextMeta> {
         KeyContext::Rebase,
         KeyContextMeta::new("rebase_plan".into()),
     );
+    contexts.insert(KeyContext::GitLog, KeyContextMeta::new("git_log".into()));
 
     contexts
 }

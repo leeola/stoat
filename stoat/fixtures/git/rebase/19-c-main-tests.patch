@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:19 +0000
+Subject: [PATCH] add test config
+
+---
+ tests.txt | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+ create mode 100644 tests.txt
+
+diff --git a/tests.txt b/tests.txt
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/tests.txt
+@@ -0,0 +1,10 @@
++test config
++runner = cargo
++parallel = true
++
++[unit]
++path = tests/unit
++timeout = 30
++
++[integration]
++path = tests/integration
+--
+2.39.0
+

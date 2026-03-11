@@ -10,6 +10,8 @@ pub mod diff;
 pub mod diff_review;
 pub mod diff_summary;
 pub mod line_selection;
+pub mod log_graph;
+pub mod log_view;
 pub mod provider;
 pub mod rebase;
 pub mod rebase_view;

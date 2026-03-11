@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:18 +0000
+Subject: [PATCH] add cors config
+
+---
+ app.txt | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/app.txt b/app.txt
+--- a/app.txt
++++ b/app.txt
+@@ -26,4 +26,5 @@
+ [middleware]
+ rate_limit = 100
+-cors = false
++cors = true
++cors_origins = https://app.example.com
+ compression = gzip
+--
+2.39.0
+

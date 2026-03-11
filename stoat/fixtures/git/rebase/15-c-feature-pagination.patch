@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:15 +0000
+Subject: [PATCH] add pagination config
+
+---
+ search.txt | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/search.txt b/search.txt
+--- a/search.txt
++++ b/search.txt
+@@ -11,3 +11,8 @@
+ by_date = true
+ by_author = true
+ by_status = true
++
++[pagination]
++page_size = 20
++max_page = 100
++cursor = true
+--
+2.39.0
+

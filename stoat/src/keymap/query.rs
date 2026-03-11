@@ -10,7 +10,11 @@ use std::collections::{HashMap, HashSet};
 /// Returns a list of (keystroke, description) pairs for bindings whose
 /// predicates include `mode == <mode>`. Prioritizes mode-specific bindings
 /// over global ones and limits total entries.
-pub fn bindings_for_mode(keymap: &CompiledKeymap, mode: &str) -> Vec<(String, String)> {
+pub fn bindings_for_mode(
+    keymap: &CompiledKeymap,
+    mode: &str,
+    focus: &str,
+) -> Vec<(String, String)> {
     let mut mode_specific = Vec::new();
     let mut global = Vec::new();
     let mut seen_actions = HashSet::new();
@@ -30,6 +34,12 @@ pub fn bindings_for_mode(keymap: &CompiledKeymap, mode: &str) -> Vec<(String, St
         let matches_mode = !has_mode_pred || matches_mode_predicate(&binding.predicates, mode);
 
         if !matches_mode {
+            continue;
+        }
+
+        if has_focus_predicate(&binding.predicates)
+            && !matches_focus_predicate(&binding.predicates, focus)
+        {
             continue;
         }
 
@@ -59,6 +69,7 @@ pub fn bindings_for_infobox(
     mode: &str,
     mode_display: &str,
     usage: &UsageTracker,
+    focus: &str,
 ) -> Infobox {
     let mut mode_specific: Vec<(String, String, String)> = Vec::new();
     let mut global: Vec<(String, String, String)> = Vec::new();
@@ -84,6 +95,16 @@ pub fn bindings_for_infobox(
         let matches_mode = !has_mode_pred || matches_mode_predicate(&binding.predicates, mode);
 
         if !matches_mode {
+            continue;
+        }
+
+        if has_focus_predicate(&binding.predicates)
+            && !matches_focus_predicate(&binding.predicates, focus)
+        {
+            continue;
+        }
+
+        if binding.key.display() == "escape" {
             continue;
         }
 
@@ -135,6 +156,39 @@ pub fn bindings_for_infobox(
 
 fn has_mode_predicate(predicates: &[stoat_config::Predicate]) -> bool {
     predicates.iter().any(is_mode_predicate)
+}
+
+fn has_focus_predicate(predicates: &[stoat_config::Predicate]) -> bool {
+    predicates.iter().any(is_focus_predicate)
+}
+
+fn matches_focus_predicate(predicates: &[stoat_config::Predicate], focus: &str) -> bool {
+    predicates
+        .iter()
+        .filter(|p| is_focus_predicate(p))
+        .all(|p| focus_predicate_matches(p, focus))
+}
+
+fn is_focus_predicate(pred: &stoat_config::Predicate) -> bool {
+    match pred {
+        stoat_config::Predicate::Eq(field, _) => field.node == "focus",
+        stoat_config::Predicate::NotEq(field, _) => field.node == "focus",
+        _ => false,
+    }
+}
+
+fn focus_predicate_matches(pred: &stoat_config::Predicate, focus: &str) -> bool {
+    match pred {
+        stoat_config::Predicate::Eq(_, val) => match &val.node {
+            stoat_config::Value::String(s) | stoat_config::Value::Ident(s) => s == focus,
+            _ => false,
+        },
+        stoat_config::Predicate::NotEq(_, val) => match &val.node {
+            stoat_config::Value::String(s) | stoat_config::Value::Ident(s) => s != focus,
+            _ => true,
+        },
+        _ => true,
+    }
 }
 
 fn matches_mode_predicate(predicates: &[stoat_config::Predicate], mode: &str) -> bool {

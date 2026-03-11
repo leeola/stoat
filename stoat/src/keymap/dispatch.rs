@@ -392,6 +392,16 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "RebaseAbort"
             | "RebaseSkip"
             | "RebaseEditMessage"
+            // Git log
+            | "OpenGitLog"
+            | "GitLogDismiss"
+            | "GitLogNext"
+            | "GitLogPrev"
+            | "GitLogSelect"
+            | "GitLogDetailNextFile"
+            | "GitLogDetailPrevFile"
+            | "GitLogSearchConfirm"
+            | "GitLogSearchOpen"
             // Command line
             | "ShowCommandLine"
             | "CommandLineDismiss"

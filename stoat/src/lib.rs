@@ -30,6 +30,7 @@ pub use stoat_log as log;
 pub mod modal;
 pub mod pane;
 pub mod paths;
+pub mod quick_input;
 pub mod rel_path;
 pub mod scroll;
 pub mod selections;

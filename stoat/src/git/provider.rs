@@ -57,6 +57,12 @@ pub trait GitRepo: Send + Sync {
         head: &str,
         max: usize,
     ) -> Result<Vec<CommitLogEntry>, GitError>;
+    async fn log_all(&self, head: &str, max: usize) -> Result<Vec<CommitLogEntry>, GitError>;
+    async fn log_all_branches(
+        &self,
+        offset: usize,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError>;
     async fn merge_base(&self, ref1: &str, ref2: &str) -> Result<String, GitError>;
     async fn upstream_ref(&self) -> Result<Option<String>, GitError>;
     async fn rebase_interactive(&self, base_ref: &str, todo_content: &str) -> Result<(), GitError>;
@@ -273,6 +279,29 @@ impl GitRepo for RealGitRepo {
         smol::unblock(move || {
             let repo = Repository::open(&workdir)?;
             repo.log_commits(&base, &head, max)
+        })
+        .await
+    }
+
+    async fn log_all(&self, head: &str, max: usize) -> Result<Vec<CommitLogEntry>, GitError> {
+        let workdir = self.workdir_path.clone();
+        let head = head.to_string();
+        smol::unblock(move || {
+            let repo = Repository::open(&workdir)?;
+            repo.log_all(&head, max)
+        })
+        .await
+    }
+
+    async fn log_all_branches(
+        &self,
+        offset: usize,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let workdir = self.workdir_path.clone();
+        smol::unblock(move || {
+            let repo = Repository::open(&workdir)?;
+            repo.log_all_branches(offset, max)
         })
         .await
     }
@@ -866,8 +895,22 @@ impl GitRepo for FakeGitRepo {
                     .first()
                     .map(|f| f.path.to_string_lossy().to_string())
                     .unwrap_or_default(),
+                parent_oids: vec![],
             })
             .collect())
+    }
+
+    async fn log_all(&self, _head: &str, max: usize) -> Result<Vec<CommitLogEntry>, GitError> {
+        self.log_commits("", "", max).await
+    }
+
+    async fn log_all_branches(
+        &self,
+        offset: usize,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let all = self.log_commits("", "", usize::MAX).await?;
+        Ok(all.into_iter().skip(offset).take(max).collect())
     }
 
     async fn merge_base(&self, _ref1: &str, _ref2: &str) -> Result<String, GitError> {

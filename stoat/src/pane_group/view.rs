@@ -129,6 +129,7 @@ pub struct PaneGroupView {
     git_status_scroll: ScrollHandle,
     blame_commit_diff_scroll: ScrollHandle,
     rebase_scroll: ScrollHandle,
+    git_log_scroll: ScrollHandle,
     symbol_picker_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
@@ -309,6 +310,7 @@ impl PaneGroupView {
             git_status_scroll: ScrollHandle::new(),
             blame_commit_diff_scroll: ScrollHandle::new(),
             rebase_scroll: ScrollHandle::new(),
+            git_log_scroll: ScrollHandle::new(),
             symbol_picker_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
@@ -587,6 +589,15 @@ impl PaneGroupView {
                 "RebaseAbort" => self.handle_rebase_abort(window, cx),
                 "RebaseSkip" => self.handle_rebase_skip(window, cx),
                 "RebaseEditMessage" => self.handle_rebase_edit_message(window, cx),
+                "OpenGitLog" => self.handle_open_git_log(window, cx),
+                "GitLogDismiss" => self.handle_git_log_dismiss(window, cx),
+                "GitLogNext" => self.handle_git_log_next(window, cx),
+                "GitLogPrev" => self.handle_git_log_prev(window, cx),
+                "GitLogSelect" => self.handle_git_log_select(window, cx),
+                "GitLogDetailNextFile" => self.handle_git_log_detail_next_file(window, cx),
+                "GitLogDetailPrevFile" => self.handle_git_log_detail_prev_file(window, cx),
+                "GitLogSearchConfirm" => self.handle_git_log_search_confirm(window, cx),
+                "GitLogSearchOpen" => self.handle_git_log_search_open(window, cx),
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
                 "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
                 "OpenGitBlame" => self.handle_open_git_blame(window, cx),
@@ -1883,6 +1894,27 @@ impl Render for PaneGroupView {
                             self.app_state.rebase.in_progress.clone(),
                             self.app_state.rebase.base_ref.clone(),
                             self.app_state.rebase.conflict_files.clone(),
+                        ))
+                    })
+                    .when(key_context == KeyContext::GitLog, |div| {
+                        let detail_snapshot = self.app_state.git_log.detail.as_ref().map(|d| {
+                            crate::git::log_view::GitLogDetailSnapshot {
+                                files: d.files.clone(),
+                                selected_file: d.selected_file,
+                                preview: d.preview.clone(),
+                            }
+                        });
+                        div.child(crate::git::log_view::GitLogView::new(
+                            self.app_state.git_log.commits.clone(),
+                            self.app_state.git_log.graph.clone(),
+                            self.app_state.git_log.selected,
+                            detail_snapshot,
+                            self.app_state.git_log.detail_visible,
+                            self.git_log_scroll.clone(),
+                            self.app_state.git_log.loading,
+                            self.app_state.git_log.search_query.clone(),
+                            self.app_state.git_log.search_matches.clone(),
+                            self.app_state.git_log.search_input.clone(),
                         ))
                     })
                     .when(key_context == KeyContext::BlameCommitDiff, |div| {

@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Mon, 1 Jan 2024 00:00:11 +0000
+Subject: [PATCH] add api endpoints
+
+---
+ api.txt | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+ create mode 100644 api.txt
+
+diff --git a/api.txt b/api.txt
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/api.txt
+@@ -0,0 +1,12 @@
++api endpoints
++version = v1
++base_url = /api
++
++[users]
++list = GET /users
++create = POST /users
++detail = GET /users/:id
++
++[health]
++status = GET /health
++ready = GET /ready
+--
+2.39.0
+

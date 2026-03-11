@@ -55,6 +55,7 @@ pub struct CommitLogEntry {
     pub author: String,
     pub timestamp: i64,
     pub message: String,
+    pub parent_oids: Vec<String>,
 }
 
 /// Errors that can occur during git operations.
@@ -496,12 +497,124 @@ impl Repository {
                 .find_commit(oid)
                 .map_err(|e| GitError::GitOperationFailed(format!("Failed to find commit: {e}")))?;
             let short = &oid.to_string()[..7.min(oid.to_string().len())];
+            let parent_oids = (0..commit.parent_count())
+                .filter_map(|i| commit.parent_id(i).ok())
+                .map(|id| id.to_string())
+                .collect();
             entries.push(CommitLogEntry {
                 oid: oid.to_string(),
                 short_hash: short.to_string(),
                 author: commit.author().name().unwrap_or("Unknown").to_string(),
                 timestamp: commit.time().seconds(),
                 message: commit.summary().unwrap_or("").to_string(),
+                parent_oids,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    /// Walk backwards from `head` with no base exclusion, returning up to `max` commits.
+    pub fn log_all(&self, head: &str, max: usize) -> Result<Vec<CommitLogEntry>, GitError> {
+        let head_oid = self
+            .repo
+            .revparse_single(head)
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to parse '{head}': {e}")))?
+            .id();
+
+        let mut revwalk = self
+            .repo
+            .revwalk()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create revwalk: {e}")))?;
+        revwalk
+            .push(head_oid)
+            .map_err(|e| GitError::GitOperationFailed(format!("Revwalk push failed: {e}")))?;
+        revwalk
+            .set_sorting(git2::Sort::TIME)
+            .map_err(|e| GitError::GitOperationFailed(format!("Set sorting failed: {e}")))?;
+
+        let mut entries = Vec::new();
+        for oid_result in revwalk {
+            if entries.len() >= max {
+                break;
+            }
+            let oid = oid_result.map_err(|e| {
+                GitError::GitOperationFailed(format!("Revwalk iteration failed: {e}"))
+            })?;
+            let commit = self
+                .repo
+                .find_commit(oid)
+                .map_err(|e| GitError::GitOperationFailed(format!("Failed to find commit: {e}")))?;
+            let oid_str = oid.to_string();
+            let short = oid_str[..7.min(oid_str.len())].to_string();
+            let parent_oids = (0..commit.parent_count())
+                .filter_map(|i| commit.parent_id(i).ok())
+                .map(|id| id.to_string())
+                .collect();
+            entries.push(CommitLogEntry {
+                oid: oid_str,
+                short_hash: short,
+                author: commit.author().name().unwrap_or("Unknown").to_string(),
+                timestamp: commit.time().seconds(),
+                message: commit.summary().unwrap_or("").to_string(),
+                parent_oids,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    /// Walk all local branches with offset-based pagination.
+    ///
+    /// Uses `push_glob("refs/heads/*")` to include all local branches,
+    /// sorted topologically with time tiebreaking. Skips `offset` commits,
+    /// then collects up to `max`.
+    pub fn log_all_branches(
+        &self,
+        offset: usize,
+        max: usize,
+    ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let mut revwalk = self
+            .repo
+            .revwalk()
+            .map_err(|e| GitError::GitOperationFailed(format!("Failed to create revwalk: {e}")))?;
+        revwalk
+            .push_glob("refs/heads/*")
+            .map_err(|e| GitError::GitOperationFailed(format!("push_glob failed: {e}")))?;
+        revwalk
+            .set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| GitError::GitOperationFailed(format!("Set sorting failed: {e}")))?;
+
+        let mut entries = Vec::new();
+        let mut skipped = 0;
+        for oid_result in revwalk {
+            let oid = oid_result.map_err(|e| {
+                GitError::GitOperationFailed(format!("Revwalk iteration failed: {e}"))
+            })?;
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if entries.len() >= max {
+                break;
+            }
+            let commit = self
+                .repo
+                .find_commit(oid)
+                .map_err(|e| GitError::GitOperationFailed(format!("Failed to find commit: {e}")))?;
+            let oid_str = oid.to_string();
+            let short = oid_str[..7.min(oid_str.len())].to_string();
+            let parent_oids = (0..commit.parent_count())
+                .filter_map(|i| commit.parent_id(i).ok())
+                .map(|id| id.to_string())
+                .collect();
+            entries.push(CommitLogEntry {
+                oid: oid_str,
+                short_hash: short,
+                author: commit.author().name().unwrap_or("Unknown").to_string(),
+                timestamp: commit.time().seconds(),
+                message: commit.summary().unwrap_or("").to_string(),
+                parent_oids,
             });
         }
 

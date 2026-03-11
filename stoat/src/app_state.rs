@@ -260,6 +260,30 @@ pub struct BlameCommitDiff {
     pub preview_task: Option<Task<()>>,
 }
 
+#[derive(Default)]
+pub struct GitLogState {
+    pub commits: Vec<crate::git::repository::CommitLogEntry>,
+    pub graph: Vec<crate::git::log_graph::GraphRow>,
+    pub selected: usize,
+    pub detail: Option<GitLogCommitDetail>,
+    pub detail_visible: bool,
+    pub detail_task: Option<Task<()>>,
+    pub previous_mode: Option<String>,
+    pub previous_key_context: Option<KeyContext>,
+    pub loading: bool,
+    pub all_loaded: bool,
+    pub search_query: String,
+    pub search_matches: Vec<usize>,
+    pub search_input: Option<gpui::Entity<crate::quick_input::QuickInput>>,
+}
+
+pub struct GitLogCommitDetail {
+    pub files: Vec<crate::git::repository::CommitFileChange>,
+    pub selected_file: usize,
+    pub preview: Option<crate::git::status::DiffPreviewData>,
+    pub preview_task: Option<Task<()>>,
+}
+
 impl GitStatus {
     /// Filter files based on the current filter setting.
     ///
@@ -351,6 +375,8 @@ pub struct AppState {
     pub blame_commit_diff: Option<BlameCommitDiff>,
     /// Interactive rebase state
     pub rebase: crate::git::rebase::RebaseState,
+    /// Git log viewer state
+    pub git_log: GitLogState,
     /// LSP manager for language server coordination
     ///
     /// Manages language server processes and routes diagnostics to buffers.
@@ -466,6 +492,7 @@ impl AppState {
             },
             blame_commit_diff: None,
             rebase: crate::git::rebase::RebaseState::default(),
+            git_log: GitLogState::default(),
             lsp_manager,
             lsp_state,
             project_env,
@@ -1098,6 +1125,20 @@ impl AppState {
         self.rebase.selected = 0;
         self.rebase.preview = None;
         self.rebase.preview_task = None;
+    }
+
+    pub fn open_git_log(&mut self, current_mode: String, current_key_context: KeyContext) {
+        self.git_log = GitLogState::default();
+        self.git_log.previous_mode = Some(current_mode);
+        self.git_log.previous_key_context = Some(current_key_context);
+        self.git_log.loading = true;
+    }
+
+    pub fn dismiss_git_log(&mut self) -> (Option<String>, Option<KeyContext>) {
+        let prev_mode = self.git_log.previous_mode.take();
+        let prev_ctx = self.git_log.previous_key_context.take();
+        self.git_log = GitLogState::default();
+        (prev_mode, prev_ctx)
     }
 
     /// Dismiss rebase modal and restore previous mode/context.

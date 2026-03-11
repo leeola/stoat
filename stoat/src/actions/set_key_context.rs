@@ -84,6 +84,9 @@ impl Stoat {
             warn!(context = ?context, "No metadata found for KeyContext, mode unchanged");
         }
 
+        self.autoinfo = None;
+        self.autoinfo_expanded = false;
+
         // When leaving diff review, phantom rows disappear. Snap scroll to cursor
         // so the viewport doesn't end up past the end of the buffer.
         if was_diff_review && context == KeyContext::TextEditor {

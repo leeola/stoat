@@ -61,6 +61,8 @@ pub enum KeyContext {
     BlameCommitDiff,
     /// Interactive rebase context
     Rebase,
+    /// Git log viewer context
+    GitLog,
 }
 
 impl KeyContext {
@@ -90,6 +92,7 @@ impl KeyContext {
             Self::BlameReview => "BlameReview",
             Self::BlameCommitDiff => "BlameCommitDiff",
             Self::Rebase => "Rebase",
+            Self::GitLog => "GitLog",
         }
     }
 
@@ -113,6 +116,7 @@ impl KeyContext {
             "BlameReview" => Ok(Self::BlameReview),
             "BlameCommitDiff" => Ok(Self::BlameCommitDiff),
             "Rebase" => Ok(Self::Rebase),
+            "GitLog" => Ok(Self::GitLog),
             _ => Err(format!("Unknown KeyContext: {s}")),
         }
     }
