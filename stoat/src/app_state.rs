@@ -263,7 +263,7 @@ pub struct BlameCommitDiff {
 #[derive(Default)]
 pub struct GitLogState {
     pub commits: Vec<crate::git::repository::CommitLogEntry>,
-    pub graph: Vec<crate::git::log_graph::GraphRow>,
+    pub graph: crate::git::log_graph::GraphOutput,
     pub selected: usize,
     pub detail: Option<GitLogCommitDetail>,
     pub detail_visible: bool,
