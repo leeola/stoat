@@ -115,8 +115,8 @@ impl GitLogView {
                         ConnectionKind::Straight => {
                             let x = col_x(conn.from_col);
                             let mut builder = PathBuilder::stroke(px(LINE_WIDTH));
-                            builder.move_to(point(origin.x + x, origin.y + px(-1.0)));
-                            builder.line_to(point(origin.x + x, origin.y + px(height + 1.0)));
+                            builder.move_to(point(origin.x + x, origin.y + px(-0.5)));
+                            builder.line_to(point(origin.x + x, origin.y + px(height + 0.5)));
                             if let Ok(path) = builder.build() {
                                 window.paint_path(path, color);
                             }
@@ -130,9 +130,15 @@ impl GitLogView {
                             let mut builder = PathBuilder::stroke(px(LINE_WIDTH));
                             builder.move_to(point(origin.x + commit_x, origin.y + px(mid_y)));
                             builder.cubic_bezier_to(
-                                point(origin.x + target_x, origin.y + px(height + 1.0)),
-                                point(origin.x + commit_x, origin.y + px(height + 1.0)),
-                                point(origin.x + target_x, origin.y + px(mid_y)),
+                                point(origin.x + target_x, origin.y + px(height + 0.5)),
+                                point(
+                                    origin.x + commit_x + (target_x - commit_x) / 2.0,
+                                    origin.y + px(height + 0.5),
+                                ),
+                                point(
+                                    origin.x + commit_x + (target_x - commit_x) / 2.0,
+                                    origin.y + px(mid_y),
+                                ),
                             );
                             if let Ok(path) = builder.build() {
                                 window.paint_path(path, color);
@@ -148,10 +154,14 @@ impl GitLogView {
                     .map(|c| rgb(LANE_COLORS[c.color_index % LANE_COLORS.len()]).into())
                     .unwrap_or_else(|| rgb(LANE_COLORS[0]).into());
 
-                if graph_row.has_incoming {
+                let has_straight_at_col = graph_row
+                    .connections
+                    .iter()
+                    .any(|c| c.kind == ConnectionKind::Straight && c.from_col == graph_row.column);
+                if graph_row.has_incoming && !has_straight_at_col {
                     let x = col_x(graph_row.column);
                     let mut builder = PathBuilder::stroke(px(LINE_WIDTH));
-                    builder.move_to(point(origin.x + x, origin.y + px(-1.0)));
+                    builder.move_to(point(origin.x + x, origin.y + px(-0.5)));
                     builder.line_to(point(origin.x + x, origin.y + px(mid_y)));
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, node_color);
