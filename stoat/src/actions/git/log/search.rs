@@ -1,5 +1,5 @@
 use crate::{pane_group::view::PaneGroupView, quick_input::QuickInputEvent};
-use gpui::{AppContext, Context, Focusable, Window};
+use gpui::{AppContext, Context, Focusable, ScrollStrategy, Window};
 
 impl PaneGroupView {
     pub(crate) fn handle_git_log_search_open(
@@ -64,6 +64,8 @@ impl PaneGroupView {
 
         if let Some(&first) = self.app_state.git_log.search_matches.first() {
             self.app_state.git_log.selected = first;
+            self.git_log_scroll
+                .scroll_to_item(first, ScrollStrategy::Nearest);
         }
 
         if let Some(editor) = self.active_editor().cloned() {

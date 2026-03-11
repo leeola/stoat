@@ -9,9 +9,9 @@ use crate::{
     quick_input::QuickInput,
 };
 use gpui::{
-    canvas, div, point, prelude::FluentBuilder, px, rgb, rgba, Entity, FontWeight, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels, RenderOnce, ScrollHandle,
-    StatefulInteractiveElement, Styled, Window,
+    canvas, div, point, prelude::FluentBuilder, px, rgb, rgba, uniform_list, Entity, FontWeight,
+    Hsla, InteractiveElement, IntoElement, ParentElement, PathBuilder, Pixels, RenderOnce,
+    ScrollHandle, StatefulInteractiveElement, Styled, UniformListScrollHandle, Window,
 };
 use std::collections::BTreeMap;
 
@@ -95,7 +95,7 @@ pub struct GitLogView {
     selected: usize,
     detail: Option<GitLogDetailSnapshot>,
     detail_visible: bool,
-    scroll_handle: ScrollHandle,
+    scroll_handle: UniformListScrollHandle,
     loading: bool,
     search_query: String,
     search_matches: Vec<usize>,
@@ -110,7 +110,7 @@ impl GitLogView {
         selected: usize,
         detail: Option<GitLogDetailSnapshot>,
         detail_visible: bool,
-        scroll_handle: ScrollHandle,
+        scroll_handle: UniformListScrollHandle,
         loading: bool,
         search_query: String,
         search_matches: Vec<usize>,
@@ -323,6 +323,12 @@ impl RenderOnce for GitLogView {
         let selected = self.selected;
         let is_searching = !self.search_query.is_empty();
 
+        let selected_commit = if show_detail {
+            self.commits.get(selected).cloned()
+        } else {
+            None
+        };
+
         let title = if is_searching {
             format!(
                 "Git Log ({} commits, {} matches for \"{}\")",
@@ -369,87 +375,87 @@ impl RenderOnce for GitLogView {
                 0.0
             };
 
+            let base_scroll_handle = self.scroll_handle.0.borrow().base_handle.clone();
             let graph_canvas = if has_graph {
                 Some(Self::render_graph_canvas(
                     self.graph.entries,
                     self.graph.lines,
                     self.graph.max_lanes,
-                    self.scroll_handle.clone(),
+                    base_scroll_handle,
                 ))
             } else {
                 None
             };
 
-            let mut list = div()
-                .id("git-log-list")
-                .flex()
-                .flex_col()
-                .flex_1()
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll_handle);
+            let commits = self.commits;
+            let search_matches = self.search_matches;
+            let loading = self.loading;
+            let item_count = commits.len() + if loading { 1 } else { 0 };
 
-            for (i, commit) in self.commits.iter().enumerate() {
-                let is_selected = i == selected;
-                let is_match = is_searching && self.search_matches.contains(&i);
-                let dim = is_searching && !is_match;
+            let list = uniform_list("git-log-list", item_count, move |range, _window, _cx| {
+                range
+                    .map(|i| {
+                        if i >= commits.len() {
+                            return div()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .text_color(rgb(0x808080))
+                                .text_size(px(11.0))
+                                .child("Loading...");
+                        }
 
-                let date_str = format_relative_time(commit.timestamp);
+                        let commit = &commits[i];
+                        let is_selected = i == selected;
+                        let is_match = is_searching && search_matches.contains(&i);
+                        let dim = is_searching && !is_match;
+                        let date_str = format_relative_time(commit.timestamp);
 
-                let mut row = div()
-                    .flex()
-                    .h(px(ROW_HEIGHT))
-                    .px(px(8.0))
-                    .when(is_selected, |d| d.bg(rgb(0x3b4261)))
-                    .when(dim, |d| d.opacity(0.35));
+                        let mut row = div()
+                            .flex()
+                            .h(px(ROW_HEIGHT))
+                            .px(px(8.0))
+                            .when(is_selected, |d| d.bg(rgb(0x3b4261)))
+                            .when(dim, |d| d.opacity(0.35));
 
-                if has_graph {
-                    row = row.child(div().w(px(gw)).flex_shrink_0());
-                }
+                        if has_graph {
+                            row = row.child(div().w(px(gw)).flex_shrink_0());
+                        }
 
-                let text_row = div()
-                    .flex()
-                    .gap_2()
-                    .flex_1()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_color(rgb(0xce9178))
-                            .text_size(px(11.0))
-                            .w(px(56.0))
-                            .flex_shrink_0()
-                            .child(commit.short_hash.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0xd4d4d4))
-                            .text_size(px(11.0))
+                        let text_row = div()
+                            .flex()
+                            .gap_2()
                             .flex_1()
-                            .overflow_x_hidden()
-                            .child(commit.message.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x808080))
-                            .text_size(px(10.0))
-                            .flex_shrink_0()
-                            .child(format!("{} {}", commit.author, date_str)),
-                    );
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_color(rgb(0xce9178))
+                                    .text_size(px(11.0))
+                                    .w(px(56.0))
+                                    .flex_shrink_0()
+                                    .child(commit.short_hash.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0xd4d4d4))
+                                    .text_size(px(11.0))
+                                    .flex_1()
+                                    .overflow_x_hidden()
+                                    .child(commit.message.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(0x808080))
+                                    .text_size(px(10.0))
+                                    .flex_shrink_0()
+                                    .child(format!("{} {}", commit.author, date_str)),
+                            );
 
-                row = row.child(text_row);
-
-                list = list.child(row);
-            }
-
-            if self.loading {
-                list = list.child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .text_color(rgb(0x808080))
-                        .text_size(px(11.0))
-                        .child("Loading..."),
-                );
-            }
+                        row.child(text_row)
+                    })
+                    .collect()
+            })
+            .flex_1()
+            .track_scroll(&self.scroll_handle);
 
             div()
                 .id("git-log-content")
@@ -487,8 +493,7 @@ impl RenderOnce for GitLogView {
             .child(key_hint("q/esc", "close"));
 
         let detail_panel = if show_detail {
-            if let Some(ref detail) = self.detail {
-                let commit = &self.commits[selected];
+            if let (Some(ref detail), Some(ref commit)) = (&self.detail, &selected_commit) {
                 let date_str = format_relative_time(commit.timestamp);
 
                 let modal_width = viewport_width * 0.75;

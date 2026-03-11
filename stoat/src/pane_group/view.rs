@@ -14,7 +14,7 @@ use crate::{
 use gpui::{
     div, prelude::FluentBuilder, AnyElement, App, AppContext, Context, Entity, FocusHandle,
     Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, Styled,
-    Subscription, Window,
+    Subscription, UniformListScrollHandle, Window,
 };
 use std::{
     cell::RefCell,
@@ -129,7 +129,7 @@ pub struct PaneGroupView {
     git_status_scroll: ScrollHandle,
     blame_commit_diff_scroll: ScrollHandle,
     rebase_scroll: ScrollHandle,
-    git_log_scroll: ScrollHandle,
+    pub(crate) git_log_scroll: UniformListScrollHandle,
     symbol_picker_scroll: ScrollHandle,
     render_stats_tracker: Rc<RefCell<FrameTimer>>,
     /// Single minimap view for the entire window (updates to show active pane's content)
@@ -310,7 +310,7 @@ impl PaneGroupView {
             git_status_scroll: ScrollHandle::new(),
             blame_commit_diff_scroll: ScrollHandle::new(),
             rebase_scroll: ScrollHandle::new(),
-            git_log_scroll: ScrollHandle::new(),
+            git_log_scroll: UniformListScrollHandle::new(),
             symbol_picker_scroll: ScrollHandle::new(),
             render_stats_tracker: Rc::new(RefCell::new(FrameTimer::new())),
             minimap_view,
@@ -1271,8 +1271,12 @@ impl Render for PaneGroupView {
                     && !self.app_state.git_log.loading
                     && !self.app_state.git_log.all_loaded
                 {
-                    let bottom = self.git_log_scroll.bottom_item();
-                    if bottom >= commit_count.saturating_sub(SCROLL_LOAD_THRESHOLD) {
+                    let scroll_y = {
+                        let state = self.git_log_scroll.0.borrow();
+                        -f32::from(state.base_handle.offset().y)
+                    };
+                    let approx_bottom = (scroll_y / 22.0) as usize + 50;
+                    if approx_bottom >= commit_count.saturating_sub(SCROLL_LOAD_THRESHOLD) {
                         self.load_more_git_log_commits(cx);
                     }
                 }

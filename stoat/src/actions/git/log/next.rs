@@ -1,5 +1,5 @@
 use crate::pane_group::view::PaneGroupView;
-use gpui::{Context, Window};
+use gpui::{Context, ScrollStrategy, Window};
 
 const LOG_LOAD_THRESHOLD: usize = 50;
 
@@ -13,6 +13,9 @@ impl PaneGroupView {
         if self.app_state.git_log.selected < len - 1 {
             self.app_state.git_log.selected += 1;
         }
+
+        self.git_log_scroll
+            .scroll_to_item(self.app_state.git_log.selected, ScrollStrategy::Nearest);
 
         if self.app_state.git_log.selected >= len.saturating_sub(LOG_LOAD_THRESHOLD) {
             self.load_more_git_log_commits(cx);

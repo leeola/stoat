@@ -1,7 +1,7 @@
 use crate::{git::log_graph::compute_graph, pane_group::view::PaneGroupView, stoat::KeyContext};
 use gpui::{Context, Window};
 
-const LOG_BATCH_SIZE: usize = 500;
+const LOG_BATCH_SIZE: usize = 200;
 
 impl PaneGroupView {
     pub(crate) fn handle_open_git_log(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
