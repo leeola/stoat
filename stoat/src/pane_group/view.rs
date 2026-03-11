@@ -1262,6 +1262,23 @@ impl Render for PaneGroupView {
             self.process_pending_actions(window, cx);
         }
 
+        // Pre-fetch more git log commits when scrolling near the bottom
+        const SCROLL_LOAD_THRESHOLD: usize = 50;
+        if let Some(stoat) = self.active_stoat(cx) {
+            if stoat.read(cx).key_context() == KeyContext::GitLog {
+                let commit_count = self.app_state.git_log.commits.len();
+                if commit_count > 0
+                    && !self.app_state.git_log.loading
+                    && !self.app_state.git_log.all_loaded
+                {
+                    let bottom = self.git_log_scroll.bottom_item();
+                    if bottom >= commit_count.saturating_sub(SCROLL_LOAD_THRESHOLD) {
+                        self.load_more_git_log_commits(cx);
+                    }
+                }
+            }
+        }
+
         // Track scroll position for ScrollHint mode
         // Extract early to avoid borrow conflicts with later code
         let current_scroll_y = self

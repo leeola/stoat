@@ -1,7 +1,7 @@
 use crate::pane_group::view::PaneGroupView;
 use gpui::{Context, Window};
 
-const LOG_LOAD_THRESHOLD: usize = 20;
+const LOG_LOAD_THRESHOLD: usize = 50;
 
 impl PaneGroupView {
     pub(crate) fn handle_git_log_next(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
