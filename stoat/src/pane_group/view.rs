@@ -1279,6 +1279,16 @@ impl Render for PaneGroupView {
                     if approx_bottom >= commit_count.saturating_sub(SCROLL_LOAD_THRESHOLD) {
                         self.load_more_git_log_commits(cx);
                     }
+
+                    let top_visible = (scroll_y / 22.0) as usize;
+                    let bottom_visible = (top_visible + 35).min(commit_count.saturating_sub(1));
+                    if self.app_state.git_log.selected < top_visible {
+                        self.app_state.git_log.selected = top_visible;
+                        self.load_git_log_detail_for_selected(cx);
+                    } else if self.app_state.git_log.selected > bottom_visible {
+                        self.app_state.git_log.selected = bottom_visible;
+                        self.load_git_log_detail_for_selected(cx);
+                    }
                 }
             }
         }
@@ -1930,7 +1940,6 @@ impl Render for PaneGroupView {
                             self.app_state.git_log.graph.clone(),
                             self.app_state.git_log.selected,
                             detail_snapshot,
-                            self.app_state.git_log.detail_visible,
                             self.git_log_scroll.clone(),
                             self.app_state.git_log.loading,
                             self.app_state.git_log.search_query.clone(),

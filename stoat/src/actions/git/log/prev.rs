@@ -10,8 +10,6 @@ impl PaneGroupView {
         self.git_log_scroll
             .scroll_to_item(self.app_state.git_log.selected, ScrollStrategy::Nearest);
 
-        if self.app_state.git_log.detail_visible {
-            self.load_git_log_detail_for_selected(cx);
-        }
+        self.load_git_log_detail_for_selected(cx);
     }
 }

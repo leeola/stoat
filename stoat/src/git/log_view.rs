@@ -94,7 +94,6 @@ pub struct GitLogView {
     graph: GraphOutput,
     selected: usize,
     detail: Option<GitLogDetailSnapshot>,
-    detail_visible: bool,
     scroll_handle: UniformListScrollHandle,
     loading: bool,
     search_query: String,
@@ -109,7 +108,6 @@ impl GitLogView {
         graph: GraphOutput,
         selected: usize,
         detail: Option<GitLogDetailSnapshot>,
-        detail_visible: bool,
         scroll_handle: UniformListScrollHandle,
         loading: bool,
         search_query: String,
@@ -121,7 +119,6 @@ impl GitLogView {
             graph,
             selected,
             detail,
-            detail_visible,
             scroll_handle,
             loading,
             search_query,
@@ -317,7 +314,7 @@ impl RenderOnce for GitLogView {
         let viewport_height = f32::from(window.viewport_size().height);
 
         let has_detail = self.detail.is_some();
-        let show_detail = self.detail_visible && has_detail && viewport_width > 900.0;
+        let show_detail = has_detail && viewport_width > 900.0;
         let is_empty = self.commits.is_empty();
         let commit_count = self.commits.len();
         let selected = self.selected;
@@ -464,6 +461,7 @@ impl RenderOnce for GitLogView {
                 .flex_1()
                 .overflow_hidden()
                 .relative()
+                .child(list)
                 .child(
                     div()
                         .absolute()
@@ -473,7 +471,6 @@ impl RenderOnce for GitLogView {
                         .w(px(gw))
                         .when_some(graph_canvas, |d, c| d.child(c)),
                 )
-                .child(list)
         };
 
         let footer = div()
@@ -487,7 +484,6 @@ impl RenderOnce for GitLogView {
             .text_size(px(10.0))
             .text_color(rgb(0x808080))
             .child(key_hint("j/k", "navigate"))
-            .child(key_hint("enter", "details"))
             .child(key_hint("h/l", "detail files"))
             .child(key_hint("/", "search"))
             .child(key_hint("q/esc", "close"));

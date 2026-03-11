@@ -9,15 +9,7 @@ impl PaneGroupView {
         _window: &mut gpui::Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.app_state.git_log.detail_visible {
-            self.app_state.git_log.detail_visible = false;
-            self.app_state.git_log.detail = None;
-            self.app_state.git_log.detail_task = None;
-            cx.notify();
-        } else {
-            self.app_state.git_log.detail_visible = true;
-            self.load_git_log_detail_for_selected(cx);
-        }
+        self.load_git_log_detail_for_selected(cx);
     }
 
     pub(crate) fn load_git_log_detail_for_selected(&mut self, cx: &mut Context<'_, Self>) {

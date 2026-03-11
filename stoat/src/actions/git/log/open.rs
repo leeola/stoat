@@ -62,6 +62,7 @@ impl PaneGroupView {
                             pgv.app_state.git_log.graph = graph;
                             pgv.app_state.git_log.loading = false;
                             pgv.app_state.git_log.all_loaded = all_loaded;
+                            pgv.load_git_log_detail_for_selected(cx);
                         },
                         Err(e) => {
                             pgv.app_state.flash_message =

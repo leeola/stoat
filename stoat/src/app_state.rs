@@ -266,7 +266,6 @@ pub struct GitLogState {
     pub graph: crate::git::log_graph::GraphOutput,
     pub selected: usize,
     pub detail: Option<GitLogCommitDetail>,
-    pub detail_visible: bool,
     pub detail_task: Option<Task<()>>,
     pub previous_mode: Option<String>,
     pub previous_key_context: Option<KeyContext>,
