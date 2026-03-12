@@ -617,6 +617,7 @@ mod tests {
             timestamp: 0,
             message: "Add feature".into(),
             parent_oids: vec![],
+            refs: vec![],
         };
         let commit = RebaseCommit::from_log_entry(entry);
         assert_eq!(commit.oid, "abc1234567890");

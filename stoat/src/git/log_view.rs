@@ -99,6 +99,7 @@ pub struct GitLogView {
     search_query: String,
     search_matches: Vec<usize>,
     search_input: Option<Entity<QuickInput>>,
+    branch_name: Option<String>,
 }
 
 impl GitLogView {
@@ -113,6 +114,7 @@ impl GitLogView {
         search_query: String,
         search_matches: Vec<usize>,
         search_input: Option<Entity<QuickInput>>,
+        branch_name: Option<String>,
     ) -> Self {
         Self {
             commits,
@@ -124,6 +126,7 @@ impl GitLogView {
             search_query,
             search_matches,
             search_input,
+            branch_name,
         }
     }
 
@@ -326,15 +329,22 @@ impl RenderOnce for GitLogView {
             None
         };
 
-        let title = if is_searching {
-            format!(
+        let title = match (&self.branch_name, is_searching) {
+            (Some(branch), true) => format!(
+                "Git Log \u{2014} {} ({} commits, {} matches for \"{}\")",
+                branch,
+                commit_count,
+                self.search_matches.len(),
+                self.search_query,
+            ),
+            (Some(branch), false) => format!("Git Log \u{2014} {branch} ({commit_count} commits)"),
+            (None, true) => format!(
                 "Git Log ({} commits, {} matches for \"{}\")",
                 commit_count,
                 self.search_matches.len(),
                 self.search_query,
-            )
-        } else {
-            format!("Git Log ({commit_count} commits)")
+            ),
+            (None, false) => format!("Git Log ({commit_count} commits)"),
         };
 
         let mut header = div()
@@ -416,19 +426,29 @@ impl RenderOnce for GitLogView {
                             row = row.child(div().w(px(gw)).flex_shrink_0());
                         }
 
-                        let text_row = div()
-                            .flex()
-                            .gap_2()
-                            .flex_1()
-                            .items_center()
-                            .child(
+                        let mut text_row = div().flex().gap_2().flex_1().items_center().child(
+                            div()
+                                .text_color(rgb(0xce9178))
+                                .text_size(px(11.0))
+                                .w(px(56.0))
+                                .flex_shrink_0()
+                                .child(commit.short_hash.clone()),
+                        );
+
+                        for ref_name in &commit.refs {
+                            text_row = text_row.child(
                                 div()
-                                    .text_color(rgb(0xce9178))
-                                    .text_size(px(11.0))
-                                    .w(px(56.0))
+                                    .px(px(4.0))
+                                    .rounded(px(3.0))
+                                    .bg(rgb(0x2d4f2d))
+                                    .text_color(rgb(0x6a9955))
+                                    .text_size(px(9.0))
                                     .flex_shrink_0()
-                                    .child(commit.short_hash.clone()),
-                            )
+                                    .child(ref_name.clone()),
+                            );
+                        }
+
+                        let text_row = text_row
                             .child(
                                 div()
                                     .text_color(rgb(0xd4d4d4))
@@ -471,27 +491,11 @@ impl RenderOnce for GitLogView {
                 )
         };
 
-        let footer = div()
-            .border_t_1()
-            .border_color(rgb(0x3e3e42))
-            .bg(rgb(0x252526))
-            .px(px(8.0))
-            .py(px(4.0))
-            .flex()
-            .gap_4()
-            .text_size(px(10.0))
-            .text_color(rgb(0x808080))
-            .child(key_hint("j/k", "navigate"))
-            .child(key_hint("ctrl-f/b", "page dn/up"))
-            .child(key_hint("h/l", "detail files"))
-            .child(key_hint("/", "search"))
-            .child(key_hint("q/esc", "close"));
-
         let detail_panel = if show_detail {
             if let (Some(ref detail), Some(ref commit)) = (&self.detail, &selected_commit) {
                 let date_str = format_relative_time(commit.timestamp);
 
-                let modal_width = viewport_width * 0.75;
+                let modal_width = viewport_width * 0.9;
                 let mut detail_div = div()
                     .flex()
                     .flex_col()
@@ -606,7 +610,7 @@ impl RenderOnce for GitLogView {
                     .flex_col()
                     .when(is_empty && !self.loading, |d| d.w(px(500.0)).h(px(200.0)))
                     .when(!is_empty || self.loading, |d| {
-                        d.w_3_4().h(px(viewport_height * 0.85))
+                        d.w(px(viewport_width * 0.9)).h(px(viewport_height * 0.92))
                     })
                     .bg(rgb(0x1e1e1e))
                     .border_1()
@@ -622,21 +626,7 @@ impl RenderOnce for GitLogView {
                             .overflow_hidden()
                             .child(div().flex().flex_col().flex_1().child(commit_list))
                             .when_some(detail_panel, |d, panel| d.child(panel)),
-                    )
-                    .child(footer),
+                    ),
             )
     }
-}
-
-fn key_hint(key: &str, label: &str) -> impl IntoElement {
-    div()
-        .flex()
-        .gap_1()
-        .child(
-            div()
-                .text_color(rgb(0xd4d4d4))
-                .font_weight(FontWeight::BOLD)
-                .child(key.to_string()),
-        )
-        .child(div().text_color(rgb(0x808080)).child(label.to_string()))
 }

@@ -896,6 +896,7 @@ impl GitRepo for FakeGitRepo {
                     .map(|f| f.path.to_string_lossy().to_string())
                     .unwrap_or_default(),
                 parent_oids: vec![],
+                refs: vec![],
             })
             .collect())
     }

@@ -398,6 +398,7 @@ mod tests {
             timestamp: 0,
             message: oid.to_string(),
             parent_oids: parents.iter().map(|s| s.to_string()).collect(),
+            refs: vec![],
         }
     }
 

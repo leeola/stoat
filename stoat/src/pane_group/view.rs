@@ -1947,6 +1947,11 @@ impl Render for PaneGroupView {
                             self.app_state.git_log.search_query.clone(),
                             self.app_state.git_log.search_matches.clone(),
                             self.app_state.git_log.search_input.clone(),
+                            self.app_state
+                                .git_status
+                                .branch_info
+                                .as_ref()
+                                .map(|bi| bi.branch_name.clone()),
                         ))
                     })
                     .when(key_context == KeyContext::BlameCommitDiff, |div| {

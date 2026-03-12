@@ -56,6 +56,7 @@ pub struct CommitLogEntry {
     pub timestamp: i64,
     pub message: String,
     pub parent_oids: Vec<String>,
+    pub refs: Vec<String>,
 }
 
 /// Errors that can occur during git operations.
@@ -508,6 +509,7 @@ impl Repository {
                 timestamp: commit.time().seconds(),
                 message: commit.summary().unwrap_or("").to_string(),
                 parent_oids,
+                refs: vec![],
             });
         }
 
@@ -558,6 +560,7 @@ impl Repository {
                 timestamp: commit.time().seconds(),
                 message: commit.summary().unwrap_or("").to_string(),
                 parent_oids,
+                refs: vec![],
             });
         }
 
@@ -574,6 +577,19 @@ impl Repository {
         offset: usize,
         max: usize,
     ) -> Result<Vec<CommitLogEntry>, GitError> {
+        let mut ref_map: HashMap<git2::Oid, Vec<String>> = HashMap::new();
+        for branch_result in self
+            .repo
+            .branches(Some(git2::BranchType::Local))
+            .map_err(|e| GitError::GitOperationFailed(format!("branches failed: {e}")))?
+        {
+            let (branch, _) = branch_result
+                .map_err(|e| GitError::GitOperationFailed(format!("branch iter: {e}")))?;
+            if let (Some(name), Some(oid)) = (branch.name().ok().flatten(), branch.get().target()) {
+                ref_map.entry(oid).or_default().push(name.to_string());
+            }
+        }
+
         let mut revwalk = self
             .repo
             .revwalk()
@@ -615,6 +631,7 @@ impl Repository {
                 timestamp: commit.time().seconds(),
                 message: commit.summary().unwrap_or("").to_string(),
                 parent_oids,
+                refs: ref_map.remove(&oid).unwrap_or_default(),
             });
         }
 
