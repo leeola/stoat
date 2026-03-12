@@ -433,6 +433,10 @@ actions!(
         GitLogSearchOpen,
         /// Confirm search query
         GitLogSearchConfirm,
+        /// Jump down half a page in git log
+        GitLogPageDown,
+        /// Jump up half a page in git log
+        GitLogPageUp,
     ]
 );
 
@@ -1560,6 +1564,18 @@ action_metadata!(
     "Execute search query",
     hidden
 );
+action_metadata!(
+    GitLogPageDown,
+    "page down",
+    "Jump down half a page in git log",
+    hidden
+);
+action_metadata!(
+    GitLogPageUp,
+    "page up",
+    "Jump up half a page in git log",
+    hidden
+);
 
 // Line selection actions
 action_metadata!(
@@ -2279,6 +2295,11 @@ pub static ACTION_NAMES: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitLogSearchConfirm>(),
         GitLogSearchConfirm::action_name(),
     );
+    names.insert(
+        TypeId::of::<GitLogPageDown>(),
+        GitLogPageDown::action_name(),
+    );
+    names.insert(TypeId::of::<GitLogPageUp>(), GitLogPageUp::action_name());
 
     // Line selection actions
     names.insert(
@@ -2913,6 +2934,11 @@ pub static DESCRIPTIONS: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new
         TypeId::of::<GitLogSearchConfirm>(),
         GitLogSearchConfirm::description(),
     );
+    descriptions.insert(
+        TypeId::of::<GitLogPageDown>(),
+        GitLogPageDown::description(),
+    );
+    descriptions.insert(TypeId::of::<GitLogPageUp>(), GitLogPageUp::description());
 
     // Line selection actions
     descriptions.insert(
@@ -3518,6 +3544,8 @@ pub static HELP_TEXT: LazyLock<HashMap<TypeId, &'static str>> = LazyLock::new(||
         TypeId::of::<GitLogSearchConfirm>(),
         GitLogSearchConfirm::help_text(),
     );
+    help.insert(TypeId::of::<GitLogPageDown>(), GitLogPageDown::help_text());
+    help.insert(TypeId::of::<GitLogPageUp>(), GitLogPageUp::help_text());
 
     // Line selection actions
     help.insert(

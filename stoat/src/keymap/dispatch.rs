@@ -402,6 +402,8 @@ pub fn dispatch_pane_action<C: AppContext>(
             | "GitLogDetailPrevFile"
             | "GitLogSearchConfirm"
             | "GitLogSearchOpen"
+            | "GitLogPageDown"
+            | "GitLogPageUp"
             // Command line
             | "ShowCommandLine"
             | "CommandLineDismiss"

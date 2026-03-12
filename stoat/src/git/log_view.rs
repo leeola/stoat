@@ -405,8 +405,6 @@ impl RenderOnce for GitLogView {
                         let is_selected = i == selected;
                         let is_match = is_searching && search_matches.contains(&i);
                         let dim = is_searching && !is_match;
-                        let date_str = format_relative_time(commit.timestamp);
-
                         let mut row = div()
                             .flex()
                             .h(px(ROW_HEIGHT))
@@ -444,7 +442,7 @@ impl RenderOnce for GitLogView {
                                     .text_color(rgb(0x808080))
                                     .text_size(px(10.0))
                                     .flex_shrink_0()
-                                    .child(format!("{} {}", commit.author, date_str)),
+                                    .child(commit.author.clone()),
                             );
 
                         row.child(text_row)
@@ -484,6 +482,7 @@ impl RenderOnce for GitLogView {
             .text_size(px(10.0))
             .text_color(rgb(0x808080))
             .child(key_hint("j/k", "navigate"))
+            .child(key_hint("ctrl-f/b", "page dn/up"))
             .child(key_hint("h/l", "detail files"))
             .child(key_hint("/", "search"))
             .child(key_hint("q/esc", "close"));
@@ -496,7 +495,7 @@ impl RenderOnce for GitLogView {
                 let mut detail_div = div()
                     .flex()
                     .flex_col()
-                    .w(px(modal_width * 0.4))
+                    .w(px(modal_width * 0.55))
                     .border_l_1()
                     .border_color(rgb(0x3e3e42))
                     .overflow_hidden();
@@ -596,6 +595,7 @@ impl RenderOnce for GitLogView {
             .left_0()
             .right_0()
             .bottom_0()
+            .occlude()
             .bg(rgba(0x00000030))
             .flex()
             .items_center()

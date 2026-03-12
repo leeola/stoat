@@ -598,6 +598,8 @@ impl PaneGroupView {
                 "GitLogDetailPrevFile" => self.handle_git_log_detail_prev_file(window, cx),
                 "GitLogSearchConfirm" => self.handle_git_log_search_confirm(window, cx),
                 "GitLogSearchOpen" => self.handle_git_log_search_open(window, cx),
+                "GitLogPageDown" => self.handle_git_log_page_down(window, cx),
+                "GitLogPageUp" => self.handle_git_log_page_up(window, cx),
                 "OpenDiffReview" => self.handle_open_diff_review(window, cx),
                 "OpenConflictReview" => self.handle_open_conflict_review(window, cx),
                 "OpenGitBlame" => self.handle_open_git_blame(window, cx),

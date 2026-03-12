@@ -293,6 +293,8 @@ on key {
             l -> GitLogDetailNextFile();
             h -> GitLogDetailPrevFile();
             / -> GitLogSearchOpen();
+            ctrl-f -> GitLogPageDown();
+            ctrl-b -> GitLogPageUp();
         }
     }
 
