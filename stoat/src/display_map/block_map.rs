@@ -1,7 +1,7 @@
 use super::wrap_map::WrapSnapshot;
 use std::{cmp::Ordering, ops::Deref, sync::Arc};
 use stoat_text::{
-    Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
+    patch::Patch, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -63,7 +63,7 @@ impl BlockContent {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BlockPlacement {
     Above(u32),
     Below(u32),
@@ -167,17 +167,50 @@ pub enum BlockRowKind<'a> {
     Block { block: &'a Block, line_index: u32 },
 }
 
-pub struct BlockMap;
+pub struct BlockMap {
+    cached_transforms: Option<SumTree<Transform>>,
+    cached_total_rows: u32,
+    last_block_fingerprint: Vec<(BlockPlacement, u32)>,
+}
 
 impl BlockMap {
     pub fn new() -> Self {
-        Self
+        Self {
+            cached_transforms: None,
+            cached_total_rows: 0,
+            last_block_fingerprint: Vec::new(),
+        }
     }
 
-    pub fn sync(&self, wrap_snapshot: Arc<WrapSnapshot>, blocks: &[Block]) -> BlockSnapshot {
+    pub fn sync(
+        &mut self,
+        wrap_snapshot: Arc<WrapSnapshot>,
+        blocks: &[Block],
+        wrap_edits: &Patch<u32>,
+    ) -> BlockSnapshot {
+        let fingerprint: Vec<(BlockPlacement, u32)> = blocks
+            .iter()
+            .map(|b| (b.placement, b.line_count()))
+            .collect();
+
+        if wrap_edits.is_empty() && fingerprint == self.last_block_fingerprint {
+            if let Some(ref transforms) = self.cached_transforms {
+                return BlockSnapshot {
+                    wrap_snapshot,
+                    transforms: transforms.clone(),
+                    total_rows: self.cached_total_rows,
+                };
+            }
+        }
+
         let wrap_line_count = wrap_snapshot.line_count();
         let transforms = build_transforms(wrap_line_count, blocks, &wrap_snapshot);
         let total_rows: OutputRow = transforms.extent(());
+
+        self.cached_transforms = Some(transforms.clone());
+        self.cached_total_rows = total_rows.0;
+        self.last_block_fingerprint = fingerprint;
+
         BlockSnapshot {
             wrap_snapshot,
             transforms,
@@ -575,19 +608,6 @@ fn block_anchor_wrap_row(block: &Block, wrap_snapshot: &WrapSnapshot) -> u32 {
     }
 }
 
-fn longest_wrap_row(wrap_snapshot: &WrapSnapshot, start: u32, count: u32) -> (u32, u32) {
-    let mut best_row = 0u32;
-    let mut best_chars = 0u32;
-    for i in 0..count {
-        let len = wrap_snapshot.line_len(start + i);
-        if len > best_chars {
-            best_row = i;
-            best_chars = len;
-        }
-    }
-    (best_row, best_chars)
-}
-
 fn longest_block_line(block: &Block) -> (u32, u32) {
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
@@ -607,7 +627,8 @@ fn push_isomorphic(
     start_wrap_row: u32,
     wrap_snapshot: &WrapSnapshot,
 ) {
-    let (longest_row, longest_row_chars) = longest_wrap_row(wrap_snapshot, start_wrap_row, rows);
+    let (longest_row, longest_row_chars) =
+        wrap_snapshot.longest_in_output_range(start_wrap_row, rows);
 
     let mut merged = false;
     transforms.update_last(
@@ -650,7 +671,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::{Bias, Point};
+    use stoat_text::{patch::Patch, Bias, Point};
 
     fn create_block_snapshot(content: &str, blocks: &[Block]) -> super::BlockSnapshot {
         let mut buffer = TextBuffer::new();
@@ -661,10 +682,10 @@ mod tests {
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let tab_map = TabMap::new(4);
-        let tab_snapshot = tab_map.sync(fold_snapshot);
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
-        let block_map = BlockMap::new();
-        block_map.sync(wrap_snapshot, blocks)
+        let mut block_map = BlockMap::new();
+        block_map.sync(wrap_snapshot, blocks, &Patch::empty())
     }
 
     fn text_block(placement: BlockPlacement, content: &str) -> Block {
@@ -875,10 +896,10 @@ mod tests {
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let tab_map = TabMap::new(4);
-        let tab_snapshot = tab_map.sync(fold_snapshot);
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
-        let block_map = BlockMap::new();
-        let snapshot = block_map.sync(wrap_snapshot, &[]);
+        let mut block_map = BlockMap::new();
+        let snapshot = block_map.sync(wrap_snapshot, &[], &Patch::empty());
 
         let buf = snapshot.block_to_buffer(BlockPoint::new(0, 5)).unwrap();
         assert_eq!(buf, Point::new(0, 2));
@@ -934,5 +955,46 @@ mod tests {
             snapshot.write_display_line(&mut buf, row);
             assert_eq!(buf, expected, "mismatch at row {row}");
         }
+    }
+
+    fn create_wrap_snapshot(content: &str) -> Arc<super::WrapSnapshot> {
+        let mut buffer = TextBuffer::new();
+        buffer.rope.push(content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let tab_map = TabMap::new(4);
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
+        wrap_snapshot
+    }
+
+    #[test]
+    fn cache_reused_when_nothing_changes() {
+        let wrap_snapshot = create_wrap_snapshot("hello\nworld");
+        let blocks = vec![text_block(BlockPlacement::Below(0), "deleted")];
+        let mut block_map = BlockMap::new();
+
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &blocks, &Patch::empty());
+        let snap2 = block_map.sync(wrap_snapshot, &blocks, &Patch::empty());
+
+        assert_eq!(snap1.total_lines(), snap2.total_lines());
+        assert_eq!(snap1.longest_row(), snap2.longest_row());
+    }
+
+    #[test]
+    fn cache_invalidated_on_block_change() {
+        let wrap_snapshot = create_wrap_snapshot("hello\nworld");
+        let blocks1 = vec![text_block(BlockPlacement::Below(0), "deleted")];
+        let blocks2 = vec![text_block(BlockPlacement::Below(0), "deleted\nextra line")];
+        let mut block_map = BlockMap::new();
+
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &blocks1, &Patch::empty());
+        assert_eq!(snap1.total_lines(), 3);
+
+        let snap2 = block_map.sync(wrap_snapshot, &blocks2, &Patch::empty());
+        assert_eq!(snap2.total_lines(), 4);
     }
 }

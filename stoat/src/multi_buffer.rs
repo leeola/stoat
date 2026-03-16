@@ -3,7 +3,10 @@ use crate::{
     git::BufferDiff,
 };
 use std::sync::{Arc, OnceLock};
-use stoat_text::{Anchor, Bias, Point, Rope};
+use stoat_text::{
+    patch::{Edit, Patch},
+    Anchor, Bias, Point, Rope,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExcerptId(u64);
@@ -166,6 +169,19 @@ impl MultiBufferSnapshot {
         a.cmp(b, &|anchor| self.resolve_anchor(anchor))
     }
 
+    pub fn edits_since(&self, since_version: usize) -> Patch<usize> {
+        let start_idx = self.edit_log.partition_point(|r| r.version < since_version);
+        let mut result = Patch::empty();
+        for record in &self.edit_log[start_idx..] {
+            let edit = Edit {
+                old: record.range.clone(),
+                new: record.range.start..(record.range.start + record.new_len),
+            };
+            result = result.compose([edit]);
+        }
+        result
+    }
+
     pub fn is_singleton(&self) -> bool {
         self.singleton
     }
@@ -303,6 +319,46 @@ mod tests {
         let snapshot = multi.snapshot();
         assert!(snapshot.is_anchor_valid(&stoat_text::Anchor::min()));
         assert!(snapshot.is_anchor_valid(&stoat_text::Anchor::max()));
+    }
+
+    #[test]
+    fn edits_since_single_edit() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let v0 = multi.snapshot().version;
+        buffer.write().unwrap().edit(0..0, "XX");
+        let snap = multi.snapshot();
+        let patch = snap.edits_since(v0);
+        let edits = patch.edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].old, 0..0);
+        assert_eq!(edits[0].new, 0..2);
+    }
+
+    #[test]
+    fn edits_since_multiple_edits() {
+        let (id, buffer) = create_test_buffer("hello world");
+        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let v0 = multi.snapshot().version;
+        buffer.write().unwrap().edit(0..0, "XX");
+        buffer.write().unwrap().edit(8..11, "Y");
+        let snap = multi.snapshot();
+        let patch = snap.edits_since(v0);
+        let edits = patch.edits();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].old, 0..0);
+        assert_eq!(edits[0].new, 0..2);
+        assert_eq!(edits[1].old, 6..9);
+        assert_eq!(edits[1].new, 8..9);
+    }
+
+    #[test]
+    fn edits_since_no_changes() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snap = multi.snapshot();
+        let patch = snap.edits_since(snap.version);
+        assert!(patch.is_empty());
     }
 
     #[test]

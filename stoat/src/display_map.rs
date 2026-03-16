@@ -16,7 +16,7 @@ pub use block_map::{
 pub use fold_map::{FoldMap, FoldPlaceholder, FoldPoint, FoldSnapshot};
 pub use inlay_map::{InlayMap, InlayPoint, InlaySnapshot};
 use std::sync::Arc;
-use stoat_text::{Bias, CharsAt, Point, ReversedCharsAt, Rope};
+use stoat_text::{patch::Patch, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use unicode_width::UnicodeWidthChar;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
@@ -47,15 +47,17 @@ pub struct DisplayMap {
     tab_map: TabMap,
     wrap_map: WrapMap,
     block_map: BlockMap,
+    last_buffer_version: usize,
 }
 
 impl DisplayMap {
     pub fn new(multi_buffer: MultiBuffer) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
+        let version = buffer_snapshot.version;
         let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let tab_map = TabMap::new(4);
-        let tab_snapshot = tab_map.sync(fold_snapshot);
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None);
         let block_map = BlockMap::new();
 
@@ -66,6 +68,7 @@ impl DisplayMap {
             tab_map,
             wrap_map,
             block_map,
+            last_buffer_version: version,
         }
     }
 
@@ -122,12 +125,14 @@ impl DisplayMap {
         self.multi_buffer.compact_edit_log(watermark);
         let buffer_snapshot = self.multi_buffer.snapshot();
         let diff = buffer_snapshot.diff.clone();
-        let inlay_snapshot = self.inlay_map.sync(buffer_snapshot);
-        let fold_snapshot = self.fold_map.sync(inlay_snapshot);
-        let tab_snapshot = self.tab_map.sync(fold_snapshot);
-        let wrap_snapshot = self.wrap_map.sync(tab_snapshot);
+        let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
+        self.last_buffer_version = buffer_snapshot.version;
+        let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
+        let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
+        let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
         let blocks = collect_blocks_from_diff(diff.as_ref());
-        let block_snapshot = self.block_map.sync(wrap_snapshot, &blocks);
+        let block_snapshot = self.block_map.sync(wrap_snapshot, &blocks, &wrap_edits);
 
         DisplaySnapshot {
             block_snapshot,

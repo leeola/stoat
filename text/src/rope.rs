@@ -373,6 +373,11 @@ impl Rope {
         self.chunks.summary()
     }
 
+    pub fn text_summary_for_range(&self, range: Range<usize>) -> TextSummary {
+        let mut cursor = self.cursor(range.start);
+        cursor.summary(range.end)
+    }
+
     pub fn max_point(&self) -> Point {
         self.chunks.summary().lines
     }

@@ -1,6 +1,6 @@
 use super::fold_map::{FoldPoint, FoldSnapshot};
 use std::{ops::Deref, sync::Arc};
-use stoat_text::Bias;
+use stoat_text::{patch::Patch, Bias};
 
 const MAX_EXPANSION_COLUMN: u32 = 256;
 
@@ -49,12 +49,17 @@ impl TabMap {
         self.tab_size = size.max(1);
     }
 
-    pub fn sync(&self, fold_snapshot: Arc<FoldSnapshot>) -> TabSnapshot {
-        TabSnapshot {
+    pub fn sync(
+        &self,
+        fold_snapshot: Arc<FoldSnapshot>,
+        fold_edits: Patch<u32>,
+    ) -> (TabSnapshot, Patch<u32>) {
+        let snapshot = TabSnapshot {
             fold_snapshot,
             tab_size: self.tab_size,
             max_expansion_column: MAX_EXPANSION_COLUMN,
-        }
+        };
+        (snapshot, fold_edits)
     }
 }
 
@@ -242,6 +247,7 @@ fn collapse_column(
 ) -> u32 {
     let mut expanded = 0u32;
     let mut fold_col = 0u32;
+    let mut last_char_byte_len = 0u32;
     for ch in chars {
         if expanded >= tab_column {
             break;
@@ -256,10 +262,11 @@ fn collapse_column(
             super::display_width(ch)
         };
         expanded += char_width;
-        fold_col += ch.len_utf8() as u32;
+        last_char_byte_len = ch.len_utf8() as u32;
+        fold_col += last_char_byte_len;
     }
     if bias == Bias::Left && expanded > tab_column {
-        fold_col = fold_col.saturating_sub(1);
+        fold_col = fold_col.saturating_sub(last_char_byte_len);
     }
     fold_col
 }
@@ -276,7 +283,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::Bias;
+    use stoat_text::{patch::Patch, Bias};
 
     fn make_snapshot(content: &str) -> super::TabSnapshot {
         let mut buffer = TextBuffer::new();
@@ -287,7 +294,8 @@ mod tests {
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let tab_map = TabMap::new(4);
-        tab_map.sync(fold_snapshot)
+        let (snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        snapshot
     }
 
     #[test]
@@ -399,6 +407,33 @@ mod tests {
         // Each CJK char is 2 display columns wide
         assert_eq!(snap.expand_line_range(0, 0, Some(4)), "\u{4e16}\u{754c}");
         assert_eq!(snap.expand_line_range(0, 4, None), "hello");
+    }
+
+    #[test]
+    fn cjk_collapse_bias_left() {
+        let snap = make_snapshot("\u{4e16}hello");
+        assert_eq!(
+            snap.to_fold_point(TabPoint::new(0, 1), Bias::Left),
+            FoldPoint::new(0, 0),
+        );
+        assert_eq!(
+            snap.to_fold_point(TabPoint::new(0, 2), Bias::Left),
+            FoldPoint::new(0, 3),
+        );
+    }
+
+    #[test]
+    fn cjk_roundtrip() {
+        let snap = make_snapshot("\u{4e16}\u{754c}hello");
+        for col in [0u32, 3, 6, 7, 8, 9, 10, 11] {
+            let tab = snap.to_tab_point(FoldPoint::new(0, col));
+            let back = snap.to_fold_point(tab, Bias::Left);
+            assert_eq!(
+                back,
+                FoldPoint::new(0, col),
+                "roundtrip failed for col {col}"
+            );
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 mod anchor;
 mod offset_utf16;
+pub mod patch;
 mod point;
 mod rope;
 mod sum_tree;

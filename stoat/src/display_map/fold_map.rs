@@ -6,8 +6,8 @@ use std::{
     sync::Arc,
 };
 use stoat_text::{
-    Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary, Dimension, Dimensions, Item, Point,
-    ReversedCharsAt, Rope, SeekTarget, SumTree, TextSummary,
+    patch::Patch, Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary, Dimension, Dimensions,
+    Item, Point, ReversedCharsAt, Rope, SeekTarget, SumTree, TextSummary,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -153,14 +153,19 @@ impl FoldMap {
         (map, snapshot)
     }
 
-    pub fn sync(&mut self, inlay_snapshot: Arc<InlaySnapshot>) -> Arc<FoldSnapshot> {
+    pub fn sync(
+        &mut self,
+        inlay_snapshot: Arc<InlaySnapshot>,
+        inlay_edits: &Patch<u32>,
+    ) -> (Arc<FoldSnapshot>, Patch<u32>) {
         if inlay_snapshot.inlay_version == self.last_inlay_version
             && self.version == self.last_self_version
         {
             if let Some(ref cached) = self.cached_snapshot {
-                return Arc::clone(cached);
+                return (Arc::clone(cached), Patch::empty());
             }
         }
+
         let buffer = inlay_snapshot.buffer_snapshot();
         let all_anchors: Vec<Anchor> = self
             .folds
@@ -186,7 +191,34 @@ impl FoldMap {
             });
         }
         self.folds = valid_folds;
-        let transforms = build_fold_transforms(&inlay_snapshot, &resolved);
+
+        let can_incremental = !inlay_edits.is_empty()
+            && self.version == self.last_self_version
+            && self.cached_snapshot.is_some();
+
+        let (transforms, edits) = if can_incremental {
+            let old_snapshot = self.cached_snapshot.as_ref().unwrap();
+            sync_fold_incremental(old_snapshot, &inlay_snapshot, inlay_edits, &resolved)
+        } else {
+            let old_line_count = self
+                .cached_snapshot
+                .as_ref()
+                .map(|s| s.line_count())
+                .unwrap_or(0);
+            let transforms = build_fold_transforms(&inlay_snapshot, &resolved);
+            let new_line_count = if transforms.is_empty() {
+                1
+            } else {
+                let extent: FoldPoint = transforms.extent(());
+                extent.row() + 1
+            };
+            let edits = Patch::new(vec![stoat_text::patch::Edit {
+                old: 0..old_line_count,
+                new: 0..new_line_count,
+            }]);
+            (transforms, edits)
+        };
+
         let snapshot = Arc::new(FoldSnapshot {
             inlay_snapshot,
             transforms,
@@ -196,7 +228,7 @@ impl FoldMap {
         self.last_inlay_version = snapshot.inlay_snapshot.inlay_version;
         self.last_self_version = self.version;
         self.cached_snapshot = Some(Arc::clone(&snapshot));
-        snapshot
+        (snapshot, edits)
     }
 
     pub fn fold(
@@ -337,7 +369,11 @@ fn build_fold_transforms(inlay_snapshot: &InlaySnapshot, folds: &[Fold]) -> SumT
         };
 
         if fold_start > cursor {
-            let summary = TextSummary::from_str(&text[cursor..fold_start]);
+            let summary = if has_inlays {
+                TextSummary::from_str(&text[cursor..fold_start])
+            } else {
+                rope.text_summary_for_range(cursor..fold_start)
+            };
             transforms.push(
                 Transform {
                     summary: TransformSummary {
@@ -350,7 +386,11 @@ fn build_fold_transforms(inlay_snapshot: &InlaySnapshot, folds: &[Fold]) -> SumT
             );
         }
 
-        let input_summary = TextSummary::from_str(&text[fold_start..fold_end]);
+        let input_summary = if has_inlays {
+            TextSummary::from_str(&text[fold_start..fold_end])
+        } else {
+            rope.text_summary_for_range(fold_start..fold_end)
+        };
         let output_summary = TextSummary::from_str(&fold.placeholder.text);
         transforms.push(
             Transform {
@@ -367,7 +407,11 @@ fn build_fold_transforms(inlay_snapshot: &InlaySnapshot, folds: &[Fold]) -> SumT
     }
 
     if cursor < text.len() {
-        let summary = TextSummary::from_str(&text[cursor..]);
+        let summary = if has_inlays {
+            TextSummary::from_str(&text[cursor..])
+        } else {
+            rope.text_summary_for_range(cursor..text.len())
+        };
         transforms.push(
             Transform {
                 summary: TransformSummary {
@@ -381,6 +425,258 @@ fn build_fold_transforms(inlay_snapshot: &InlaySnapshot, folds: &[Fold]) -> SumT
     }
 
     transforms
+}
+
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InputOffset(usize);
+
+impl<'a> Dimension<'a, TransformSummary> for InputOffset {
+    fn zero(_cx: ()) -> Self {
+        Self(0)
+    }
+
+    fn add_summary(&mut self, s: &'a TransformSummary, _cx: ()) {
+        self.0 += s.input.len;
+    }
+}
+
+fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary) {
+    if summary.input.len == 0 {
+        return;
+    }
+    let mut summary = Some(summary);
+    tree.update_last(
+        |t| {
+            if t.placeholder.is_none() {
+                ContextLessSummary::add_summary(&mut t.summary, &summary.take().unwrap());
+            }
+        },
+        (),
+    );
+    if let Some(s) = summary {
+        tree.push(
+            Transform {
+                summary: s,
+                placeholder: None,
+            },
+            (),
+        );
+    }
+}
+
+fn sync_fold_incremental(
+    old_snapshot: &FoldSnapshot,
+    inlay_snapshot: &InlaySnapshot,
+    inlay_edits: &Patch<u32>,
+    resolved_folds: &[Fold],
+) -> (SumTree<Transform>, Patch<u32>) {
+    let has_inlays = inlay_snapshot.has_inlays();
+    let rope = &inlay_snapshot.rope;
+    let text = if has_inlays {
+        inlay_snapshot.inlay_text()
+    } else {
+        inlay_snapshot.buffer_snapshot().text()
+    };
+
+    let row_to_offset = |row: u32| -> usize {
+        if has_inlays {
+            inlay_snapshot.inlay_offset_at_row(row)
+        } else {
+            rope.point_to_offset(Point::new(row, 0))
+        }
+    };
+
+    let text_summary = |a: usize, b: usize| -> TextSummary {
+        if has_inlays {
+            TextSummary::from_str(&text[a..b])
+        } else {
+            rope.text_summary_for_range(a..b)
+        }
+    };
+
+    let mut new_transforms = SumTree::new(());
+    let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
+    let mut row_edits = Patch::empty();
+
+    let mut edits_iter = inlay_edits.into_iter().peekable();
+    while let Some(edit) = edits_iter.next() {
+        let old_start_offset = row_to_offset(edit.old.start);
+        let old_end_offset = row_to_offset(edit.old.end).min(text.len());
+
+        // Preserve unchanged prefix
+        new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
+
+        // If cursor item ends exactly at edit start, merge it with prefix
+        if let Some(item) = cursor.item() {
+            if item.placeholder.is_none()
+                && cursor.start().0 + item.summary.input.len == old_start_offset
+            {
+                push_fold_isomorphic(&mut new_transforms, item.summary.clone());
+                cursor.next();
+            }
+        }
+
+        // Record old output rows
+        let old_fold_start = old_snapshot
+            .to_fold_point(InlayPoint::new(edit.old.start, 0), Bias::Right)
+            .row();
+        let old_fold_end = if edit.old.start == edit.old.end {
+            old_fold_start + 1
+        } else {
+            old_snapshot
+                .to_fold_point(InlayPoint::new(edit.old.end, 0), Bias::Right)
+                .row()
+                .max(old_fold_start + 1)
+        };
+
+        // Seek past old content
+        cursor.seek_forward(&InputOffset(old_end_offset), Bias::Right);
+
+        // Push gap from current position to edit.new.start
+        let new_start_offset = row_to_offset(edit.new.start);
+        let current_pos = new_transforms.summary().input.len;
+        if new_start_offset > current_pos {
+            let summary = text_summary(current_pos, new_start_offset);
+            push_fold_isomorphic(
+                &mut new_transforms,
+                TransformSummary {
+                    input: summary.clone(),
+                    output: summary,
+                },
+            );
+        }
+        let new_fold_start = new_transforms.summary().output.lines.row;
+
+        // Rebuild transforms for the edit region [new_start, new_end)
+        let new_end_offset = row_to_offset(edit.new.end).min(text.len());
+        let folds_in_range: Vec<&Fold> = {
+            let new_start_inlay = InlayPoint::new(edit.new.start, 0);
+            let new_end_inlay = InlayPoint::new(edit.new.end, 0);
+            let end_idx = resolved_folds.partition_point(|f| f.range.start < new_end_inlay);
+            resolved_folds[..end_idx]
+                .iter()
+                .filter(|f| f.range.end > new_start_inlay)
+                .collect()
+        };
+
+        if folds_in_range.is_empty() {
+            let current_pos = new_transforms.summary().input.len;
+            if new_end_offset > current_pos {
+                let summary = text_summary(current_pos, new_end_offset);
+                push_fold_isomorphic(
+                    &mut new_transforms,
+                    TransformSummary {
+                        input: summary.clone(),
+                        output: summary,
+                    },
+                );
+            }
+        } else {
+            let mut region_cursor = new_transforms.summary().input.len;
+            for fold in &folds_in_range {
+                let fold_start_offset = inlay_snapshot
+                    .inlay_point_to_offset(fold.range.start)
+                    .min(text.len());
+                let fold_end_offset = inlay_snapshot
+                    .inlay_point_to_offset(fold.range.end)
+                    .min(text.len());
+
+                if fold_start_offset > region_cursor {
+                    let summary = text_summary(region_cursor, fold_start_offset);
+                    push_fold_isomorphic(
+                        &mut new_transforms,
+                        TransformSummary {
+                            input: summary.clone(),
+                            output: summary,
+                        },
+                    );
+                }
+
+                let input_summary = text_summary(fold_start_offset, fold_end_offset);
+                let output_summary = TextSummary::from_str(&fold.placeholder.text);
+                new_transforms.push(
+                    Transform {
+                        summary: TransformSummary {
+                            input: input_summary,
+                            output: output_summary,
+                        },
+                        placeholder: Some(fold.placeholder.clone()),
+                    },
+                    (),
+                );
+                region_cursor = fold_end_offset;
+            }
+
+            if new_end_offset > region_cursor {
+                let summary = text_summary(region_cursor, new_end_offset);
+                push_fold_isomorphic(
+                    &mut new_transforms,
+                    TransformSummary {
+                        input: summary.clone(),
+                        output: summary,
+                    },
+                );
+            }
+        }
+
+        let new_out = new_transforms.summary().output.lines;
+        let new_fold_end = if new_out.column > 0 {
+            new_out.row + 1
+        } else {
+            new_out.row.max(new_fold_start + 1)
+        };
+
+        row_edits.push(stoat_text::patch::Edit {
+            old: old_fold_start..old_fold_end,
+            new: new_fold_start..new_fold_end,
+        });
+
+        // Handle tail of current transform
+        if let Some(item) = cursor.item() {
+            let cursor_end = cursor.start().0 + item.summary.input.len;
+            if edits_iter
+                .peek()
+                .is_none_or(|next| row_to_offset(next.old.start) >= cursor_end)
+            {
+                let tail = cursor_end - old_end_offset;
+                let tail_end_new = new_end_offset + tail;
+                let current_pos = new_transforms.summary().input.len;
+                if tail_end_new > current_pos {
+                    let summary = text_summary(current_pos, tail_end_new);
+                    push_fold_isomorphic(
+                        &mut new_transforms,
+                        TransformSummary {
+                            input: summary.clone(),
+                            output: summary,
+                        },
+                    );
+                }
+                cursor.next();
+            }
+        }
+    }
+
+    new_transforms.append(cursor.suffix(), ());
+
+    if new_transforms.is_empty() && !text.is_empty() {
+        let summary = if has_inlays {
+            TextSummary::from_str(text)
+        } else {
+            rope.summary().clone()
+        };
+        new_transforms.push(
+            Transform {
+                summary: TransformSummary {
+                    input: summary.clone(),
+                    output: summary,
+                },
+                placeholder: None,
+            },
+            (),
+        );
+    }
+
+    (new_transforms, row_edits)
 }
 
 struct PointScanner<'a> {
@@ -525,6 +821,15 @@ impl FoldSnapshot {
             rope.point_to_offset(end) <= buffer_offset
         });
 
+        let next_fold_start_offset = if fold_idx < self.folds.len() {
+            let start = self
+                .inlay_snapshot
+                .to_buffer_point(self.folds[fold_idx].range.start);
+            rope.point_to_offset(start)
+        } else {
+            usize::MAX
+        };
+
         FoldChars {
             inlay_snapshot: &self.inlay_snapshot,
             rope,
@@ -532,6 +837,7 @@ impl FoldSnapshot {
             buffer_offset,
             folds: &self.folds,
             fold_idx,
+            next_fold_start_offset,
             placeholder_iter: None,
         }
     }
@@ -548,6 +854,15 @@ impl FoldSnapshot {
             rope.point_to_offset(start) < buffer_offset
         });
 
+        let next_fold_end_offset = if fold_idx > 0 {
+            let end = self
+                .inlay_snapshot
+                .to_buffer_point(self.folds[fold_idx - 1].range.end);
+            rope.point_to_offset(end)
+        } else {
+            0
+        };
+
         ReversedFoldChars {
             inlay_snapshot: &self.inlay_snapshot,
             rope,
@@ -555,6 +870,7 @@ impl FoldSnapshot {
             buffer_offset,
             folds: &self.folds,
             fold_idx,
+            next_fold_end_offset,
             placeholder_iter: None,
         }
     }
@@ -571,6 +887,7 @@ pub struct FoldChars<'a> {
     buffer_offset: usize,
     folds: &'a [Fold],
     fold_idx: usize,
+    next_fold_start_offset: usize,
     placeholder_iter: Option<std::str::Chars<'a>>,
 }
 
@@ -585,19 +902,23 @@ impl Iterator for FoldChars<'_> {
             self.placeholder_iter = None;
         }
 
-        if self.fold_idx < self.folds.len() {
+        if self.buffer_offset >= self.next_fold_start_offset {
             let fold = &self.folds[self.fold_idx];
-            let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
-            let start_off = self.rope.point_to_offset(start);
-            if self.buffer_offset >= start_off {
-                let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
-                let end_off = self.rope.point_to_offset(end);
-                self.fold_idx += 1;
-                self.placeholder_iter = Some(fold.placeholder.text.chars());
-                self.chars = self.rope.chars_at(end_off);
-                self.buffer_offset = end_off;
-                return self.next();
-            }
+            let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
+            let end_off = self.rope.point_to_offset(end);
+            self.fold_idx += 1;
+            self.next_fold_start_offset = if self.fold_idx < self.folds.len() {
+                let start = self
+                    .inlay_snapshot
+                    .to_buffer_point(self.folds[self.fold_idx].range.start);
+                self.rope.point_to_offset(start)
+            } else {
+                usize::MAX
+            };
+            self.placeholder_iter = Some(fold.placeholder.text.chars());
+            self.chars = self.rope.chars_at(end_off);
+            self.buffer_offset = end_off;
+            return self.next();
         }
 
         let ch = self.chars.next()?;
@@ -613,6 +934,7 @@ pub struct ReversedFoldChars<'a> {
     buffer_offset: usize,
     folds: &'a [Fold],
     fold_idx: usize,
+    next_fold_end_offset: usize,
     placeholder_iter: Option<std::iter::Rev<std::str::Chars<'a>>>,
 }
 
@@ -627,19 +949,23 @@ impl Iterator for ReversedFoldChars<'_> {
             self.placeholder_iter = None;
         }
 
-        if self.fold_idx > 0 {
+        if self.fold_idx > 0 && self.buffer_offset <= self.next_fold_end_offset {
             let fold = &self.folds[self.fold_idx - 1];
-            let end = self.inlay_snapshot.to_buffer_point(fold.range.end);
-            let end_off = self.rope.point_to_offset(end);
-            if self.buffer_offset <= end_off {
-                let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
-                let start_off = self.rope.point_to_offset(start);
-                self.fold_idx -= 1;
-                self.placeholder_iter = Some(fold.placeholder.text.chars().rev());
-                self.chars = self.rope.reversed_chars_at(start_off);
-                self.buffer_offset = start_off;
-                return self.next();
-            }
+            let start = self.inlay_snapshot.to_buffer_point(fold.range.start);
+            let start_off = self.rope.point_to_offset(start);
+            self.fold_idx -= 1;
+            self.next_fold_end_offset = if self.fold_idx > 0 {
+                let end = self
+                    .inlay_snapshot
+                    .to_buffer_point(self.folds[self.fold_idx - 1].range.end);
+                self.rope.point_to_offset(end)
+            } else {
+                0
+            };
+            self.placeholder_iter = Some(fold.placeholder.text.chars().rev());
+            self.chars = self.rope.reversed_chars_at(start_off);
+            self.buffer_offset = start_off;
+            return self.next();
         }
 
         let ch = self.chars.next()?;
@@ -672,7 +998,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::Bias;
+    use stoat_text::{patch::Patch, Bias};
 
     fn make_snapshot(content: &str) -> Arc<super::FoldSnapshot> {
         let mut buffer = TextBuffer::new();
@@ -708,7 +1034,8 @@ mod tests {
             })
             .collect();
         fold_map.fold(anchor_ranges, FoldPlaceholder::default(), &buffer_snapshot);
-        fold_map.sync(inlay_snapshot)
+        let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+        snapshot
     }
 
     #[test]
@@ -809,11 +1136,11 @@ mod tests {
             FoldPlaceholder::default(),
             &buffer_snapshot,
         );
-        let snap = fold_map.sync(inlay_snapshot.clone());
+        let (snap, _) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
         assert_eq!(snap.line_count(), 3);
 
         fold_map.unfold(vec![start_off..end_off], &buffer_snapshot);
-        let snap = fold_map.sync(inlay_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         assert_eq!(snap.line_count(), 3);
         assert_eq!(
             snap.to_fold_point(InlayPoint::new(1, 3), Bias::Right),
@@ -848,7 +1175,7 @@ mod tests {
             FoldPlaceholder::default(),
             &buffer_snapshot,
         );
-        let snap = fold_map.sync(inlay_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         // 4 rows - 2 rows folded = 2 rows
         assert_eq!(snap.line_count(), 2);
     }
@@ -947,7 +1274,7 @@ mod tests {
             FoldPlaceholder::default(),
             &buffer_snapshot,
         );
-        let snap = fold_map.sync(inlay_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         let folds = snap.folds_in_range(InlayPoint::new(0, 0)..InlayPoint::new(1, 0));
         assert_eq!(folds.len(), 1);
     }
@@ -1034,7 +1361,7 @@ mod tests {
 
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
-        let fold_snap = fold_map.sync(inlay2);
+        let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.folds.len(), 0);
     }
 
@@ -1062,7 +1389,7 @@ mod tests {
 
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
-        let fold_snap = fold_map.sync(inlay2);
+        let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.folds.len(), 1);
     }
 
@@ -1090,7 +1417,7 @@ mod tests {
 
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
-        let fold_snap = fold_map.sync(inlay2);
+        let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.folds.len(), 0);
     }
 
@@ -1120,7 +1447,7 @@ mod tests {
 
         let snap2 = multi_buffer.snapshot();
         let inlay2 = InlayMap::new(snap2).1;
-        let fold_snap = fold_map.sync(inlay2);
+        let (fold_snap, _) = fold_map.sync(inlay2, &Patch::empty());
         assert_eq!(fold_snap.fold_line(2), "...");
     }
 
@@ -1139,10 +1466,10 @@ mod tests {
             .point_to_offset(stoat_text::Point::new(0, 5));
         let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
         inlay_map.splice(Vec::new(), vec![(anchor, ": str".to_string())]);
-        let inlay_snap2 = inlay_map.sync(buffer_snapshot);
+        let (inlay_snap2, _) = inlay_map.sync(buffer_snapshot, &Patch::empty());
         assert!(inlay_snap2.has_inlays());
 
-        let fold_snap2 = fold_map.sync(inlay_snap2);
+        let (fold_snap2, _) = fold_map.sync(inlay_snap2, &Patch::empty());
         assert!(fold_snap2.inlay_snapshot().has_inlays());
     }
 
@@ -1171,7 +1498,7 @@ mod tests {
             FoldPlaceholder::default(),
             &buffer_snapshot,
         );
-        let snap = fold_map.sync(inlay_snapshot);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         assert_eq!(snap.folds.len(), 2);
     }
 }
