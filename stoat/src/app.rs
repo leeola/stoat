@@ -63,9 +63,9 @@ impl Stoat {
         let area = frame.area();
         self.viewport_height = area.height;
 
-        match self.workspace.active_pane().active_view() {
+        match self.workspace.active_pane_mut().active_view_mut() {
             Some(View::Editor(editor)) => {
-                self.render_editor(frame, area, editor);
+                render_editor(frame, area, editor);
             },
             None => {
                 let text = Text::styled("Stoat", Style::default().fg(Color::Cyan));
@@ -73,85 +73,6 @@ impl Stoat {
                 frame.render_widget(paragraph, area);
             },
         }
-    }
-
-    fn render_editor(&self, frame: &mut Frame<'_>, area: Rect, editor: &Editor) {
-        let gutter_width = 4u16;
-        let content_width = area.width.saturating_sub(gutter_width);
-
-        let vertical = Layout::horizontal([
-            Constraint::Length(gutter_width),
-            Constraint::Length(content_width),
-        ]);
-        let [gutter_area, content_area] = vertical.areas(area);
-
-        let snapshot = editor.display_snapshot();
-        let buffer_lines: Vec<&str> = snapshot.lines().collect();
-        let scroll_offset = editor.scroll_offset.0 as usize;
-        let visible_lines = area.height as usize;
-        let total_display_lines = snapshot.line_count() as usize;
-
-        let mut gutter_lines = Vec::new();
-        let mut content_lines = Vec::new();
-
-        for i in 0..visible_lines {
-            let display_row = (scroll_offset + i) as u32;
-            if (display_row as usize) < total_display_lines {
-                match snapshot.classify_row(display_row) {
-                    BlockRowKind::BufferRow { buffer_row } => {
-                        let has_deletion = snapshot.has_deletion_after(buffer_row);
-                        let (marker, color) = match snapshot.line_diff_status(buffer_row) {
-                            DiffStatus::Added => {
-                                if has_deletion {
-                                    ("~", Color::Yellow)
-                                } else {
-                                    ("+", Color::Green)
-                                }
-                            },
-                            DiffStatus::Modified => ("~", Color::Yellow),
-                            DiffStatus::Unchanged => {
-                                if has_deletion {
-                                    ("-", Color::Red)
-                                } else {
-                                    (" ", Color::DarkGray)
-                                }
-                            },
-                        };
-                        let num_str = format!("{}{:>3}", marker, buffer_row + 1);
-                        gutter_lines.push(Line::from(Span::styled(
-                            num_str,
-                            Style::default().fg(color),
-                        )));
-                        let line_content =
-                            buffer_lines.get(buffer_row as usize).copied().unwrap_or("");
-                        content_lines.push(Line::from(line_content));
-                    },
-                    BlockRowKind::Block { block, line_index } => {
-                        let num_str = "   -".to_string();
-                        gutter_lines.push(Line::from(Span::styled(
-                            num_str,
-                            Style::default().fg(Color::Red),
-                        )));
-                        content_lines.push(Line::from(Span::styled(
-                            block.get_line(line_index),
-                            Style::default().fg(Color::Red),
-                        )));
-                    },
-                }
-            } else {
-                gutter_lines.push(Line::from(Span::styled(
-                    "  ~ ",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                content_lines.push(Line::from(""));
-            }
-        }
-
-        let gutter = Paragraph::new(gutter_lines);
-        let content = Paragraph::new(content_lines);
-
-        frame.render_widget(gutter, gutter_area);
-        frame.render_widget(content, content_area);
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
@@ -217,6 +138,99 @@ impl Stoat {
     pub fn set_mode(&mut self, mode: &'static str) {
         self.mode = mode;
     }
+}
+
+fn render_editor(frame: &mut Frame<'_>, area: Rect, editor: &mut Editor) {
+    let gutter_width = 4u16;
+    let content_width = area.width.saturating_sub(gutter_width);
+
+    let vertical = Layout::horizontal([
+        Constraint::Length(gutter_width),
+        Constraint::Length(content_width),
+    ]);
+    let [gutter_area, content_area] = vertical.areas(area);
+
+    let snapshot = editor.display_snapshot();
+    let scroll_offset = editor.scroll_offset.0 as usize;
+    let visible_lines = area.height as usize;
+    let total_display_lines = snapshot.line_count() as usize;
+
+    let mut gutter_lines = Vec::new();
+    let mut content_lines = Vec::new();
+    let mut line_buf = String::with_capacity(content_width as usize);
+
+    for i in 0..visible_lines {
+        let display_row = (scroll_offset + i) as u32;
+        if (display_row as usize) < total_display_lines {
+            match snapshot.classify_row(display_row) {
+                BlockRowKind::BufferRow { buffer_row } => {
+                    line_buf.clear();
+                    snapshot.write_display_line(&mut line_buf, display_row);
+                    if snapshot.is_wrap_continuation(display_row) {
+                        gutter_lines.push(Line::from(Span::styled(
+                            "    ",
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    } else {
+                        let has_deletion = snapshot.has_deletion_after(buffer_row);
+                        let (marker, color) = match snapshot.line_diff_status(buffer_row) {
+                            DiffStatus::Added => {
+                                if has_deletion {
+                                    ("~", Color::Yellow)
+                                } else {
+                                    ("+", Color::Green)
+                                }
+                            },
+                            DiffStatus::Modified => ("~", Color::Yellow),
+                            DiffStatus::Unchanged => {
+                                if has_deletion {
+                                    ("-", Color::Red)
+                                } else {
+                                    (" ", Color::DarkGray)
+                                }
+                            },
+                        };
+                        let num_str = format!("{}{:>3}", marker, buffer_row + 1);
+                        gutter_lines.push(Line::from(Span::styled(
+                            num_str,
+                            Style::default().fg(color),
+                        )));
+                    }
+                    let indent = snapshot.soft_wrap_indent(display_row);
+                    if indent > 0 {
+                        let pad = " ".repeat(indent as usize);
+                        content_lines.push(Line::from(format!("{pad}{line_buf}")));
+                    } else {
+                        content_lines.push(Line::from(line_buf.clone()));
+                    }
+                },
+                BlockRowKind::Block { .. } => {
+                    gutter_lines.push(Line::from(Span::styled(
+                        "   -",
+                        Style::default().fg(Color::Red),
+                    )));
+                    line_buf.clear();
+                    snapshot.write_display_line(&mut line_buf, display_row);
+                    content_lines.push(Line::from(Span::styled(
+                        line_buf.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                },
+            }
+        } else {
+            gutter_lines.push(Line::from(Span::styled(
+                "  ~ ",
+                Style::default().fg(Color::DarkGray),
+            )));
+            content_lines.push(Line::from(""));
+        }
+    }
+
+    let gutter = Paragraph::new(gutter_lines);
+    let content = Paragraph::new(content_lines);
+
+    frame.render_widget(gutter, gutter_area);
+    frame.render_widget(content, content_area);
 }
 
 impl Default for Stoat {

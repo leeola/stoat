@@ -1,8 +1,9 @@
 use crate::{
-    buffer::{BufferId, SharedBuffer},
+    buffer::{self, BufferId, EditRecord, SharedBuffer},
     git::BufferDiff,
 };
-use stoat_text::Point;
+use std::sync::{Arc, OnceLock};
+use stoat_text::{Anchor, Bias, Point, Rope};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExcerptId(u64);
@@ -60,9 +61,20 @@ impl MultiBuffer {
         let buffer = excerpt.buffer.read().expect("buffer lock poisoned");
         MultiBufferSnapshot {
             singleton: self.singleton,
-            line_count: buffer.line_count(),
-            text: buffer.rope.to_string(),
+            rope: buffer.rope.clone(),
+            text_cache: OnceLock::new(),
             diff: buffer.diff.clone(),
+            version: buffer.version,
+            edit_log: buffer.edit_log.clone(),
+            compacted_to: buffer.compacted_to(),
+        }
+    }
+
+    pub fn compact_edit_log(&self, watermark: usize) {
+        if let Some(buf) = self.as_singleton() {
+            buf.write()
+                .expect("buffer lock")
+                .compact_edit_log(watermark);
         }
     }
 
@@ -78,33 +90,34 @@ impl MultiBuffer {
 #[derive(Clone)]
 pub struct MultiBufferSnapshot {
     singleton: bool,
-    line_count: u32,
-    text: String,
+    pub(crate) rope: Rope,
+    text_cache: OnceLock<String>,
     pub diff: Option<BufferDiff>,
+    pub version: usize,
+    pub(crate) edit_log: Arc<Vec<EditRecord>>,
+    compacted_to: usize,
 }
 
 impl MultiBufferSnapshot {
     pub fn line_count(&self) -> u32 {
-        self.line_count
+        self.rope.max_point().row + 1
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        self.text_cache.get_or_init(|| self.rope.to_string())
     }
 
     pub fn lines(&self) -> impl Iterator<Item = &str> {
-        self.text.lines()
+        self.text().split('\n')
+    }
+
+    pub fn line_at_row(&self, row: u32) -> String {
+        self.rope.line_at_row(row)
     }
 
     pub fn max_point(&self) -> MultiBufferPoint {
-        let row = self.line_count.saturating_sub(1);
-        let column = self
-            .text
-            .lines()
-            .nth(row as usize)
-            .map(|line| line.len() as u32)
-            .unwrap_or(0);
-        MultiBufferPoint::new(row, column)
+        let p = self.rope.max_point();
+        MultiBufferPoint::new(p.row, p.column)
     }
 
     pub fn point_to_multi_buffer_point(&self, point: Point) -> MultiBufferPoint {
@@ -116,6 +129,41 @@ impl MultiBufferSnapshot {
 
     pub fn multi_buffer_point_to_point(&self, point: MultiBufferPoint) -> Point {
         Point::new(point.row, point.column)
+    }
+
+    pub fn anchor_at(&self, offset: usize, bias: Bias) -> Anchor {
+        Anchor {
+            version: self.version,
+            offset: offset.min(self.rope.len()),
+            bias,
+        }
+    }
+
+    pub fn resolve_anchor(&self, anchor: &Anchor) -> usize {
+        buffer::resolve_anchor_in_log(&self.edit_log, anchor, self.rope.len())
+    }
+
+    pub fn point_for_anchor(&self, anchor: &Anchor) -> Point {
+        self.rope.offset_to_point(self.resolve_anchor(anchor))
+    }
+
+    pub fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize> {
+        buffer::resolve_anchors_batch(&self.edit_log, anchors, self.rope.len())
+    }
+
+    pub fn points_for_anchors_batch(&self, anchors: &[Anchor]) -> Vec<Point> {
+        let offsets = self.resolve_anchors_batch(anchors);
+        self.rope.offsets_to_points_batch(&offsets)
+    }
+
+    pub fn is_anchor_valid(&self, anchor: &Anchor) -> bool {
+        anchor.offset == usize::MAX
+            || (anchor.offset == 0 && anchor.bias == Bias::Left)
+            || anchor.version >= self.compacted_to
+    }
+
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> std::cmp::Ordering {
+        a.cmp(b, &|anchor| self.resolve_anchor(anchor))
     }
 
     pub fn is_singleton(&self) -> bool {
@@ -180,6 +228,24 @@ mod tests {
     }
 
     #[test]
+    fn anchor_valid_within_bounds() {
+        let (id, buffer) = create_test_buffer("0123456789");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snapshot = multi.snapshot();
+        let anchor = snapshot.anchor_at(5, stoat_text::Bias::Right);
+        assert!(snapshot.is_anchor_valid(&anchor));
+    }
+
+    #[test]
+    fn anchor_max_is_valid() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snapshot = multi.snapshot();
+        let anchor = snapshot.anchor_at(5, stoat_text::Bias::Left);
+        assert!(snapshot.is_anchor_valid(&anchor));
+    }
+
+    #[test]
     fn passthrough_coordinates() {
         let (id, buffer) = create_test_buffer("hello\nworld");
         let multi = MultiBuffer::singleton(id, buffer);
@@ -191,5 +257,63 @@ mod tests {
 
         let back = snapshot.multi_buffer_point_to_point(mb_point);
         assert_eq!(back, point);
+    }
+
+    #[test]
+    fn stale_anchor_invalid_after_compaction() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snap1 = multi.snapshot();
+        let anchor = snap1.anchor_at(2, stoat_text::Bias::Right);
+
+        multi
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, "XX");
+        multi.compact_edit_log(anchor.version + 1);
+
+        let snap2 = multi.snapshot();
+        assert!(!snap2.is_anchor_valid(&anchor));
+    }
+
+    #[test]
+    fn fresh_anchor_valid() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snapshot = multi.snapshot();
+        let anchor = snapshot.anchor_at(3, stoat_text::Bias::Right);
+        assert!(snapshot.is_anchor_valid(&anchor));
+    }
+
+    #[test]
+    fn anchor_min_max_always_valid() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+
+        multi
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, "XX");
+        multi.compact_edit_log(100);
+
+        let snapshot = multi.snapshot();
+        assert!(snapshot.is_anchor_valid(&stoat_text::Anchor::min()));
+        assert!(snapshot.is_anchor_valid(&stoat_text::Anchor::max()));
+    }
+
+    #[test]
+    fn cmp_anchors_by_offset() {
+        let (id, buffer) = create_test_buffer("hello world");
+        let multi = MultiBuffer::singleton(id, buffer);
+        let snapshot = multi.snapshot();
+        let a = snapshot.anchor_at(3, stoat_text::Bias::Left);
+        let b = snapshot.anchor_at(7, stoat_text::Bias::Left);
+        assert_eq!(snapshot.cmp_anchors(&a, &b), std::cmp::Ordering::Less);
+        assert_eq!(snapshot.cmp_anchors(&b, &a), std::cmp::Ordering::Greater);
+        assert_eq!(snapshot.cmp_anchors(&a, &a), std::cmp::Ordering::Equal);
     }
 }

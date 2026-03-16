@@ -15,7 +15,9 @@ pub use app::{run, Stoat};
 pub use buffer::{BufferId, BufferStore, SharedBuffer, TextBuffer};
 pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, DisplayMap, DisplayPoint,
-    DisplayRow, DisplaySnapshot,
+    DisplayRow, DisplaySnapshot, FoldMap, FoldPlaceholder, FoldPoint, FoldSnapshot, InlayMap,
+    InlayPoint, InlaySnapshot, TabMap, TabPoint, TabRow, TabSnapshot, WrapMap, WrapPoint,
+    WrapSnapshot,
 };
 pub use editor::Editor;
 pub use git::{BufferDiff, DeletedHunk, DiffStatus};

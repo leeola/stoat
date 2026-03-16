@@ -26,7 +26,7 @@ impl Editor {
         }
     }
 
-    pub fn display_snapshot(&self) -> DisplaySnapshot {
+    pub fn display_snapshot(&mut self) -> DisplaySnapshot {
         self.display_map.snapshot()
     }
 
@@ -38,5 +38,17 @@ impl Editor {
         let snapshot = self.display_map.snapshot();
         let max_offset = snapshot.line_count().saturating_sub(1);
         self.scroll_offset = DisplayRow((self.scroll_offset.0 + n).min(max_offset));
+    }
+
+    pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
+        self.display_map.fold(ranges);
+    }
+
+    pub fn unfold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
+        self.display_map.unfold(ranges);
+    }
+
+    pub fn set_wrap_width(&mut self, width: Option<u32>) {
+        self.display_map.set_wrap_width(width);
     }
 }
