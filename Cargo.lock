@@ -1671,7 +1671,6 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "clap",
- "ratatui",
  "stoat",
  "tokio",
  "tracing",

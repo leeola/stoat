@@ -23,4 +23,3 @@ stoat = { path = "../stoat" }
 clap.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-ratatui.workspace = true

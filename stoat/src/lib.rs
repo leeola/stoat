@@ -3,6 +3,7 @@ pub mod buffer;
 pub mod display_map;
 pub mod git;
 pub mod multi_buffer;
+pub mod ui;
 
 pub use app::Stoat;
 pub use buffer::{BufferId, SharedBuffer, TextBuffer};

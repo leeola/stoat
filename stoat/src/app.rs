@@ -1,16 +1,16 @@
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use futures::StreamExt;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
     style::{Color, Style},
     text::Text,
-    widgets::Paragraph,
-    Frame,
+    widgets::{Paragraph, Widget},
 };
 use std::io;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 pub struct Stoat {
-    terminal_events: EventStream,
-    dirty: bool,
+    size: Rect,
 }
 
 impl Default for Stoat {
@@ -22,47 +22,49 @@ impl Default for Stoat {
 impl Stoat {
     pub fn new() -> Self {
         Self {
-            terminal_events: EventStream::new(),
-            dirty: true,
+            size: Rect::default(),
         }
     }
 
-    /// Returns `Ok(true)` when a frame should be rendered, `Ok(false)` to exit.
-    pub async fn draw(&mut self) -> io::Result<bool> {
-        if self.dirty {
-            self.dirty = false;
-            return Ok(true);
-        }
-
-        loop {
-            let Some(event) = self.terminal_events.next().await else {
-                return Ok(false);
-            };
-            let event = event?;
-
-            if let Some(should_continue) = self.process_terminal(event) {
-                return Ok(should_continue);
+    pub async fn run(
+        &mut self,
+        mut events: Receiver<Event>,
+        render: Sender<Buffer>,
+    ) -> io::Result<()> {
+        while let Some(event) = events.recv().await {
+            match self.update(event) {
+                Some(true) => {
+                    if render.send(self.render()).await.is_err() {
+                        break;
+                    }
+                },
+                Some(false) => break,
+                None => {},
             }
         }
+        Ok(())
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>) {
-        let text = Text::styled("Stoat", Style::default().fg(Color::Cyan));
-        let paragraph = Paragraph::new(text).centered();
-        frame.render_widget(paragraph, frame.area());
-    }
-
-    fn process_terminal(&mut self, event: Event) -> Option<bool> {
+    /// Returns `Some(true)` to redraw, `Some(false)` to quit, `None` for no visible change.
+    fn update(&mut self, event: Event) -> Option<bool> {
         match event {
+            Event::Resize(w, h) => {
+                self.size = Rect::new(0, 0, w, h);
+                Some(true)
+            },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.process_key(key.code, key.modifiers)
             },
-            Event::Resize(_, _) => {
-                self.dirty = true;
-                Some(true)
-            },
             _ => None,
         }
+    }
+
+    fn render(&self) -> Buffer {
+        let mut buf = Buffer::empty(self.size);
+        let text = Text::styled("Stoat", Style::default().fg(Color::Cyan));
+        let paragraph = Paragraph::new(text).centered();
+        paragraph.render(self.size, &mut buf);
+        buf
     }
 
     fn process_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<bool> {

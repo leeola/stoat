@@ -1,5 +1,4 @@
 use clap::Parser;
-use ratatui::DefaultTerminal;
 use stoat::Stoat;
 
 #[derive(Parser)]
@@ -9,18 +8,25 @@ pub struct Args {
     pub file: Option<std::path::PathBuf>,
 }
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _args = Args::parse();
-    let mut terminal = ratatui::init();
-    let result = run_app(&mut terminal).await;
-    ratatui::restore();
-    result
-}
 
-async fn run_app(terminal: &mut DefaultTerminal) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stoat = Stoat::new();
-    while stoat.draw().await? {
-        terminal.draw(|f| stoat.render(f))?;
-    }
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+    // Capacity 1: natural backpressure -- main thread won't render ahead
+    // if the UI thread hasn't flushed the previous frame yet
+    let (render_tx, render_rx) = tokio::sync::mpsc::channel(1);
+
+    let ui_handle = stoat::ui::spawn(event_tx, render_rx);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        let mut stoat = Stoat::new();
+        stoat.run(event_rx, render_tx).await
+    })?;
+
+    ui_handle.join().expect("ui thread panicked")?;
+
     Ok(())
 }
