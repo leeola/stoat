@@ -1,8 +1,10 @@
+pub mod app;
 pub mod buffer;
 pub mod display_map;
 pub mod git;
 pub mod multi_buffer;
 
+pub use app::Stoat;
 pub use buffer::{BufferId, SharedBuffer, TextBuffer};
 pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, DisplayMap, DisplayPoint,
