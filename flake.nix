@@ -33,7 +33,7 @@
               gcc
               rust-analyzer
               # using a hardcoded rustfmt version to support nightly rustfmt features.
-              rust-bin.nightly."2025-06-26".rustfmt
+              rust-bin.nightly."2025-03-05".rustfmt
               rust-toolchain
 
             ]
