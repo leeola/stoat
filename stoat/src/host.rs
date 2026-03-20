@@ -8,8 +8,12 @@
 //! - Borrowed paths (`&Path` inputs)
 //! - Small `Copy` return types for metadata
 
+#[cfg(test)]
+pub mod fake;
 pub mod fs;
 pub mod local;
 
+#[cfg(test)]
+pub use fake::FakeFs;
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use local::LocalFs;

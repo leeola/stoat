@@ -9,6 +9,7 @@ pub struct FsMetadata {
     pub is_symlink: bool,
 }
 
+#[derive(Debug)]
 pub struct FsDirEntry {
     pub name: CompactString,
     pub is_dir: bool,
