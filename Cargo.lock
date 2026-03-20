@@ -1658,6 +1658,7 @@ dependencies = [
  "futures",
  "git2",
  "ratatui",
+ "stoat_action",
  "stoat_log",
  "stoat_text",
  "tempfile",
@@ -1665,6 +1666,10 @@ dependencies = [
  "tracing",
  "unicode-width 0.2.2",
 ]
+
+[[package]]
+name = "stoat_action"
+version = "0.1.0"
 
 [[package]]
 name = "stoat_bin"

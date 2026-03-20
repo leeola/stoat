@@ -1,3 +1,4 @@
+use crate::action_handlers;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -7,7 +8,15 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 use std::io;
+use stoat_action::{Action, Quit};
 use tokio::sync::mpsc::{Receiver, Sender};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateEffect {
+    Redraw,
+    Quit,
+    None,
+}
 
 pub struct Stoat {
     size: Rect,
@@ -33,29 +42,31 @@ impl Stoat {
     ) -> io::Result<()> {
         while let Some(event) = events.recv().await {
             match self.update(event) {
-                Some(true) => {
+                UpdateEffect::Redraw => {
                     if render.send(self.render()).await.is_err() {
                         break;
                     }
                 },
-                Some(false) => break,
-                None => {},
+                UpdateEffect::Quit => break,
+                UpdateEffect::None => {},
             }
         }
         Ok(())
     }
 
-    /// Returns `Some(true)` to redraw, `Some(false)` to quit, `None` for no visible change.
-    fn update(&mut self, event: Event) -> Option<bool> {
+    fn update(&mut self, event: Event) -> UpdateEffect {
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
-                Some(true)
+                UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                self.process_key(key.code, key.modifiers)
+                let Some(action) = self.process_key(key.code, key.modifiers) else {
+                    return UpdateEffect::None;
+                };
+                action_handlers::dispatch(&*action)
             },
-            _ => None,
+            _ => UpdateEffect::None,
         }
     }
 
@@ -67,11 +78,11 @@ impl Stoat {
         buf
     }
 
-    fn process_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<bool> {
+    fn process_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Box<dyn Action>> {
         match (code, modifiers) {
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Some(false),
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(false),
-            (KeyCode::Esc, KeyModifiers::NONE) => Some(false),
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Some(Box::new(Quit)),
+            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Box::new(Quit)),
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(Box::new(Quit)),
             _ => None,
         }
     }

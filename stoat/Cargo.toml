@@ -8,6 +8,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+stoat_action = { path = "../action" }
 stoat_log = { path = "../log" }
 stoat_text = { path = "../text" }
 ratatui.workspace = true

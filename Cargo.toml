@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["bin", "config", "stoat", "log", "text"]
+members = ["action", "bin", "config", "stoat", "log", "text"]
 
 [workspace.package]
 edition = "2021"

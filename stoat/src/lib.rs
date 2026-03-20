@@ -1,3 +1,4 @@
+pub mod action_handlers;
 pub mod app;
 pub mod buffer;
 pub mod display_map;
