@@ -13,7 +13,7 @@ stoat_log = { path = "../log" }
 stoat_text = { path = "../text" }
 ratatui.workspace = true
 crossterm.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 futures.workspace = true
 tracing.workspace = true
 compact_str.workspace = true

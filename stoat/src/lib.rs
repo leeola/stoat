@@ -3,6 +3,7 @@ pub mod app;
 pub mod buffer;
 pub mod display_map;
 pub mod git;
+pub mod host;
 pub mod multi_buffer;
 pub mod ui;
 
