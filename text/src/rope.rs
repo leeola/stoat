@@ -26,6 +26,7 @@ pub struct TextSummary {
 }
 
 impl TextSummary {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(text: &str) -> Self {
         let mut lines = Point::zero();
         let mut len_utf16 = OffsetUtf16(0);
@@ -669,7 +670,7 @@ impl Rope {
                 return true;
             }
             let take = remaining.len().min(chunk.len());
-            if &chunk.as_bytes()[..take] != &remaining[..take] {
+            if chunk.as_bytes()[..take] != remaining[..take] {
                 return false;
             }
             remaining = &remaining[take..];
@@ -2502,7 +2503,6 @@ mod tests {
         let mut iter = rope.find_iter("abc");
         assert_eq!(iter.next(), Some(0));
         assert_eq!(iter.next(), Some(3));
-        drop(iter);
     }
 
     #[test]

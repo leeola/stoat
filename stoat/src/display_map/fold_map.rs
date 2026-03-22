@@ -1139,6 +1139,7 @@ mod tests {
         let (snap, _) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
         assert_eq!(snap.line_count(), 3);
 
+        #[allow(clippy::single_range_in_vec_init)]
         fold_map.unfold(vec![start_off..end_off], &buffer_snapshot);
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         assert_eq!(snap.line_count(), 3);

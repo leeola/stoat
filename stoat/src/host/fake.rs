@@ -44,6 +44,12 @@ impl FakeState {
     }
 }
 
+impl Default for FakeFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeFs {
     pub fn new() -> Self {
         Self {

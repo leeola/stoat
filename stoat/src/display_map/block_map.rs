@@ -173,6 +173,12 @@ pub struct BlockMap {
     last_block_fingerprint: Vec<(BlockPlacement, u32)>,
 }
 
+impl Default for BlockMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BlockMap {
     pub fn new() -> Self {
         Self {

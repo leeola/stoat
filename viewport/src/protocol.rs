@@ -24,6 +24,12 @@ pub struct ToViewportCodec {
     inner: LengthDelimitedCodec,
 }
 
+impl Default for ToViewportCodec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToViewportCodec {
     pub fn new() -> Self {
         Self {
@@ -71,6 +77,12 @@ impl Decoder for ToViewportCodec {
 
 pub struct ToMainCodec {
     inner: LengthDelimitedCodec,
+}
+
+impl Default for ToMainCodec {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToMainCodec {

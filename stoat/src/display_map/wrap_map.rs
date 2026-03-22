@@ -27,9 +27,6 @@ impl From<TabPoint> for WrapPoint {
     }
 }
 
-#[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WrapRow(pub u32);
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WrapRowKind {
     Primary,

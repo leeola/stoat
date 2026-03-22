@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn identity_compose() {
         let patch = Patch::<u32>::empty();
-        let composed = patch.compose(&Patch::empty());
+        let composed = patch.compose(Patch::empty());
         assert!(composed.is_empty());
     }
 

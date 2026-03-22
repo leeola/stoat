@@ -2238,7 +2238,7 @@ mod tests {
         tree.extend(1..=10, ());
         let evens: Vec<_> = tree
             .filter::<_, Count>((), |summary| summary.contains_even)
-            .map(|item| *item)
+            .copied()
             .collect();
         assert_eq!(evens, vec![2, 4, 6, 8, 10]);
     }
