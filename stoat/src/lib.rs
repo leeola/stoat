@@ -5,6 +5,7 @@ pub mod display_map;
 pub mod git;
 pub mod host;
 pub mod multi_buffer;
+pub mod pane;
 pub mod ui;
 
 pub use app::Stoat;
@@ -19,4 +20,5 @@ pub use git::{BufferDiff, DeletedHunk, DiffStatus};
 pub use multi_buffer::{
     ExcerptId, MultiBuffer, MultiBufferPoint, MultiBufferRow, MultiBufferSnapshot,
 };
+pub use pane::{Axis, Direction, Pane, PaneId, PaneTree, Placement, View};
 pub use stoat_log as log;

@@ -1,11 +1,14 @@
-use crate::action_handlers;
+use crate::{
+    action_handlers,
+    pane::{Pane, PaneTree, View},
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
     text::Text,
-    widgets::{Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use std::io;
 use stoat_action::{Action, Quit};
@@ -20,6 +23,7 @@ pub enum UpdateEffect {
 
 pub struct Stoat {
     size: Rect,
+    pub panes: PaneTree,
 }
 
 impl Default for Stoat {
@@ -32,6 +36,7 @@ impl Stoat {
     pub fn new() -> Self {
         Self {
             size: Rect::default(),
+            panes: PaneTree::new(Rect::default()),
         }
     }
 
@@ -58,13 +63,14 @@ impl Stoat {
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
+                self.panes.resize(self.size);
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let Some(action) = self.process_key(key.code, key.modifiers) else {
                     return UpdateEffect::None;
                 };
-                action_handlers::dispatch(&*action)
+                action_handlers::dispatch(self, &*action)
             },
             _ => UpdateEffect::None,
         }
@@ -72,9 +78,11 @@ impl Stoat {
 
     fn render(&self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
-        let text = Text::styled("Stoat", Style::default().fg(Color::Cyan));
-        let paragraph = Paragraph::new(text).centered();
-        paragraph.render(self.size, &mut buf);
+        let focused = self.panes.focus();
+        for (id, pane) in self.panes.split_panes() {
+            let is_focused = id == focused;
+            render_pane(pane, is_focused, &mut buf);
+        }
         buf
     }
 
@@ -86,4 +94,31 @@ impl Stoat {
             _ => None,
         }
     }
+}
+
+fn render_pane(pane: &Pane, is_focused: bool, buf: &mut Buffer) {
+    let label = match &pane.view {
+        View::Label(s) => s.as_str(),
+    };
+
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(pane.area);
+    block.render(pane.area, buf);
+
+    let text_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Paragraph::new(Text::styled(label, text_style))
+        .centered()
+        .render(inner, buf);
 }

@@ -19,6 +19,7 @@ tracing.workspace = true
 compact_str.workspace = true
 git2 = { version = "0.19", default-features = false }
 unicode-width.workspace = true
+slotmap.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

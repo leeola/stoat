@@ -34,6 +34,7 @@ futures = { version = "0.3", default-features = false }
 compact_str = "0.8"
 arrayvec = "0.7"
 unicode-width = "0.2"
+slotmap = "1"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 

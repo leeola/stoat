@@ -1,4 +1,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionKind {
     Quit,
+    SplitRight,
+    SplitDown,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    FocusNext,
+    FocusPrev,
+    ClosePane,
 }
