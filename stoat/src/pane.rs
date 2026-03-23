@@ -644,7 +644,7 @@ mod tests {
     fn close_collapses_single_child_split() {
         let mut tree = PaneTree::new(area());
         // Create: [a | [b / c]]
-        let a = tree.focus();
+        let _a = tree.focus();
         tree.split(Axis::Vertical); // b
         let c = tree.split(Axis::Horizontal); // c (nested in right)
 

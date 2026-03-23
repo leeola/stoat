@@ -1685,6 +1685,7 @@ dependencies = [
  "ratatui",
  "slotmap",
  "stoat_action",
+ "stoat_config",
  "stoat_log",
  "stoat_text",
  "tempfile",

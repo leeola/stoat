@@ -1,0 +1,6 @@
+on key {
+    mode == normal {
+        q -> Quit();
+        Escape -> Quit();
+    }
+}

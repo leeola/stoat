@@ -1,8 +1,9 @@
 use crate::{
     action_handlers,
+    keymap::{Keymap, KeymapState, StateValue},
     pane::{Pane, PaneTree, View},
 };
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -14,6 +15,8 @@ use std::io;
 use stoat_action::{Action, Quit};
 use tokio::sync::mpsc::{Receiver, Sender};
 
+const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -24,6 +27,8 @@ pub enum UpdateEffect {
 pub struct Stoat {
     size: Rect,
     pub panes: PaneTree,
+    pub mode: String,
+    keymap: Keymap,
 }
 
 impl Default for Stoat {
@@ -34,9 +39,22 @@ impl Default for Stoat {
 
 impl Stoat {
     pub fn new() -> Self {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        if !errors.is_empty() {
+            tracing::error!(
+                "default keymap parse errors: {}",
+                stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
+            );
+        }
+        let keymap = config
+            .map(|c| Keymap::compile(&c))
+            .unwrap_or_else(|| Keymap::compile(&stoat_config::Config { blocks: vec![] }));
+
         Self {
             size: Rect::default(),
             panes: PaneTree::new(Rect::default()),
+            mode: "normal".into(),
+            keymap,
         }
     }
 
@@ -66,14 +84,37 @@ impl Stoat {
                 self.panes.resize(self.size);
                 UpdateEffect::Redraw
             },
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let Some(action) = self.process_key(key.code, key.modifiers) else {
-                    return UpdateEffect::None;
-                };
-                action_handlers::dispatch(self, &*action)
-            },
+            Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             _ => UpdateEffect::None,
         }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        // Ctrl-C is a hardcoded escape hatch
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return UpdateEffect::Quit;
+        }
+
+        let state = StoatKeymapState::new(&self.mode);
+        let Some(actions) = self.keymap.lookup(&state, &key) else {
+            return UpdateEffect::None;
+        };
+
+        let resolved: Vec<_> = actions
+            .iter()
+            .filter_map(|ra| resolve_action(&ra.name))
+            .collect();
+
+        let mut effect = UpdateEffect::None;
+        for action in &resolved {
+            let e = action_handlers::dispatch(self, &**action);
+            match e {
+                UpdateEffect::Quit => return UpdateEffect::Quit,
+                UpdateEffect::Redraw => effect = UpdateEffect::Redraw,
+                UpdateEffect::None => {},
+            }
+        }
+        effect
     }
 
     fn render(&self) -> Buffer {
@@ -85,14 +126,36 @@ impl Stoat {
         }
         buf
     }
+}
 
-    fn process_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Option<Box<dyn Action>> {
-        match (code, modifiers) {
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => Some(Box::new(Quit)),
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(Box::new(Quit)),
-            (KeyCode::Esc, KeyModifiers::NONE) => Some(Box::new(Quit)),
+struct StoatKeymapState {
+    mode_value: StateValue,
+}
+
+impl StoatKeymapState {
+    fn new(mode: &str) -> Self {
+        Self {
+            mode_value: StateValue::String(mode.into()),
+        }
+    }
+}
+
+impl KeymapState for StoatKeymapState {
+    fn get(&self, field: &str) -> Option<&StateValue> {
+        match field {
+            "mode" => Some(&self.mode_value),
             _ => None,
         }
+    }
+}
+
+fn resolve_action(name: &str) -> Option<Box<dyn Action>> {
+    match name {
+        "Quit" => Some(Box::new(Quit)),
+        _ => {
+            tracing::warn!("unknown action: {name}");
+            None
+        },
     }
 }
 
