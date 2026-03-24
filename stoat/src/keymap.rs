@@ -58,6 +58,40 @@ impl CompiledKey {
     pub fn matches(&self, event: &KeyEvent) -> bool {
         event.code == self.code && event.modifiers == self.modifiers
     }
+
+    pub fn display_label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("C".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("S".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("A".to_string());
+        }
+        parts.push(match self.code {
+            KeyCode::Char(' ') => "Spc".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Enter => "Ret".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Backspace => "Bsp".to_string(),
+            KeyCode::Delete => "Del".to_string(),
+            KeyCode::Up => "Up".to_string(),
+            KeyCode::Down => "Dn".to_string(),
+            KeyCode::Left => "Lt".to_string(),
+            KeyCode::Right => "Rt".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PgUp".to_string(),
+            KeyCode::PageDown => "PgDn".to_string(),
+            KeyCode::Insert => "Ins".to_string(),
+            KeyCode::F(n) => format!("F{n}"),
+            _ => "?".to_string(),
+        });
+        parts.join("-")
+    }
 }
 
 fn resolve_key(key: &Key) -> Option<KeyCode> {
@@ -138,9 +172,7 @@ fn state_value_cmp(
     check: impl Fn(std::cmp::Ordering) -> bool,
 ) -> bool {
     match (state.get(field), val) {
-        (Some(StateValue::Number(n)), Value::Number(v)) => {
-            n.partial_cmp(v).map_or(false, |o| check(o))
-        },
+        (Some(StateValue::Number(n)), Value::Number(v)) => n.partial_cmp(v).is_some_and(check),
         _ => false,
     }
 }
@@ -235,6 +267,39 @@ impl Keymap {
             }
         }
         None
+    }
+
+    /// Returns `(key_label, action_name)` pairs for all bindings active in the given mode.
+    ///
+    /// Only includes bindings whose sole predicate is `mode == "<mode>"`.
+    pub fn bindings_for_mode(&self, mode: &str) -> Vec<(String, String)> {
+        let mut results = Vec::new();
+        for binding in &self.bindings {
+            if !is_mode_only_predicate(&binding.predicates, mode) {
+                continue;
+            }
+            let action_name = binding
+                .actions
+                .first()
+                .map(|a| a.name.clone())
+                .unwrap_or_default();
+            results.push((binding.key.display_label(), action_name));
+        }
+        results
+    }
+}
+
+fn is_mode_only_predicate(predicates: &[Predicate], mode: &str) -> bool {
+    if predicates.len() != 1 {
+        return false;
+    }
+    match &predicates[0] {
+        Predicate::Eq(field, val) if field.node == "mode" => match &val.node {
+            Value::String(s) => s == mode,
+            Value::Ident(s) => s == mode,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -737,5 +802,79 @@ mod tests {
         );
         let keymap = Keymap::compile(&config);
         assert_eq!(keymap.bindings.len(), 1);
+    }
+
+    #[test]
+    fn display_label_char() {
+        let ck = CompiledKey {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(ck.display_label(), "q");
+    }
+
+    #[test]
+    fn display_label_ctrl() {
+        let ck = CompiledKey {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert_eq!(ck.display_label(), "C-s");
+    }
+
+    #[test]
+    fn display_label_named() {
+        assert_eq!(
+            CompiledKey {
+                code: KeyCode::Esc,
+                modifiers: KeyModifiers::NONE
+            }
+            .display_label(),
+            "Esc"
+        );
+        assert_eq!(
+            CompiledKey {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE
+            }
+            .display_label(),
+            "Spc"
+        );
+    }
+
+    #[test]
+    fn bindings_for_mode_returns_matches() {
+        let config = parse_config(
+            r#"on key {
+                mode == "space" {
+                    q -> Quit();
+                    a -> SetMode(space_a);
+                }
+                mode == "normal" {
+                    j -> MoveDown();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let bindings = keymap.bindings_for_mode("space");
+
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0], ("q".to_string(), "Quit".to_string()));
+        assert_eq!(bindings[1], ("a".to_string(), "SetMode".to_string()));
+    }
+
+    #[test]
+    fn bindings_for_mode_excludes_other_modes() {
+        let config = parse_config(
+            r#"on key {
+                mode == "space" { q -> Quit(); }
+                mode == "normal" { j -> MoveDown(); }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        assert_eq!(keymap.bindings_for_mode("space").len(), 1);
+        assert_eq!(keymap.bindings_for_mode("normal").len(), 1);
+        assert!(keymap.bindings_for_mode("insert").is_empty());
     }
 }

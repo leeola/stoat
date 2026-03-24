@@ -2,5 +2,10 @@ on key {
     mode == normal {
         q -> Quit();
         Escape -> Quit();
+        Space -> SetMode(space);
+    }
+    mode == space {
+        Escape -> SetMode(normal);
+        q -> Quit();
     }
 }
