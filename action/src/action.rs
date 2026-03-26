@@ -5,6 +5,8 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn kind(&self) -> ActionKind;
     fn params(&self) -> &'static [ParamDef];
+    fn short_desc(&self) -> &'static str;
+    fn long_desc(&self) -> &'static str;
 }
 
 pub trait Action: Debug + Send + 'static {
@@ -15,58 +17,50 @@ pub trait Action: Debug + Send + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-#[derive(Debug)]
-pub struct QuitDef;
+macro_rules! define_action {
+    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
+        #[derive(Debug)]
+        pub struct $def;
 
-impl ActionDef for QuitDef {
-    fn name(&self) -> &'static str {
-        "Quit"
-    }
+        impl $crate::ActionDef for $def {
+            fn name(&self) -> &'static str {
+                $name
+            }
 
-    fn kind(&self) -> ActionKind {
-        ActionKind::Quit
-    }
+            fn kind(&self) -> $crate::ActionKind {
+                $kind
+            }
 
-    fn params(&self) -> &'static [ParamDef] {
-        &[]
-    }
+            fn params(&self) -> &'static [$crate::ParamDef] {
+                &[]
+            }
+
+            fn short_desc(&self) -> &'static str {
+                $short
+            }
+
+            fn long_desc(&self) -> &'static str {
+                $long
+            }
+        }
+
+        #[derive(Debug)]
+        pub struct $action;
+
+        impl $action {
+            pub const DEF: &$def = &$def;
+        }
+
+        impl $crate::Action for $action {
+            fn def(&self) -> &'static dyn $crate::ActionDef {
+                Self::DEF
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+    };
 }
 
-#[derive(Debug)]
-pub struct Quit;
-
-impl Quit {
-    pub const DEF: &QuitDef = &QuitDef;
-}
-
-impl Action for Quit {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quit_kind() {
-        assert_eq!(Quit.kind(), ActionKind::Quit);
-    }
-
-    #[test]
-    fn quit_def() {
-        assert_eq!(Quit.def().name(), "Quit");
-        assert!(Quit.def().params().is_empty());
-    }
-
-    #[test]
-    fn quit_downcast() {
-        let action: Box<dyn Action> = Box::new(Quit);
-        assert!(action.as_any().downcast_ref::<Quit>().is_some());
-    }
-}
+pub(crate) use define_action;

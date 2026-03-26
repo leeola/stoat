@@ -1,12 +1,16 @@
 mod action;
+pub mod defs;
 mod kind;
-pub mod pane;
 mod param;
+pub mod registry;
 
-pub use action::{Action, ActionDef, Quit};
-pub use kind::ActionKind;
-pub use pane::{
-    ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
-    SplitRight,
+pub use action::{Action, ActionDef};
+pub use defs::{
+    app::Quit,
+    pane::{
+        ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
+        SplitRight,
+    },
 };
+pub use kind::ActionKind;
 pub use param::{ParamDef, ParamKind, ParamValue};

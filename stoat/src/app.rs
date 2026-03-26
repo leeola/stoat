@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 use std::io;
-use stoat_action::{Action, Quit};
+use stoat_action::Action;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
@@ -129,7 +129,16 @@ impl Stoat {
             render_pane(pane, is_focused, &mut buf);
         }
         if !PRIMARY_MODES.contains(&self.mode.as_str()) {
-            let bindings = self.keymap.bindings_for_mode(&self.mode);
+            let raw = self.keymap.bindings_for_mode(&self.mode);
+            let bindings: Vec<_> = raw
+                .iter()
+                .map(|(key, action_name)| {
+                    let desc = stoat_action::registry::lookup(action_name)
+                        .map(|e| e.def.short_desc())
+                        .unwrap_or(action_name.as_str());
+                    (key.as_str(), desc)
+                })
+                .collect();
             render_mini_help(&self.mode, &bindings, self.size, &mut buf);
         }
         buf
@@ -168,16 +177,14 @@ fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
 const PRIMARY_MODES: &[&str] = &["normal", "insert"];
 
 fn resolve_action(name: &str) -> Option<Box<dyn Action>> {
-    match name {
-        "Quit" => Some(Box::new(Quit)),
-        _ => {
-            tracing::warn!("unknown action: {name}");
-            None
-        },
+    let entry = stoat_action::registry::lookup(name);
+    if entry.is_none() {
+        tracing::warn!("unknown action: {name}");
     }
+    entry.map(|e| (e.create)())
 }
 
-fn render_mini_help(mode: &str, bindings: &[(String, String)], area: Rect, buf: &mut Buffer) {
+fn render_mini_help(mode: &str, bindings: &[(&str, &str)], area: Rect, buf: &mut Buffer) {
     if bindings.is_empty() || area.width < 10 || area.height < 4 {
         return;
     }
