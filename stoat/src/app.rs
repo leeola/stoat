@@ -1,6 +1,6 @@
 use crate::{
     action_handlers,
-    keymap::{Keymap, KeymapState, ResolvedArg, StateValue},
+    keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -129,13 +129,12 @@ impl Stoat {
             render_pane(pane, is_focused, &mut buf);
         }
         if !PRIMARY_MODES.contains(&self.mode.as_str()) {
-            let raw = self.keymap.bindings_for_mode(&self.mode);
+            let state = StoatKeymapState::new(&self.mode);
+            let raw = self.keymap.active_bindings(&state);
             let bindings: Vec<_> = raw
                 .iter()
-                .map(|(key, action_name)| {
-                    let desc = stoat_action::registry::lookup(action_name)
-                        .map(|e| e.def.short_desc())
-                        .unwrap_or(action_name.as_str());
+                .map(|(key, actions)| {
+                    let desc = actions.first().map(action_display_desc).unwrap_or_default();
                     (key.as_str(), desc)
                 })
                 .collect();
@@ -176,6 +175,16 @@ fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
 
 const PRIMARY_MODES: &[&str] = &["normal", "insert"];
 
+fn action_display_desc(action: &ResolvedAction) -> String {
+    if action.name == "SetMode" {
+        let target = action.args.first().and_then(arg_as_str).unwrap_or_default();
+        return format!("{target} mode");
+    }
+    stoat_action::registry::lookup(&action.name)
+        .map(|e| e.def.short_desc().to_string())
+        .unwrap_or_else(|| action.name.clone())
+}
+
 fn resolve_action(name: &str) -> Option<Box<dyn Action>> {
     let entry = stoat_action::registry::lookup(name);
     if entry.is_none() {
@@ -184,7 +193,7 @@ fn resolve_action(name: &str) -> Option<Box<dyn Action>> {
     entry.map(|e| (e.create)())
 }
 
-fn render_mini_help(mode: &str, bindings: &[(&str, &str)], area: Rect, buf: &mut Buffer) {
+fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &mut Buffer) {
     if bindings.is_empty() || area.width < 10 || area.height < 4 {
         return;
     }

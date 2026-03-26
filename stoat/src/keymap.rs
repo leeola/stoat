@@ -269,37 +269,17 @@ impl Keymap {
         None
     }
 
-    /// Returns `(key_label, action_name)` pairs for all bindings active in the given mode.
-    ///
-    /// Only includes bindings whose sole predicate is `mode == "<mode>"`.
-    pub fn bindings_for_mode(&self, mode: &str) -> Vec<(String, String)> {
+    /// Returns `(key_label, actions)` for all bindings whose predicates match
+    /// the current state. Uses the same evaluator as [`Keymap::lookup`].
+    pub fn active_bindings(&self, state: &dyn KeymapState) -> Vec<(String, &[ResolvedAction])> {
         let mut results = Vec::new();
         for binding in &self.bindings {
-            if !is_mode_only_predicate(&binding.predicates, mode) {
-                continue;
+            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
+            if matches {
+                results.push((binding.key.display_label(), binding.actions.as_slice()));
             }
-            let action_name = binding
-                .actions
-                .first()
-                .map(|a| a.name.clone())
-                .unwrap_or_default();
-            results.push((binding.key.display_label(), action_name));
         }
         results
-    }
-}
-
-fn is_mode_only_predicate(predicates: &[Predicate], mode: &str) -> bool {
-    if predicates.len() != 1 {
-        return false;
-    }
-    match &predicates[0] {
-        Predicate::Eq(field, val) if field.node == "mode" => match &val.node {
-            Value::String(s) => s == mode,
-            Value::Ident(s) => s == mode,
-            _ => false,
-        },
-        _ => false,
     }
 }
 
@@ -843,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn bindings_for_mode_returns_matches() {
+    fn active_bindings_returns_matches() {
         let config = parse_config(
             r#"on key {
                 mode == "space" {
@@ -856,15 +836,18 @@ mod tests {
             }"#,
         );
         let keymap = Keymap::compile(&config);
-        let bindings = keymap.bindings_for_mode("space");
+        let state = TestState::new().set("mode", StateValue::String("space".into()));
+        let bindings = keymap.active_bindings(&state);
 
         assert_eq!(bindings.len(), 2);
-        assert_eq!(bindings[0], ("q".to_string(), "Quit".to_string()));
-        assert_eq!(bindings[1], ("a".to_string(), "SetMode".to_string()));
+        assert_eq!(bindings[0].0, "q");
+        assert_eq!(bindings[0].1[0].name, "Quit");
+        assert_eq!(bindings[1].0, "a");
+        assert_eq!(bindings[1].1[0].name, "SetMode");
     }
 
     #[test]
-    fn bindings_for_mode_excludes_other_modes() {
+    fn active_bindings_excludes_non_matching() {
         let config = parse_config(
             r#"on key {
                 mode == "space" { q -> Quit(); }
@@ -873,8 +856,37 @@ mod tests {
         );
         let keymap = Keymap::compile(&config);
 
-        assert_eq!(keymap.bindings_for_mode("space").len(), 1);
-        assert_eq!(keymap.bindings_for_mode("normal").len(), 1);
-        assert!(keymap.bindings_for_mode("insert").is_empty());
+        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        assert_eq!(keymap.active_bindings(&space).len(), 1);
+
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+        assert_eq!(keymap.active_bindings(&normal).len(), 1);
+
+        let insert = TestState::new().set("mode", StateValue::String("insert".into()));
+        assert!(keymap.active_bindings(&insert).is_empty());
+    }
+
+    #[test]
+    fn active_bindings_compound_predicates() {
+        let config = parse_config(
+            r#"on key {
+                mode == "space" && has_selection {
+                    d -> Delete();
+                }
+                mode == "space" {
+                    q -> Quit();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        let without = TestState::new().set("mode", StateValue::String("space".into()));
+        assert_eq!(keymap.active_bindings(&without).len(), 1);
+        assert_eq!(keymap.active_bindings(&without)[0].1[0].name, "Quit");
+
+        let with = TestState::new()
+            .set("mode", StateValue::String("space".into()))
+            .set("has_selection", StateValue::Bool(true));
+        assert_eq!(keymap.active_bindings(&with).len(), 2);
     }
 }
