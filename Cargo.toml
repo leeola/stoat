@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["action", "bin", "config", "stoat", "log", "text", "viewport"]
+members = [
+  "action",
+  "bin",
+  "config",
+  "scheduler",
+  "stoat",
+  "log",
+  "text",
+  "viewport",
+]
 
 [workspace.package]
 edition = "2021"
@@ -37,6 +46,8 @@ unicode-width = "0.2"
 slotmap = "1"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
+async-task = "4"
+parking_lot = "0.12"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
