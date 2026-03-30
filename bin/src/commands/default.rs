@@ -1,5 +1,7 @@
 use clap::Parser;
+use std::sync::Arc;
 use stoat::Stoat;
+use stoat_scheduler::TestScheduler;
 
 #[derive(Parser)]
 #[command(name = "stoat", about = "A modal text editor")]
@@ -21,8 +23,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    // FIXME: Replace TestScheduler with a production scheduler
+    let scheduler = Arc::new(TestScheduler::new());
+    let executor = scheduler.executor();
+
     rt.block_on(async {
-        let mut stoat = Stoat::new();
+        let mut stoat = Stoat::new(executor);
         stoat.run(event_rx, render_tx).await
     })?;
 

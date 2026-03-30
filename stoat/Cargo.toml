@@ -11,6 +11,7 @@ workspace = true
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
 stoat_log = { path = "../log" }
+stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 ratatui.workspace = true
 crossterm.workspace = true

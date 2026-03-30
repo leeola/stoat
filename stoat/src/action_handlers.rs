@@ -49,10 +49,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use stoat_action::Quit;
+    use stoat_scheduler::TestScheduler;
 
     fn stoat() -> Stoat {
-        Stoat::new()
+        let scheduler = Arc::new(TestScheduler::new());
+        Stoat::new(scheduler.executor())
     }
 
     #[test]

@@ -9,7 +9,9 @@ pub mod multi_buffer;
 pub mod pane;
 pub mod ui;
 
-pub use app::Stoat;
+pub use app::{Stoat, UpdateEffect};
+#[cfg(test)]
+mod test_harness;
 pub use buffer::{BufferId, SharedBuffer, TextBuffer};
 pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, DisplayMap, DisplayPoint,

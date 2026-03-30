@@ -20,6 +20,7 @@ workspace = true
 
 [dependencies]
 stoat = { path = "../stoat" }
+stoat_scheduler = { path = "../scheduler" }
 clap.workspace = true
 tracing.workspace = true
 tokio.workspace = true

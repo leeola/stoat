@@ -13,6 +13,7 @@ use ratatui::{
 };
 use std::io;
 use stoat_action::Action;
+use stoat_scheduler::Executor;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
@@ -28,17 +29,17 @@ pub struct Stoat {
     size: Rect,
     pub panes: PaneTree,
     pub mode: String,
+    pub executor: Executor,
     keymap: Keymap,
 }
 
-impl Default for Stoat {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Stoat {
-    pub fn new() -> Self {
+    #[cfg(test)]
+    pub fn test() -> crate::test_harness::TestHarness {
+        crate::test_harness::TestHarness::default()
+    }
+
+    pub fn new(executor: Executor) -> Self {
         let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
         if !errors.is_empty() {
             tracing::error!(
@@ -54,6 +55,7 @@ impl Stoat {
             size: Rect::default(),
             panes: PaneTree::new(Rect::default()),
             mode: "normal".into(),
+            executor,
             keymap,
         }
     }
@@ -77,7 +79,7 @@ impl Stoat {
         Ok(())
     }
 
-    fn update(&mut self, event: Event) -> UpdateEffect {
+    pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -121,7 +123,7 @@ impl Stoat {
         effect
     }
 
-    fn render(&self) -> Buffer {
+    pub(crate) fn render(&self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
         let focused = self.panes.focus();
         for (id, pane) in self.panes.split_panes() {
