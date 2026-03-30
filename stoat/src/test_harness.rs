@@ -2,9 +2,13 @@
 
 use crate::app::{Stoat, UpdateEffect};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::buffer::Buffer;
-use std::sync::Arc;
+use ratatui::{
+    buffer::Buffer,
+    style::{Color, Modifier},
+};
+use std::{collections::BTreeMap, fmt::Write, sync::Arc};
 use stoat_scheduler::TestScheduler;
+use unicode_width::UnicodeWidthStr;
 
 pub struct Frame {
     pub number: usize,
@@ -16,11 +20,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn display(&self) -> String {
-        let actions = self.actions.join(", ");
-        format!(
-            "actions: {actions}\nmode: {} | size: {}x{}\n---\n{}",
-            self.mode, self.size.0, self.size.1, self.content,
-        )
+        format_plain(self)
     }
 }
 
@@ -97,6 +97,20 @@ impl TestHarness {
         &self.frames
     }
 
+    pub fn assert_snapshot(&mut self, name: &str) {
+        self.capture("snapshot");
+        let text = format_plain(self.frames.last().expect("no frames"));
+        insta::assert_snapshot!(name, text);
+    }
+
+    pub fn assert_snapshot_raw(&mut self, name: &str) {
+        self.capture("snapshot");
+        let frame = self.frames.last().expect("no frames");
+        let buf = self.last_buffer.as_ref().expect("no buffer");
+        let text = format_raw(frame, buf);
+        insta::assert_snapshot!(name, text);
+    }
+
     fn maybe_capture(&mut self, action: &str) {
         let buf = self.stoat.render();
         if self.last_buffer.as_ref() == Some(&buf) {
@@ -157,6 +171,180 @@ fn buffer_to_text(buf: &Buffer) -> String {
         lines.pop();
     }
     lines.join("\n")
+}
+
+fn format_header(frame: &Frame) -> String {
+    let mut pairs = BTreeMap::new();
+    pairs.insert("actions", frame.actions.join(", "));
+    pairs.insert("mode", frame.mode.clone());
+    pairs.insert("size", format!("{}x{}", frame.size.0, frame.size.1));
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_plain(frame: &Frame) -> String {
+    let header = format_header(frame);
+    format!("{header}\n---\n{}", frame.content)
+}
+
+fn format_raw(frame: &Frame, buf: &Buffer) -> String {
+    let header = format_header(frame);
+    let ansi = buffer_to_ansi(buf);
+    format!("{header}\n---\n{ansi}")
+}
+
+fn buffer_to_ansi(buf: &Buffer) -> String {
+    let area = buf.area;
+    let default_style = (Color::Reset, Color::Reset, Modifier::empty());
+    let mut current = default_style;
+    let mut lines: Vec<String> = Vec::with_capacity(area.height as usize);
+
+    for y in area.y..area.y + area.height {
+        let rightmost = find_rightmost_visible(buf, y);
+        let mut line = String::new();
+        let mut skip = 0u16;
+
+        for x in area.x..rightmost {
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            let cell = &buf[(x, y)];
+            let cell_style = (cell.fg, cell.bg, cell.modifier);
+
+            if cell_style != current {
+                line.push_str("\x1b[0m");
+                push_sgr(&mut line, cell.fg, cell.bg, cell.modifier);
+                current = cell_style;
+            }
+
+            let symbol = cell.symbol();
+            line.push_str(symbol);
+            let w = UnicodeWidthStr::width(symbol);
+            if w > 1 {
+                skip = (w as u16) - 1;
+            }
+        }
+
+        if current != default_style {
+            line.push_str("\x1b[0m");
+            current = default_style;
+        }
+
+        lines.push(line);
+    }
+
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn find_rightmost_visible(buf: &Buffer, y: u16) -> u16 {
+    let area = buf.area;
+    let mut rightmost = area.x;
+    for x in area.x..area.x + area.width {
+        let cell = &buf[(x, y)];
+        let is_default_space = cell.symbol() == " "
+            && cell.fg == Color::Reset
+            && cell.bg == Color::Reset
+            && cell.modifier.is_empty();
+        if !is_default_space {
+            rightmost = x + 1;
+        }
+    }
+    rightmost
+}
+
+fn push_sgr(out: &mut String, fg: Color, bg: Color, modifier: Modifier) {
+    if modifier.contains(Modifier::BOLD) {
+        out.push_str("\x1b[1m");
+    }
+    if modifier.contains(Modifier::DIM) {
+        out.push_str("\x1b[2m");
+    }
+    if modifier.contains(Modifier::ITALIC) {
+        out.push_str("\x1b[3m");
+    }
+    if modifier.contains(Modifier::UNDERLINED) {
+        out.push_str("\x1b[4m");
+    }
+    if modifier.contains(Modifier::SLOW_BLINK) {
+        out.push_str("\x1b[5m");
+    }
+    if modifier.contains(Modifier::RAPID_BLINK) {
+        out.push_str("\x1b[6m");
+    }
+    if modifier.contains(Modifier::REVERSED) {
+        out.push_str("\x1b[7m");
+    }
+    if modifier.contains(Modifier::HIDDEN) {
+        out.push_str("\x1b[8m");
+    }
+    if modifier.contains(Modifier::CROSSED_OUT) {
+        out.push_str("\x1b[9m");
+    }
+    push_color_fg(out, fg);
+    push_color_bg(out, bg);
+}
+
+fn push_color_fg(out: &mut String, color: Color) {
+    match color {
+        Color::Reset => {},
+        Color::Black => out.push_str("\x1b[30m"),
+        Color::Red => out.push_str("\x1b[31m"),
+        Color::Green => out.push_str("\x1b[32m"),
+        Color::Yellow => out.push_str("\x1b[33m"),
+        Color::Blue => out.push_str("\x1b[34m"),
+        Color::Magenta => out.push_str("\x1b[35m"),
+        Color::Cyan => out.push_str("\x1b[36m"),
+        Color::Gray => out.push_str("\x1b[37m"),
+        Color::DarkGray => out.push_str("\x1b[90m"),
+        Color::LightRed => out.push_str("\x1b[91m"),
+        Color::LightGreen => out.push_str("\x1b[92m"),
+        Color::LightYellow => out.push_str("\x1b[93m"),
+        Color::LightBlue => out.push_str("\x1b[94m"),
+        Color::LightMagenta => out.push_str("\x1b[95m"),
+        Color::LightCyan => out.push_str("\x1b[96m"),
+        Color::White => out.push_str("\x1b[97m"),
+        Color::Indexed(n) => {
+            let _ = write!(out, "\x1b[38;5;{n}m");
+        },
+        Color::Rgb(r, g, b) => {
+            let _ = write!(out, "\x1b[38;2;{r};{g};{b}m");
+        },
+    }
+}
+
+fn push_color_bg(out: &mut String, color: Color) {
+    match color {
+        Color::Reset => {},
+        Color::Black => out.push_str("\x1b[40m"),
+        Color::Red => out.push_str("\x1b[41m"),
+        Color::Green => out.push_str("\x1b[42m"),
+        Color::Yellow => out.push_str("\x1b[43m"),
+        Color::Blue => out.push_str("\x1b[44m"),
+        Color::Magenta => out.push_str("\x1b[45m"),
+        Color::Cyan => out.push_str("\x1b[46m"),
+        Color::Gray => out.push_str("\x1b[47m"),
+        Color::DarkGray => out.push_str("\x1b[100m"),
+        Color::LightRed => out.push_str("\x1b[101m"),
+        Color::LightGreen => out.push_str("\x1b[102m"),
+        Color::LightYellow => out.push_str("\x1b[103m"),
+        Color::LightBlue => out.push_str("\x1b[104m"),
+        Color::LightMagenta => out.push_str("\x1b[105m"),
+        Color::LightCyan => out.push_str("\x1b[106m"),
+        Color::White => out.push_str("\x1b[107m"),
+        Color::Indexed(n) => {
+            let _ = write!(out, "\x1b[48;5;{n}m");
+        },
+        Color::Rgb(r, g, b) => {
+            let _ = write!(out, "\x1b[48;2;{r};{g};{b}m");
+        },
+    }
 }
 
 fn parse_keys(seq: &str) -> Vec<KeyEvent> {
@@ -370,5 +558,24 @@ mod tests {
     fn harness_custom_size() {
         let h = TestHarness::with_size(120, 40);
         assert_eq!(h.frames()[0].size, (120, 40));
+    }
+
+    #[test]
+    fn snapshot_initial_plain() {
+        let mut h = Stoat::test();
+        h.assert_snapshot("initial_plain");
+    }
+
+    #[test]
+    fn snapshot_initial_raw() {
+        let mut h = Stoat::test();
+        h.assert_snapshot_raw("initial_raw");
+    }
+
+    #[test]
+    fn snapshot_space_mode() {
+        let mut h = Stoat::test();
+        h.type_keys("space");
+        h.assert_snapshot("space_mode");
     }
 }
