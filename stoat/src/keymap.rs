@@ -59,6 +59,47 @@ impl CompiledKey {
         event.code == self.code && event.modifiers == self.modifiers
     }
 
+    pub fn to_key_token(&self) -> String {
+        let base = match self.code {
+            KeyCode::Char(' ') => "space",
+            KeyCode::Char(c) => return self.format_with_modifiers(&c.to_string()),
+            KeyCode::Esc => "escape",
+            KeyCode::Enter => "enter",
+            KeyCode::Tab => "tab",
+            KeyCode::Backspace => "backspace",
+            KeyCode::Delete => "delete",
+            KeyCode::Up => "up",
+            KeyCode::Down => "down",
+            KeyCode::Left => "left",
+            KeyCode::Right => "right",
+            KeyCode::Home => "home",
+            KeyCode::End => "end",
+            KeyCode::PageUp => "pageup",
+            KeyCode::PageDown => "pagedown",
+            KeyCode::F(n) => return self.format_with_modifiers(&format!("f{n}")),
+            _ => "?",
+        };
+        self.format_with_modifiers(base)
+    }
+
+    fn format_with_modifiers(&self, base: &str) -> String {
+        if self.modifiers.is_empty() {
+            return base.to_string();
+        }
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("ctrl");
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("shift");
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("alt");
+        }
+        parts.push(base);
+        parts.join("-")
+    }
+
     pub fn display_label(&self) -> String {
         let mut parts = Vec::new();
         if self.modifiers.contains(KeyModifiers::CONTROL) {
@@ -217,13 +258,13 @@ fn glob_match_inner(pattern: &[char], text: &[char], mut pi: usize, mut ti: usiz
     ti >= text.len()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAction {
     pub name: String,
     pub args: Vec<ResolvedArg>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedArg {
     pub name: Option<String>,
     pub value: Value,
@@ -267,6 +308,17 @@ impl Keymap {
             }
         }
         None
+    }
+
+    pub fn active_keys(&self, state: &dyn KeymapState) -> Vec<(&CompiledKey, &[ResolvedAction])> {
+        let mut results = Vec::new();
+        for binding in &self.bindings {
+            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
+            if matches {
+                results.push((&binding.key, binding.actions.as_slice()));
+            }
+        }
+        results
     }
 
     /// Returns `(key_label, actions)` for all bindings whose predicates match
@@ -340,7 +392,7 @@ fn compile_binding(binding: &Binding, predicates: &[Predicate], out: &mut Vec<Co
     });
 }
 
-fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAction {
+pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAction {
     let args = action
         .args
         .iter()
@@ -820,6 +872,33 @@ mod tests {
             .display_label(),
             "Spc"
         );
+    }
+
+    #[test]
+    fn to_key_token_char() {
+        let ck = CompiledKey {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(ck.to_key_token(), "q");
+    }
+
+    #[test]
+    fn to_key_token_space() {
+        let ck = CompiledKey {
+            code: KeyCode::Char(' '),
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(ck.to_key_token(), "space");
+    }
+
+    #[test]
+    fn to_key_token_ctrl() {
+        let ck = CompiledKey {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert_eq!(ck.to_key_token(), "ctrl-s");
     }
 
     #[test]

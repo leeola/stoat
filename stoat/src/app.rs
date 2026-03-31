@@ -39,6 +39,15 @@ impl Stoat {
         crate::test_harness::TestHarness::default()
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_keys_for_mode(
+        &self,
+        mode: &str,
+    ) -> Vec<(&crate::keymap::CompiledKey, &[ResolvedAction])> {
+        let state = StoatKeymapState::new(mode);
+        self.keymap.active_keys(&state)
+    }
+
     pub fn new(executor: Executor) -> Self {
         let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
         if !errors.is_empty() {
@@ -167,7 +176,7 @@ impl KeymapState for StoatKeymapState {
     }
 }
 
-fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
+pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
     match &arg.value {
         stoat_config::Value::String(s) => Some(s.clone()),
         stoat_config::Value::Ident(s) => Some(s.clone()),

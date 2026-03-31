@@ -12,6 +12,10 @@ pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)
 }
 
+pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
+    parser::parse_action(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

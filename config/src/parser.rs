@@ -478,6 +478,35 @@ pub fn parser() -> impl Parser<char, Config, Error = Simple<char>> {
     config()
 }
 
+pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
+    let source = if source.contains('(') {
+        source.to_string()
+    } else {
+        format!("{source}()")
+    };
+    let (result, errs) = action().then_ignore(end()).parse_recovery(&*source);
+    if !errs.is_empty() {
+        let errors = errs
+            .into_iter()
+            .map(|e| {
+                let span = e.span();
+                let found = e
+                    .found()
+                    .map(|c| format!("'{c}'"))
+                    .unwrap_or_else(|| "end of input".to_string());
+                ParseError::new(span, format!("unexpected {found}"))
+            })
+            .collect();
+        return Err(errors);
+    }
+    result.ok_or_else(|| {
+        vec![ParseError::new(
+            0..source.len(),
+            "failed to parse action".to_string(),
+        )]
+    })
+}
+
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     let (result, errs) = parser().parse_recovery(source);
 

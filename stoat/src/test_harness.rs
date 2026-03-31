@@ -1,12 +1,19 @@
 #![allow(dead_code)]
 
-use crate::app::{Stoat, UpdateEffect};
+use crate::{
+    app::{arg_as_str, Stoat, UpdateEffect},
+    keymap::resolve_config_action,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier},
 };
-use std::{collections::BTreeMap, fmt::Write, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet, VecDeque},
+    fmt::Write,
+    sync::Arc,
+};
 use stoat_scheduler::TestScheduler;
 use unicode_width::UnicodeWidthStr;
 
@@ -109,6 +116,56 @@ impl TestHarness {
         let buf = self.last_buffer.as_ref().expect("no buffer");
         let text = format_raw(frame, buf);
         insta::assert_snapshot!(name, text);
+    }
+
+    pub fn type_action(&mut self, action_expr: &str) {
+        let parsed = stoat_config::parse_action(action_expr)
+            .unwrap_or_else(|e| panic!("failed to parse action {action_expr:?}: {e:?}"));
+        let target = resolve_config_action(&parsed);
+        let tokens = self.find_action_keys(&target, action_expr);
+        self.type_keys(&tokens.join(" "));
+    }
+
+    fn find_action_keys(
+        &self,
+        target: &crate::keymap::ResolvedAction,
+        action_expr: &str,
+    ) -> Vec<String> {
+        let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+        let mut visited: HashSet<String> = HashSet::new();
+
+        let start = self.stoat.mode.clone();
+        queue.push_back((start.clone(), Vec::new()));
+        visited.insert(start);
+
+        while let Some((mode, path)) = queue.pop_front() {
+            let bindings = self.stoat.active_keys_for_mode(&mode);
+
+            for (key, actions) in &bindings {
+                if actions.iter().any(|a| a == target) {
+                    let mut full_path = path.clone();
+                    full_path.push(key.to_key_token());
+                    return full_path;
+                }
+
+                for action in *actions {
+                    if action.name == "SetMode" {
+                        if let Some(target_mode) = action.args.first().and_then(arg_as_str) {
+                            if visited.insert(target_mode.clone()) {
+                                let mut new_path = path.clone();
+                                new_path.push(key.to_key_token());
+                                queue.push_back((target_mode, new_path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        panic!(
+            "action {action_expr:?} is unreachable from mode {:?}",
+            self.stoat.mode
+        );
     }
 
     fn maybe_capture(&mut self, action: &str) {
@@ -577,5 +634,49 @@ mod tests {
         let mut h = Stoat::test();
         h.type_keys("space");
         h.assert_snapshot("space_mode");
+    }
+
+    #[test]
+    fn type_action_direct() {
+        let mut h = Stoat::test();
+        h.type_action("SetMode(space)");
+        let last = h.frames().last().expect("no frames");
+        assert_eq!(last.mode, "space");
+    }
+
+    #[test]
+    fn type_action_quit_from_space() {
+        let mut h = Stoat::test();
+        h.type_keys("space");
+        h.type_action("Quit");
+    }
+
+    #[test]
+    #[should_panic(expected = "unreachable")]
+    fn type_action_unreachable_panics() {
+        let mut h = Stoat::test();
+        h.type_action("NonExistentAction");
+    }
+
+    #[test]
+    fn to_key_token_round_trips() {
+        use crate::keymap::CompiledKey;
+
+        let cases = [
+            (KeyCode::Char('q'), KeyModifiers::NONE, "q"),
+            (KeyCode::Char(' '), KeyModifiers::NONE, "space"),
+            (KeyCode::Esc, KeyModifiers::NONE, "escape"),
+            (KeyCode::Enter, KeyModifiers::NONE, "enter"),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, "ctrl-s"),
+            (KeyCode::F(1), KeyModifiers::NONE, "f1"),
+        ];
+        for (code, modifiers, expected) in cases {
+            let ck = CompiledKey { code, modifiers };
+            let token = ck.to_key_token();
+            assert_eq!(token, expected);
+            let parsed = parse_single_key(&token);
+            assert_eq!(parsed.code, code);
+            assert_eq!(parsed.modifiers, modifiers);
+        }
     }
 }
