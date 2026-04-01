@@ -1,5 +1,5 @@
 use super::fold_map::{FoldPoint, FoldSnapshot};
-use std::{ops::Deref, sync::Arc};
+use std::{num::NonZeroU32, ops::Deref, sync::Arc};
 use stoat_text::{patch::Patch, Bias};
 
 const MAX_EXPANSION_COLUMN: u32 = 256;
@@ -35,31 +35,81 @@ impl From<FoldPoint> for TabPoint {
 pub struct TabRow(pub u32);
 
 pub struct TabMap {
-    tab_size: u32,
+    tab_size: NonZeroU32,
+    version: usize,
 }
 
 impl TabMap {
-    pub fn new(tab_size: u32) -> Self {
+    pub fn new(tab_size: NonZeroU32) -> Self {
         Self {
-            tab_size: tab_size.max(1),
+            tab_size,
+            version: 0,
         }
     }
 
-    pub fn set_tab_size(&mut self, size: u32) {
-        self.tab_size = size.max(1);
+    pub fn set_tab_size(&mut self, size: NonZeroU32) {
+        self.tab_size = size;
     }
 
     pub fn sync(
-        &self,
+        &mut self,
         fold_snapshot: Arc<FoldSnapshot>,
         fold_edits: Patch<u32>,
     ) -> (TabSnapshot, Patch<u32>) {
+        let tab_size = self.tab_size.get();
+
+        let expanded_edits = if fold_edits.is_empty() {
+            fold_edits
+        } else {
+            let mut expanded = Vec::new();
+            for edit in fold_edits.into_iter() {
+                let mut new_end = edit.new.end;
+                for row in edit.new.start..edit.new.end {
+                    let has_tab = fold_snapshot.fold_line_chars(row).any(|ch| ch == '\t');
+                    if has_tab {
+                        new_end = new_end.max(row + 1);
+                    }
+                }
+                // Check the row past the edit end if the edit did not change
+                // line count -- tabs on that line may have shifted.
+                let old_rows = edit.old.end - edit.old.start;
+                let new_rows = edit.new.end - edit.new.start;
+                if old_rows == new_rows && edit.new.end < fold_snapshot.line_count() {
+                    let has_tab = fold_snapshot
+                        .fold_line_chars(edit.new.end)
+                        .any(|ch| ch == '\t');
+                    if has_tab {
+                        new_end = new_end.max(edit.new.end + 1);
+                    }
+                }
+
+                let new_edit = stoat_text::patch::Edit {
+                    old: edit.old.start
+                        ..edit.old.end.max(new_end - edit.new.start + edit.old.start),
+                    new: edit.new.start..new_end,
+                };
+
+                if let Some(last) = expanded.last_mut() {
+                    let last: &mut stoat_text::patch::Edit<u32> = last;
+                    if new_edit.old.start <= last.old.end {
+                        last.old.end = last.old.end.max(new_edit.old.end);
+                        last.new.end = last.new.end.max(new_edit.new.end);
+                        continue;
+                    }
+                }
+                expanded.push(new_edit);
+            }
+            Patch::new(expanded)
+        };
+
+        self.version += 1;
         let snapshot = TabSnapshot {
             fold_snapshot,
-            tab_size: self.tab_size,
+            tab_size,
             max_expansion_column: MAX_EXPANSION_COLUMN,
+            version: self.version,
         };
-        (snapshot, fold_edits)
+        (snapshot, expanded_edits)
     }
 }
 
@@ -68,6 +118,7 @@ pub struct TabSnapshot {
     fold_snapshot: Arc<FoldSnapshot>,
     tab_size: u32,
     max_expansion_column: u32,
+    version: usize,
 }
 
 impl Deref for TabSnapshot {
@@ -88,6 +139,10 @@ impl TabSnapshot {
 
     pub fn max_expansion_column(&self) -> u32 {
         self.max_expansion_column
+    }
+
+    pub fn version(&self) -> usize {
+        self.version
     }
 
     pub fn to_tab_point(&self, fold_point: FoldPoint) -> TabPoint {
@@ -111,6 +166,26 @@ impl TabSnapshot {
             self.max_expansion_column,
         );
         FoldPoint::new(tab_point.row(), fold_column)
+    }
+
+    pub fn tab_point_to_fold_point_detailed(
+        &self,
+        tab_point: TabPoint,
+        bias: Bias,
+    ) -> (FoldPoint, u32, u32) {
+        let chars = self.fold_snapshot.fold_line_chars(tab_point.row());
+        let (fold_column, expanded_char_column, to_next_stop) = collapse_column_detailed(
+            chars,
+            tab_point.column(),
+            self.tab_size,
+            bias,
+            self.max_expansion_column,
+        );
+        (
+            FoldPoint::new(tab_point.row(), fold_column),
+            expanded_char_column,
+            to_next_stop,
+        )
     }
 
     pub fn line_len(&self, fold_row: u32) -> u32 {
@@ -271,6 +346,47 @@ fn collapse_column(
     fold_col
 }
 
+fn collapse_column_detailed(
+    chars: impl Iterator<Item = char>,
+    tab_column: u32,
+    tab_size: u32,
+    bias: Bias,
+    max_expansion_column: u32,
+) -> (u32, u32, u32) {
+    let mut expanded = 0u32;
+    let mut fold_col = 0u32;
+    let mut last_char_byte_len = 0u32;
+    let mut last_char_width = 0u32;
+    for ch in chars {
+        if expanded >= tab_column {
+            break;
+        }
+        let char_width = if ch == '\t' {
+            if expanded >= max_expansion_column {
+                1
+            } else {
+                tab_size - (expanded % tab_size)
+            }
+        } else {
+            super::display_width(ch)
+        };
+        expanded += char_width;
+        last_char_byte_len = ch.len_utf8() as u32;
+        last_char_width = char_width;
+        fold_col += last_char_byte_len;
+    }
+    if bias == Bias::Left && expanded > tab_column {
+        fold_col = fold_col.saturating_sub(last_char_byte_len);
+        expanded -= last_char_width;
+    }
+    let to_next_stop = if expanded >= max_expansion_column {
+        1
+    } else {
+        tab_size - (expanded % tab_size)
+    };
+    (fold_col, expanded, to_next_stop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TabMap, TabPoint};
@@ -282,18 +398,20 @@ mod tests {
         },
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
+    use std::{
+        num::NonZeroU32,
+        sync::{Arc, RwLock},
+    };
     use stoat_text::{patch::Patch, Bias};
 
     fn make_snapshot(content: &str) -> super::TabSnapshot {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
         let (snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         snapshot
     }

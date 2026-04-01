@@ -1,7 +1,28 @@
-use super::wrap_map::WrapSnapshot;
-use std::{cmp::Ordering, ops::Deref, sync::Arc};
+use super::{
+    fold_map::FoldPointCursor,
+    highlights::{Chunk, Highlights},
+    inlay_map::InlayPointCursor,
+    wrap_map::{WrapPointCursor, WrapSnapshot},
+    Companion, DisplayMapId,
+};
+use crate::{
+    buffer::BufferId,
+    diff_map::DiffHunkStatus,
+    multi_buffer::{ExcerptId, ExcerptInfo, MultiBufferSnapshot},
+};
+use ratatui::text::Line;
+use std::{
+    cmp::Ordering,
+    collections::HashSet,
+    ops::Deref,
+    sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    },
+};
 use stoat_text::{
-    patch::Patch, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
+    patch::Patch, tree_map::TreeMap, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point,
+    SeekTarget, SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -19,83 +40,312 @@ impl BlockPoint {
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockRow(pub u32);
 
-#[derive(Clone)]
-pub enum BlockContent {
-    Text(Arc<Vec<String>>),
-    Lines {
-        line_count: u32,
-        get_line: Arc<dyn Fn(u32) -> String + Send + Sync>,
-    },
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CustomBlockId(pub usize);
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SpacerId(pub usize);
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum BlockStyle {
+    Fixed,
+    Flex,
+    Spacer,
+    Sticky,
 }
 
-impl std::fmt::Debug for BlockContent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+/// Render callback producing styled terminal lines for a block.
+pub type RenderBlock = Arc<dyn Fn(&BlockContext<'_>) -> Vec<Line<'static>> + Send + Sync>;
+
+pub struct BlockContext<'a> {
+    pub block_id: BlockId,
+    pub max_width: u32,
+    pub height: u32,
+    pub selected: bool,
+    pub anchor_row: u32,
+    pub diff_status: Option<DiffHunkStatus>,
+    pub buffer_snapshot: &'a MultiBufferSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BlockId {
+    Custom(CustomBlockId),
+    ExcerptBoundary(ExcerptId),
+    BufferHeader(ExcerptId),
+    FoldedBuffer(ExcerptId),
+    Spacer(SpacerId),
+}
+
+pub struct CompanionView<'a> {
+    pub display_map_id: DisplayMapId,
+    pub companion_wrap_snapshot: &'a WrapSnapshot,
+    pub companion: &'a Companion,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum BlockPlacement<T = u32> {
+    Above(T),
+    Below(T),
+    Near(T),
+    Replace { start: T, end: T },
+}
+
+impl<T: Copy> BlockPlacement<T> {
+    pub fn start(&self) -> T {
         match self {
-            BlockContent::Text(lines) => f.debug_tuple("Text").field(lines).finish(),
-            BlockContent::Lines { line_count, .. } => f
-                .debug_struct("Lines")
-                .field("line_count", line_count)
-                .finish_non_exhaustive(),
+            BlockPlacement::Above(v) | BlockPlacement::Below(v) | BlockPlacement::Near(v) => *v,
+            BlockPlacement::Replace { start, .. } => *start,
+        }
+    }
+
+    pub fn end(&self) -> T {
+        match self {
+            BlockPlacement::Above(v) | BlockPlacement::Below(v) | BlockPlacement::Near(v) => *v,
+            BlockPlacement::Replace { end, .. } => *end,
+        }
+    }
+
+    pub fn map<U: Copy>(&self, f: impl Fn(T) -> U) -> BlockPlacement<U> {
+        match self {
+            BlockPlacement::Above(v) => BlockPlacement::Above(f(*v)),
+            BlockPlacement::Below(v) => BlockPlacement::Below(f(*v)),
+            BlockPlacement::Near(v) => BlockPlacement::Near(f(*v)),
+            BlockPlacement::Replace { start, end } => BlockPlacement::Replace {
+                start: f(*start),
+                end: f(*end),
+            },
         }
     }
 }
 
-impl BlockContent {
-    fn line_count(&self) -> u32 {
-        match self {
-            BlockContent::Text(lines) => lines.len().max(1) as u32,
-            BlockContent::Lines { line_count, .. } => *line_count,
-        }
-    }
-
-    fn get_line(&self, index: u32) -> String {
-        match self {
-            BlockContent::Text(lines) => lines.get(index as usize).cloned().unwrap_or_default(),
-            BlockContent::Lines { get_line, .. } => get_line(index),
-        }
-    }
-
-    fn line_len(&self, index: u32) -> u32 {
-        match self {
-            BlockContent::Text(lines) => lines.get(index as usize).map_or(0, |l| l.len() as u32),
-            BlockContent::Lines { get_line, .. } => get_line(index).len() as u32,
-        }
+impl BlockPlacement<u32> {
+    fn start_row(&self) -> u32 {
+        self.start()
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum BlockPlacement {
+#[derive(Copy, Clone, Debug)]
+enum ResolvedPlacement {
     Above(u32),
     Below(u32),
+    Near(u32),
+    Replace { start: u32, end: u32 },
+}
+
+impl ResolvedPlacement {
+    fn start_wrap_row(&self) -> u32 {
+        match self {
+            ResolvedPlacement::Above(r)
+            | ResolvedPlacement::Below(r)
+            | ResolvedPlacement::Near(r) => *r,
+            ResolvedPlacement::Replace { start, .. } => *start,
+        }
+    }
+
+    fn input_rows(&self) -> u32 {
+        match self {
+            ResolvedPlacement::Above(_)
+            | ResolvedPlacement::Below(_)
+            | ResolvedPlacement::Near(_) => 0,
+            ResolvedPlacement::Replace { start, end } => end - start + 1,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct BlockProperties {
+    pub placement: BlockPlacement,
+    pub height: Option<u32>,
+    pub style: BlockStyle,
+    pub render: RenderBlock,
+    pub diff_status: Option<DiffHunkStatus>,
+    pub priority: usize,
+}
+
+impl std::fmt::Debug for BlockProperties {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockProperties")
+            .field("placement", &self.placement)
+            .field("height", &self.height)
+            .field("style", &self.style)
+            .finish()
+    }
+}
+
+impl BlockProperties {
+    pub fn from_text(placement: BlockPlacement, lines: Vec<String>, style: BlockStyle) -> Self {
+        let height = lines.len().max(1) as u32;
+        let lines = Arc::new(lines);
+        Self {
+            placement,
+            height: Some(height),
+            style,
+            render: Arc::new(move |_ctx| lines.iter().map(|l| Line::raw(l.clone())).collect()),
+            diff_status: None,
+            priority: 0,
+        }
+    }
+
+    pub fn from_lines_fn(
+        placement: BlockPlacement,
+        line_count: u32,
+        get_line: Arc<dyn Fn(u32) -> String + Send + Sync>,
+        style: BlockStyle,
+    ) -> Self {
+        Self {
+            placement,
+            height: Some(line_count),
+            style,
+            render: Arc::new(move |_ctx| (0..line_count).map(|i| Line::raw(get_line(i))).collect()),
+            diff_status: None,
+            priority: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct CustomBlock {
+    pub id: CustomBlockId,
+    pub placement: BlockPlacement,
+    pub height: Option<u32>,
+    pub render: RenderBlock,
+    pub diff_status: Option<DiffHunkStatus>,
+    pub style: BlockStyle,
+    pub priority: usize,
+}
+
+impl std::fmt::Debug for CustomBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomBlock")
+            .field("id", &self.id)
+            .field("placement", &self.placement)
+            .field("height", &self.height)
+            .field("style", &self.style)
+            .field("priority", &self.priority)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct Block {
-    pub placement: BlockPlacement,
-    pub content: BlockContent,
+pub enum Block {
+    Custom(Arc<CustomBlock>),
+    FoldedBuffer {
+        first_excerpt: ExcerptInfo,
+        height: u32,
+    },
+    ExcerptBoundary {
+        excerpt: ExcerptInfo,
+        height: u32,
+    },
+    BufferHeader {
+        excerpt: ExcerptInfo,
+        height: u32,
+    },
+    Spacer {
+        id: SpacerId,
+        height: u32,
+        is_below: bool,
+    },
 }
 
 impl Block {
-    pub fn line_count(&self) -> u32 {
-        self.content.line_count()
+    pub fn height(&self) -> u32 {
+        match self {
+            Block::Custom(b) => b.height.unwrap_or(0),
+            Block::FoldedBuffer { height, .. }
+            | Block::ExcerptBoundary { height, .. }
+            | Block::BufferHeader { height, .. }
+            | Block::Spacer { height, .. } => *height,
+        }
+    }
+
+    pub fn render_lines(&self, ctx: &BlockContext<'_>) -> Vec<Line<'static>> {
+        match self {
+            Block::Custom(b) => (b.render)(ctx),
+            _ => vec![Line::raw(String::new()); self.height() as usize],
+        }
+    }
+
+    fn default_ctx(&self) -> BlockContext<'static> {
+        // Non-Custom blocks render static content and don't access the buffer.
+        // Custom blocks receive a real BlockContext through the display pipeline.
+        static EMPTY_SNAPSHOT: std::sync::LazyLock<MultiBufferSnapshot> =
+            std::sync::LazyLock::new(MultiBufferSnapshot::empty);
+        BlockContext {
+            block_id: match self {
+                Block::Custom(b) => BlockId::Custom(b.id),
+                Block::FoldedBuffer { first_excerpt, .. } => {
+                    BlockId::FoldedBuffer(first_excerpt.id)
+                },
+                Block::ExcerptBoundary { excerpt, .. } => BlockId::ExcerptBoundary(excerpt.id),
+                Block::BufferHeader { excerpt, .. } => BlockId::BufferHeader(excerpt.id),
+                Block::Spacer { id, .. } => BlockId::Spacer(*id),
+            },
+            max_width: 256,
+            height: self.height(),
+            selected: false,
+            anchor_row: 0,
+            diff_status: match self {
+                Block::Custom(b) => b.diff_status,
+                _ => None,
+            },
+            buffer_snapshot: &EMPTY_SNAPSHOT,
+        }
     }
 
     pub fn get_line(&self, index: u32) -> String {
-        self.content.get_line(index)
+        match self {
+            Block::Custom(b) => {
+                let ctx = self.default_ctx();
+                let lines = (b.render)(&ctx);
+                lines
+                    .get(index as usize)
+                    .map(|l| l.to_string())
+                    .unwrap_or_default()
+            },
+            _ => String::new(),
+        }
     }
 
     pub fn line_len(&self, index: u32) -> u32 {
-        self.content.line_len(index)
+        self.get_line(index).len() as u32
     }
 
     pub fn write_line(&self, buf: &mut String, index: u32) {
-        match &self.content {
-            BlockContent::Text(lines) => {
-                if let Some(line) = lines.get(index as usize) {
-                    buf.push_str(line);
+        buf.push_str(&self.get_line(index));
+    }
+
+    fn placement(&self) -> BlockPlacement {
+        match self {
+            Block::Custom(b) => b.placement,
+            Block::FoldedBuffer { .. } => BlockPlacement::Replace { start: 0, end: 0 },
+            Block::ExcerptBoundary { .. } | Block::BufferHeader { .. } => BlockPlacement::Above(0),
+            Block::Spacer { is_below, .. } => {
+                if *is_below {
+                    BlockPlacement::Below(0)
+                } else {
+                    BlockPlacement::Above(0)
                 }
             },
-            BlockContent::Lines { get_line, .. } => buf.push_str(&get_line(index)),
+        }
+    }
+
+    fn is_replacement(&self) -> bool {
+        match self {
+            Block::Custom(b) => matches!(b.placement, BlockPlacement::Replace { .. }),
+            Block::FoldedBuffer { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn place_below(&self) -> bool {
+        match self {
+            Block::Custom(b) => matches!(
+                b.placement,
+                BlockPlacement::Below(_) | BlockPlacement::Near(_)
+            ),
+            Block::Spacer { is_below, .. } => *is_below,
+            _ => false,
         }
     }
 }
@@ -167,10 +417,58 @@ pub enum BlockRowKind<'a> {
     Block { block: &'a Block, line_index: u32 },
 }
 
+pub struct BlockChunks<'a> {
+    snapshot: &'a BlockSnapshot,
+    current_row: u32,
+    end_row: u32,
+    emitted_line: bool,
+}
+
+impl<'a> Iterator for BlockChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        loop {
+            if self.current_row >= self.end_row {
+                return None;
+            }
+
+            if !self.emitted_line {
+                self.emitted_line = true;
+                let line = self.snapshot.display_line(self.current_row);
+                if !line.is_empty() {
+                    return Some(Chunk {
+                        text: std::borrow::Cow::Owned(line),
+                        ..Default::default()
+                    });
+                }
+            }
+
+            self.current_row += 1;
+            self.emitted_line = false;
+            if self.current_row < self.end_row {
+                return Some(Chunk {
+                    text: std::borrow::Cow::Borrowed("\n"),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
 pub struct BlockMap {
-    cached_transforms: Option<SumTree<Transform>>,
-    cached_total_rows: u32,
-    last_block_fingerprint: Vec<(BlockPlacement, u32)>,
+    next_block_id: AtomicUsize,
+    next_spacer_id: AtomicUsize,
+    custom_blocks: Vec<Arc<CustomBlock>>,
+    custom_blocks_by_id: TreeMap<CustomBlockId, Arc<CustomBlock>>,
+    transforms: Option<SumTree<Transform>>,
+    total_rows: u32,
+    blocks_dirty: bool,
+    deferred_edits: Patch<u32>,
+    buffer_header_height: u32,
+    excerpt_header_height: u32,
+    folded_buffers: HashSet<BufferId>,
+    buffers_with_disabled_headers: HashSet<BufferId>,
 }
 
 impl Default for BlockMap {
@@ -182,40 +480,140 @@ impl Default for BlockMap {
 impl BlockMap {
     pub fn new() -> Self {
         Self {
-            cached_transforms: None,
-            cached_total_rows: 0,
-            last_block_fingerprint: Vec::new(),
+            next_block_id: AtomicUsize::new(0),
+            next_spacer_id: AtomicUsize::new(0),
+            custom_blocks: Vec::new(),
+            custom_blocks_by_id: TreeMap::default(),
+            transforms: None,
+            total_rows: 0,
+            blocks_dirty: true,
+            deferred_edits: Patch::empty(),
+            buffer_header_height: 1,
+            excerpt_header_height: 1,
+            folded_buffers: HashSet::new(),
+            buffers_with_disabled_headers: HashSet::new(),
         }
+    }
+
+    pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
+        let mut ids = Vec::with_capacity(blocks.len());
+        for props in blocks {
+            let id = CustomBlockId(self.next_block_id.fetch_add(1, SeqCst));
+            let block = Arc::new(CustomBlock {
+                id,
+                placement: props.placement,
+                height: props.height,
+                render: props.render,
+                diff_status: props.diff_status,
+                style: props.style,
+                priority: props.priority,
+            });
+            let ix = self
+                .custom_blocks
+                .partition_point(|b| b.placement.start_row() <= props.placement.start_row());
+            self.custom_blocks.insert(ix, block.clone());
+            self.custom_blocks_by_id.insert(id, block);
+            ids.push(id);
+        }
+        self.blocks_dirty = true;
+        ids
+    }
+
+    pub fn remove(&mut self, ids: &HashSet<CustomBlockId>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.custom_blocks.retain(|b| !ids.contains(&b.id));
+        for id in ids {
+            self.custom_blocks_by_id.remove(id);
+        }
+        self.blocks_dirty = true;
+    }
+
+    pub fn fold_buffer(&mut self, buffer_id: BufferId) {
+        self.folded_buffers.insert(buffer_id);
+        self.blocks_dirty = true;
+    }
+
+    pub fn unfold_buffer(&mut self, buffer_id: BufferId) {
+        self.folded_buffers.remove(&buffer_id);
+        self.blocks_dirty = true;
+    }
+
+    pub fn disable_header_for_buffer(&mut self, buffer_id: BufferId) {
+        self.buffers_with_disabled_headers.insert(buffer_id);
+        self.blocks_dirty = true;
     }
 
     pub fn sync(
         &mut self,
         wrap_snapshot: Arc<WrapSnapshot>,
-        blocks: &[Block],
         wrap_edits: &Patch<u32>,
+        _companion_view: Option<CompanionView<'_>>,
     ) -> BlockSnapshot {
-        let fingerprint: Vec<(BlockPlacement, u32)> = blocks
-            .iter()
-            .map(|b| (b.placement, b.line_count()))
-            .collect();
+        let edits = if self.deferred_edits.is_empty() {
+            wrap_edits.clone()
+        } else {
+            let deferred = std::mem::replace(&mut self.deferred_edits, Patch::empty());
+            deferred.compose(wrap_edits.edits().iter().cloned())
+        };
 
-        if wrap_edits.is_empty() && fingerprint == self.last_block_fingerprint {
-            if let Some(ref transforms) = self.cached_transforms {
+        if edits.is_empty() && !self.blocks_dirty {
+            if let Some(ref transforms) = self.transforms {
                 return BlockSnapshot {
                     wrap_snapshot,
                     transforms: transforms.clone(),
-                    total_rows: self.cached_total_rows,
+                    total_rows: self.total_rows,
                 };
             }
         }
 
         let wrap_line_count = wrap_snapshot.line_count();
-        let transforms = build_transforms(wrap_line_count, blocks, &wrap_snapshot);
+
+        let buffer_snapshot = wrap_snapshot
+            .tab_snapshot()
+            .fold_snapshot()
+            .inlay_snapshot()
+            .buffer_snapshot();
+        let mut blocks: Vec<Block> = self
+            .custom_blocks
+            .iter()
+            .map(|b| Block::Custom(b.clone()))
+            .collect();
+        blocks.extend(
+            self.header_and_footer_blocks(buffer_snapshot)
+                .into_iter()
+                .map(|(_placement, block)| block),
+        );
+        if let Some(ref companion_view) = _companion_view {
+            blocks.extend(
+                self.spacer_blocks(&wrap_snapshot, companion_view)
+                    .into_iter()
+                    .map(|(_placement, block)| block),
+            );
+        }
+
+        let can_incremental = !self.blocks_dirty && !edits.is_empty() && self.transforms.is_some();
+
+        let transforms = if can_incremental {
+            sync_incremental(
+                self.transforms
+                    .as_ref()
+                    .expect("guarded by can_incremental"),
+                wrap_line_count,
+                &blocks,
+                &wrap_snapshot,
+                &edits,
+            )
+        } else {
+            build_transforms(wrap_line_count, &blocks, &wrap_snapshot)
+        };
+
         let total_rows: OutputRow = transforms.extent(());
 
-        self.cached_transforms = Some(transforms.clone());
-        self.cached_total_rows = total_rows.0;
-        self.last_block_fingerprint = fingerprint;
+        self.transforms = Some(transforms.clone());
+        self.total_rows = total_rows.0;
+        self.blocks_dirty = false;
 
         BlockSnapshot {
             wrap_snapshot,
@@ -223,8 +621,111 @@ impl BlockMap {
             total_rows: total_rows.0,
         }
     }
+
+    fn header_and_footer_blocks(
+        &self,
+        buffer: &MultiBufferSnapshot,
+    ) -> Vec<(BlockPlacement, Block)> {
+        if !buffer.show_headers() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        for boundary in buffer.excerpt_boundaries_in_range(0..buffer.line_count()) {
+            if self
+                .buffers_with_disabled_headers
+                .contains(&boundary.next.buffer_id)
+            {
+                continue;
+            }
+
+            if boundary.starts_new_buffer() {
+                if self.folded_buffers.contains(&boundary.next.buffer_id) {
+                    results.push((
+                        BlockPlacement::Replace {
+                            start: boundary.row,
+                            end: boundary.row,
+                        },
+                        Block::FoldedBuffer {
+                            first_excerpt: boundary.next.clone(),
+                            height: self.buffer_header_height,
+                        },
+                    ));
+                } else {
+                    results.push((
+                        BlockPlacement::Above(boundary.row),
+                        Block::BufferHeader {
+                            excerpt: boundary.next,
+                            height: self.buffer_header_height,
+                        },
+                    ));
+                }
+            } else if boundary.prev.is_some() {
+                results.push((
+                    BlockPlacement::Above(boundary.row),
+                    Block::ExcerptBoundary {
+                        excerpt: boundary.next,
+                        height: self.excerpt_header_height,
+                    },
+                ));
+            }
+        }
+
+        results
+    }
+
+    fn spacer_blocks(
+        &self,
+        wrap_snapshot: &WrapSnapshot,
+        companion_view: &CompanionView<'_>,
+    ) -> Vec<(BlockPlacement, Block)> {
+        let companion = companion_view.companion;
+        let our_snapshot = wrap_snapshot
+            .tab_snapshot()
+            .fold_snapshot()
+            .inlay_snapshot()
+            .buffer_snapshot();
+        let companion_snapshot = companion_view
+            .companion_wrap_snapshot
+            .tab_snapshot()
+            .fold_snapshot()
+            .inlay_snapshot()
+            .buffer_snapshot();
+
+        let patches = (companion.rhs_rows_to_lhs_rows)(
+            &companion.rhs_excerpt_to_lhs_excerpt,
+            companion_snapshot,
+            our_snapshot,
+            (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
+        );
+
+        let mut spacers = Vec::new();
+        for patch in &patches {
+            for edit in patch.patch.edits() {
+                let old_rows = edit.old.end.row.saturating_sub(edit.old.start.row);
+                let new_rows = edit.new.end.row.saturating_sub(edit.new.start.row);
+                if new_rows > old_rows {
+                    let height = new_rows - old_rows;
+                    let spacer_id = SpacerId(
+                        self.next_spacer_id
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    );
+                    spacers.push((
+                        BlockPlacement::Below(edit.old.end.row),
+                        Block::Spacer {
+                            id: spacer_id,
+                            height,
+                            is_below: true,
+                        },
+                    ));
+                }
+            }
+        }
+        spacers
+    }
 }
 
+#[derive(Clone)]
 pub struct BlockSnapshot {
     wrap_snapshot: Arc<WrapSnapshot>,
     transforms: SumTree<Transform>,
@@ -439,7 +940,7 @@ impl BlockSnapshot {
             .lines()
     }
 
-    pub fn buffer_snapshot(&self) -> &crate::multi_buffer::MultiBufferSnapshot {
+    pub fn buffer_snapshot(&self) -> &MultiBufferSnapshot {
         self.wrap_snapshot
             .fold_snapshot()
             .inlay_snapshot()
@@ -480,6 +981,19 @@ impl BlockSnapshot {
         let mut result = String::new();
         self.write_display_line(&mut result, block_row);
         result
+    }
+
+    pub fn chunks(
+        &self,
+        rows: std::ops::Range<u32>,
+        _highlights: Highlights<'_>,
+    ) -> BlockChunks<'_> {
+        BlockChunks {
+            snapshot: self,
+            current_row: rows.start,
+            end_row: rows.end,
+            emitted_line: false,
+        }
     }
 
     pub fn soft_wrap_indent(&self, block_row: u32) -> u32 {
@@ -527,11 +1041,325 @@ impl BlockSnapshot {
     }
 }
 
+fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
+    blocks.sort_unstable_by(|(a, _), (b, _)| {
+        a.start_wrap_row()
+            .cmp(&b.start_wrap_row())
+            .then_with(|| {
+                let a_end = match a {
+                    ResolvedPlacement::Replace { end, .. } => *end,
+                    _ => a.start_wrap_row(),
+                };
+                let b_end = match b {
+                    ResolvedPlacement::Replace { end, .. } => *end,
+                    _ => b.start_wrap_row(),
+                };
+                b_end.cmp(&a_end)
+            })
+            .then_with(|| {
+                fn tie(p: &ResolvedPlacement) -> u8 {
+                    match p {
+                        ResolvedPlacement::Replace { .. } => 0,
+                        ResolvedPlacement::Above(_) => 1,
+                        ResolvedPlacement::Near(_) => 2,
+                        ResolvedPlacement::Below(_) => 3,
+                    }
+                }
+                tie(a).cmp(&tie(b))
+            })
+    });
+
+    blocks.dedup_by(|right, left| match (&mut left.0, &right.0) {
+        (
+            ResolvedPlacement::Replace {
+                start: left_start,
+                end: left_end,
+            },
+            ResolvedPlacement::Above(row)
+            | ResolvedPlacement::Below(row)
+            | ResolvedPlacement::Near(row),
+        ) => *row >= *left_start && *row <= *left_end,
+        (
+            ResolvedPlacement::Replace { end: left_end, .. },
+            ResolvedPlacement::Replace {
+                start: right_start,
+                end: right_end,
+            },
+        ) => {
+            if *right_start <= *left_end {
+                *left_end = (*left_end).max(*right_end);
+                true
+            } else {
+                false
+            }
+        },
+        _ => false,
+    });
+}
+
+fn resolve_block_placement(
+    block: &Block,
+    inlay_cursor: &mut InlayPointCursor<'_>,
+    fold_cursor: &mut FoldPointCursor<'_>,
+    wrap_cursor: &mut WrapPointCursor<'_>,
+) -> ResolvedPlacement {
+    let map_row = |buffer_row: u32,
+                   inlay_cursor: &mut InlayPointCursor<'_>,
+                   fold_cursor: &mut FoldPointCursor<'_>,
+                   wrap_cursor: &mut WrapPointCursor<'_>|
+     -> u32 {
+        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0));
+        let fold_point = fold_cursor.map(inlay_point, Bias::Right);
+        let tab_point = super::tab_map::TabPoint::new(fold_point.row(), fold_point.column());
+        wrap_cursor.map(tab_point).row()
+    };
+
+    let placement = block.placement();
+    match placement {
+        BlockPlacement::Above(row) => {
+            ResolvedPlacement::Above(map_row(row, inlay_cursor, fold_cursor, wrap_cursor))
+        },
+        BlockPlacement::Below(row) => {
+            ResolvedPlacement::Below(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
+        },
+        BlockPlacement::Near(row) => {
+            ResolvedPlacement::Near(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
+        },
+        BlockPlacement::Replace { start, end } => {
+            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor);
+            let end_wrap = map_row(end, inlay_cursor, fold_cursor, wrap_cursor);
+            ResolvedPlacement::Replace {
+                start: start_wrap,
+                end: end_wrap.max(start_wrap),
+            }
+        },
+    }
+}
+
+fn sync_incremental(
+    old_transforms: &SumTree<Transform>,
+    wrap_line_count: u32,
+    blocks: &[Block],
+    wrap_snapshot: &WrapSnapshot,
+    wrap_edits: &Patch<u32>,
+) -> SumTree<Transform> {
+    debug_assert!(
+        blocks
+            .windows(2)
+            .all(|w| block_buffer_row(&w[0]) <= block_buffer_row(&w[1])),
+        "blocks must be sorted by buffer row"
+    );
+
+    let mut new_transforms = SumTree::new(());
+    let mut cursor = old_transforms.cursor::<InputRow>(());
+    let mut last_block_idx: usize = 0;
+
+    let mut inlay_cursor = wrap_snapshot
+        .fold_snapshot()
+        .inlay_snapshot()
+        .inlay_point_cursor();
+    let mut fold_cursor = wrap_snapshot.fold_snapshot().fold_point_cursor();
+    let mut wrap_cursor = wrap_snapshot.wrap_point_cursor();
+    let mut blocks_in_range: Vec<(ResolvedPlacement, &Block)> = Vec::new();
+    let mut edits = wrap_edits.edits().iter().peekable();
+
+    while let Some(edit) = edits.next() {
+        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+
+        // Preserve transforms ending exactly at edit start (matching Zed lines 902-920)
+        if let Some(item) = cursor.item() {
+            let item_end = cursor.start().0 + item.summary.input_rows;
+            if item.summary.input_rows > 0
+                && item_end == edit.old.start
+                && !item.block.as_ref().is_some_and(|b| b.is_replacement())
+            {
+                new_transforms.push(item.clone(), ());
+                cursor.next();
+
+                while let Some(item) = cursor.item() {
+                    if item.block.as_ref().is_some_and(|b| b.place_below()) {
+                        new_transforms.push(item.clone(), ());
+                        cursor.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Handle isomorphic prefix if edit starts within a transform
+        if let Some(item) = cursor.item() {
+            if item.block.is_none() {
+                let transform_rows_before_edit = edit.old.start - cursor.start().0;
+                if transform_rows_before_edit > 0 {
+                    push_isomorphic(
+                        &mut new_transforms,
+                        transform_rows_before_edit,
+                        cursor.start().0,
+                        wrap_snapshot,
+                    );
+                }
+            }
+        }
+
+        let mut old_end = edit.old.end;
+        let mut new_end = edit.new.end;
+        loop {
+            cursor.seek(&InputRow(old_end), Bias::Left);
+            cursor.next();
+
+            let transform_boundary = cursor.start().0;
+            let extension = transform_boundary - old_end;
+            old_end += extension;
+            new_end += extension;
+
+            while let Some(next_edit) = edits.peek() {
+                if next_edit.old.start <= cursor.start().0 {
+                    old_end = next_edit.old.end;
+                    new_end = next_edit.new.end;
+                    cursor.seek(&InputRow(old_end), Bias::Left);
+                    cursor.next();
+                    edits.next();
+                } else {
+                    break;
+                }
+            }
+
+            if cursor.start().0 == old_end {
+                break;
+            }
+        }
+
+        // Discard zero-width block transforms at edit end (matching Zed lines 980-991)
+        while let Some(item) = cursor.item() {
+            if item.summary.input_rows == 0 && item.block.is_some() {
+                cursor.next();
+            } else {
+                break;
+            }
+        }
+
+        let current_rows: InputRow = new_transforms.extent(());
+        if edit.new.start > current_rows.0 {
+            let gap = edit.new.start - current_rows.0;
+            push_isomorphic(&mut new_transforms, gap, current_rows.0, wrap_snapshot);
+        }
+
+        let edit_end = new_end.min(wrap_line_count);
+
+        let edit_start_buf = wrap_row_to_buffer_row(edit.new.start, wrap_snapshot);
+        let edit_end_buf = if edit_end >= wrap_line_count {
+            u32::MAX
+        } else {
+            wrap_row_to_buffer_row(edit_end, wrap_snapshot)
+        };
+
+        let search_start_buf = edit_start_buf.saturating_sub(1);
+        let start_block_idx = last_block_idx
+            + blocks[last_block_idx..].partition_point(|b| block_buffer_row(b) < search_start_buf);
+        let end_block_idx = if edit_end_buf == u32::MAX {
+            blocks.len()
+        } else {
+            start_block_idx
+                + blocks[start_block_idx..].partition_point(|b| block_buffer_row(b) <= edit_end_buf)
+        };
+
+        blocks_in_range.clear();
+        blocks_in_range.extend(
+            blocks[start_block_idx..end_block_idx]
+                .iter()
+                .filter_map(|b| {
+                    let placement = resolve_block_placement(
+                        b,
+                        &mut inlay_cursor,
+                        &mut fold_cursor,
+                        &mut wrap_cursor,
+                    );
+                    let block_start = placement.start_wrap_row();
+                    let block_end = match placement {
+                        ResolvedPlacement::Replace { end, .. } => end,
+                        _ => block_start,
+                    };
+                    if block_start < edit_end && block_end >= edit.new.start {
+                        Some((placement, b))
+                    } else {
+                        None
+                    }
+                }),
+        );
+        sort_and_dedup_blocks(&mut blocks_in_range);
+
+        let mut row = new_transforms.extent::<InputRow>(()).0;
+        for &(placement, block) in &blocks_in_range {
+            let anchor = placement.start_wrap_row();
+            if anchor > row {
+                push_isomorphic(&mut new_transforms, anchor - row, row, wrap_snapshot);
+                row = anchor;
+            }
+
+            let input_rows = placement.input_rows();
+            let (blk_longest_row, blk_longest_chars) = longest_block_line(block);
+            new_transforms.push(
+                Transform {
+                    summary: TransformSummary {
+                        input_rows,
+                        output_rows: block.height(),
+                        longest_row: blk_longest_row,
+                        longest_row_chars: blk_longest_chars,
+                    },
+                    block: Some(block.clone()),
+                },
+                (),
+            );
+            row += input_rows;
+        }
+
+        if edit_end > row {
+            push_isomorphic(&mut new_transforms, edit_end - row, row, wrap_snapshot);
+        }
+
+        last_block_idx = end_block_idx;
+    }
+
+    new_transforms.append(cursor.suffix(), ());
+
+    if new_transforms.is_empty() && wrap_line_count > 0 {
+        let (longest_row, longest_row_chars) = wrap_snapshot.longest_line();
+        new_transforms.push(
+            Transform {
+                summary: TransformSummary {
+                    input_rows: wrap_line_count,
+                    output_rows: wrap_line_count,
+                    longest_row,
+                    longest_row_chars,
+                },
+                block: None,
+            },
+            (),
+        );
+    }
+
+    debug_assert_eq!(
+        new_transforms.extent::<InputRow>(()).0,
+        wrap_line_count,
+        "transform input_rows must equal wrap line count"
+    );
+
+    new_transforms
+}
+
 fn build_transforms(
     wrap_line_count: u32,
     blocks: &[Block],
     wrap_snapshot: &WrapSnapshot,
 ) -> SumTree<Transform> {
+    debug_assert!(
+        blocks
+            .windows(2)
+            .all(|w| block_buffer_row(&w[0]) <= block_buffer_row(&w[1])),
+        "blocks must be sorted by buffer row"
+    );
+
     let mut transforms = SumTree::new(());
 
     if blocks.is_empty() {
@@ -553,27 +1381,43 @@ fn build_transforms(
         return transforms;
     }
 
-    let mut keyed_blocks: Vec<(u32, &Block)> = blocks
-        .iter()
-        .map(|b| (block_anchor_wrap_row(b, wrap_snapshot), b))
-        .collect();
-    keyed_blocks.sort_unstable_by_key(|&(row, _)| row);
+    let mut inlay_cursor = wrap_snapshot
+        .fold_snapshot()
+        .inlay_snapshot()
+        .inlay_point_cursor();
+    let mut fold_cursor = wrap_snapshot.fold_snapshot().fold_point_cursor();
+    let mut wrap_cursor = wrap_snapshot.wrap_point_cursor();
+
+    let mut keyed_blocks: Vec<(ResolvedPlacement, &Block)> = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        keyed_blocks.push((
+            resolve_block_placement(b, &mut inlay_cursor, &mut fold_cursor, &mut wrap_cursor),
+            b,
+        ));
+    }
+    sort_and_dedup_blocks(&mut keyed_blocks);
 
     let mut current_wrap_row = 0u32;
 
-    for (anchor, block) in keyed_blocks {
+    for &(placement, block) in &keyed_blocks {
+        let anchor = placement.start_wrap_row();
         if anchor > current_wrap_row {
-            let rows = anchor - current_wrap_row;
-            push_isomorphic(&mut transforms, rows, current_wrap_row, wrap_snapshot);
+            push_isomorphic(
+                &mut transforms,
+                anchor - current_wrap_row,
+                current_wrap_row,
+                wrap_snapshot,
+            );
             current_wrap_row = anchor;
         }
 
+        let input_rows = placement.input_rows();
         let (blk_longest_row, blk_longest_chars) = longest_block_line(block);
         transforms.push(
             Transform {
                 summary: TransformSummary {
-                    input_rows: 0,
-                    output_rows: block.line_count(),
+                    input_rows,
+                    output_rows: block.height(),
                     longest_row: blk_longest_row,
                     longest_row_chars: blk_longest_chars,
                 },
@@ -581,6 +1425,7 @@ fn build_transforms(
             },
             (),
         );
+        current_wrap_row += input_rows;
     }
 
     if current_wrap_row < wrap_line_count {
@@ -588,36 +1433,35 @@ fn build_transforms(
         push_isomorphic(&mut transforms, rows, current_wrap_row, wrap_snapshot);
     }
 
+    debug_assert_eq!(
+        transforms.extent::<InputRow>(()).0,
+        wrap_line_count,
+        "transform input_rows must equal wrap line count"
+    );
+
     transforms
 }
 
-fn block_anchor_wrap_row(block: &Block, wrap_snapshot: &WrapSnapshot) -> u32 {
-    let buffer_row = match block.placement {
-        BlockPlacement::Above(row) => row,
-        BlockPlacement::Below(row) => row,
-    };
+fn block_buffer_row(block: &Block) -> u32 {
+    block.placement().start_row()
+}
 
+fn wrap_row_to_buffer_row(wrap_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
+    let tab_point = wrap_snapshot.to_tab_point(super::wrap_map::WrapPoint::new(wrap_row, 0));
     let inlay_point = wrap_snapshot
         .fold_snapshot()
-        .inlay_snapshot()
-        .to_inlay_point(Point::new(buffer_row, 0));
-    let fold_point = wrap_snapshot
+        .to_inlay_point(super::fold_map::FoldPoint::new(tab_point.row(), 0));
+    wrap_snapshot
         .fold_snapshot()
-        .to_fold_point(inlay_point, Bias::Right);
-    let tab_point = super::tab_map::TabPoint::new(fold_point.row(), fold_point.column());
-    let wrap_point = wrap_snapshot.to_wrap_point(tab_point);
-    let wrap_row = wrap_point.row();
-
-    match block.placement {
-        BlockPlacement::Above(_) => wrap_row,
-        BlockPlacement::Below(_) => wrap_row + 1,
-    }
+        .inlay_snapshot()
+        .to_buffer_point(inlay_point)
+        .row
 }
 
 fn longest_block_line(block: &Block) -> (u32, u32) {
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
-    for i in 0..block.line_count() {
+    for i in 0..block.height() {
         let len = block.line_len(i);
         if len > best_chars {
             best_row = i;
@@ -633,6 +1477,10 @@ fn push_isomorphic(
     start_wrap_row: u32,
     wrap_snapshot: &WrapSnapshot,
 ) {
+    if rows == 0 {
+        return;
+    }
+
     let (longest_row, longest_row_chars) =
         wrap_snapshot.longest_in_output_range(start_wrap_row, rows);
 
@@ -670,36 +1518,41 @@ fn push_isomorphic(
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, BlockContent, BlockMap, BlockPlacement, BlockPoint, BlockRowKind};
+    use super::{BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRowKind, BlockStyle};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
+    use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{patch::Patch, Bias, Point};
 
-    fn create_block_snapshot(content: &str, blocks: &[Block]) -> super::BlockSnapshot {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
+    fn test_executor() -> Executor {
+        Executor::new(Arc::new(TestScheduler::new()))
+    }
+
+    fn create_block_snapshot(content: &str, props: &[BlockProperties]) -> super::BlockSnapshot {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
         let mut block_map = BlockMap::new();
-        block_map.sync(wrap_snapshot, blocks, &Patch::empty())
+        block_map.insert(props.to_vec());
+        block_map.sync(wrap_snapshot, &Patch::empty(), None)
     }
 
-    fn text_block(placement: BlockPlacement, content: &str) -> Block {
-        let lines: Vec<String> = content.lines().map(String::from).collect();
-        Block {
+    fn text_block(placement: BlockPlacement, content: &str) -> BlockProperties {
+        BlockProperties::from_text(
             placement,
-            content: BlockContent::Text(Arc::new(lines)),
-        }
+            content.lines().map(String::from).collect(),
+            BlockStyle::Fixed,
+        )
     }
 
     #[test]
@@ -884,7 +1737,6 @@ mod tests {
     fn clip_point_snaps_off_block_row() {
         let blocks = vec![text_block(BlockPlacement::Below(0), "deleted")];
         let snapshot = create_block_snapshot("hello\nworld", &blocks);
-        // Row 1 is a block row
         let clipped_left = snapshot.clip_point(BlockPoint::new(1, 0), Bias::Left);
         assert_eq!(clipped_left, BlockPoint::new(0, 5));
 
@@ -894,18 +1746,17 @@ mod tests {
 
     #[test]
     fn block_to_buffer_reverses_tabs() {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push("\thello");
+        let buffer = TextBuffer::with_text(BufferId::new(0), "\thello");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
         let mut block_map = BlockMap::new();
-        let snapshot = block_map.sync(wrap_snapshot, &[], &Patch::empty());
+        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), None);
 
         let buf = snapshot.block_to_buffer(BlockPoint::new(0, 5)).unwrap();
         assert_eq!(buf, Point::new(0, 2));
@@ -913,8 +1764,11 @@ mod tests {
 
     #[test]
     fn block_line_len_matches_get_line() {
-        let block = text_block(BlockPlacement::Below(0), "short\nlonger line\nx");
-        for i in 0..block.line_count() {
+        let props = text_block(BlockPlacement::Below(0), "short\nlonger line\nx");
+        let mut block_map = BlockMap::new();
+        block_map.insert(vec![props]);
+        let block = super::Block::Custom(block_map.custom_blocks[0].clone());
+        for i in 0..block.height() {
             assert_eq!(
                 block.line_len(i),
                 block.get_line(i).len() as u32,
@@ -924,29 +1778,49 @@ mod tests {
     }
 
     #[test]
-    fn block_content_pre_split_matches() {
-        let text_content = BlockContent::Text(Arc::new(
+    fn from_text_and_from_lines_fn_match() {
+        let text_props = BlockProperties::from_text(
+            BlockPlacement::Below(0),
             "first\nsecond line\nthird"
                 .lines()
                 .map(String::from)
                 .collect(),
-        ));
-        let lines_content = BlockContent::Lines {
-            line_count: 3,
-            get_line: Arc::new(|i| ["first", "second line", "third"][i as usize].to_string()),
-        };
+            BlockStyle::Fixed,
+        );
+        let lines_props = BlockProperties::from_lines_fn(
+            BlockPlacement::Below(0),
+            3,
+            Arc::new(|i| ["first", "second line", "third"][i as usize].to_string()),
+            BlockStyle::Fixed,
+        );
 
-        assert_eq!(text_content.line_count(), lines_content.line_count());
-        for i in 0..text_content.line_count() {
+        assert_eq!(text_props.height, lines_props.height);
+        let height = text_props.height.unwrap_or(0);
+        let text_ctx = super::BlockContext {
+            block_id: super::BlockId::Custom(super::CustomBlockId(0)),
+            max_width: 80,
+            height,
+            selected: false,
+            anchor_row: 0,
+            diff_status: None,
+            buffer_snapshot: &super::MultiBufferSnapshot::empty(),
+        };
+        let lines_ctx = super::BlockContext {
+            block_id: super::BlockId::Custom(super::CustomBlockId(1)),
+            max_width: 80,
+            height,
+            selected: false,
+            anchor_row: 0,
+            diff_status: None,
+            buffer_snapshot: &super::MultiBufferSnapshot::empty(),
+        };
+        let text_lines = (text_props.render)(&text_ctx);
+        let lines_lines = (lines_props.render)(&lines_ctx);
+        for i in 0..height as usize {
             assert_eq!(
-                text_content.get_line(i),
-                lines_content.get_line(i),
+                text_lines[i].to_string(),
+                lines_lines[i].to_string(),
                 "get_line mismatch at {i}"
-            );
-            assert_eq!(
-                text_content.line_len(i),
-                lines_content.line_len(i),
-                "line_len mismatch at {i}"
             );
         }
     }
@@ -964,27 +1838,26 @@ mod tests {
     }
 
     fn create_wrap_snapshot(content: &str) -> Arc<super::WrapSnapshot> {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None);
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
         wrap_snapshot
     }
 
     #[test]
     fn cache_reused_when_nothing_changes() {
         let wrap_snapshot = create_wrap_snapshot("hello\nworld");
-        let blocks = vec![text_block(BlockPlacement::Below(0), "deleted")];
         let mut block_map = BlockMap::new();
+        block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &blocks, &Patch::empty());
-        let snap2 = block_map.sync(wrap_snapshot, &blocks, &Patch::empty());
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), None);
 
         assert_eq!(snap1.total_lines(), snap2.total_lines());
         assert_eq!(snap1.longest_row(), snap2.longest_row());
@@ -993,14 +1866,198 @@ mod tests {
     #[test]
     fn cache_invalidated_on_block_change() {
         let wrap_snapshot = create_wrap_snapshot("hello\nworld");
-        let blocks1 = vec![text_block(BlockPlacement::Below(0), "deleted")];
-        let blocks2 = vec![text_block(BlockPlacement::Below(0), "deleted\nextra line")];
         let mut block_map = BlockMap::new();
+        let ids = block_map.insert(vec![text_block(BlockPlacement::Below(0), "deleted")]);
 
-        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &blocks1, &Patch::empty());
+        let snap1 = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
         assert_eq!(snap1.total_lines(), 3);
 
-        let snap2 = block_map.sync(wrap_snapshot, &blocks2, &Patch::empty());
+        block_map.remove(&ids.into_iter().collect());
+        block_map.insert(vec![text_block(
+            BlockPlacement::Below(0),
+            "deleted\nextra line",
+        )]);
+
+        let snap2 = block_map.sync(wrap_snapshot, &Patch::empty(), None);
         assert_eq!(snap2.total_lines(), 4);
+    }
+
+    #[test]
+    fn replace_single_row() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 1 },
+            "replacement",
+        )];
+        let snapshot = create_block_snapshot("line0\nline1\nline2", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 3);
+
+        match snapshot.classify_row(0) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 0),
+            _ => panic!("expected buffer row"),
+        }
+        match snapshot.classify_row(1) {
+            BlockRowKind::Block { block, line_index } => {
+                assert_eq!(line_index, 0);
+                assert_eq!(block.get_line(0), "replacement");
+            },
+            _ => panic!("expected block"),
+        }
+        match snapshot.classify_row(2) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 2),
+            _ => panic!("expected buffer row"),
+        }
+
+        assert!(snapshot.block_to_buffer(BlockPoint::new(1, 0)).is_none());
+        assert_eq!(
+            snapshot.block_to_buffer(BlockPoint::new(0, 0)),
+            Some(Point::new(0, 0))
+        );
+        assert_eq!(
+            snapshot.block_to_buffer(BlockPoint::new(2, 0)),
+            Some(Point::new(2, 0))
+        );
+    }
+
+    #[test]
+    fn replace_multi_row() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 3 },
+            "rep0\nrep1",
+        )];
+        let snapshot = create_block_snapshot("r0\nr1\nr2\nr3\nr4", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 4);
+
+        match snapshot.classify_row(0) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 0),
+            _ => panic!("expected buffer row"),
+        }
+        match snapshot.classify_row(1) {
+            BlockRowKind::Block { block, line_index } => {
+                assert_eq!(line_index, 0);
+                assert_eq!(block.get_line(0), "rep0");
+            },
+            _ => panic!("expected block at row 1"),
+        }
+        match snapshot.classify_row(2) {
+            BlockRowKind::Block { block, line_index } => {
+                assert_eq!(line_index, 1);
+                assert_eq!(block.get_line(1), "rep1");
+            },
+            _ => panic!("expected block at row 2"),
+        }
+        match snapshot.classify_row(3) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 4),
+            _ => panic!("expected buffer row"),
+        }
+    }
+
+    #[test]
+    fn near_placement() {
+        let blocks = vec![text_block(BlockPlacement::Near(0), "near-block")];
+        let snapshot = create_block_snapshot("line0\nline1", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 3);
+
+        match snapshot.classify_row(0) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 0),
+            _ => panic!("expected buffer row"),
+        }
+        match snapshot.classify_row(1) {
+            BlockRowKind::Block { block, .. } => {
+                assert_eq!(block.get_line(0), "near-block");
+            },
+            _ => panic!("expected block"),
+        }
+        match snapshot.classify_row(2) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 1),
+            _ => panic!("expected buffer row"),
+        }
+    }
+
+    #[test]
+    fn mixed_placements() {
+        let blocks = vec![
+            text_block(BlockPlacement::Above(1), "above"),
+            text_block(BlockPlacement::Below(1), "below"),
+            text_block(BlockPlacement::Replace { start: 3, end: 3 }, "replaced"),
+        ];
+        let snapshot = create_block_snapshot("r0\nr1\nr2\nr3\nr4", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 7);
+
+        let classifications: Vec<_> = (0..7)
+            .map(|row| match snapshot.classify_row(row) {
+                BlockRowKind::BufferRow { buffer_row } => format!("buf{}", buffer_row),
+                BlockRowKind::Block { block, .. } => format!("blk:{}", block.get_line(0)),
+            })
+            .collect();
+
+        assert_eq!(
+            classifications,
+            vec![
+                "buf0",
+                "blk:above",
+                "buf1",
+                "blk:below",
+                "buf2",
+                "blk:replaced",
+                "buf4"
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_at_beginning() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 0, end: 0 },
+            "new-first",
+        )];
+        let snapshot = create_block_snapshot("old-first\nline1", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 2);
+        match snapshot.classify_row(0) {
+            BlockRowKind::Block { block, .. } => assert_eq!(block.get_line(0), "new-first"),
+            _ => panic!("expected block"),
+        }
+        match snapshot.classify_row(1) {
+            BlockRowKind::BufferRow { buffer_row } => assert_eq!(buffer_row, 1),
+            _ => panic!("expected buffer row"),
+        }
+    }
+
+    #[test]
+    fn replace_at_end() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 2, end: 2 },
+            "new-last",
+        )];
+        let snapshot = create_block_snapshot("line0\nline1\nold-last", &blocks);
+
+        assert_eq!(snapshot.total_lines(), 3);
+        match snapshot.classify_row(2) {
+            BlockRowKind::Block { block, .. } => assert_eq!(block.get_line(0), "new-last"),
+            _ => panic!("expected block"),
+        }
+    }
+
+    #[test]
+    fn insert_and_remove_blocks() {
+        let wrap_snapshot = create_wrap_snapshot("hello\nworld\nfoo");
+        let mut block_map = BlockMap::new();
+
+        let ids = block_map.insert(vec![
+            text_block(BlockPlacement::Below(0), "blk1"),
+            text_block(BlockPlacement::Below(1), "blk2"),
+        ]);
+        assert_eq!(ids.len(), 2);
+
+        let snap = block_map.sync(Arc::clone(&wrap_snapshot), &Patch::empty(), None);
+        assert_eq!(snap.total_lines(), 5);
+
+        block_map.remove(&[ids[0]].into_iter().collect());
+        let snap = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+        assert_eq!(snap.total_lines(), 4);
     }
 }

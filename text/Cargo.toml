@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 arrayvec.workspace = true
+smallvec.workspace = true

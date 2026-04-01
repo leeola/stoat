@@ -1,7 +1,36 @@
 use super::tab_map::{TabPoint, TabSnapshot};
-use std::{cmp::Ordering, ops::Deref, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::VecDeque,
+    future::Future,
+    mem,
+    ops::Deref,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+
+/// Yields control back to the executor once, allowing other tasks to run.
+fn yield_now() -> impl Future<Output = ()> {
+    struct YieldNow(bool);
+    impl Future for YieldNow {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+    YieldNow(false)
+}
+use stoat_scheduler::{Executor, Task};
 use stoat_text::{
-    patch::Patch, Bias, ContextLessSummary, Dimension, Dimensions, Item, SeekTarget, SumTree,
+    patch::{Edit, Patch},
+    Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item, SeekTarget, SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -120,13 +149,17 @@ impl<'a> Dimension<'a, TransformSummary> for LongestInRange {
     }
 }
 
+const WRAP_SYNC_THRESHOLD: u32 = 100;
+const WRAP_YIELD_ROW_INTERVAL: u32 = 100;
+
 pub struct WrapMap {
+    snapshot: WrapSnapshot,
+    pending_edits: VecDeque<(TabSnapshot, Patch<u32>)>,
+    interpolated_edits: Patch<u32>,
+    edits_since_sync: Patch<u32>,
     wrap_width: Option<u32>,
-    cached_snapshot: Option<Arc<WrapSnapshot>>,
-    last_fold_version: usize,
-    last_buffer_version: usize,
-    last_inlay_version: usize,
-    last_wrap_width: Option<u32>,
+    background_task: Option<Task<(WrapSnapshot, Patch<u32>)>>,
+    executor: Executor,
 }
 
 #[derive(Clone)]
@@ -137,6 +170,7 @@ pub struct WrapSnapshot {
     total_rows: u32,
     longest_row: u32,
     longest_row_chars: u32,
+    pub interpolated: bool,
 }
 
 impl Deref for WrapSnapshot {
@@ -147,20 +181,23 @@ impl Deref for WrapSnapshot {
 }
 
 impl WrapMap {
-    pub fn new(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> (Self, Arc<WrapSnapshot>) {
-        let fold_version = tab_snapshot.fold_snapshot().version();
-        let buffer_version = tab_snapshot.fold_snapshot().inlay_snapshot().version;
-        let inlay_version = tab_snapshot.fold_snapshot().inlay_snapshot().inlay_version;
-        let snapshot = Arc::new(build_snapshot(tab_snapshot, wrap_width));
+    pub fn new(
+        tab_snapshot: TabSnapshot,
+        wrap_width: Option<u32>,
+        executor: Executor,
+    ) -> (Self, Arc<WrapSnapshot>) {
+        let snapshot = build_snapshot(tab_snapshot, wrap_width);
+        let snapshot_arc = Arc::new(snapshot.clone());
         let map = WrapMap {
+            snapshot,
+            pending_edits: VecDeque::new(),
+            interpolated_edits: Patch::empty(),
+            edits_since_sync: Patch::empty(),
             wrap_width,
-            cached_snapshot: Some(Arc::clone(&snapshot)),
-            last_fold_version: fold_version,
-            last_buffer_version: buffer_version,
-            last_inlay_version: inlay_version,
-            last_wrap_width: wrap_width,
+            background_task: None,
+            executor,
         };
-        (map, snapshot)
+        (map, snapshot_arc)
     }
 
     pub fn sync(
@@ -168,48 +205,162 @@ impl WrapMap {
         tab_snapshot: TabSnapshot,
         tab_edits: &Patch<u32>,
     ) -> (Arc<WrapSnapshot>, Patch<u32>) {
-        let fold_version = tab_snapshot.fold_snapshot().version();
-        let buffer_version = tab_snapshot.fold_snapshot().inlay_snapshot().version;
-        let inlay_version = tab_snapshot.fold_snapshot().inlay_snapshot().inlay_version;
-        if fold_version == self.last_fold_version
-            && buffer_version == self.last_buffer_version
-            && inlay_version == self.last_inlay_version
-            && self.wrap_width == self.last_wrap_width
-        {
-            if let Some(ref cached) = self.cached_snapshot {
-                return (Arc::clone(cached), Patch::empty());
-            }
-        }
+        let wrap_width_changed = self.wrap_width != self.snapshot.wrap_width;
+        let new_fold_ver = tab_snapshot.fold_snapshot().version();
+        let new_buf_ver = tab_snapshot.fold_snapshot().inlay_snapshot().version();
+        let new_inlay_ver = tab_snapshot.fold_snapshot().inlay_snapshot().inlay_version;
+        let old_fold_ver = self.snapshot.tab_snapshot.fold_snapshot().version();
+        let old_buf_ver = self
+            .snapshot
+            .tab_snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .version();
+        let old_inlay_ver = self
+            .snapshot
+            .tab_snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .inlay_version;
+        let version_changed = new_fold_ver != old_fold_ver
+            || new_buf_ver != old_buf_ver
+            || new_inlay_ver != old_inlay_ver;
 
-        let can_incremental = !tab_edits.is_empty()
-            && self.cached_snapshot.is_some()
-            && self.wrap_width == self.last_wrap_width;
+        let needs_full_rebuild = wrap_width_changed || (version_changed && tab_edits.is_empty());
 
-        let (snapshot, edits) = if can_incremental {
-            let old = self.cached_snapshot.as_ref().unwrap();
-            sync_incremental(old, tab_snapshot, tab_edits, self.wrap_width)
-        } else {
-            let old_line_count = self
-                .cached_snapshot
-                .as_ref()
-                .map(|s| s.line_count())
-                .unwrap_or(0);
-            let snapshot = build_snapshot(tab_snapshot, self.wrap_width);
-            let new_line_count = snapshot.line_count();
-            let edits = Patch::new(vec![stoat_text::patch::Edit {
+        if needs_full_rebuild {
+            let old_line_count = self.snapshot.line_count();
+            self.snapshot = build_snapshot(tab_snapshot, self.wrap_width);
+            let new_line_count = self.snapshot.line_count();
+            self.edits_since_sync = self.edits_since_sync.compose([Edit {
                 old: 0..old_line_count,
                 new: 0..new_line_count,
             }]);
-            (snapshot, edits)
-        };
+        } else if !tab_edits.is_empty() && self.wrap_width.is_some() {
+            self.pending_edits
+                .push_back((tab_snapshot, tab_edits.clone()));
+            self.flush_edits();
+        } else if !tab_edits.is_empty() {
+            // No wrapping: apply identity
+            let interpolated = self.snapshot.interpolate(tab_snapshot, tab_edits);
+            self.edits_since_sync = self
+                .edits_since_sync
+                .compose(interpolated.edits().iter().cloned());
+            self.snapshot.interpolated = false;
+        }
 
-        let snapshot = Arc::new(snapshot);
-        self.last_fold_version = fold_version;
-        self.last_buffer_version = buffer_version;
-        self.last_inlay_version = inlay_version;
-        self.last_wrap_width = self.wrap_width;
-        self.cached_snapshot = Some(Arc::clone(&snapshot));
-        (snapshot, edits)
+        (
+            Arc::new(self.snapshot.clone()),
+            mem::take(&mut self.edits_since_sync),
+        )
+    }
+
+    fn flush_edits(&mut self) {
+        self.poll_background_task();
+
+        if !self.snapshot.interpolated {
+            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let mut to_remove = 0;
+            for (tab_snapshot, _) in &self.pending_edits {
+                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                    to_remove += 1;
+                } else {
+                    break;
+                }
+            }
+            self.pending_edits.drain(..to_remove);
+        }
+
+        if self.pending_edits.is_empty() {
+            return;
+        }
+
+        if let Some(wrap_width) = self.wrap_width {
+            if self.background_task.is_none() {
+                let is_small = self.pending_edits.len() == 1
+                    && self
+                        .pending_edits
+                        .back()
+                        .map(|(_, edits)| {
+                            edits.edits().iter().all(|e| {
+                                e.new.end.saturating_sub(e.new.start) < WRAP_SYNC_THRESHOLD
+                            })
+                        })
+                        .unwrap_or(false);
+
+                if is_small {
+                    let (tab_snapshot, tab_edits) = self
+                        .pending_edits
+                        .pop_back()
+                        .expect("pending_edits.len() == 1");
+                    let wrap_edits = sync_incremental(
+                        &self.snapshot,
+                        tab_snapshot,
+                        &tab_edits,
+                        Some(wrap_width),
+                    );
+                    self.snapshot = wrap_edits.0;
+                    self.edits_since_sync = self
+                        .edits_since_sync
+                        .compose(wrap_edits.1.edits().iter().cloned());
+                    return;
+                }
+
+                let mut snapshot = self.snapshot.clone();
+                let pending = self.pending_edits.clone();
+                self.background_task = Some(self.executor.spawn(async move {
+                    let mut edits = Patch::empty();
+                    for (tab_snapshot, tab_edits) in pending {
+                        let (new_snap, wrap_edits) =
+                            sync_incremental(&snapshot, tab_snapshot, &tab_edits, Some(wrap_width));
+                        snapshot = new_snap;
+                        edits = edits.compose(wrap_edits.edits().iter().cloned());
+                        yield_now().await;
+                    }
+                    (snapshot, edits)
+                }));
+            }
+
+            // Apply interpolated edits for any remaining pending
+            let was_interpolated = self.snapshot.interpolated;
+            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let mut to_remove = 0;
+            for (tab_snapshot, edits) in &self.pending_edits {
+                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                    to_remove += 1;
+                } else {
+                    let interpolated = self.snapshot.interpolate(tab_snapshot.clone(), edits);
+                    self.edits_since_sync = self
+                        .edits_since_sync
+                        .compose(interpolated.edits().iter().cloned());
+                    self.interpolated_edits = self
+                        .interpolated_edits
+                        .compose(interpolated.edits().iter().cloned());
+                }
+            }
+            if !was_interpolated {
+                self.pending_edits.drain(..to_remove);
+            }
+        }
+    }
+
+    fn poll_background_task(&mut self) {
+        if let Some(ref mut task) = self.background_task {
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            if let Poll::Ready((snapshot, edits)) = Pin::new(task).poll(&mut cx) {
+                let mut inverted = mem::take(&mut self.interpolated_edits);
+                inverted.invert();
+                self.edits_since_sync = self
+                    .edits_since_sync
+                    .compose(inverted.edits().iter().cloned())
+                    .compose(edits.edits().iter().cloned());
+                self.snapshot = snapshot;
+                self.background_task = None;
+                self.pending_edits.clear();
+                self.flush_edits();
+            }
+        }
     }
 
     pub fn set_wrap_width(&mut self, width: Option<u32>) {
@@ -273,6 +424,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         total_rows,
         longest_row,
         longest_row_chars,
+        interpolated: false,
     }
 }
 
@@ -330,7 +482,7 @@ fn sync_incremental(
 
         let new_output_end: u32 = new_transforms.summary().output_rows;
 
-        wrap_edits.push(stoat_text::patch::Edit {
+        wrap_edits.push(Edit {
             old: old_output_start..old_output_end,
             new: new_output_start..new_output_end,
         });
@@ -350,6 +502,7 @@ fn sync_incremental(
         total_rows,
         longest_row,
         longest_row_chars,
+        interpolated: false,
     };
 
     (snapshot, wrap_edits)
@@ -400,11 +553,16 @@ fn compute_wrap_columns(
 
         if ch == ' ' || ch == '\t' {
             last_break_candidate = Some(expanded_col + char_width);
+        } else if ch == '-' {
+            last_break_candidate = Some(expanded_col + char_width);
+        } else if char_width >= 2 {
+            // CJK and other wide characters can break at any boundary.
+            last_break_candidate = Some(expanded_col);
         }
 
         expanded_col += char_width;
 
-        let segment_start = *breaks.last().unwrap();
+        let segment_start = *breaks.last().expect("breaks starts with [0]");
         if expanded_col - segment_start >= width {
             let break_at = match last_break_candidate {
                 Some(b) if b > segment_start => b,
@@ -415,7 +573,7 @@ fn compute_wrap_columns(
         }
     }
 
-    if breaks.len() > 1 && *breaks.last().unwrap() >= tab_line_len {
+    if breaks.len() > 1 && *breaks.last().expect("breaks starts with [0]") >= tab_line_len {
         breaks.pop();
     }
 
@@ -423,6 +581,62 @@ fn compute_wrap_columns(
 }
 
 impl WrapSnapshot {
+    /// Cheap approximation: replaces edited regions with 1:1 identity transforms
+    /// (no wrapping). Fast but inaccurate -- sets `interpolated = true`.
+    fn interpolate(&mut self, new_tab_snapshot: TabSnapshot, tab_edits: &Patch<u32>) -> Patch<u32> {
+        let mut new_transforms = SumTree::new(());
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        let mut wrap_edits = Patch::empty();
+
+        for edit in tab_edits {
+            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+            let old_output_start = cursor.start().1 .0;
+
+            cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
+            let old_output_end = cursor.start().1 .0;
+
+            let new_output_start: u32 = new_transforms.summary().output_rows;
+
+            for tab_row in edit.new.start..edit.new.end {
+                let tab_line_len = new_tab_snapshot.line_len(tab_row);
+                new_transforms.push(
+                    Transform {
+                        summary: TransformSummary {
+                            input_rows: 1,
+                            output_rows: 1,
+                            longest_row: 0,
+                            longest_row_chars: tab_line_len,
+                        },
+                        wrap_columns: vec![0],
+                        tab_line_len,
+                    },
+                    (),
+                );
+            }
+
+            let new_output_end: u32 = new_transforms.summary().output_rows;
+            wrap_edits.push(Edit {
+                old: old_output_start..old_output_end,
+                new: new_output_start..new_output_end,
+            });
+        }
+
+        new_transforms.append(cursor.suffix(), ());
+        drop(cursor);
+
+        let s = new_transforms.summary().clone();
+        self.tab_snapshot = new_tab_snapshot;
+        self.transforms = new_transforms;
+        self.total_rows = s.output_rows;
+        self.longest_row = s.longest_row;
+        self.longest_row_chars = s.longest_row_chars;
+        self.interpolated = true;
+
+        wrap_edits
+    }
+
     pub fn tab_snapshot(&self) -> &TabSnapshot {
         &self.tab_snapshot
     }
@@ -670,6 +884,48 @@ impl WrapSnapshot {
     pub fn line_count(&self) -> u32 {
         self.total_rows
     }
+
+    pub fn wrap_point_cursor(&self) -> WrapPointCursor<'_> {
+        WrapPointCursor {
+            cursor: self
+                .transforms
+                .cursor::<Dimensions<InputRow, OutputRow>>(()),
+            wrap_width: self.wrap_width,
+        }
+    }
+}
+
+pub struct WrapPointCursor<'a> {
+    cursor: Cursor<'a, 'static, Transform, Dimensions<InputRow, OutputRow>>,
+    wrap_width: Option<u32>,
+}
+
+impl WrapPointCursor<'_> {
+    pub fn map(&mut self, tab_point: TabPoint) -> WrapPoint {
+        if self.wrap_width.is_none() {
+            return WrapPoint::new(tab_point.row(), tab_point.column());
+        }
+
+        let target = InputRow(tab_point.row() + 1);
+        if self.cursor.did_seek() {
+            self.cursor.seek_forward(&target, Bias::Left);
+        } else {
+            self.cursor.seek(&target, Bias::Left);
+        }
+
+        let Dimensions(_input_start, output_start, _) = self.cursor.start();
+        if let Some(transform) = self.cursor.item() {
+            let tab_col = tab_point.column();
+            let sub_row = transform
+                .wrap_columns
+                .partition_point(|&c| c <= tab_col)
+                .saturating_sub(1);
+            let wrap_col = tab_col - transform.wrap_columns[sub_row];
+            WrapPoint::new(output_start.0 + sub_row as u32, wrap_col)
+        } else {
+            WrapPoint::new(output_start.0, tab_point.column())
+        }
+    }
 }
 
 fn transform_sub_row_len(transform: &Transform, sub_idx: usize) -> u32 {
@@ -693,19 +949,23 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
+    use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::patch::Patch;
 
+    fn test_executor() -> Executor {
+        Executor::new(Arc::new(TestScheduler::new()))
+    }
+
     fn make_snapshot(content: &str, wrap_width: Option<u32>) -> Arc<super::WrapSnapshot> {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width);
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
         wrap_snapshot
     }
 
@@ -864,16 +1124,15 @@ mod tests {
         content: &str,
         wrap_width: Option<u32>,
     ) -> (WrapMap, Arc<super::WrapSnapshot>, MultiBuffer) {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (wrap_map, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width);
+        let (wrap_map, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
         (wrap_map, wrap_snapshot, multi_buffer)
     }
 
@@ -881,7 +1140,7 @@ mod tests {
         let snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (wrap_snapshot, _) = wrap_map.sync(tab_snapshot, &Patch::empty());
         wrap_snapshot
@@ -903,7 +1162,7 @@ mod tests {
         let full_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(full_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let full = super::build_snapshot(tab_snapshot, Some(5));
 
@@ -935,7 +1194,7 @@ mod tests {
         let full_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(full_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let full = super::build_snapshot(tab_snapshot, Some(5));
 
@@ -976,7 +1235,7 @@ mod tests {
         let full_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(full_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let full = super::build_snapshot(tab_snapshot, Some(6));
 
@@ -998,7 +1257,7 @@ mod tests {
         let full_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(full_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let full = super::build_snapshot(tab_snapshot, Some(new_width));
 

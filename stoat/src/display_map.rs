@@ -1,22 +1,42 @@
 mod block_map;
+mod crease_map;
 mod fold_map;
+pub mod highlights;
 pub mod inlay_map;
 pub mod invisibles;
 pub mod tab_map;
 mod wrap_map;
 
 use crate::{
-    git::{BufferDiff, DiffStatus},
-    multi_buffer::MultiBuffer,
+    buffer::BufferId,
+    diff_map::{DiffMap, TokenDetail},
+    git::DiffStatus,
+    multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{
-    Block, BlockContent, BlockMap, BlockPlacement, BlockPoint, BlockRow, BlockRowKind,
-    BlockSnapshot,
+    Block, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRow,
+    BlockRowKind, BlockSnapshot, BlockStyle, CompanionView, CustomBlock, CustomBlockId,
+    RenderBlock,
 };
-pub use fold_map::{FoldMap, FoldPlaceholder, FoldPoint, FoldSnapshot};
-pub use inlay_map::{InlayMap, InlayPoint, InlaySnapshot};
-use std::sync::Arc;
-use stoat_text::{patch::Patch, Bias, CharsAt, Point, ReversedCharsAt, Rope};
+pub use crease_map::{
+    Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
+};
+pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
+pub use highlights::{
+    Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement, HighlightKey, HighlightStyle,
+    HighlightStyleId, HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight,
+    InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
+};
+pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
+use stoat_scheduler::Executor;
+use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use unicode_width::UnicodeWidthChar;
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
@@ -40,36 +60,134 @@ impl DisplayPoint {
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayRow(pub u32);
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayMapId(u64);
+
+static NEXT_DISPLAY_MAP_ID: AtomicU64 = AtomicU64::new(0);
+
+impl DisplayMapId {
+    pub fn next() -> Self {
+        Self(NEXT_DISPLAY_MAP_ID.fetch_add(1, AtomicOrdering::Relaxed))
+    }
+}
+
+pub type ConvertMultiBufferRows = fn(
+    excerpt_map: &HashMap<ExcerptId, ExcerptId>,
+    companion_snapshot: &MultiBufferSnapshot,
+    our_snapshot: &MultiBufferSnapshot,
+    bounds: (std::ops::Bound<Point>, std::ops::Bound<Point>),
+) -> Vec<CompanionExcerptPatch>;
+
+#[derive(Debug)]
+pub struct CompanionExcerptPatch {
+    pub patch: Patch<Point>,
+    pub edited_range: std::ops::Range<Point>,
+    pub source_excerpt_range: std::ops::Range<Point>,
+    pub target_excerpt_range: std::ops::Range<Point>,
+}
+
+#[allow(dead_code)]
+pub struct Companion {
+    pub(crate) rhs_display_map_id: DisplayMapId,
+    pub(crate) rhs_buffer_to_lhs_buffer: HashMap<BufferId, BufferId>,
+    pub(crate) lhs_buffer_to_rhs_buffer: HashMap<BufferId, BufferId>,
+    pub(crate) rhs_excerpt_to_lhs_excerpt: HashMap<ExcerptId, ExcerptId>,
+    pub(crate) lhs_excerpt_to_rhs_excerpt: HashMap<ExcerptId, ExcerptId>,
+    pub(crate) rhs_rows_to_lhs_rows: ConvertMultiBufferRows,
+    pub(crate) lhs_rows_to_rhs_rows: ConvertMultiBufferRows,
+    pub(crate) rhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
+    pub(crate) lhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
+    pub(crate) companion_wrap_snapshot: Arc<WrapSnapshot>,
+}
+
+/// Threshold for which diagnostic severities to display.
+///
+/// Ordered by severity: Error < Warning < Information < Hint.
+/// Filtering by "max severity" means: show diagnostics where `severity <= threshold`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DiagnosticSeverity {
+    Error = 1,
+    Warning = 2,
+    Information = 3,
+    Hint = 4,
+}
+
 pub struct DisplayMap {
+    id: DisplayMapId,
     multi_buffer: MultiBuffer,
     inlay_map: InlayMap,
     fold_map: FoldMap,
     tab_map: TabMap,
     wrap_map: WrapMap,
     block_map: BlockMap,
-    last_buffer_version: usize,
+    crease_map: CreaseMap,
+    text_highlights: TextHighlights,
+    semantic_token_highlights: SemanticTokensHighlights,
+    inlay_highlights: InlayHighlights,
+    companion: Option<Companion>,
+    lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
+    masked: bool,
+    clip_at_line_ends: bool,
+    diagnostics_max_severity: Option<DiagnosticSeverity>,
+    last_buffer_version: u64,
+    inserted_diff_block_ids: Vec<CustomBlockId>,
+    last_diff_version: usize,
+    cached_snapshot: Option<DisplaySnapshot>,
 }
 
 impl DisplayMap {
-    pub fn new(multi_buffer: MultiBuffer) -> Self {
+    pub fn new(multi_buffer: MultiBuffer, executor: Executor) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
-        let version = buffer_snapshot.version;
+        let version = buffer_snapshot.version();
         let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let tab_map = TabMap::new(4);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None);
+        let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None, executor);
         let block_map = BlockMap::new();
 
         Self {
+            id: DisplayMapId::next(),
             multi_buffer,
             inlay_map,
             fold_map,
             tab_map,
             wrap_map,
             block_map,
+            crease_map: CreaseMap::new(),
+            text_highlights: Arc::new(HashMap::new()),
+            semantic_token_highlights: Arc::new(HashMap::new()),
+            inlay_highlights: BTreeMap::new(),
+            companion: None,
+            lsp_folding_crease_ids: HashMap::new(),
+            masked: false,
+            clip_at_line_ends: false,
+            diagnostics_max_severity: None,
             last_buffer_version: version,
+            inserted_diff_block_ids: Vec::new(),
+            last_diff_version: 0,
+            cached_snapshot: None,
         }
+    }
+
+    pub fn id(&self) -> DisplayMapId {
+        self.id
+    }
+
+    pub fn set_companion(&mut self, companion: Option<Companion>) {
+        self.companion = companion;
+    }
+
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    pub fn set_clip_at_line_ends(&mut self, clip: bool) {
+        self.clip_at_line_ends = clip;
+    }
+
+    pub fn set_diagnostics_max_severity(&mut self, severity: Option<DiagnosticSeverity>) {
+        self.diagnostics_max_severity = severity;
     }
 
     pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
@@ -77,8 +195,8 @@ impl DisplayMap {
         let anchor_ranges = ranges
             .into_iter()
             .map(|r| {
-                let start_off = buffer_snapshot.rope.point_to_offset(r.start);
-                let end_off = buffer_snapshot.rope.point_to_offset(r.end);
+                let start_off = buffer_snapshot.rope().point_to_offset(r.start);
+                let end_off = buffer_snapshot.rope().point_to_offset(r.end);
                 buffer_snapshot.anchor_at(start_off, Bias::Right)
                     ..buffer_snapshot.anchor_at(end_off, Bias::Left)
             })
@@ -92,8 +210,8 @@ impl DisplayMap {
         let offset_ranges = ranges
             .into_iter()
             .map(|r| {
-                let start_off = buffer_snapshot.rope.point_to_offset(r.start);
-                let end_off = buffer_snapshot.rope.point_to_offset(r.end);
+                let start_off = buffer_snapshot.rope().point_to_offset(r.start);
+                let end_off = buffer_snapshot.rope().point_to_offset(r.end);
                 start_off..end_off
             })
             .collect();
@@ -103,7 +221,7 @@ impl DisplayMap {
     pub fn toggle_fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let any_folded = ranges.iter().any(|r| {
-            let offset = buffer_snapshot.rope.point_to_offset(r.start);
+            let offset = buffer_snapshot.rope().point_to_offset(r.start);
             self.fold_map.is_folded_at_offset(offset, &buffer_snapshot)
         });
         if any_folded {
@@ -117,57 +235,164 @@ impl DisplayMap {
         self.wrap_map.set_wrap_width(width);
     }
 
-    pub fn snapshot(&mut self) -> DisplaySnapshot {
-        let watermark = self
-            .fold_map
-            .min_anchor_version()
-            .min(self.inlay_map.min_anchor_version());
-        self.multi_buffer.compact_edit_log(watermark);
+    pub fn highlight_text(
+        &mut self,
+        key: HighlightKey,
+        ranges: Vec<std::ops::Range<Anchor>>,
+        style: HighlightStyle,
+    ) {
         let buffer_snapshot = self.multi_buffer.snapshot();
-        let diff = buffer_snapshot.diff.clone();
+        let mut sorted_ranges = ranges;
+        sorted_ranges.sort_by(|a, b| {
+            buffer_snapshot
+                .resolve_anchor(&a.start)
+                .cmp(&buffer_snapshot.resolve_anchor(&b.start))
+        });
+        Arc::make_mut(&mut self.text_highlights).insert(key, Arc::new((style, sorted_ranges)));
+    }
+
+    pub fn clear_highlights(&mut self, key: HighlightKey) -> bool {
+        let mut cleared = Arc::make_mut(&mut self.text_highlights)
+            .remove(&key)
+            .is_some();
+        cleared |= self.inlay_highlights.remove(&key).is_some();
+        cleared
+    }
+
+    pub fn set_semantic_token_highlights(
+        &mut self,
+        buffer_id: BufferId,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+    ) {
+        Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, (tokens, interner));
+    }
+
+    pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
+        Arc::make_mut(&mut self.semantic_token_highlights).remove(&buffer_id);
+    }
+
+    pub fn highlight_inlays(
+        &mut self,
+        key: HighlightKey,
+        highlights: Vec<InlayHighlight>,
+        style: HighlightStyle,
+    ) {
+        let entry = self.inlay_highlights.entry(key).or_default();
+        for highlight in highlights {
+            entry.insert(highlight.inlay, (style.clone(), highlight));
+        }
+    }
+
+    pub fn insert_creases(
+        &mut self,
+        creases: impl IntoIterator<Item = Crease<Anchor>>,
+    ) -> Vec<CreaseId> {
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
+        self.crease_map.insert(creases, &resolve)
+    }
+
+    pub fn remove_creases(&mut self, ids: impl IntoIterator<Item = CreaseId>) {
+        self.crease_map.remove(ids);
+    }
+
+    pub fn set_lsp_folding_ranges(
+        &mut self,
+        buffer_id: BufferId,
+        ranges: Vec<(std::ops::Range<Anchor>, Option<String>)>,
+    ) {
+        if let Some(old_ids) = self.lsp_folding_crease_ids.remove(&buffer_id) {
+            self.crease_map.remove(old_ids);
+        }
+        let creases = ranges.into_iter().map(|(range, collapsed_text)| {
+            Crease::inline(
+                range,
+                FoldPlaceholder {
+                    text: Arc::from("..."),
+                    collapsed_text: collapsed_text.map(|t| Arc::from(t.as_str())),
+                    ..Default::default()
+                },
+            )
+        });
+        let ids = self.insert_creases(creases);
+        self.lsp_folding_crease_ids.insert(buffer_id, ids);
+    }
+
+    pub fn snapshot(&mut self) -> DisplaySnapshot {
+        let buffer_version = self.multi_buffer.buffer_version();
+        if buffer_version == self.last_buffer_version
+            && self.fold_map.version_unchanged()
+            && self.inlay_map.version_unchanged()
+        {
+            if let Some(ref cached) = self.cached_snapshot {
+                return cached.clone();
+            }
+        }
+
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        let diff_map = buffer_snapshot.diff_map.clone();
         let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
-        self.last_buffer_version = buffer_snapshot.version;
+        self.last_buffer_version = buffer_snapshot.version();
         let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
         let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
         let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
         let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
-        let blocks = collect_blocks_from_diff(diff.as_ref());
-        let block_snapshot = self.block_map.sync(wrap_snapshot, &blocks, &wrap_edits);
-
-        DisplaySnapshot {
-            block_snapshot,
-            diff,
+        let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
+        if diff_version != self.last_diff_version {
+            self.block_map
+                .remove(&self.inserted_diff_block_ids.drain(..).collect());
+            let props = diff_map
+                .as_ref()
+                .map(|dm| dm.deleted_blocks())
+                .unwrap_or_default();
+            self.inserted_diff_block_ids = self.block_map.insert(props);
+            self.last_diff_version = diff_version;
         }
+        let companion_view = self.companion.as_ref().map(|c| CompanionView {
+            display_map_id: self.id,
+            companion_wrap_snapshot: &c.companion_wrap_snapshot,
+            companion: c,
+        });
+        let block_snapshot = self
+            .block_map
+            .sync(wrap_snapshot, &wrap_edits, companion_view);
+
+        let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
+        self.crease_map
+            .sync(&|a| buffer_snapshot_for_crease.resolve_anchor(a));
+
+        let snapshot = DisplaySnapshot {
+            companion_display_snapshot: None,
+            block_snapshot,
+            diff_map,
+            text_highlights: self.text_highlights.clone(),
+            semantic_token_highlights: self.semantic_token_highlights.clone(),
+            inlay_highlights: self.inlay_highlights.clone(),
+            crease_snapshot: self.crease_map.snapshot(),
+            fold_placeholder: FoldPlaceholder::default(),
+            masked: self.masked,
+            clip_at_line_ends: self.clip_at_line_ends,
+            diagnostics_max_severity: self.diagnostics_max_severity,
+        };
+        self.cached_snapshot = Some(snapshot.clone());
+        snapshot
     }
 }
 
-fn collect_blocks_from_diff(diff: Option<&BufferDiff>) -> Vec<Block> {
-    let diff = match diff {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-
-    let base_text = match diff.base_text() {
-        Some(t) => Arc::clone(t),
-        None => return Vec::new(),
-    };
-
-    diff.deleted_hunks()
-        .iter()
-        .map(|hunk| {
-            let content = &base_text[hunk.base_byte_range.clone()];
-            let lines: Vec<String> = content.lines().map(String::from).collect();
-            Block {
-                placement: BlockPlacement::Below(hunk.after_buffer_line),
-                content: BlockContent::Text(Arc::new(lines)),
-            }
-        })
-        .collect()
-}
-
+#[derive(Clone)]
 pub struct DisplaySnapshot {
+    companion_display_snapshot: Option<Arc<DisplaySnapshot>>,
     block_snapshot: BlockSnapshot,
-    diff: Option<BufferDiff>,
+    diff_map: Option<DiffMap>,
+    text_highlights: TextHighlights,
+    semantic_token_highlights: SemanticTokensHighlights,
+    inlay_highlights: InlayHighlights,
+    crease_snapshot: CreaseSnapshot,
+    fold_placeholder: FoldPlaceholder,
+    masked: bool,
+    clip_at_line_ends: bool,
+    diagnostics_max_severity: Option<DiagnosticSeverity>,
 }
 
 impl DisplaySnapshot {
@@ -187,12 +412,60 @@ impl DisplaySnapshot {
         self.fold_snapshot().inlay_snapshot()
     }
 
+    pub fn companion_snapshot(&self) -> Option<&DisplaySnapshot> {
+        self.companion_display_snapshot.as_deref()
+    }
+
+    pub fn fold_placeholder(&self) -> &FoldPlaceholder {
+        &self.fold_placeholder
+    }
+
+    pub fn crease_snapshot(&self) -> &CreaseSnapshot {
+        &self.crease_snapshot
+    }
+
+    pub fn text_highlights(&self) -> &TextHighlights {
+        &self.text_highlights
+    }
+
+    pub fn semantic_token_highlights(&self) -> &SemanticTokensHighlights {
+        &self.semantic_token_highlights
+    }
+
+    pub fn inlay_highlights(&self) -> &InlayHighlights {
+        &self.inlay_highlights
+    }
+
+    pub fn is_masked(&self) -> bool {
+        self.masked
+    }
+
     pub fn wrap_snapshot(&self) -> &WrapSnapshot {
         self.block_snapshot.wrap_snapshot()
     }
 
     pub fn longest_row(&self) -> (u32, u32) {
         self.block_snapshot.longest_row()
+    }
+
+    pub fn chunks(
+        &self,
+        display_rows: std::ops::Range<u32>,
+        highlights: Highlights<'_>,
+    ) -> block_map::BlockChunks<'_> {
+        self.block_snapshot.chunks(display_rows, highlights)
+    }
+
+    pub fn highlighted_chunks(
+        &self,
+        display_rows: std::ops::Range<u32>,
+    ) -> block_map::BlockChunks<'_> {
+        let highlights = Highlights {
+            text_highlights: Some(&self.text_highlights),
+            inlay_highlights: Some(&self.inlay_highlights),
+            semantic_token_highlights: Some(&self.semantic_token_highlights),
+        };
+        self.block_snapshot.chunks(display_rows, highlights)
     }
 
     pub fn is_line_folded(&self, buffer_row: u32) -> bool {
@@ -221,7 +494,27 @@ impl DisplaySnapshot {
         let bp = self
             .block_snapshot
             .clip_point(BlockPoint::new(point.row, point.column), bias);
+        let mut clipped = DisplayPoint::new(bp.row, bp.column);
+        if self.clip_at_line_ends {
+            clipped = self.clip_point_at_line_end(clipped);
+        }
+        clipped
+    }
+
+    pub fn clip_ignoring_line_ends(&self, point: DisplayPoint, bias: Bias) -> DisplayPoint {
+        let bp = self
+            .block_snapshot
+            .clip_point(BlockPoint::new(point.row, point.column), bias);
         DisplayPoint::new(bp.row, bp.column)
+    }
+
+    fn clip_point_at_line_end(&self, point: DisplayPoint) -> DisplayPoint {
+        let line_len = self.line_len(point.row);
+        if line_len > 0 && point.column >= line_len {
+            DisplayPoint::new(point.row, line_len.saturating_sub(1))
+        } else {
+            point
+        }
     }
 
     pub fn max_point(&self) -> DisplayPoint {
@@ -250,9 +543,9 @@ impl DisplaySnapshot {
     }
 
     pub fn line_diff_status(&self, buffer_line: u32) -> DiffStatus {
-        self.diff
+        self.diff_map
             .as_ref()
-            .map(|d| d.status_for_line(buffer_line))
+            .map(|dm| dm.status_for_line(buffer_line))
             .unwrap_or_default()
     }
 
@@ -283,14 +576,18 @@ impl DisplaySnapshot {
     }
 
     pub fn has_deletion_after(&self, buffer_line: u32) -> bool {
-        self.diff
+        self.diff_map
             .as_ref()
-            .map(|d| d.has_deletion_after(buffer_line))
+            .map(|dm| dm.has_deletion_after(buffer_line))
             .unwrap_or(false)
     }
 
+    pub fn token_detail_for_line(&self, buffer_line: u32) -> Option<&TokenDetail> {
+        self.diff_map.as_ref()?.token_detail_for_line(buffer_line)
+    }
+
     pub fn buffer_chars_at(&self, point: Point) -> BufferCharsAt<'_> {
-        let rope = &self.block_snapshot.buffer_snapshot().rope;
+        let rope = &self.block_snapshot.buffer_snapshot().rope();
         let offset = rope.point_to_offset(point);
         BufferCharsAt {
             chars: rope.chars_at(offset),
@@ -299,7 +596,7 @@ impl DisplaySnapshot {
     }
 
     pub fn reverse_buffer_chars_at(&self, point: Point) -> ReversedBufferCharsAt<'_> {
-        let rope = &self.block_snapshot.buffer_snapshot().rope;
+        let rope = &self.block_snapshot.buffer_snapshot().rope();
         let offset = rope.point_to_offset(point);
         ReversedBufferCharsAt {
             chars: rope.reversed_chars_at(offset),
@@ -318,14 +615,18 @@ impl DisplaySnapshot {
     pub fn next_line_boundary(&self, point: Point) -> (Point, DisplayPoint) {
         let display = self.buffer_to_display(point);
         let end = DisplayPoint::new(display.row, self.line_len(display.row));
-        let max = self.block_snapshot.buffer_snapshot().rope.max_point();
+        let max = self.block_snapshot.buffer_snapshot().rope().max_point();
         let buf = self.display_to_buffer(end).unwrap_or(max);
         (buf, end)
     }
 
     pub fn clip_at_line_end(&self, point: DisplayPoint) -> DisplayPoint {
-        let clipped = self.clip_point(point, Bias::Left);
+        let clipped = self.clip_ignoring_line_ends(point, Bias::Left);
         DisplayPoint::new(clipped.row, clipped.column.min(self.line_len(clipped.row)))
+    }
+
+    pub fn diagnostics_max_severity(&self) -> Option<DiagnosticSeverity> {
+        self.diagnostics_max_severity
     }
 }
 
@@ -373,50 +674,55 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, InlayPoint};
+    use super::{BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, InlayKind, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
-        git::{BufferDiff, DeletedHunk},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         multi_buffer::MultiBuffer,
     };
     use std::{
         ops::Range,
         sync::{Arc, RwLock},
     };
+    use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::Point;
 
-    fn create_display_map(content: &str) -> DisplayMap {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
-        let shared = Arc::new(RwLock::new(buffer));
-        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        DisplayMap::new(multi_buffer)
+    fn test_executor() -> Executor {
+        Executor::new(Arc::new(TestScheduler::new()))
     }
 
-    fn create_display_map_with_diff(content: &str, diff: BufferDiff) -> DisplayMap {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push(content);
-        buffer.diff = Some(diff);
+    fn create_display_map(content: &str) -> DisplayMap {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
-        DisplayMap::new(multi_buffer)
+        DisplayMap::new(multi_buffer, test_executor())
+    }
+
+    fn create_display_map_with_diff(content: &str, diff_map: DiffMap) -> DisplayMap {
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), content);
+        buffer.diff_map = Some(diff_map);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        DisplayMap::new(multi_buffer, test_executor())
     }
 
     fn make_diff_with_deletion(
         after_line: u32,
         base_text: &str,
         byte_range: Range<usize>,
-        line_count: u32,
-    ) -> BufferDiff {
-        let mut diff = BufferDiff::default();
-        let base = Arc::new(base_text.to_string());
-        diff.set_base_text(base);
-        diff.add_deleted_hunk(DeletedHunk {
-            after_buffer_line: after_line,
+        _line_count: u32,
+    ) -> DiffMap {
+        let mut dm = DiffMap::default();
+        dm.set_base_text(Arc::new(base_text.to_string()));
+        dm.push_hunk(DiffHunk {
+            status: DiffHunkStatus::Deleted,
+            buffer_start_line: after_line + 1,
+            buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range: byte_range,
-            line_count,
+            anchor_range: None,
+            token_detail: None,
         });
-        diff
+        dm
     }
 
     #[test]
@@ -698,18 +1004,18 @@ mod tests {
 
     #[test]
     fn inlay_survives_compaction() {
-        let mut buffer = TextBuffer::new();
-        buffer.rope.push("hello world");
+        let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
-        let mut display_map = DisplayMap::new(multi_buffer);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
 
         let snap = display_map.multi_buffer.snapshot();
-        let off = snap.rope.point_to_offset(Point::new(0, 5));
+        let off = snap.rope().point_to_offset(Point::new(0, 5));
         let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
-        display_map
-            .inlay_map
-            .splice(Vec::new(), vec![(anchor, ": str".to_string())]);
+        display_map.inlay_map.splice(
+            Vec::new(),
+            vec![(anchor, ": str".to_string(), InlayKind::Hint)],
+        );
 
         for i in 0..10 {
             {
@@ -784,5 +1090,50 @@ mod tests {
             snapshot.write_display_line(&mut buf, row);
             assert_eq!(buf, expected, "mismatch at row {row}");
         }
+    }
+
+    #[test]
+    fn chunks_match_display_lines() {
+        let mut display_map = create_display_map("hello\nworld\nfoo bar");
+        let snapshot = display_map.snapshot();
+        let total = snapshot.line_count();
+
+        let chunks: Vec<_> = snapshot.highlighted_chunks(0..total).collect();
+        let from_chunks: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        let from_lines: String = (0..total)
+            .map(|r| snapshot.display_line(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(from_chunks, from_lines);
+    }
+
+    #[test]
+    fn chunks_with_blocks_match_display_lines() {
+        use crate::display_map::{BlockPlacement, BlockProperties, BlockStyle};
+
+        let diff = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                buffer_start_line: 2,
+                buffer_line_range: 2..2,
+                base_byte_range: 0..7,
+                anchor_range: None,
+                token_detail: None,
+            }],
+            Some(Arc::new("deleted".to_string())),
+        );
+        let mut display_map = create_display_map_with_diff("aaa\nbbb\nccc", diff);
+        let snapshot = display_map.snapshot();
+        let total = snapshot.line_count();
+
+        let chunks: Vec<_> = snapshot.highlighted_chunks(0..total).collect();
+        let from_chunks: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        let from_lines: String = (0..total)
+            .map(|r| snapshot.display_line(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(from_chunks, from_lines);
     }
 }
