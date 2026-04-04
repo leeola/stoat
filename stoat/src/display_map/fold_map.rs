@@ -160,6 +160,7 @@ impl<'a> Dimension<'a, FoldSummary> for FoldStart {
 struct Transform {
     summary: TransformSummary,
     placeholder: Option<FoldPlaceholder>,
+    fold_id: Option<FoldId>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -504,19 +505,29 @@ impl FoldMap {
             return;
         }
 
-        let mut merged = Vec::with_capacity(all.len());
+        let mut merged: Vec<AnchoredFold> = Vec::with_capacity(all.len());
         let mut last_end = 0usize;
         for fold in all {
             let fold_range = fold.range.to_offset_range(&resolve);
-            if !merged.is_empty() && fold_range.start <= last_end {
-                if fold_range.end > last_end {
-                    let last: &mut AnchoredFold =
-                        merged.last_mut().expect("guarded by !merged.is_empty()");
-                    last.range.end = fold.range.end;
-                    last.resolved_end = fold_range.end;
-                    last_end = fold_range.end;
+            if !merged.is_empty() {
+                let overlaps = fold_range.start < last_end;
+                let adjacent_and_mergeable = fold_range.start == last_end
+                    && merged
+                        .last()
+                        .expect("guarded by !merged.is_empty()")
+                        .placeholder
+                        .merge_adjacent
+                    && fold.placeholder.merge_adjacent;
+                if overlaps || adjacent_and_mergeable {
+                    if fold_range.end > last_end {
+                        let last: &mut AnchoredFold =
+                            merged.last_mut().expect("guarded by !merged.is_empty()");
+                        last.range.end = fold.range.end;
+                        last.resolved_end = fold_range.end;
+                        last_end = fold_range.end;
+                    }
+                    continue;
                 }
-                continue;
             }
             last_end = fold_range.end;
             merged.push(fold);
@@ -541,6 +552,7 @@ fn build_fold_transforms(
                         output: summary,
                     },
                     placeholder: None,
+                    fold_id: None,
                 },
                 (),
             );
@@ -587,6 +599,7 @@ fn build_fold_transforms(
                         output: summary,
                     },
                     placeholder: None,
+                    fold_id: None,
                 },
                 (),
             );
@@ -605,6 +618,7 @@ fn build_fold_transforms(
                     output: output_summary,
                 },
                 placeholder: Some(fold.placeholder.clone()),
+                fold_id: Some(fold.id),
             },
             (),
         );
@@ -625,6 +639,7 @@ fn build_fold_transforms(
                     output: summary,
                 },
                 placeholder: None,
+                fold_id: None,
             },
             (),
         );
@@ -667,6 +682,7 @@ fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary
             Transform {
                 summary: s,
                 placeholder: None,
+                fold_id: None,
             },
             (),
         );
@@ -820,6 +836,7 @@ fn sync_fold_incremental(
                             output: output_summary,
                         },
                         placeholder: Some(fold.placeholder.clone()),
+                        fold_id: Some(fold.id),
                     },
                     (),
                 );
@@ -890,11 +907,13 @@ fn sync_fold_incremental(
                     output: summary,
                 },
                 placeholder: None,
+                fold_id: None,
             },
             (),
         );
     }
 
+    row_edits.consolidate();
     (new_transforms, row_edits)
 }
 
@@ -954,6 +973,15 @@ impl FoldSnapshot {
 
     pub fn fold_metadata(&self, id: &FoldId) -> Option<&FoldMetadata> {
         self.fold_metadata_by_id.get(id)
+    }
+
+    pub fn fold_id_at_point(&self, fold_point: FoldPoint) -> Option<FoldId> {
+        let (_, _, item) = self.transforms.find::<Dimensions<FoldPoint, FoldPoint>, _>(
+            (),
+            &fold_point,
+            Bias::Right,
+        );
+        item.and_then(|t| t.fold_id)
     }
 
     pub fn to_fold_point(&self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {

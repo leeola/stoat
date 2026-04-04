@@ -79,6 +79,7 @@ pub enum BlockId {
 pub struct CompanionView<'a> {
     pub display_map_id: DisplayMapId,
     pub companion_wrap_snapshot: &'a WrapSnapshot,
+    pub companion_wrap_edits: &'a Patch<u32>,
     pub companion: &'a Companion,
 }
 
@@ -495,6 +496,10 @@ impl BlockMap {
         }
     }
 
+    pub fn mark_dirty(&mut self) {
+        self.blocks_dirty = true;
+    }
+
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
         let mut ids = Vec::with_capacity(blocks.len());
         for props in blocks {
@@ -530,6 +535,10 @@ impl BlockMap {
         self.blocks_dirty = true;
     }
 
+    pub fn folded_buffers(&self) -> &HashSet<BufferId> {
+        &self.folded_buffers
+    }
+
     pub fn fold_buffer(&mut self, buffer_id: BufferId) {
         self.folded_buffers.insert(buffer_id);
         self.blocks_dirty = true;
@@ -549,14 +558,55 @@ impl BlockMap {
         &mut self,
         wrap_snapshot: Arc<WrapSnapshot>,
         wrap_edits: &Patch<u32>,
-        _companion_view: Option<CompanionView<'_>>,
+        companion_view: Option<CompanionView<'_>>,
     ) -> BlockSnapshot {
-        let edits = if self.deferred_edits.is_empty() {
+        let mut edits = if self.deferred_edits.is_empty() {
             wrap_edits.clone()
         } else {
             let deferred = std::mem::replace(&mut self.deferred_edits, Patch::empty());
             deferred.compose(wrap_edits.edits().iter().cloned())
         };
+
+        // Pull in companion edits: when the companion changes, we need to
+        // recompute spacer blocks in the affected region.
+        if let Some(ref cv) = companion_view {
+            if !cv.companion_wrap_edits.is_empty() {
+                let our_buffer = wrap_snapshot
+                    .tab_snapshot()
+                    .fold_snapshot()
+                    .inlay_snapshot()
+                    .buffer_snapshot();
+                let their_buffer = cv
+                    .companion_wrap_snapshot
+                    .tab_snapshot()
+                    .fold_snapshot()
+                    .inlay_snapshot()
+                    .buffer_snapshot();
+
+                let mut merged = Patch::empty();
+                for edit in cv.companion_wrap_edits.edits() {
+                    let companion_row =
+                        wrap_row_to_buffer_row(edit.new.start, cv.companion_wrap_snapshot);
+                    let our_range = cv.companion.convert_point_from_companion(
+                        cv.display_map_id,
+                        our_buffer,
+                        their_buffer,
+                        Point::new(companion_row, 0),
+                    );
+                    let our_wrap_start =
+                        buffer_row_to_wrap_row(our_range.start.row, &wrap_snapshot);
+                    let our_wrap_end = buffer_row_to_wrap_row(our_range.end.row, &wrap_snapshot)
+                        .max(our_wrap_start + 1);
+                    merged.push(stoat_text::patch::Edit {
+                        old: our_wrap_start..our_wrap_end,
+                        new: our_wrap_start..our_wrap_end,
+                    });
+                }
+                if !merged.is_empty() {
+                    edits = edits.compose(merged.into_inner());
+                }
+            }
+        }
 
         if edits.is_empty() && !self.blocks_dirty {
             if let Some(ref transforms) = self.transforms {
@@ -585,7 +635,7 @@ impl BlockMap {
                 .into_iter()
                 .map(|(_placement, block)| block),
         );
-        if let Some(ref companion_view) = _companion_view {
+        if let Some(ref companion_view) = companion_view {
             blocks.extend(
                 self.spacer_blocks(&wrap_snapshot, companion_view)
                     .into_iter()
@@ -692,8 +742,10 @@ impl BlockMap {
             .inlay_snapshot()
             .buffer_snapshot();
 
-        let patches = (companion.rhs_rows_to_lhs_rows)(
-            &companion.rhs_excerpt_to_lhs_excerpt,
+        let convert_fn = companion.rows_to_companion(companion_view.display_map_id);
+        let excerpt_map = companion.excerpt_map(companion_view.display_map_id);
+        let patches = convert_fn(
+            excerpt_map,
             companion_snapshot,
             our_snapshot,
             (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
@@ -701,20 +753,55 @@ impl BlockMap {
 
         let mut spacers = Vec::new();
         for patch in &patches {
+            let mut delta: i64 = 0;
+
             for edit in patch.patch.edits() {
-                let old_rows = edit.old.end.row.saturating_sub(edit.old.start.row);
-                let new_rows = edit.new.end.row.saturating_sub(edit.new.start.row);
-                if new_rows > old_rows {
-                    let height = new_rows - old_rows;
+                let our_start_wrap =
+                    buffer_row_to_wrap_row(edit.new.start.row, wrap_snapshot) as i64;
+                let our_end_wrap = buffer_row_to_wrap_row(edit.new.end.row, wrap_snapshot) as i64;
+                let companion_start_wrap = buffer_row_to_wrap_row(
+                    edit.old.start.row,
+                    companion_view.companion_wrap_snapshot,
+                ) as i64;
+                let companion_end_wrap = buffer_row_to_wrap_row(
+                    edit.old.end.row,
+                    companion_view.companion_wrap_snapshot,
+                ) as i64;
+
+                let our_rows = our_end_wrap - our_start_wrap;
+                let companion_rows = companion_end_wrap - companion_start_wrap;
+                let new_delta = delta + (companion_rows - our_rows);
+
+                if new_delta > delta {
+                    let height = (new_delta - delta) as u32;
                     let spacer_id = SpacerId(
                         self.next_spacer_id
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     );
                     spacers.push((
-                        BlockPlacement::Below(edit.old.end.row),
+                        BlockPlacement::Above(edit.new.start.row),
                         Block::Spacer {
                             id: spacer_id,
                             height,
+                            is_below: false,
+                        },
+                    ));
+                }
+
+                delta = new_delta;
+            }
+
+            if delta > 0 {
+                if let Some(last_edit) = patch.patch.edits().last() {
+                    let spacer_id = SpacerId(
+                        self.next_spacer_id
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    );
+                    spacers.push((
+                        BlockPlacement::Below(last_edit.new.end.row),
+                        Block::Spacer {
+                            id: spacer_id,
+                            height: delta as u32,
                             is_below: true,
                         },
                     ));
@@ -1456,6 +1543,58 @@ fn wrap_row_to_buffer_row(wrap_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
         .inlay_snapshot()
         .to_buffer_point(inlay_point)
         .row
+}
+
+fn buffer_row_to_wrap_row(buffer_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
+    let inlay_point = wrap_snapshot
+        .fold_snapshot()
+        .inlay_snapshot()
+        .to_inlay_point(Point::new(buffer_row, 0));
+    let fold_point = wrap_snapshot
+        .fold_snapshot()
+        .to_fold_point(inlay_point, Bias::Left);
+    let tab_point = wrap_snapshot.tab_snapshot().to_tab_point(fold_point);
+    wrap_snapshot.to_wrap_point(tab_point).row()
+}
+
+pub fn balancing_block(
+    block: &CustomBlock,
+    our_snapshot: &MultiBufferSnapshot,
+    companion_snapshot: &MultiBufferSnapshot,
+    companion: &Companion,
+    display_map_id: DisplayMapId,
+) -> Option<BlockProperties> {
+    let our_row = block.placement.start_row();
+    let our_point = Point::new(our_row, 0);
+    let their_range = companion.convert_point_from_companion(
+        display_map_id,
+        our_snapshot,
+        companion_snapshot,
+        our_point,
+    );
+    let placement = match block.placement {
+        BlockPlacement::Above(_) => BlockPlacement::Above(their_range.start.row),
+        BlockPlacement::Below(_) => {
+            if their_range.start == their_range.end {
+                BlockPlacement::Above(their_range.start.row)
+            } else {
+                BlockPlacement::Below(their_range.start.row)
+            }
+        },
+        BlockPlacement::Near(_) | BlockPlacement::Replace { .. } => return None,
+    };
+    let height = block.height;
+    Some(BlockProperties {
+        placement,
+        height,
+        style: BlockStyle::Spacer,
+        render: Arc::new(move |_ctx| {
+            let h = height.unwrap_or(0) as usize;
+            vec![Line::raw(String::new()); h]
+        }),
+        diff_status: None,
+        priority: block.priority,
+    })
 }
 
 fn longest_block_line(block: &Block) -> (u32, u32) {

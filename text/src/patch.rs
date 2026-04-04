@@ -96,6 +96,30 @@ where
             self.0.push(edit);
         }
     }
+
+    pub fn consolidate(&mut self) {
+        if self.0.len() <= 1 {
+            return;
+        }
+        self.0.sort_unstable_by(|a, b| {
+            a.old
+                .start
+                .cmp(&b.old.start)
+                .then_with(|| b.old.end.cmp(&a.old.end))
+        });
+        let mut write = 0;
+        for read in 1..self.0.len() {
+            if self.0[write].old.end >= self.0[read].old.start {
+                self.0[write].old.end = self.0[write].old.end.max(self.0[read].old.end);
+                self.0[write].new.start = self.0[write].new.start.min(self.0[read].new.start);
+                self.0[write].new.end = self.0[write].new.end.max(self.0[read].new.end);
+            } else {
+                write += 1;
+                self.0[write] = self.0[read].clone();
+            }
+        }
+        self.0.truncate(write + 1);
+    }
 }
 
 impl<T, TDelta> Patch<T>
@@ -422,6 +446,151 @@ mod tests {
                     .copied(),
             );
         }
+    }
+
+    #[test]
+    fn consolidate_empty() {
+        let mut patch = Patch::<u32>::empty();
+        patch.consolidate();
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn consolidate_single() {
+        let mut patch = Patch(vec![Edit {
+            old: 1u32..3,
+            new: 1..4,
+        }]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[Edit {
+                old: 1..3,
+                new: 1..4
+            }]
+        );
+    }
+
+    #[test]
+    fn consolidate_already_sorted_no_overlap() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 1u32..3,
+                new: 1..4,
+            },
+            Edit {
+                old: 5..7,
+                new: 6..8,
+            },
+        ]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[
+                Edit {
+                    old: 1..3,
+                    new: 1..4
+                },
+                Edit {
+                    old: 5..7,
+                    new: 6..8
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn consolidate_out_of_order() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 5u32..7,
+                new: 6..8,
+            },
+            Edit {
+                old: 1..3,
+                new: 1..4,
+            },
+        ]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[
+                Edit {
+                    old: 1..3,
+                    new: 1..4
+                },
+                Edit {
+                    old: 5..7,
+                    new: 6..8
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn consolidate_overlapping() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 1u32..5,
+                new: 1..6,
+            },
+            Edit {
+                old: 3..7,
+                new: 4..8,
+            },
+        ]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[Edit {
+                old: 1..7,
+                new: 1..8
+            }]
+        );
+    }
+
+    #[test]
+    fn consolidate_nested() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 1u32..10,
+                new: 1..12,
+            },
+            Edit {
+                old: 3..5,
+                new: 3..5,
+            },
+        ]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[Edit {
+                old: 1..10,
+                new: 1..12
+            }]
+        );
+    }
+
+    #[test]
+    fn consolidate_adjacent() {
+        let mut patch = Patch(vec![
+            Edit {
+                old: 1u32..3,
+                new: 1..4,
+            },
+            Edit {
+                old: 3..5,
+                new: 4..7,
+            },
+        ]);
+        patch.consolidate();
+        assert_eq!(
+            patch.edits(),
+            &[Edit {
+                old: 1..5,
+                new: 1..7
+            }]
+        );
     }
 
     #[test]

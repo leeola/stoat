@@ -14,18 +14,19 @@ use crate::{
     multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{
-    Block, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRow,
-    BlockRowKind, BlockSnapshot, BlockStyle, CompanionView, CustomBlock, CustomBlockId,
-    RenderBlock,
+    balancing_block, Block, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint,
+    BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CompanionView, CustomBlock,
+    CustomBlockId, RenderBlock,
 };
 pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
 pub use highlights::{
-    Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement, HighlightKey, HighlightStyle,
-    HighlightStyleId, HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight,
-    InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
+    CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement,
+    HighlightKey, HighlightStyle, HighlightStyleId, HighlightStyleInterner, HighlightedChunk,
+    Highlights, InlayHighlight, InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights,
+    TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
@@ -97,7 +98,86 @@ pub struct Companion {
     pub(crate) lhs_rows_to_rhs_rows: ConvertMultiBufferRows,
     pub(crate) rhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
     pub(crate) lhs_custom_block_to_balancing_block: HashMap<CustomBlockId, CustomBlockId>,
-    pub(crate) companion_wrap_snapshot: Arc<WrapSnapshot>,
+}
+
+#[allow(dead_code)]
+impl Companion {
+    fn is_rhs(&self, id: DisplayMapId) -> bool {
+        self.rhs_display_map_id == id
+    }
+
+    fn excerpt_map(&self, id: DisplayMapId) -> &HashMap<ExcerptId, ExcerptId> {
+        if self.is_rhs(id) {
+            &self.rhs_excerpt_to_lhs_excerpt
+        } else {
+            &self.lhs_excerpt_to_rhs_excerpt
+        }
+    }
+
+    fn rows_to_companion(&self, id: DisplayMapId) -> ConvertMultiBufferRows {
+        if self.is_rhs(id) {
+            self.rhs_rows_to_lhs_rows
+        } else {
+            self.lhs_rows_to_rhs_rows
+        }
+    }
+
+    fn convert_point_from_companion(
+        &self,
+        display_map_id: DisplayMapId,
+        our_snapshot: &MultiBufferSnapshot,
+        companion_snapshot: &MultiBufferSnapshot,
+        point: Point,
+    ) -> std::ops::Range<Point> {
+        let convert_fn = self.rows_to_companion(display_map_id);
+        let excerpt_map = self.excerpt_map(display_map_id);
+        let patches = convert_fn(
+            excerpt_map,
+            companion_snapshot,
+            our_snapshot,
+            (
+                std::ops::Bound::Included(point),
+                std::ops::Bound::Included(point),
+            ),
+        );
+        match patches.into_iter().next() {
+            Some(ep) => {
+                for edit in ep.patch.edits() {
+                    if edit.old.start <= point && point <= edit.old.end {
+                        return edit.new.clone();
+                    }
+                }
+                ep.edited_range
+            },
+            None => Point::zero()..Point::new(our_snapshot.line_count(), 0),
+        }
+    }
+
+    pub fn custom_block_to_balancing_block(
+        &self,
+        id: DisplayMapId,
+    ) -> &HashMap<CustomBlockId, CustomBlockId> {
+        if self.is_rhs(id) {
+            &self.rhs_custom_block_to_balancing_block
+        } else {
+            &self.lhs_custom_block_to_balancing_block
+        }
+    }
+
+    pub fn insert_balancing_mapping(
+        &mut self,
+        id: DisplayMapId,
+        source: CustomBlockId,
+        balancing: CustomBlockId,
+    ) {
+        if self.is_rhs(id) {
+            self.rhs_custom_block_to_balancing_block
+                .insert(source, balancing);
+        } else {
+            self.lhs_custom_block_to_balancing_block
+                .insert(source, balancing);
+        }
+    }
 }
 
 /// Threshold for which diagnostic severities to display.
@@ -174,8 +254,25 @@ impl DisplayMap {
         self.id
     }
 
+    pub fn folded_buffers(&self) -> &std::collections::HashSet<BufferId> {
+        self.block_map.folded_buffers()
+    }
+
     pub fn set_companion(&mut self, companion: Option<Companion>) {
+        if companion.is_none() {
+            if let Some(old) = self.companion.take() {
+                let ids: std::collections::HashSet<CustomBlockId> = old
+                    .rhs_custom_block_to_balancing_block
+                    .values()
+                    .chain(old.lhs_custom_block_to_balancing_block.values())
+                    .copied()
+                    .collect();
+                self.block_map.remove(&ids);
+            }
+            return;
+        }
         self.companion = companion;
+        self.block_map.mark_dirty();
     }
 
     pub fn set_masked(&mut self, masked: bool) {
@@ -319,25 +416,37 @@ impl DisplayMap {
         self.lsp_folding_crease_ids.insert(buffer_id, ids);
     }
 
+    pub fn sync_through_wrap(&mut self) -> (Arc<WrapSnapshot>, Patch<u32>) {
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
+        self.last_buffer_version = buffer_snapshot.version();
+        let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
+        let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
+        let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
+        self.wrap_map.sync(tab_snapshot, &tab_edits)
+    }
+
     pub fn snapshot(&mut self) -> DisplaySnapshot {
+        self.snapshot_with_companion(None)
+    }
+
+    pub fn snapshot_with_companion(
+        &mut self,
+        companion_wrap_data: Option<(&WrapSnapshot, &Patch<u32>)>,
+    ) -> DisplaySnapshot {
         let buffer_version = self.multi_buffer.buffer_version();
         if buffer_version == self.last_buffer_version
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
+            && companion_wrap_data.is_none()
         {
             if let Some(ref cached) = self.cached_snapshot {
                 return cached.clone();
             }
         }
 
-        let buffer_snapshot = self.multi_buffer.snapshot();
-        let diff_map = buffer_snapshot.diff_map.clone();
-        let buffer_edits = buffer_snapshot.edits_since(self.last_buffer_version);
-        self.last_buffer_version = buffer_snapshot.version();
-        let (inlay_snapshot, inlay_edits) = self.inlay_map.sync(buffer_snapshot, &buffer_edits);
-        let (fold_snapshot, fold_edits) = self.fold_map.sync(inlay_snapshot, &inlay_edits);
-        let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
-        let (wrap_snapshot, wrap_edits) = self.wrap_map.sync(tab_snapshot, &tab_edits);
+        let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();
+        let diff_map = self.multi_buffer.snapshot().diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version {
             self.block_map
@@ -349,11 +458,16 @@ impl DisplayMap {
             self.inserted_diff_block_ids = self.block_map.insert(props);
             self.last_diff_version = diff_version;
         }
-        let companion_view = self.companion.as_ref().map(|c| CompanionView {
-            display_map_id: self.id,
-            companion_wrap_snapshot: &c.companion_wrap_snapshot,
-            companion: c,
-        });
+        let companion_view =
+            self.companion
+                .as_ref()
+                .zip(companion_wrap_data)
+                .map(|(c, (snap, edits))| CompanionView {
+                    display_map_id: self.id,
+                    companion_wrap_snapshot: snap,
+                    companion_wrap_edits: edits,
+                    companion: c,
+                });
         let block_snapshot = self
             .block_map
             .sync(wrap_snapshot, &wrap_edits, companion_view);
@@ -418,6 +532,14 @@ impl DisplaySnapshot {
 
     pub fn fold_placeholder(&self) -> &FoldPlaceholder {
         &self.fold_placeholder
+    }
+
+    pub fn chunk_renderer_at_fold_point(&self, fold_point: FoldPoint) -> Option<ChunkRenderer> {
+        self.fold_snapshot()
+            .fold_id_at_point(fold_point)
+            .map(|id| ChunkRenderer {
+                id: ChunkRendererId::Fold(id.0),
+            })
     }
 
     pub fn crease_snapshot(&self) -> &CreaseSnapshot {

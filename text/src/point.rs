@@ -1,5 +1,5 @@
 use crate::{rope::TextSummary, Dimension};
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Sub};
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Point {
@@ -38,6 +38,19 @@ impl Add for Point {
 impl AddAssign for Point {
     fn add_assign(&mut self, other: Self) {
         *self = *self + other;
+    }
+}
+
+impl Sub for Point {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        debug_assert!(other <= self);
+        if self.row == other.row {
+            Point::new(0, self.column - other.column)
+        } else {
+            Point::new(self.row - other.row, self.column)
+        }
     }
 }
 

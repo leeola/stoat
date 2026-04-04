@@ -1,4 +1,10 @@
-use crate::{buffer::BufferId, display_map::inlay_map::InlayId};
+use crate::{
+    buffer::BufferId,
+    display_map::{
+        inlay_map::{InlayId, InlayKind},
+        DiagnosticSeverity,
+    },
+};
 use ratatui::style::{Color, Modifier, Style};
 use std::{
     borrow::Cow,
@@ -164,6 +170,8 @@ pub struct Chunk<'a> {
     pub highlight_style: Option<HighlightStyle>,
     pub is_tab: bool,
     pub is_inlay: bool,
+    pub inlay_kind: Option<InlayKind>,
+    pub diagnostic_severity: Option<DiagnosticSeverity>,
     pub renderer: Option<ChunkRenderer>,
 }
 
@@ -174,6 +182,8 @@ impl Default for Chunk<'_> {
             highlight_style: None,
             is_tab: false,
             is_inlay: false,
+            inlay_kind: None,
+            diagnostic_severity: None,
             renderer: None,
         }
     }
@@ -207,6 +217,54 @@ impl PartialOrd for HighlightEndpoint {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedHighlightEndpoints {
+    text_ptr: usize,
+    semantic_ptr: Option<usize>,
+    range: Range<usize>,
+    endpoints: Arc<[HighlightEndpoint]>,
+}
+
+impl CachedHighlightEndpoints {
+    fn is_valid(
+        &self,
+        highlights: &TextHighlights,
+        semantic: Option<&SemanticTokensHighlights>,
+        range: &Range<usize>,
+    ) -> bool {
+        self.text_ptr == Arc::as_ptr(highlights) as usize
+            && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
+            && self.range == *range
+    }
+
+    pub fn endpoints(&self) -> &[HighlightEndpoint] {
+        &self.endpoints
+    }
+}
+
+pub fn create_highlight_endpoints_cached(
+    range: &Range<usize>,
+    highlights: &TextHighlights,
+    semantic_highlights: Option<&SemanticTokensHighlights>,
+    resolve: &impl Fn(&Anchor) -> usize,
+    cache: &mut Option<CachedHighlightEndpoints>,
+) -> Arc<[HighlightEndpoint]> {
+    if let Some(ref cached) = cache {
+        if cached.is_valid(highlights, semantic_highlights, range) {
+            return cached.endpoints.clone();
+        }
+    }
+    let endpoints = create_highlight_endpoints(range, highlights, semantic_highlights, resolve);
+    let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
+    *cache = Some(CachedHighlightEndpoints {
+        text_ptr: Arc::as_ptr(highlights) as usize,
+        semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
+        range: range.clone(),
+        endpoints: arc.clone(),
+    });
+    arc
 }
 
 pub fn create_highlight_endpoints(
