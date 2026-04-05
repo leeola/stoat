@@ -1,5 +1,6 @@
 use crate::{
     action_handlers,
+    buffer_registry::BufferRegistry,
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
 };
@@ -31,6 +32,7 @@ pub struct Stoat {
     pub mode: String,
     pub executor: Executor,
     keymap: Keymap,
+    pub(crate) buffers: BufferRegistry,
 }
 
 impl Stoat {
@@ -66,6 +68,7 @@ impl Stoat {
             mode: "normal".into(),
             executor,
             keymap,
+            buffers: BufferRegistry::new(),
         }
     }
 
@@ -137,7 +140,7 @@ impl Stoat {
         let focused = self.panes.focus();
         for (id, pane) in self.panes.split_panes() {
             let is_focused = id == focused;
-            render_pane(pane, is_focused, &mut buf);
+            render_pane(pane, is_focused, &self.buffers, &mut buf);
         }
         if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
@@ -261,9 +264,13 @@ fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &m
     }
 }
 
-fn render_pane(pane: &Pane, is_focused: bool, buf: &mut Buffer) {
-    let label = match &pane.view {
-        View::Label(s) => s.as_str(),
+fn render_pane(pane: &Pane, is_focused: bool, buffers: &BufferRegistry, buf: &mut Buffer) {
+    let label: String = match &pane.view {
+        View::Label(s) => s.clone(),
+        View::Editor(buffer_id) => buffers
+            .path_for(*buffer_id)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "[scratch]".into()),
     };
 
     let border_style = if is_focused {

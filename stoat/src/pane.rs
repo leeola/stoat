@@ -1,3 +1,4 @@
+use crate::buffer::BufferId;
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 
@@ -25,6 +26,7 @@ pub enum Direction {
 #[derive(Debug, Clone)]
 pub enum View {
     Label(String),
+    Editor(BufferId),
 }
 
 /// How a pane is presented on screen.
@@ -143,8 +145,9 @@ impl PaneTree {
         let focused_pane = self.focus;
         let focused_node = self.node_for_pane(focused_pane);
 
+        let focused_view = self.panes[focused_pane].view.clone();
         let new_pane_id = self.panes.insert(Pane {
-            view: View::Label(format!("Pane {}", self.next_index)),
+            view: focused_view,
             placement: Placement::Split,
             area: Rect::default(),
             index: self.next_index,

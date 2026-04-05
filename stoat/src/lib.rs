@@ -1,6 +1,7 @@
 pub mod action_handlers;
 pub mod app;
 pub mod buffer;
+mod buffer_registry;
 pub mod diff_map;
 pub mod display_map;
 pub mod git;
