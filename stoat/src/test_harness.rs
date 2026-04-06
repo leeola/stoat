@@ -22,6 +22,10 @@ pub struct Frame {
     pub actions: Vec<String>,
     pub mode: String,
     pub size: (u16, u16),
+    pub pane_count: usize,
+    /// 1-based position of the focused pane in visual traversal order
+    /// (left-to-right, top-to-bottom).
+    pub focused_pane: usize,
     pub content: String,
 }
 
@@ -168,6 +172,19 @@ impl TestHarness {
         );
     }
 
+    fn pane_metadata(&self) -> (usize, usize) {
+        let focused_id = self.stoat.panes.focus();
+        let pane_count = self.stoat.panes.pane_count();
+        let focused_pos = self
+            .stoat
+            .panes
+            .split_panes()
+            .position(|(id, _)| id == focused_id)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        (pane_count, focused_pos)
+    }
+
     fn maybe_capture(&mut self, action: &str) {
         let buf = self.stoat.render();
         if self.last_buffer.as_ref() == Some(&buf) {
@@ -176,12 +193,15 @@ impl TestHarness {
             }
             return;
         }
+        let (pane_count, focused_pane) = self.pane_metadata();
         self.last_buffer = Some(buf.clone());
         self.frames.push(Frame {
             number: self.step + self.sub_frame,
             actions: vec![action.to_string()],
             mode: self.stoat.mode.clone(),
             size: (buf.area.width, buf.area.height),
+            pane_count,
+            focused_pane,
             content: buffer_to_text(&buf),
         });
         self.sub_frame += 1;
@@ -192,11 +212,14 @@ impl TestHarness {
         let is_different = self.last_buffer.as_ref() != Some(&buf);
         self.last_buffer = Some(buf.clone());
         if is_different {
+            let (pane_count, focused_pane) = self.pane_metadata();
             self.frames.push(Frame {
                 number: self.step + self.sub_frame,
                 actions: vec![action.to_string()],
                 mode: self.stoat.mode.clone(),
                 size: (buf.area.width, buf.area.height),
+                pane_count,
+                focused_pane,
                 content: buffer_to_text(&buf),
             });
             self.sub_frame += 1;
@@ -233,6 +256,10 @@ fn buffer_to_text(buf: &Buffer) -> String {
 fn format_header(frame: &Frame) -> String {
     let mut pairs = BTreeMap::new();
     pairs.insert("actions", frame.actions.join(", "));
+    pairs.insert(
+        "focused",
+        format!("#{} of {}", frame.focused_pane, frame.pane_count),
+    );
     pairs.insert("mode", frame.mode.clone());
     pairs.insert("size", format!("{}x{}", frame.size.0, frame.size.1));
     pairs

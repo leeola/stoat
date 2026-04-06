@@ -3,6 +3,7 @@ source: stoat/src/test_harness.rs
 expression: text
 ---
 actions: d
+focused: #3 of 3
 mode: normal
 size: 80x24
 ---
