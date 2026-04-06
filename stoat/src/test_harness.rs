@@ -71,6 +71,11 @@ impl TestHarness {
         Self::new(width, height)
     }
 
+    pub fn open_file(&mut self, path: &std::path::Path) {
+        self.stoat.open_file(path).expect("open_file failed");
+        self.capture("open_file");
+    }
+
     pub fn type_keys(&mut self, seq: &str) {
         self.step += 100;
         self.sub_frame = 0;
@@ -729,6 +734,65 @@ mod tests {
         h.type_action("SplitRight()");
         h.type_action("FocusLeft()");
         h.assert_snapshot("split_right_focus_left");
+    }
+
+    fn write_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).expect("write test file");
+        path
+    }
+
+    #[test]
+    fn open_single_file_replaces_scratch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "test.txt", "hello world");
+
+        let mut h = Stoat::test();
+        h.open_file(&path);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
+        h.assert_snapshot("open_single_file");
+    }
+
+    #[test]
+    fn open_two_files_splits() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_file(dir.path(), "a.txt", "file A");
+        let b = write_file(dir.path(), "b.txt", "file B");
+
+        let mut h = Stoat::test();
+        h.open_file(&a);
+        h.open_file(&b);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 2);
+        h.assert_snapshot("open_two_files");
+    }
+
+    #[test]
+    fn open_three_files_three_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_file(dir.path(), "a.txt", "AAA");
+        let b = write_file(dir.path(), "b.txt", "BBB");
+        let c = write_file(dir.path(), "c.txt", "CCC");
+
+        let mut h = Stoat::test();
+        h.open_file(&a);
+        h.open_file(&b);
+        h.open_file(&c);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 3);
+        h.assert_snapshot("open_three_files");
+    }
+
+    #[test]
+    fn open_missing_file_creates_empty_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist.txt");
+
+        let mut h = Stoat::test();
+        h.open_file(&path);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
     }
 
     #[test]

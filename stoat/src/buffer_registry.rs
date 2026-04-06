@@ -73,6 +73,12 @@ impl BufferRegistry {
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }
+
+    pub(crate) fn is_empty_scratch(&self, id: BufferId) -> bool {
+        self.buffers.get(&id).is_some_and(|entry| {
+            entry.path.is_none() && entry.buffer.read().unwrap().rope().len() == 0
+        })
+    }
 }
 
 #[cfg(test)]
