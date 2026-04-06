@@ -1,4 +1,4 @@
-use crate::buffer::BufferId;
+use crate::editor_state::EditorId;
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 
@@ -26,7 +26,7 @@ pub enum Direction {
 #[derive(Debug, Clone)]
 pub enum View {
     Label(String),
-    Editor(BufferId),
+    Editor(EditorId),
 }
 
 /// How a pane is presented on screen.

@@ -7,5 +7,16 @@ on key {
     mode == space {
         Escape -> SetMode(normal);
         q -> Quit();
+        s -> SetMode(space_split);
+        h -> [FocusLeft(), SetMode(normal)];
+        j -> [FocusDown(), SetMode(normal)];
+        k -> [FocusUp(), SetMode(normal)];
+        l -> [FocusRight(), SetMode(normal)];
+    }
+    mode == space_split {
+        Escape -> SetMode(normal);
+        r -> [SplitRight(), SetMode(normal)];
+        d -> [SplitDown(), SetMode(normal)];
+        c -> [ClosePane(), SetMode(normal)];
     }
 }

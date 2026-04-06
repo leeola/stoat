@@ -4,6 +4,7 @@ pub mod buffer;
 mod buffer_registry;
 pub mod diff_map;
 pub mod display_map;
+mod editor_state;
 pub mod git;
 pub mod host;
 pub mod keymap;

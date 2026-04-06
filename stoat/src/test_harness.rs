@@ -659,6 +659,52 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_split_right() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.assert_snapshot("split_right");
+    }
+
+    #[test]
+    fn snapshot_split_down() {
+        let mut h = Stoat::test();
+        h.type_action("SplitDown()");
+        h.assert_snapshot("split_down");
+    }
+
+    #[test]
+    fn snapshot_nested_splits() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("SplitDown()");
+        h.assert_snapshot("nested_splits");
+    }
+
+    #[test]
+    fn snapshot_three_columns() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("SplitRight()");
+        h.assert_snapshot("three_columns");
+    }
+
+    #[test]
+    fn snapshot_close_returns_to_single() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("ClosePane()");
+        h.assert_snapshot("close_returns_to_single");
+    }
+
+    #[test]
+    fn snapshot_split_right_focus_left() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("FocusLeft()");
+        h.assert_snapshot("split_right_focus_left");
+    }
+
+    #[test]
     fn to_key_token_round_trips() {
         use crate::keymap::CompiledKey;
 

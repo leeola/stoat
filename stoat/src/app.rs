@@ -1,6 +1,7 @@
 use crate::{
     action_handlers,
     buffer_registry::BufferRegistry,
+    editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
 };
@@ -12,6 +13,7 @@ use ratatui::{
     text::Text,
     widgets::{Block, Borders, Paragraph, Widget},
 };
+use slotmap::SlotMap;
 use std::io;
 use stoat_action::Action;
 use stoat_scheduler::Executor;
@@ -33,6 +35,7 @@ pub struct Stoat {
     pub executor: Executor,
     keymap: Keymap,
     pub(crate) buffers: BufferRegistry,
+    pub(crate) editors: SlotMap<EditorId, EditorState>,
 }
 
 impl Stoat {
@@ -62,13 +65,21 @@ impl Stoat {
             .map(|c| Keymap::compile(&c))
             .unwrap_or_else(|| Keymap::compile(&stoat_config::Config { blocks: vec![] }));
 
+        let mut buffers = BufferRegistry::new();
+        let (buffer_id, buffer) = buffers.new_scratch();
+        let mut editors = SlotMap::with_key();
+        let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
+        let mut panes = PaneTree::new(Rect::default());
+        panes.pane_mut(panes.focus()).view = View::Editor(editor_id);
+
         Self {
             size: Rect::default(),
-            panes: PaneTree::new(Rect::default()),
+            panes,
             mode: "normal".into(),
             executor,
             keymap,
-            buffers: BufferRegistry::new(),
+            buffers,
+            editors,
         }
     }
 
@@ -135,12 +146,12 @@ impl Stoat {
         effect
     }
 
-    pub(crate) fn render(&self) -> Buffer {
+    pub(crate) fn render(&mut self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
         let focused = self.panes.focus();
         for (id, pane) in self.panes.split_panes() {
             let is_focused = id == focused;
-            render_pane(pane, is_focused, &self.buffers, &mut buf);
+            render_pane(pane, is_focused, &mut self.editors, &self.buffers, &mut buf);
         }
         if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
@@ -264,33 +275,54 @@ fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &m
     }
 }
 
-fn render_pane(pane: &Pane, is_focused: bool, buffers: &BufferRegistry, buf: &mut Buffer) {
-    let label: String = match &pane.view {
-        View::Label(s) => s.clone(),
-        View::Editor(buffer_id) => buffers
-            .path_for(*buffer_id)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "[scratch]".into()),
-    };
-
+fn render_pane(
+    pane: &Pane,
+    is_focused: bool,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    buf: &mut Buffer,
+) {
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-
+    let text_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style);
     let inner = block.inner(pane.area);
     block.render(pane.area, buf);
 
-    let text_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Paragraph::new(Text::styled(label, text_style))
-        .centered()
-        .render(inner, buf);
+    match &pane.view {
+        View::Label(label) => {
+            Paragraph::new(Text::styled(label.clone(), text_style))
+                .centered()
+                .render(inner, buf);
+        },
+        View::Editor(editor_id) => {
+            if let Some(editor) = editors.get_mut(*editor_id) {
+                let snapshot = editor.display_map.snapshot();
+                let visible_rows = inner.height as u32;
+                let end_row = (editor.scroll_row + visible_rows).min(snapshot.line_count());
+                for (i, line) in snapshot
+                    .display_lines(editor.scroll_row..end_row)
+                    .enumerate()
+                {
+                    let y = inner.y + i as u16;
+                    for (j, ch) in line.chars().enumerate() {
+                        let x = inner.x + j as u16;
+                        if x >= inner.x + inner.width {
+                            break;
+                        }
+                        buf[(x, y)].set_char(ch).set_style(text_style);
+                    }
+                }
+            }
+        },
+    }
 }

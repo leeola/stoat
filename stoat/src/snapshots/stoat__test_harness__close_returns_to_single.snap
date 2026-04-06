@@ -2,8 +2,8 @@
 source: stoat/src/test_harness.rs
 expression: text
 ---
-actions: space
-mode: space
+actions: c
+mode: normal
 size: 80x24
 ---
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -21,12 +21,12 @@ size: 80x24
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                       ┌ space ───────────────┐
-│                                                       │Esc   normal mode     │
-│                                                       │  q   exit stoat      │
-│                                                       │  s   space_split mode│
-│                                                       │  h   focus pane left │
-│                                                       │  j   focus pane down │
-│                                                       │  k   focus pane up   │
-│                                                       │  l   focus pane right│
-└───────────────────────────────────────────────────────└──────────────────────┘
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
