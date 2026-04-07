@@ -128,17 +128,26 @@ impl TestHarness {
         &self.frames
     }
 
+    /// Snapshot the **layout** view: characters and structure with all
+    /// styling stripped. Asserts positioning, wrapping, and text content.
+    /// Use as the default for most tests; diffs stay readable and the
+    /// snapshot is stable across color/theme tweaks.
     pub fn assert_snapshot(&mut self, name: &str) {
         self.capture("snapshot");
         let text = format_plain(self.frames.last().expect("no frames"));
         insta::assert_snapshot!(name, text);
     }
 
-    pub fn assert_snapshot_raw(&mut self, name: &str) {
+    /// Snapshot the **styled** view: characters plus inline ANSI SGR escapes
+    /// for foreground/background color, modifiers (bold, reverse, etc.), and
+    /// the cursor cell. Use when colors, highlights, selection bars, or
+    /// cursor position carry meaning the layout view cannot represent. Pair
+    /// with `assert_snapshot` rather than replacing it.
+    pub fn assert_snapshot_styled(&mut self, name: &str) {
         self.capture("snapshot");
         let frame = self.frames.last().expect("no frames");
         let buf = self.last_buffer.as_ref().expect("no buffer");
-        let text = format_raw(frame, buf);
+        let text = format_styled(frame, buf);
         insta::assert_snapshot!(name, text);
     }
 
@@ -294,7 +303,7 @@ fn format_plain(frame: &Frame) -> String {
     format!("{header}\n---\n{}", frame.content)
 }
 
-fn format_raw(frame: &Frame, buf: &Buffer) -> String {
+fn format_styled(frame: &Frame, buf: &Buffer) -> String {
     let header = format_header(frame);
     let ansi = buffer_to_ansi(buf);
     format!("{header}\n---\n{ansi}")
@@ -671,9 +680,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_initial_raw() {
+    fn snapshot_initial_styled() {
         let mut h = Stoat::test();
-        h.assert_snapshot_raw("initial_raw");
+        h.assert_snapshot_styled("initial_styled");
     }
 
     #[test]
