@@ -1,0 +1,15 @@
+[package]
+name = "stoat_language"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1"

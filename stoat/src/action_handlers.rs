@@ -76,6 +76,9 @@ fn open_file(stoat: &mut Stoat, path: &Path) {
     };
 
     let (buffer_id, buffer) = stoat.buffers.open(&absolute, &content);
+    if let Some(lang) = stoat.language_registry.for_path(&absolute) {
+        stoat.buffers.set_language(buffer_id, lang);
+    }
     let new_editor_id =
         stoat
             .editors

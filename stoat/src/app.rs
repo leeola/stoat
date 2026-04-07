@@ -1,7 +1,14 @@
 use crate::{
     action_handlers,
+    buffer::BufferId,
     buffer_registry::BufferRegistry,
     command_palette::{CommandPalette, PaletteOutcome},
+    display_map::{
+        highlights::{
+            create_highlight_endpoints, highlighted_chunks, SemanticTokenHighlight, TextHighlights,
+        },
+        syntax_theme::SyntaxStyles,
+    },
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
@@ -15,9 +22,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 use slotmap::SlotMap;
-use std::{io, path::Path};
+use std::{io, path::Path, sync::Arc};
 use stoat_action::{Action, OpenFile};
+use stoat_language::{self as language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
+use stoat_text::{Bias, Point};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
@@ -38,6 +47,8 @@ pub struct Stoat {
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) command_palette: Option<CommandPalette>,
+    pub(crate) language_registry: Arc<LanguageRegistry>,
+    pub(crate) syntax_styles: SyntaxStyles,
 }
 
 impl Stoat {
@@ -83,6 +94,8 @@ impl Stoat {
             buffers,
             editors,
             command_palette: None,
+            language_registry: Arc::new(LanguageRegistry::standard()),
+            syntax_styles: SyntaxStyles::standard(),
         }
     }
 
@@ -165,7 +178,78 @@ impl Stoat {
         effect
     }
 
+    fn ensure_visible_buffers_parsed(&mut self) {
+        let mut visible: Vec<(EditorId, BufferId)> = Vec::new();
+        for (_, pane) in self.panes.split_panes() {
+            if let View::Editor(editor_id) = pane.view {
+                if let Some(editor) = self.editors.get(editor_id) {
+                    visible.push((editor_id, editor.buffer_id));
+                }
+            }
+        }
+
+        let mut updates: Vec<(EditorId, BufferId, Arc<[SemanticTokenHighlight]>)> = Vec::new();
+
+        for (editor_id, buffer_id) in &visible {
+            let Some(lang) = self.buffers.language_for(*buffer_id) else {
+                continue;
+            };
+            let Some(shared) = self.buffers.get(*buffer_id) else {
+                continue;
+            };
+
+            let snapshot = {
+                let guard = shared.read().expect("buffer poisoned");
+                guard.snapshot.clone()
+            };
+            let cur_version = snapshot.version;
+            if self.buffers.syntax_version(*buffer_id) == Some(cur_version) {
+                continue;
+            }
+
+            // FIXME(syntax-v2): allocates O(buffer) per parse. Replace with
+            // tree_sitter's parse_with callback that walks rope chunks.
+            let text = snapshot.visible_text.to_string();
+
+            let Some(tree) = language::parse(&lang, &text, None) else {
+                tracing::warn!("tree-sitter parse failed for buffer {:?}", buffer_id);
+                continue;
+            };
+
+            let spans = language::extract_highlights(&lang, &tree, &text);
+            let tokens: Arc<[SemanticTokenHighlight]> = spans
+                .into_iter()
+                .map(|sp| SemanticTokenHighlight {
+                    range: snapshot.anchor_at(sp.byte_range.start, Bias::Left)
+                        ..snapshot.anchor_at(sp.byte_range.end, Bias::Right),
+                    style: self.syntax_styles.id(sp.style),
+                })
+                .collect();
+
+            self.buffers.store_syntax(
+                *buffer_id,
+                SyntaxState {
+                    tree,
+                    version: cur_version,
+                },
+            );
+
+            updates.push((*editor_id, *buffer_id, tokens));
+        }
+
+        for (editor_id, buffer_id, tokens) in updates {
+            if let Some(editor) = self.editors.get_mut(editor_id) {
+                editor.display_map.set_semantic_token_highlights(
+                    buffer_id,
+                    tokens,
+                    self.syntax_styles.interner.clone(),
+                );
+            }
+        }
+    }
+
     pub(crate) fn render(&mut self) -> Buffer {
+        self.ensure_visible_buffers_parsed();
         let mut buf = Buffer::empty(self.size);
         let focused = self.panes.focus();
         for (id, pane) in self.panes.split_panes() {
@@ -670,23 +754,92 @@ fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                let snapshot = editor.display_map.snapshot();
-                let visible_rows = inner.height as u32;
-                let end_row = (editor.scroll_row + visible_rows).min(snapshot.line_count());
-                for (i, line) in snapshot
-                    .display_lines(editor.scroll_row..end_row)
-                    .enumerate()
-                {
-                    let y = inner.y + i as u16;
-                    for (j, ch) in line.chars().enumerate() {
-                        let x = inner.x + j as u16;
-                        if x >= inner.x + inner.width {
-                            break;
-                        }
-                        buf[(x, y)].set_char(ch).set_style(text_style);
-                    }
-                }
+                render_editor(editor, inner, text_style, buf);
             }
+            let _ = buffers;
         },
+    }
+}
+
+// FIXME(syntax-v2): bypasses BlockChunks because BlockSnapshot::chunks
+// currently ignores its Highlights argument. Properly fixing BlockChunks
+// to apply endpoint merging while traversing block transforms is the
+// right long-term home for this logic. Bypass works for v1 because folds,
+// wraps, inlays, and blocks are not active in normal flow.
+//
+// FIXME(syntax-v2): all syntax tokens share HighlightKey::SemanticToken
+// in the merger, so nested captures (e.g. escape_sequence inside
+// string_literal) collapse into a single span. Outer-wins via
+// (start, pattern_index) sort in extract_highlights is the v1 fallback;
+// proper layered overlap requires per-span priority on the merger key.
+fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+    let snapshot = editor.display_map.snapshot();
+    let visible_rows = inner.height as u32;
+    let total_rows = snapshot.line_count();
+    let end_row = (editor.scroll_row + visible_rows).min(total_rows);
+    if end_row <= editor.scroll_row {
+        return;
+    }
+
+    let buf_snap = snapshot.buffer_snapshot();
+    let buffer_line_count = buf_snap.line_count();
+
+    // FIXME(syntax-v2): assumes display_row == buffer_row. Folds, wraps,
+    // and inlays will break this. Replace with a proper display->buffer
+    // row mapping (or fix BlockChunks to consume Highlights).
+    let view_start_offset = if editor.scroll_row >= buffer_line_count {
+        buf_snap.rope().len()
+    } else {
+        buf_snap
+            .rope()
+            .point_to_offset(Point::new(editor.scroll_row, 0))
+    };
+    let view_end_offset = if end_row >= buffer_line_count {
+        buf_snap.rope().len()
+    } else {
+        buf_snap.rope().point_to_offset(Point::new(end_row, 0))
+    };
+
+    let semantic_clone = snapshot.semantic_token_highlights().clone();
+    let empty_text_highlights: TextHighlights = Arc::new(std::collections::HashMap::new());
+    let resolve = |a: &stoat_text::Anchor| buf_snap.resolve_anchor(a);
+    let endpoints = create_highlight_endpoints(
+        &(view_start_offset..view_end_offset),
+        &empty_text_highlights,
+        Some(&semantic_clone),
+        &resolve,
+    );
+
+    for display_row in editor.scroll_row..end_row {
+        let line = snapshot.display_line(display_row);
+        let y = inner.y + (display_row - editor.scroll_row) as u16;
+        if line.is_empty() {
+            continue;
+        }
+
+        let line_start = if display_row >= buffer_line_count {
+            buf_snap.rope().len()
+        } else {
+            buf_snap.rope().point_to_offset(Point::new(display_row, 0))
+        };
+
+        let mut x = inner.x;
+        for chunk in highlighted_chunks(&line, line_start, &endpoints) {
+            let style = chunk
+                .style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style())
+                .unwrap_or(fallback_style);
+            for ch in chunk.text.chars() {
+                if x >= inner.x + inner.width {
+                    break;
+                }
+                buf[(x, y)].set_char(ch).set_style(style);
+                x += 1;
+            }
+            if x >= inner.x + inner.width {
+                break;
+            }
+        }
     }
 }

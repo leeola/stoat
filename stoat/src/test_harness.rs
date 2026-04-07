@@ -909,4 +909,82 @@ mod tests {
             assert_eq!(parsed.modifiers, modifiers);
         }
     }
+
+    #[test]
+    fn snapshot_open_rust_file_highlights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "sample.rs",
+            "fn main() {\n    let x = \"hi\";\n}\n",
+        );
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_rust_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_highlights_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "sample.rs",
+            "fn main() {\n    let x = \"hi\";\n}\n",
+        );
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot_styled("snapshot_open_rust_file_highlights_styled");
+    }
+
+    #[test]
+    fn snapshot_open_json_file_highlights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.json", "{\n  \"a\": 1\n}\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_json_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_json_file_highlights_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.json", "{\n  \"a\": 1\n}\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot_styled("snapshot_open_json_file_highlights_styled");
+    }
+
+    #[test]
+    fn snapshot_open_markdown_file_highlights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.md", "# Title\n\nbody\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_markdown_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_markdown_file_highlights_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.md", "# Title\n\nbody\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot_styled("snapshot_open_markdown_file_highlights_styled");
+    }
+
+    #[test]
+    fn snapshot_open_unknown_extension_no_highlights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.txt", "fn main() {}\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_unknown_extension_no_highlights");
+    }
 }

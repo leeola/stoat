@@ -4,10 +4,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
+use stoat_language::{Language, SyntaxState};
 
 struct BufferEntry {
     buffer: SharedBuffer,
     path: Option<PathBuf>,
+    language: Option<Arc<Language>>,
+    syntax: Option<SyntaxState>,
 }
 
 pub(crate) struct BufferRegistry {
@@ -39,6 +42,8 @@ impl BufferRegistry {
             BufferEntry {
                 buffer: buffer.clone(),
                 path: None,
+                language: None,
+                syntax: None,
             },
         );
         (id, buffer)
@@ -61,6 +66,8 @@ impl BufferRegistry {
             BufferEntry {
                 buffer: buffer.clone(),
                 path: Some(path_buf),
+                language: None,
+                syntax: None,
             },
         );
         (id, buffer)
@@ -72,6 +79,27 @@ impl BufferRegistry {
 
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
+    }
+
+    pub(crate) fn language_for(&self, id: BufferId) -> Option<Arc<Language>> {
+        self.buffers.get(&id)?.language.clone()
+    }
+
+    pub(crate) fn set_language(&mut self, id: BufferId, lang: Arc<Language>) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.language = Some(lang);
+            entry.syntax = None;
+        }
+    }
+
+    pub(crate) fn syntax_version(&self, id: BufferId) -> Option<u64> {
+        self.buffers.get(&id)?.syntax.as_ref().map(|s| s.version)
+    }
+
+    pub(crate) fn store_syntax(&mut self, id: BufferId, state: SyntaxState) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.syntax = Some(state);
+        }
     }
 }
 

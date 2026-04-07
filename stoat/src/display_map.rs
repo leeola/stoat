@@ -4,6 +4,7 @@ mod fold_map;
 pub mod highlights;
 pub mod inlay_map;
 pub mod invisibles;
+pub mod syntax_theme;
 pub mod tab_map;
 mod wrap_map;
 
@@ -564,6 +565,10 @@ impl DisplaySnapshot {
 
     pub fn wrap_snapshot(&self) -> &WrapSnapshot {
         self.block_snapshot.wrap_snapshot()
+    }
+
+    pub fn buffer_snapshot(&self) -> &MultiBufferSnapshot {
+        self.block_snapshot.buffer_snapshot()
     }
 
     pub fn longest_row(&self) -> (u32, u32) {
