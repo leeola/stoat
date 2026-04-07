@@ -5,6 +5,7 @@ const PARAMS: &[ParamDef] = &[ParamDef {
     name: "path",
     kind: ParamKind::String,
     required: true,
+    description: "Filesystem path of the file to open. Relative paths resolve against the current working directory.",
 }];
 
 #[derive(Debug)]

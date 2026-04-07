@@ -89,6 +89,21 @@ impl TestHarness {
         }
     }
 
+    /// Send each char of `text` as an individual `Char(c)` KeyEvent. Bypasses
+    /// `parse_keys`, so chars like `-`, `:`, `/` that have special meaning in
+    /// the key-token grammar are typed literally.
+    pub fn type_text(&mut self, text: &str) {
+        self.step += 100;
+        self.sub_frame = 0;
+        for ch in text.chars() {
+            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
+            let desc = key_description(&key);
+            if let UpdateEffect::Redraw = self.stoat.update(Event::Key(key)) {
+                self.maybe_capture(&desc);
+            }
+        }
+    }
+
     pub fn tick(&mut self) -> bool {
         self.scheduler.tick()
     }
@@ -795,6 +810,73 @@ mod tests {
         h.open_file(&path);
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 1);
+    }
+
+    #[test]
+    fn command_palette_opens_file_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "palette_target.txt", "loaded via palette");
+        let path_str = path.to_str().expect("utf8 path");
+
+        let mut h = Stoat::test();
+        h.type_text(":OpenFile");
+        h.type_keys("enter");
+        h.type_text(path_str);
+        h.type_keys("enter");
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
+        assert!(
+            frame.content.contains("loaded via palette"),
+            "buffer not visible in frame:\n{}",
+            frame.content
+        );
+    }
+
+    #[test]
+    fn command_palette_escape_cancels() {
+        let mut h = Stoat::test();
+        h.type_text(":Open");
+        h.type_keys("escape");
+        let frame = h.snapshot();
+        assert_eq!(frame.mode, "normal");
+    }
+
+    #[test]
+    fn snapshot_command_palette_filter_empty() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        h.assert_snapshot("command_palette_filter_empty");
+    }
+
+    #[test]
+    fn snapshot_command_palette_filter_typing() {
+        let mut h = Stoat::test();
+        h.type_text(":Foc");
+        h.assert_snapshot("command_palette_filter_typing");
+    }
+
+    #[test]
+    fn snapshot_command_palette_filter_narrows_to_one() {
+        let mut h = Stoat::test();
+        h.type_text(":quit");
+        h.assert_snapshot("command_palette_filter_narrows_to_one");
+    }
+
+    #[test]
+    fn snapshot_command_palette_collect_args_empty() {
+        let mut h = Stoat::test();
+        h.type_text(":OpenFile");
+        h.type_keys("enter");
+        h.assert_snapshot("command_palette_collect_args_empty");
+    }
+
+    #[test]
+    fn snapshot_command_palette_collect_args_typing() {
+        let mut h = Stoat::test();
+        h.type_text(":OpenFile");
+        h.type_keys("enter");
+        h.type_text("/tmp/example.rs");
+        h.assert_snapshot("command_palette_collect_args_typing");
     }
 
     #[test]

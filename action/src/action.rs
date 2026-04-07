@@ -7,6 +7,13 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
     fn params(&self) -> &'static [ParamDef];
     fn short_desc(&self) -> &'static str;
     fn long_desc(&self) -> &'static str;
+
+    /// Whether this action appears in the command palette listing. Defaults to
+    /// true; override to false for plumbing actions that should only be
+    /// invoked from keybindings (e.g. opening the palette itself).
+    fn palette_visible(&self) -> bool {
+        true
+    }
 }
 
 pub trait Action: Debug + Send + 'static {

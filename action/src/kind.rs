@@ -11,4 +11,5 @@ pub enum ActionKind {
     FocusPrev,
     ClosePane,
     OpenFile,
+    OpenCommandPalette,
 }

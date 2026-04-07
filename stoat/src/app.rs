@@ -1,6 +1,7 @@
 use crate::{
     action_handlers,
     buffer_registry::BufferRegistry,
+    command_palette::{CommandPalette, PaletteOutcome},
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
@@ -36,6 +37,7 @@ pub struct Stoat {
     keymap: Keymap,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
+    pub(crate) command_palette: Option<CommandPalette>,
 }
 
 impl Stoat {
@@ -80,6 +82,7 @@ impl Stoat {
             keymap,
             buffers,
             editors,
+            command_palette: None,
         }
     }
 
@@ -131,6 +134,10 @@ impl Stoat {
             return UpdateEffect::Quit;
         }
 
+        if self.command_palette.is_some() {
+            return self.dispatch_palette_key(key);
+        }
+
         let state = StoatKeymapState::new(&self.mode);
         let Some(actions) = self.keymap.lookup(&state, &key) else {
             return UpdateEffect::None;
@@ -146,7 +153,7 @@ impl Stoat {
                 }
                 continue;
             }
-            if let Some(action) = resolve_action(&ra.name) {
+            if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 let e = action_handlers::dispatch(self, &*action);
                 match e {
                     UpdateEffect::Quit => return UpdateEffect::Quit,
@@ -165,7 +172,9 @@ impl Stoat {
             let is_focused = id == focused;
             render_pane(pane, is_focused, &mut self.editors, &self.buffers, &mut buf);
         }
-        if !PRIMARY_MODES.contains(&self.mode.as_str()) {
+        if let Some(palette) = &self.command_palette {
+            render_command_palette(palette, self.size, &mut buf);
+        } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
             let raw = self.keymap.active_bindings(&state);
             let bindings: Vec<_> = raw
@@ -178,6 +187,30 @@ impl Stoat {
             render_mini_help(&self.mode, &bindings, self.size, &mut buf);
         }
         buf
+    }
+
+    fn dispatch_palette_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        let outcome = match self.command_palette.as_mut() {
+            Some(palette) => palette.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PaletteOutcome::None => UpdateEffect::Redraw,
+            PaletteOutcome::Close => {
+                self.command_palette = None;
+                UpdateEffect::Redraw
+            },
+            PaletteOutcome::Dispatch(entry, params) => {
+                self.command_palette = None;
+                match (entry.create)(&params) {
+                    Ok(action) => action_handlers::dispatch(self, &*action),
+                    Err(e) => {
+                        tracing::warn!("palette dispatch `{}`: {e}", entry.def.name());
+                        UpdateEffect::Redraw
+                    },
+                }
+            },
+        }
     }
 }
 
@@ -210,6 +243,16 @@ pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
     }
 }
 
+fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
+    match &arg.value {
+        stoat_config::Value::String(s) => Some(stoat_action::ParamValue::String(s.clone())),
+        stoat_config::Value::Ident(s) => Some(stoat_action::ParamValue::String(s.clone())),
+        stoat_config::Value::Number(n) => Some(stoat_action::ParamValue::Number(*n)),
+        stoat_config::Value::Bool(b) => Some(stoat_action::ParamValue::Bool(*b)),
+        _ => None,
+    }
+}
+
 const PRIMARY_MODES: &[&str] = &["normal", "insert"];
 
 fn action_display_desc(action: &ResolvedAction) -> String {
@@ -222,12 +265,25 @@ fn action_display_desc(action: &ResolvedAction) -> String {
         .unwrap_or_else(|| action.name.clone())
 }
 
-fn resolve_action(name: &str) -> Option<Box<dyn Action>> {
-    let entry = stoat_action::registry::lookup(name);
-    if entry.is_none() {
-        tracing::warn!("unknown action: {name}");
+fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
+    let entry = stoat_action::registry::lookup(name)?;
+    let mut params = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg_to_param_value(arg) {
+            Some(value) => params.push(value),
+            None => {
+                tracing::warn!("action `{name}`: cannot convert arg {:?}", arg.value);
+                return None;
+            },
+        }
     }
-    entry.map(|e| (e.create)())
+    match (entry.create)(&params) {
+        Ok(action) => Some(action),
+        Err(e) => {
+            tracing::warn!("action `{name}`: {e}");
+            None
+        },
+    }
 }
 
 fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &mut Buffer) {
@@ -285,6 +341,302 @@ fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &m
             buf[(col, row)].set_char(ch).set_style(style);
         }
     }
+}
+
+fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer) {
+    match palette.phase() {
+        crate::command_palette::PalettePhase::Filter {
+            input,
+            filtered,
+            selected,
+        } => render_palette_filter(input, filtered, *selected, area, buf),
+        crate::command_palette::PalettePhase::CollectArgs {
+            entry,
+            collected,
+            current,
+            input,
+            error,
+        } => render_palette_collect_args(
+            entry,
+            collected,
+            *current,
+            input,
+            error.as_deref(),
+            area,
+            buf,
+        ),
+    }
+}
+
+fn render_palette_filter(
+    input: &str,
+    filtered: &[&'static stoat_action::registry::RegistryEntry],
+    selected: usize,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width < 30 || area.height < 10 {
+        return;
+    }
+
+    let box_width = 80u16.min(area.width.saturating_sub(4));
+    if box_width < 20 {
+        return;
+    }
+    let inner_width = box_width.saturating_sub(2) as usize;
+    let max_rows = 10u16;
+    let row_count = (filtered.len() as u16).min(max_rows).max(1);
+
+    let doc_lines: Vec<String> = filtered
+        .get(selected)
+        .map(|e| wrap_text(e.def.long_desc(), inner_width))
+        .unwrap_or_default();
+    let doc_height = doc_lines.len() as u16;
+    let doc_section: u16 = if doc_height == 0 { 0 } else { doc_height + 1 };
+
+    let box_height = 1 + 1 + 1 + row_count + doc_section + 1;
+    if box_height > area.height {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let palette_area = Rect::new(x, y, box_width, box_height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" command palette ")
+        .title_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(palette_area);
+    block.render(palette_area, buf);
+
+    let prompt_style = Style::default().fg(Color::Yellow);
+    let input_style = Style::default().fg(Color::White);
+    let row_style = Style::default().fg(Color::White);
+    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let desc_style = Style::default().fg(Color::DarkGray);
+    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+
+    let input_row = inner.y;
+    write_str(buf, inner.x, input_row, ":", prompt_style);
+    write_str(buf, inner.x + 2, input_row, input, input_style);
+    let cursor_col = inner.x + 2 + input.chars().count() as u16;
+    if cursor_col < inner.x + inner.width {
+        buf[(cursor_col, input_row)]
+            .set_char(' ')
+            .set_style(cursor_style);
+    }
+
+    let separator_row = inner.y + 1;
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, separator_row)]
+            .set_char('─')
+            .set_style(Style::default().fg(Color::DarkGray));
+    }
+
+    let list_top = inner.y + 2;
+    let name_col_width: usize = filtered
+        .iter()
+        .take(max_rows as usize)
+        .map(|e| e.def.name().len())
+        .max()
+        .unwrap_or(0);
+
+    for (i, entry) in filtered.iter().take(max_rows as usize).enumerate() {
+        let row = list_top + i as u16;
+        let is_selected = i == selected;
+        let style = if is_selected {
+            selected_style
+        } else {
+            row_style
+        };
+
+        for col in inner.x..inner.x + inner.width {
+            buf[(col, row)].set_char(' ').set_style(style);
+        }
+
+        let name = entry.def.name();
+        write_str(buf, inner.x + 1, row, name, style);
+        let desc_col = inner.x + 1 + name_col_width as u16 + 2;
+        if desc_col < inner.x + inner.width {
+            let desc_style = if is_selected { style } else { desc_style };
+            write_str(buf, desc_col, row, entry.def.short_desc(), desc_style);
+        }
+    }
+
+    if doc_section > 0 {
+        let doc_separator_row = list_top + row_count;
+        for col in inner.x..inner.x + inner.width {
+            buf[(col, doc_separator_row)]
+                .set_char('─')
+                .set_style(Style::default().fg(Color::DarkGray));
+        }
+        let doc_top = doc_separator_row + 1;
+        for (i, line) in doc_lines.iter().enumerate() {
+            write_str(
+                buf,
+                inner.x,
+                doc_top + i as u16,
+                line,
+                Style::default().fg(Color::Gray),
+            );
+        }
+    }
+}
+
+fn render_palette_collect_args(
+    entry: &'static stoat_action::registry::RegistryEntry,
+    collected: &[stoat_action::ParamValue],
+    current: usize,
+    input: &str,
+    error: Option<&str>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width < 30 || area.height < 10 {
+        return;
+    }
+
+    let box_width = 80u16.min(area.width.saturating_sub(4));
+    if box_width < 20 {
+        return;
+    }
+    let inner_width = box_width.saturating_sub(2) as usize;
+
+    let params = entry.def.params();
+    let current_param = &params[current];
+    let body_lines = wrap_text(current_param.description, inner_width);
+    let body_height = body_lines.len() as u16;
+    // header line + body lines
+    let doc_height = 1 + body_height;
+
+    let collected_lines = collected.len() as u16;
+    let error_lines: u16 = if error.is_some() { 1 } else { 0 };
+    // chrome: top + collected + input + (error?) + separator + doc + bottom
+    let box_height = 1 + collected_lines + 1 + error_lines + 1 + doc_height + 1;
+    if box_height > area.height {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let palette_area = Rect::new(x, y, box_width, box_height);
+
+    let title = format!(" {} ", entry.def.name());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(title)
+        .title_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(palette_area);
+    block.render(palette_area, buf);
+
+    let label_style = Style::default().fg(Color::Yellow);
+    let value_style = Style::default().fg(Color::White);
+    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+    let error_style = Style::default().fg(Color::Red);
+    let muted_style = Style::default().fg(Color::DarkGray);
+
+    let mut row = inner.y;
+
+    for (i, value) in collected.iter().enumerate() {
+        let label = format!("{}: ", params[i].name);
+        write_str(buf, inner.x, row, &label, muted_style);
+        let value_col = inner.x + label.chars().count() as u16;
+        write_str(buf, value_col, row, &format_param_value(value), muted_style);
+        row += 1;
+    }
+
+    let label = format!("{}: ", current_param.name);
+    write_str(buf, inner.x, row, &label, label_style);
+    let value_col = inner.x + label.chars().count() as u16;
+    write_str(buf, value_col, row, input, value_style);
+    let cursor_col = value_col + input.chars().count() as u16;
+    if cursor_col < inner.x + inner.width {
+        buf[(cursor_col, row)].set_char(' ').set_style(cursor_style);
+    }
+    row += 1;
+
+    if let Some(msg) = error {
+        write_str(buf, inner.x, row, msg, error_style);
+        row += 1;
+    }
+
+    let separator_row = row;
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, separator_row)]
+            .set_char('─')
+            .set_style(muted_style);
+    }
+    let doc_top = separator_row + 1;
+
+    let header = format!(
+        "{} ({}{})",
+        current_param.name,
+        current_param.kind,
+        if current_param.required {
+            ", required"
+        } else {
+            ""
+        },
+    );
+    write_str(buf, inner.x, doc_top, &header, muted_style);
+
+    let body_top = doc_top + 1;
+    for (i, line) in body_lines.iter().enumerate() {
+        write_str(
+            buf,
+            inner.x,
+            body_top + i as u16,
+            line,
+            Style::default().fg(Color::Gray),
+        );
+    }
+}
+
+fn format_param_value(v: &stoat_action::ParamValue) -> String {
+    match v {
+        stoat_action::ParamValue::String(s) => s.clone(),
+        stoat_action::ParamValue::Number(n) => n.to_string(),
+        stoat_action::ParamValue::Bool(b) => b.to_string(),
+    }
+}
+
+fn write_str(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
+    for (i, ch) in s.chars().enumerate() {
+        let col = x + i as u16;
+        if col >= buf.area.x + buf.area.width {
+            break;
+        }
+        if y >= buf.area.y + buf.area.height {
+            break;
+        }
+        buf[(col, y)].set_char(ch).set_style(style);
+    }
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
 }
 
 fn render_pane(

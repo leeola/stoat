@@ -3,6 +3,7 @@ on key {
         q -> Quit();
         Escape -> Quit();
         Space -> SetMode(space);
+        : -> OpenCommandPalette();
     }
     mode == space {
         Escape -> SetMode(normal);
@@ -12,11 +13,13 @@ on key {
         j -> [FocusDown(), SetMode(normal)];
         k -> [FocusUp(), SetMode(normal)];
         l -> [FocusRight(), SetMode(normal)];
+        : -> OpenCommandPalette();
     }
     mode == space_split {
         Escape -> SetMode(normal);
         r -> [SplitRight(), SetMode(normal)];
         d -> [SplitDown(), SetMode(normal)];
         c -> [ClosePane(), SetMode(normal)];
+        : -> OpenCommandPalette();
     }
 }

@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    command_palette::CommandPalette,
     editor_state::EditorState,
     pane::{Axis, Direction, View},
 };
@@ -53,6 +54,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .downcast_ref::<OpenFile>()
                 .expect("OpenFile action downcast");
             open_file(stoat, &open.path);
+            UpdateEffect::Redraw
+        },
+        ActionKind::OpenCommandPalette => {
+            stoat.command_palette = Some(CommandPalette::new());
             UpdateEffect::Redraw
         },
     }

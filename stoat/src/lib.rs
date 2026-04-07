@@ -2,6 +2,7 @@ pub mod action_handlers;
 pub mod app;
 pub mod buffer;
 mod buffer_registry;
+pub mod command_palette;
 pub mod diff_map;
 pub mod display_map;
 mod editor_state;
