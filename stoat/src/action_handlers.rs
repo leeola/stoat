@@ -3,7 +3,8 @@ use crate::{
     editor_state::EditorState,
     pane::{Axis, Direction, View},
 };
-use stoat_action::{Action, ActionKind};
+use std::path::Path;
+use stoat_action::{Action, ActionKind, OpenFile};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     match action.kind() {
@@ -46,6 +47,50 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             }
             UpdateEffect::Redraw
         },
+        ActionKind::OpenFile => {
+            let open = action
+                .as_any()
+                .downcast_ref::<OpenFile>()
+                .expect("OpenFile action downcast");
+            open_file(stoat, &open.path);
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+fn open_file(stoat: &mut Stoat, path: &Path) {
+    let absolute = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
+    let content = match std::fs::read_to_string(&absolute) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            tracing::error!("failed to read {}: {}", absolute.display(), e);
+            return;
+        },
+    };
+
+    let (buffer_id, buffer) = stoat.buffers.open(&absolute, &content);
+    let new_editor_id =
+        stoat
+            .editors
+            .insert(EditorState::new(buffer_id, buffer, stoat.executor.clone()));
+
+    let focused = stoat.panes.focus();
+    let old = match stoat.panes.pane(focused).view {
+        View::Editor(eid) => Some(eid),
+        View::Label(_) => None,
+    };
+    stoat.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+
+    if let Some(old_id) = old {
+        let still_referenced = stoat
+            .panes
+            .split_panes()
+            .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
+        if !still_referenced {
+            stoat.editors.remove(old_id);
+        }
     }
 }
 

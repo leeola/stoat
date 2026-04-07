@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::{path::PathBuf, sync::Arc};
-use stoat::Stoat;
+use stoat::{Axis, Stoat};
 use stoat_scheduler::TestScheduler;
 
 #[derive(Parser)]
@@ -30,8 +30,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let mut stoat = Stoat::new(executor);
 
-        for path in &args.files {
-            stoat.open_file(path)?;
+        for (i, path) in args.files.iter().enumerate() {
+            if i > 0 {
+                stoat.panes.split(Axis::Vertical);
+            }
+            stoat.open_file(path);
         }
 
         stoat.run(event_rx, render_tx).await

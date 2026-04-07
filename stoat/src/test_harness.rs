@@ -72,7 +72,7 @@ impl TestHarness {
     }
 
     pub fn open_file(&mut self, path: &std::path::Path) {
-        self.stoat.open_file(path).expect("open_file failed");
+        self.stoat.open_file(path);
         self.capture("open_file");
     }
 
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn open_single_file_replaces_scratch() {
+    fn open_file_shows_in_focused_pane() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(dir.path(), "test.txt", "hello world");
 
@@ -751,11 +751,11 @@ mod tests {
         h.open_file(&path);
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 1);
-        h.assert_snapshot("open_single_file");
+        h.assert_snapshot("open_file_shows_in_focused_pane");
     }
 
     #[test]
-    fn open_two_files_splits() {
+    fn open_file_replaces_focused_pane_does_not_split() {
         let dir = tempfile::tempdir().unwrap();
         let a = write_file(dir.path(), "a.txt", "file A");
         let b = write_file(dir.path(), "b.txt", "file B");
@@ -764,12 +764,12 @@ mod tests {
         h.open_file(&a);
         h.open_file(&b);
         let frame = h.snapshot();
-        assert_eq!(frame.pane_count, 2);
-        h.assert_snapshot("open_two_files");
+        assert_eq!(frame.pane_count, 1);
+        h.assert_snapshot("open_file_replaces_focused_pane");
     }
 
     #[test]
-    fn open_three_files_three_columns() {
+    fn split_then_open_creates_multi_pane_layout() {
         let dir = tempfile::tempdir().unwrap();
         let a = write_file(dir.path(), "a.txt", "AAA");
         let b = write_file(dir.path(), "b.txt", "BBB");
@@ -777,11 +777,13 @@ mod tests {
 
         let mut h = Stoat::test();
         h.open_file(&a);
+        h.type_action("SplitRight()");
         h.open_file(&b);
+        h.type_action("SplitRight()");
         h.open_file(&c);
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 3);
-        h.assert_snapshot("open_three_files");
+        h.assert_snapshot("split_then_open_three");
     }
 
     #[test]

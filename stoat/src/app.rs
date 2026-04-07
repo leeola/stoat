@@ -3,7 +3,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    pane::{Axis, Pane, PaneTree, View},
+    pane::{Pane, PaneTree, View},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -15,7 +15,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{io, path::Path};
-use stoat_action::Action;
+use stoat_action::{Action, OpenFile};
 use stoat_scheduler::Executor;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -83,52 +83,16 @@ impl Stoat {
         }
     }
 
-    /// Reads `path` from disk and assigns its contents to a pane.
+    /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.
     ///
-    /// If the focused pane currently shows the untouched initial scratch buffer,
-    /// the new editor replaces it in place. Otherwise the focused pane is split
-    /// vertically and the new editor goes into the new pane.
-    ///
-    /// A missing file is treated as a new, empty buffer with the path attached
-    /// (vim-style "edit a file that doesn't exist yet"). Other IO errors are
-    /// returned to the caller.
-    pub fn open_file(&mut self, path: &Path) -> io::Result<()> {
-        let absolute = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
-        let content = match std::fs::read_to_string(&absolute) {
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e),
+    /// The action handler reads the file, creates a buffer, and shows it in
+    /// the focused pane. A missing file becomes an empty buffer with the path
+    /// attached (vim-style); other IO errors are logged and ignored.
+    pub fn open_file(&mut self, path: &Path) {
+        let action = OpenFile {
+            path: path.to_path_buf(),
         };
-
-        let (buffer_id, buffer) = self.buffers.open(&absolute, &content);
-        let new_editor_id =
-            self.editors
-                .insert(EditorState::new(buffer_id, buffer, self.executor.clone()));
-
-        let focused = self.panes.focus();
-        let replace = match self.panes.pane(focused).view {
-            View::Editor(eid) => self
-                .editors
-                .get(eid)
-                .is_some_and(|e| self.buffers.is_empty_scratch(e.buffer_id)),
-            View::Label(_) => true,
-        };
-
-        if replace {
-            let old = match self.panes.pane(focused).view {
-                View::Editor(eid) => Some(eid),
-                View::Label(_) => None,
-            };
-            self.panes.pane_mut(focused).view = View::Editor(new_editor_id);
-            if let Some(old_id) = old {
-                self.editors.remove(old_id);
-            }
-        } else {
-            let new_pane_id = self.panes.split(Axis::Vertical);
-            self.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
-        }
-        Ok(())
+        action_handlers::dispatch(self, &action);
     }
 
     pub async fn run(

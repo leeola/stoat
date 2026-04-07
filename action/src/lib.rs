@@ -7,6 +7,7 @@ pub mod registry;
 pub use action::{Action, ActionDef};
 pub use defs::{
     app::Quit,
+    file::OpenFile,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitRight,
