@@ -101,6 +101,13 @@ impl BufferRegistry {
             entry.syntax = Some(state);
         }
     }
+
+    /// Move the prior [`SyntaxState`] out of the registry. The caller is
+    /// expected to update it (`tree.edit` + reparse) and put it back via
+    /// [`Self::store_syntax`]. Returns `None` if no state has been stored.
+    pub(crate) fn take_syntax(&mut self, id: BufferId) -> Option<SyntaxState> {
+        self.buffers.get_mut(&id)?.syntax.take()
+    }
 }
 
 #[cfg(test)]

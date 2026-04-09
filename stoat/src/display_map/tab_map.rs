@@ -1,5 +1,13 @@
-use super::fold_map::{FoldPoint, FoldSnapshot};
-use std::{num::NonZeroU32, ops::Deref, sync::Arc};
+use super::{
+    fold_map::{FoldChunks, FoldOffset, FoldPoint, FoldSnapshot},
+    highlights::{Chunk, HighlightEndpoint},
+};
+use std::{
+    borrow::Cow,
+    num::NonZeroU32,
+    ops::{Deref, Range},
+    sync::Arc,
+};
 use stoat_text::{patch::Patch, Bias};
 
 const MAX_EXPANSION_COLUMN: u32 = 256;
@@ -285,6 +293,152 @@ impl TabSnapshot {
     pub fn line_count(&self) -> u32 {
         self.fold_snapshot.line_count()
     }
+
+    /// Stream [`Chunk`]s covering a fold-offset range with tabs expanded.
+    ///
+    /// `start_column` is the display column at `range.start`; pass 0 when
+    /// starting at a row boundary (typical editor use). Tabs encountered in
+    /// the chunk stream are emitted as separate unstyled chunks tagged with
+    /// [`Chunk::is_tab`], sized to advance the running display column to the
+    /// next multiple of [`TabSnapshot::tab_size`] (clamped to
+    /// [`TabSnapshot::max_expansion_column`]).
+    ///
+    /// Newlines reset the display column to 0. The caller is responsible for
+    /// ensuring the starting column is accurate.
+    pub fn chunks<'a>(
+        &'a self,
+        range: Range<FoldOffset>,
+        start_column: u32,
+        endpoints: Arc<[HighlightEndpoint]>,
+    ) -> TabChunks<'a> {
+        TabChunks {
+            fold_chunks: self.fold_snapshot.chunks(range, endpoints),
+            pending: None,
+            display_column: start_column,
+            tab_size: self.tab_size,
+            max_expansion_column: self.max_expansion_column,
+        }
+    }
+}
+
+/// Iterator returned by [`TabSnapshot::chunks`]. Splits incoming chunks at
+/// tab characters and emits tab-expansion chunks interleaved with the
+/// preserved-style runs.
+pub struct TabChunks<'a> {
+    fold_chunks: FoldChunks<'a>,
+    pending: Option<Chunk<'a>>,
+    display_column: u32,
+    tab_size: u32,
+    max_expansion_column: u32,
+}
+
+impl<'a> Iterator for TabChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        // Refill pending if needed.
+        if self.pending.is_none() {
+            self.pending = self.fold_chunks.next();
+            self.pending.as_ref()?;
+        }
+        // Take ownership of pending so we can mutate self freely.
+        let pending = self.pending.take().unwrap();
+
+        let text: &str = pending.text.as_ref();
+        let tab_idx = text.find('\t');
+
+        match tab_idx {
+            None => {
+                // No tab in this chunk. Emit whole chunk, advance column.
+                advance_display_column(&pending.text, &mut self.display_column);
+                Some(pending)
+            },
+            Some(0) => {
+                // Chunk starts with a tab. Emit the expansion chunk and push
+                // the remainder back into pending.
+                let spaces = self.tab_width();
+                self.display_column += spaces;
+                let rest = text[1..].to_string();
+                let metadata = clone_chunk_metadata(&pending);
+                if !rest.is_empty() {
+                    self.pending = Some(Chunk {
+                        text: Cow::Owned(rest),
+                        ..metadata
+                    });
+                }
+                Some(Chunk {
+                    text: Cow::Borrowed(tab_spaces_slice(spaces)),
+                    is_tab: true,
+                    highlight_style: None,
+                    ..Default::default()
+                })
+            },
+            Some(idx) => {
+                // Emit prefix before the tab; push the tab-plus-suffix back
+                // into pending so the next call processes them.
+                let prefix = text[..idx].to_string();
+                let rest = text[idx..].to_string();
+                let metadata = clone_chunk_metadata(&pending);
+                self.pending = Some(Chunk {
+                    text: Cow::Owned(rest),
+                    highlight_style: metadata.highlight_style.clone(),
+                    is_tab: metadata.is_tab,
+                    is_inlay: metadata.is_inlay,
+                    inlay_kind: metadata.inlay_kind,
+                    diagnostic_severity: metadata.diagnostic_severity,
+                    renderer: metadata.renderer.clone(),
+                });
+                advance_display_column(&prefix, &mut self.display_column);
+                Some(Chunk {
+                    text: Cow::Owned(prefix),
+                    ..metadata
+                })
+            },
+        }
+    }
+}
+
+fn clone_chunk_metadata<'a>(chunk: &Chunk<'a>) -> Chunk<'a> {
+    Chunk {
+        text: Cow::Borrowed(""),
+        highlight_style: chunk.highlight_style.clone(),
+        is_tab: chunk.is_tab,
+        is_inlay: chunk.is_inlay,
+        inlay_kind: chunk.inlay_kind,
+        diagnostic_severity: chunk.diagnostic_severity,
+        renderer: chunk.renderer.clone(),
+    }
+}
+
+impl TabChunks<'_> {
+    fn tab_width(&self) -> u32 {
+        if self.display_column >= self.max_expansion_column {
+            1
+        } else {
+            self.tab_size - (self.display_column % self.tab_size)
+        }
+    }
+}
+
+fn advance_display_column(text: &str, column: &mut u32) {
+    for ch in text.chars() {
+        if ch == '\n' {
+            *column = 0;
+        } else {
+            *column += super::display_width(ch);
+        }
+    }
+}
+
+// A static slice of spaces long enough to cover any tab expansion
+// (up to `MAX_EXPANSION_COLUMN` + tab_size slop). The returned subslice
+// is always a valid UTF-8 slice of ASCII spaces.
+const TAB_SPACES: &str =
+    "                                                                                                                                                                                                                                                                                                                                ";
+
+fn tab_spaces_slice(width: u32) -> &'static str {
+    let len = (width as usize).min(TAB_SPACES.len());
+    &TAB_SPACES[..len]
 }
 
 fn expand_column(
@@ -576,5 +730,57 @@ mod tests {
             snap.write_expand_line(&mut buf, row);
             assert_eq!(buf, expected, "mismatch at row {row}");
         }
+    }
+
+    #[test]
+    fn chunks_no_tabs_forwards_fold_chunks() {
+        use crate::display_map::fold_map::FoldOffset;
+
+        let snap = make_snapshot("hello world");
+        let end = snap.fold_snapshot().len();
+        let text: String = snap
+            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn chunks_single_leading_tab_expands() {
+        use crate::display_map::fold_map::FoldOffset;
+
+        let snap = make_snapshot("\thello");
+        let end = snap.fold_snapshot().len();
+        let chunks: Vec<_> = snap
+            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .collect();
+
+        // A leading tab with tab_size=4 expands to 4 spaces.
+        let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "    hello");
+
+        // The tab must be marked as a distinct is_tab chunk.
+        let tab_chunks: Vec<_> = chunks.iter().filter(|c| c.is_tab).collect();
+        assert_eq!(tab_chunks.len(), 1);
+        assert_eq!(tab_chunks[0].text.as_ref(), "    ");
+    }
+
+    #[test]
+    fn chunks_tab_in_middle_splits_chunk() {
+        use crate::display_map::fold_map::FoldOffset;
+
+        let snap = make_snapshot("ab\tcd");
+        let end = snap.fold_snapshot().len();
+        let chunks: Vec<_> = snap
+            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .collect();
+
+        // Expected expansion: "ab" + "  " (tab at col 2, expands to col 4) + "cd"
+        let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "ab  cd");
+
+        let tab_chunks: Vec<_> = chunks.iter().filter(|c| c.is_tab).collect();
+        assert_eq!(tab_chunks.len(), 1);
+        assert_eq!(tab_chunks[0].text.as_ref(), "  ");
     }
 }

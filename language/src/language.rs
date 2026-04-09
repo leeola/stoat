@@ -32,6 +32,10 @@ pub enum TokenStyle {
     Title,
     LinkText,
     LinkUri,
+    Emphasis,
+    EmphasisStrong,
+    LiteralMarkup,
+    Strikethrough,
 }
 
 impl TokenStyle {
@@ -64,6 +68,10 @@ impl TokenStyle {
         TokenStyle::Title,
         TokenStyle::LinkText,
         TokenStyle::LinkUri,
+        TokenStyle::Emphasis,
+        TokenStyle::EmphasisStrong,
+        TokenStyle::LiteralMarkup,
+        TokenStyle::Strikethrough,
     ];
 
     pub fn from_capture_name(name: &str) -> Option<TokenStyle> {
@@ -105,6 +113,10 @@ impl TokenStyle {
             "title.markup" => Some(TokenStyle::Title),
             "link_text.markup" => Some(TokenStyle::LinkText),
             "link_uri.markup" => Some(TokenStyle::LinkUri),
+            "emphasis.markup" => Some(TokenStyle::Emphasis),
+            "emphasis.strong.markup" => Some(TokenStyle::EmphasisStrong),
+            "text.literal.markup" => Some(TokenStyle::LiteralMarkup),
+            "strikethrough.markup" => Some(TokenStyle::Strikethrough),
             _ => None,
         }
     }
@@ -118,6 +130,18 @@ pub struct Language {
     /// Indexed by tree-sitter capture index. None means the capture
     /// name is unrecognized and spans for it are skipped.
     pub capture_styles: Vec<Option<TokenStyle>>,
+    /// Inner languages parsed inside specific node kinds of this grammar.
+    /// Used by markdown to inject the markdown-inline grammar inside
+    /// `inline` nodes, and could support code-fence injections later.
+    pub injections: Vec<LanguageInjection>,
+}
+
+/// Pairs an inner [`Language`] with the host node kind it should be parsed
+/// inside. The host parser produces a tree; for each node whose kind matches
+/// `host_node_kind`, the inner parser is run over that node's byte range.
+pub struct LanguageInjection {
+    pub host_node_kind: &'static str,
+    pub inner: Arc<Language>,
 }
 
 pub struct LanguageRegistry {
@@ -126,12 +150,22 @@ pub struct LanguageRegistry {
 
 impl LanguageRegistry {
     pub fn standard() -> Self {
+        // Build markdown-inline first so we can wire it as an injection inside
+        // the host markdown grammar. The host parses block structure and emits
+        // `inline` nodes; the inline grammar parses each of those for emphasis,
+        // links, code spans, etc.
+        let markdown_inline = Arc::new(make_markdown_inline());
+        let markdown = Arc::new(make_markdown_with_injections(vec![LanguageInjection {
+            host_node_kind: "inline",
+            inner: markdown_inline.clone(),
+        }]));
         Self {
             languages: vec![
                 Arc::new(make_rust()),
                 Arc::new(make_json()),
                 Arc::new(make_toml()),
-                Arc::new(make_markdown()),
+                markdown,
+                markdown_inline,
             ],
         }
     }
@@ -155,6 +189,16 @@ fn make_language(
     grammar: TsLanguage,
     highlight_src: &str,
 ) -> Language {
+    make_language_with_injections(name, extensions, grammar, highlight_src, Vec::new())
+}
+
+fn make_language_with_injections(
+    name: &'static str,
+    extensions: &'static [&'static str],
+    grammar: TsLanguage,
+    highlight_src: &str,
+    injections: Vec<LanguageInjection>,
+) -> Language {
     let highlight_query = Query::new(&grammar, highlight_src)
         .unwrap_or_else(|e| panic!("highlight query for {name} failed to compile: {e}"));
     let capture_styles: Vec<Option<TokenStyle>> = highlight_query
@@ -168,6 +212,7 @@ fn make_language(
         grammar,
         highlight_query,
         capture_styles,
+        injections,
     }
 }
 
@@ -198,12 +243,25 @@ fn make_toml() -> Language {
     )
 }
 
-fn make_markdown() -> Language {
-    make_language(
+fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language {
+    make_language_with_injections(
         "markdown",
         &["md", "markdown"],
         grammar::markdown(),
         include_str!("../../vendor/zed/crates/languages/src/markdown/highlights.scm"),
+        injections,
+    )
+}
+
+fn make_markdown_inline() -> Language {
+    // Registered without file extensions: this grammar only runs as an
+    // injected layer inside markdown `inline` nodes (wired in phase 4). It
+    // must still be reachable by name for injection lookup.
+    make_language(
+        "markdown-inline",
+        &[],
+        grammar::markdown_inline(),
+        include_str!("../../vendor/zed/crates/languages/src/markdown-inline/highlights.scm"),
     )
 }
 
@@ -233,6 +291,24 @@ mod tests {
         // Constructor unwraps query compile errors; this test triggers
         // those panics in CI to catch query/runtime mismatches early.
         let _reg = LanguageRegistry::standard();
+    }
+
+    #[test]
+    fn standard_registers_expected_languages() {
+        let reg = LanguageRegistry::standard();
+        let names: Vec<&str> = reg.languages().iter().map(|l| l.name).collect();
+        assert_eq!(
+            names,
+            vec!["rust", "json", "toml", "markdown", "markdown-inline"],
+        );
+    }
+
+    #[test]
+    fn markdown_inline_has_no_path_extension() {
+        // markdown-inline runs as an injected layer, never as a host file.
+        // `for_path` must not resolve to it for any extension.
+        let reg = LanguageRegistry::standard();
+        assert!(reg.for_path(Path::new("a.inline")).is_none());
     }
 
     #[test]

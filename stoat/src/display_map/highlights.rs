@@ -12,7 +12,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use stoat_text::Anchor;
+use stoat_text::{Anchor, ChunksInRange, Rope};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HighlightStyle {
@@ -75,10 +75,10 @@ impl HighlightStyle {
     }
 }
 
-/// Precedence order. Derived `Ord`: lower variant = applied first (overridden by later).
+/// Precedence layer. Derived `Ord`: lower variant applied first, overridden by later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum HighlightKey {
-    ColorizeBracket(usize),
+pub enum HighlightLayer {
+    ColorizeBracket,
     SyntaxToken,
     SemanticToken,
     SearchHighlight,
@@ -90,6 +90,29 @@ pub enum HighlightKey {
     HoverState,
     SelectionHighlight,
     MatchingBracket,
+}
+
+/// Key identifying a single highlight range within the merger.
+///
+/// The `layer` determines precedence (later layers override earlier ones). The
+/// `slot` disambiguates ranges within a layer so overlapping captures at the
+/// same layer stack instead of colliding in the active-styles map. For layers
+/// with a single style source (e.g. [`HighlightLayer::SearchHighlight`]), use
+/// `slot: 0` via [`HighlightKey::layer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HighlightKey {
+    pub layer: HighlightLayer,
+    pub slot: u32,
+}
+
+impl HighlightKey {
+    pub const fn new(layer: HighlightLayer, slot: u32) -> Self {
+        Self { layer, slot }
+    }
+
+    pub const fn layer(layer: HighlightLayer) -> Self {
+        Self { layer, slot: 0 }
+    }
 }
 
 pub type TextHighlights = Arc<HashMap<HighlightKey, Arc<(HighlightStyle, Vec<Range<Anchor>>)>>>;
@@ -321,7 +344,7 @@ pub fn create_highlight_endpoints(
                 })
                 .unwrap_or_else(|i| i);
 
-            for token in &tokens[start_ix..] {
+            for (offset_in_slice, token) in tokens[start_ix..].iter().enumerate() {
                 let s = resolve(&token.range.start);
                 let e = resolve(&token.range.end);
                 if s >= range.end {
@@ -330,16 +353,22 @@ pub fn create_highlight_endpoints(
                 if s == e {
                     continue;
                 }
+                // Unique slot per token keeps nested captures (e.g. escape
+                // inside string) in distinct entries of the merger's active map.
+                let key = HighlightKey::new(
+                    HighlightLayer::SemanticToken,
+                    (start_ix + offset_in_slice) as u32,
+                );
                 endpoints.push(HighlightEndpoint {
                     offset: s,
                     is_start: true,
-                    key: HighlightKey::SemanticToken,
+                    key,
                     style: Some(interner[token.style].clone()),
                 });
                 endpoints.push(HighlightEndpoint {
                     offset: e,
                     is_start: false,
-                    key: HighlightKey::SemanticToken,
+                    key,
                     style: None,
                 });
             }
@@ -407,11 +436,113 @@ pub fn highlighted_chunks<'a>(
     })
 }
 
+/// Streaming chunk iterator over a rope segment that merges in highlight
+/// styles on the fly.
+///
+/// Holds a single [`ChunksInRange`] cursor over the rope and an `Arc`-shared
+/// slice of pre-computed [`HighlightEndpoint`]s. Emits [`Chunk`]s without any
+/// per-chunk heap allocation: `text` is always a borrow of the rope's own
+/// chunk storage, the endpoints vector is built once by the caller, and only
+/// a small [`BTreeMap`] of active styles is carried across calls.
+///
+/// This is the bottom layer of the display map chunks pipeline. Higher layers
+/// ([`super::inlay_map::InlaySnapshot::chunks`], [`super::fold_map::FoldSnapshot::chunks`],
+/// etc.) wrap a `BufferChunks` and transform the chunk stream.
+pub struct BufferChunks<'a> {
+    text_chunks: ChunksInRange<'a>,
+    pending: &'a str,
+    offset: usize,
+    end: usize,
+    endpoints: Arc<[HighlightEndpoint]>,
+    ep_idx: usize,
+    active: BTreeMap<HighlightKey, HighlightStyle>,
+}
+
+impl<'a> BufferChunks<'a> {
+    /// Construct a new iterator over `rope[range]` applying `endpoints`.
+    ///
+    /// `endpoints` must be sorted by offset and must only cover offsets within
+    /// `range`. Use [`create_highlight_endpoints`] (or the cached variant) to
+    /// build them.
+    pub fn new(rope: &'a Rope, range: Range<usize>, endpoints: Arc<[HighlightEndpoint]>) -> Self {
+        let start = range.start;
+        let end = range.end;
+        Self {
+            text_chunks: rope.chunks_in_range(range),
+            pending: "",
+            offset: start,
+            end,
+            endpoints,
+            ep_idx: 0,
+            active: BTreeMap::new(),
+        }
+    }
+
+    fn merged_style(&self) -> Option<HighlightStyle> {
+        if self.active.is_empty() {
+            return None;
+        }
+        let mut merged = HighlightStyle::default();
+        for style in self.active.values() {
+            merged.merge(style);
+        }
+        Some(merged)
+    }
+}
+
+impl<'a> Iterator for BufferChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        if self.offset >= self.end {
+            return None;
+        }
+        while self.pending.is_empty() {
+            self.pending = self.text_chunks.next()?;
+        }
+
+        while self.ep_idx < self.endpoints.len()
+            && self.endpoints[self.ep_idx].offset <= self.offset
+        {
+            let ep = &self.endpoints[self.ep_idx];
+            match &ep.style {
+                Some(style) => {
+                    self.active.insert(ep.key, style.clone());
+                },
+                None => {
+                    self.active.remove(&ep.key);
+                },
+            }
+            self.ep_idx += 1;
+        }
+
+        let next_ep_offset = if self.ep_idx < self.endpoints.len() {
+            self.endpoints[self.ep_idx].offset
+        } else {
+            usize::MAX
+        };
+        let split = self
+            .pending
+            .len()
+            .min(next_ep_offset.saturating_sub(self.offset))
+            .min(self.end.saturating_sub(self.offset));
+        let (emit, rest) = self.pending.split_at(split);
+        self.pending = rest;
+        self.offset += split;
+
+        Some(Chunk {
+            text: Cow::Borrowed(emit),
+            highlight_style: self.merged_style(),
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        create_highlight_endpoints, highlighted_chunks, HighlightKey, HighlightStyle,
-        TextHighlights,
+        create_highlight_endpoints, highlighted_chunks, Chunk, HighlightKey, HighlightLayer,
+        HighlightStyle, TextHighlights,
     };
     use ratatui::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
@@ -460,7 +591,7 @@ mod tests {
             ..Default::default()
         };
         let highlights = make_highlights(vec![(
-            HighlightKey::SearchHighlight,
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
             style.clone(),
             vec![6..11],
         )]);
@@ -490,8 +621,16 @@ mod tests {
             ..Default::default()
         };
         let highlights = make_highlights(vec![
-            (HighlightKey::SyntaxToken, style_low, vec![2..8]),
-            (HighlightKey::MatchingBracket, style_high, vec![4..6]),
+            (
+                HighlightKey::layer(HighlightLayer::SyntaxToken),
+                style_low,
+                vec![2..8],
+            ),
+            (
+                HighlightKey::layer(HighlightLayer::MatchingBracket),
+                style_high,
+                vec![4..6],
+            ),
         ]);
         let resolve = |a: &Anchor| a.offset as usize;
         let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
@@ -525,7 +664,7 @@ mod tests {
     fn empty_range_ignored() {
         let text = "hello";
         let highlights = make_highlights(vec![(
-            HighlightKey::SearchHighlight,
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
             HighlightStyle {
                 foreground: Some(Color::Red),
                 ..Default::default()
@@ -555,5 +694,166 @@ mod tests {
         assert_eq!(s.foreground, Some(Color::Red));
         assert_eq!(s.bold, Some(true));
         assert_eq!(s.italic, Some(true));
+    }
+
+    #[test]
+    fn nested_semantic_tokens_stack_per_slot() {
+        use super::{HighlightStyleInterner, SemanticTokenHighlight, SemanticTokensHighlights};
+        use crate::buffer::BufferId;
+
+        let text = "abcdefghij";
+        let outer_style = HighlightStyle {
+            foreground: Some(Color::Blue),
+            bold: Some(true),
+            ..Default::default()
+        };
+        let inner_style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let mut interner = HighlightStyleInterner::default();
+        let outer_id = interner.intern(outer_style.clone());
+        let inner_id = interner.intern(inner_style.clone());
+
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(vec![
+            SemanticTokenHighlight {
+                range: anchor(2)..anchor(8),
+                style: outer_id,
+            },
+            SemanticTokenHighlight {
+                range: anchor(4)..anchor(6),
+                style: inner_id,
+            },
+        ]);
+
+        let mut semantic_map = HashMap::new();
+        semantic_map.insert(BufferId::new(0), (tokens, Arc::new(interner)));
+        let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
+        let text_hl: TextHighlights = Arc::new(HashMap::new());
+        let resolve = |a: &Anchor| a.offset as usize;
+
+        let eps = create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), &resolve);
+        let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
+
+        // "ab" unstyled; "cd" outer only (blue+bold); "ef" outer+inner (inner slot
+        // wins: red over blue, bold preserved from outer); "gh" outer only again;
+        // "ij" unstyled.
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(chunks[0].text, "ab");
+        assert!(chunks[0].style.is_none());
+
+        assert_eq!(chunks[1].text, "cd");
+        let s1 = chunks[1].style.as_ref().unwrap();
+        assert_eq!(s1.foreground, Some(Color::Blue));
+        assert_eq!(s1.bold, Some(true));
+
+        assert_eq!(chunks[2].text, "ef");
+        let s2 = chunks[2].style.as_ref().unwrap();
+        assert_eq!(s2.foreground, Some(Color::Red));
+        assert_eq!(s2.bold, Some(true), "outer bold must survive inner merge");
+
+        assert_eq!(chunks[3].text, "gh");
+        let s3 = chunks[3].style.as_ref().unwrap();
+        assert_eq!(s3.foreground, Some(Color::Blue));
+
+        assert_eq!(chunks[4].text, "ij");
+        assert!(chunks[4].style.is_none());
+    }
+
+    #[test]
+    fn buffer_chunks_spans_multiple_rope_chunks() {
+        use super::{BufferChunks, HighlightEndpoint};
+        use stoat_text::Rope;
+
+        // A rope large enough to be split across multiple internal chunks.
+        // Chunks in stoat_text cap around 384 bytes, so 1500 bytes
+        // definitely spans multiple storage chunks.
+        let text: String = "abcdefghij".repeat(150);
+        let rope = Rope::from(text.as_str());
+        assert!(
+            rope.chunks().count() > 1,
+            "test precondition: need multi-chunk rope",
+        );
+
+        // Highlight bytes 50..55 red and 60..65 blue. These spans may lie on
+        // either side of a rope chunk boundary depending on chunk split.
+        let red = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let blue = HighlightStyle {
+            foreground: Some(Color::Blue),
+            ..Default::default()
+        };
+        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(vec![
+            HighlightEndpoint {
+                offset: 50,
+                is_start: true,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: Some(red.clone()),
+            },
+            HighlightEndpoint {
+                offset: 55,
+                is_start: false,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: None,
+            },
+            HighlightEndpoint {
+                offset: 60,
+                is_start: true,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 1),
+                style: Some(blue.clone()),
+            },
+            HighlightEndpoint {
+                offset: 65,
+                is_start: false,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 1),
+                style: None,
+            },
+        ]);
+
+        let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 0..text.len(), endpoints).collect();
+
+        let recovered: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(recovered, text, "chunks must reassemble to the rope text");
+
+        // Walk chunks by byte offset and collect each byte's resolved foreground
+        // color. Position-based assertions avoid false matches on repeated text.
+        let mut colors: Vec<Option<Color>> = Vec::with_capacity(text.len());
+        for chunk in &chunks {
+            let color = chunk.highlight_style.as_ref().and_then(|s| s.foreground);
+            for _ in chunk.text.as_bytes() {
+                colors.push(color);
+            }
+        }
+        assert_eq!(colors.len(), text.len());
+
+        for byte in 50..55 {
+            assert_eq!(colors[byte], Some(Color::Red), "byte {byte} must be red");
+        }
+        for byte in 55..60 {
+            assert_eq!(colors[byte], None, "byte {byte} must be unstyled (gap)");
+        }
+        for byte in 60..65 {
+            assert_eq!(colors[byte], Some(Color::Blue), "byte {byte} must be blue");
+        }
+        assert_eq!(colors[49], None, "byte before red span is unstyled");
+        assert_eq!(colors[65], None, "byte after blue span is unstyled");
+    }
+
+    #[test]
+    fn buffer_chunks_no_highlights_fast_path() {
+        use super::BufferChunks;
+        use stoat_text::Rope;
+
+        let text = "hello world";
+        let rope = Rope::from(text);
+        let chunks: Vec<Chunk<'_>> =
+            BufferChunks::new(&rope, 0..text.len(), Arc::from(Vec::new())).collect();
+        let joined: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(joined, text);
+        for c in &chunks {
+            assert!(c.highlight_style.is_none());
+        }
     }
 }

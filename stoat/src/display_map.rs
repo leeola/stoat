@@ -25,9 +25,9 @@ pub use crease_map::{
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
 pub use highlights::{
     CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement,
-    HighlightKey, HighlightStyle, HighlightStyleId, HighlightStyleInterner, HighlightedChunk,
-    Highlights, InlayHighlight, InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights,
-    TextHighlights,
+    HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId, HighlightStyleInterner,
+    HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, SemanticTokenHighlight,
+    SemanticTokensHighlights, TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
@@ -347,6 +347,7 @@ impl DisplayMap {
                 .cmp(&buffer_snapshot.resolve_anchor(&b.start))
         });
         Arc::make_mut(&mut self.text_highlights).insert(key, Arc::new((style, sorted_ranges)));
+        self.cached_snapshot = None;
     }
 
     pub fn clear_highlights(&mut self, key: HighlightKey) -> bool {
@@ -354,6 +355,9 @@ impl DisplayMap {
             .remove(&key)
             .is_some();
         cleared |= self.inlay_highlights.remove(&key).is_some();
+        if cleared {
+            self.cached_snapshot = None;
+        }
         cleared
     }
 
@@ -364,10 +368,14 @@ impl DisplayMap {
         interner: Arc<HighlightStyleInterner>,
     ) {
         Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, (tokens, interner));
+        // Cached display snapshot doesn't track highlight changes; invalidate
+        // it so the next snapshot picks up the new tokens.
+        self.cached_snapshot = None;
     }
 
     pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
         Arc::make_mut(&mut self.semantic_token_highlights).remove(&buffer_id);
+        self.cached_snapshot = None;
     }
 
     pub fn highlight_inlays(
@@ -580,7 +588,8 @@ impl DisplaySnapshot {
         display_rows: std::ops::Range<u32>,
         highlights: Highlights<'_>,
     ) -> block_map::BlockChunks<'_> {
-        self.block_snapshot.chunks(display_rows, highlights)
+        let endpoints = self.build_endpoints(highlights);
+        self.block_snapshot.chunks(display_rows, endpoints)
     }
 
     pub fn highlighted_chunks(
@@ -592,7 +601,27 @@ impl DisplaySnapshot {
             inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: Some(&self.semantic_token_highlights),
         };
-        self.block_snapshot.chunks(display_rows, highlights)
+        let endpoints = self.build_endpoints(highlights);
+        self.block_snapshot.chunks(display_rows, endpoints)
+    }
+
+    fn build_endpoints(
+        &self,
+        highlights: Highlights<'_>,
+    ) -> Arc<[crate::display_map::highlights::HighlightEndpoint]> {
+        let buffer = self.buffer_snapshot();
+        let rope_len = buffer.rope().len();
+        let empty: TextHighlights = Arc::new(HashMap::new());
+        let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
+        let semantic_ref = highlights.semantic_token_highlights;
+        let resolve = |a: &Anchor| buffer.resolve_anchor(a);
+        let eps = crate::display_map::highlights::create_highlight_endpoints(
+            &(0..rope_len),
+            text_highlights_ref,
+            semantic_ref,
+            &resolve,
+        );
+        Arc::from(eps)
     }
 
     pub fn is_line_folded(&self, buffer_row: u32) -> bool {

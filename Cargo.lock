@@ -1797,6 +1797,7 @@ name = "stoat_language"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "stoat_text",
  "tree-sitter",
  "tree-sitter-language",
 ]

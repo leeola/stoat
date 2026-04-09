@@ -1,7 +1,11 @@
-use super::inlay_map::{InlayPoint, InlaySnapshot};
+use super::{
+    highlights::{Chunk, HighlightEndpoint},
+    inlay_map::{InlayChunks, InlayOffset, InlayPoint, InlaySnapshot},
+};
 use crate::multi_buffer::MultiBufferSnapshot;
 use std::{
     any::TypeId,
+    borrow::Cow,
     cmp::Ordering,
     ops::{Add, AddAssign, Deref, Range, Sub},
     sync::Arc,
@@ -661,6 +665,16 @@ impl<'a> Dimension<'a, TransformSummary> for InputOffset {
     }
 }
 
+impl<'a> Dimension<'a, TransformSummary> for FoldOffset {
+    fn zero(_cx: ()) -> Self {
+        Self(0)
+    }
+
+    fn add_summary(&mut self, s: &'a TransformSummary, _cx: ()) {
+        self.0 += s.output.len;
+    }
+}
+
 fn push_fold_isomorphic(tree: &mut SumTree<Transform>, summary: TransformSummary) {
     if summary.input.len == 0 {
         return;
@@ -1026,6 +1040,96 @@ impl FoldSnapshot {
         self.folds.summary().count
     }
 
+    /// Byte offset of the start of `fold_row` in fold-offset space.
+    ///
+    /// Returns the snapshot's total length if `fold_row` is past the last
+    /// row. Used by higher layers to translate row-based ranges into the
+    /// byte-offset ranges accepted by [`FoldSnapshot::chunks`].
+    pub fn row_start_offset(&self, fold_row: u32) -> FoldOffset {
+        if fold_row == 0 {
+            return FoldOffset(0);
+        }
+        let line_count = self.line_count();
+        if fold_row >= line_count {
+            return self.len();
+        }
+        let target = FoldPoint::new(fold_row, 0);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<FoldPoint, FoldOffset>>(());
+        cursor.seek(&target, Bias::Left);
+        let Dimensions(transform_start_point, transform_start_offset, _) = *cursor.start();
+        // Within an isomorphic transform, rows in the output map directly to
+        // bytes in the input. Sum the bytes of preceding rows within the
+        // transform to get the exact offset.
+        let rows_into_transform = fold_row - transform_start_point.row();
+        if rows_into_transform == 0 {
+            return transform_start_offset;
+        }
+        let Some(transform) = cursor.item() else {
+            return transform_start_offset;
+        };
+        // For isomorphic transforms, output.len == input.len and the text
+        // mirrors the inlay bytes. Walk the characters of the transform's
+        // fold-line chars until we've crossed `rows_into_transform` newlines.
+        let mut byte_offset = 0u32;
+        let mut newlines_seen = 0u32;
+        if transform.placeholder.is_some() {
+            // Folded transforms span 0 or 1 output row, so multi-row advance
+            // isn't possible here. Return transform start.
+            return transform_start_offset;
+        }
+        let first_tab_row = transform_start_point.row();
+        for row_within in 0..rows_into_transform {
+            let absolute_row = first_tab_row + row_within;
+            for ch in self.fold_line_chars(absolute_row) {
+                byte_offset += ch.len_utf8() as u32;
+            }
+            // Account for the newline separating rows.
+            byte_offset += 1;
+            newlines_seen += 1;
+        }
+        let _ = newlines_seen;
+        FoldOffset(transform_start_offset.0 + byte_offset as usize)
+    }
+
+    /// Stream [`Chunk`]s covering `range` in fold-offset space.
+    ///
+    /// Walks the fold transform tree and interleaves chunks from the inlay
+    /// layer (for isomorphic segments) with placeholder text (for folds).
+    /// Fold placeholders are emitted as a single unstyled chunk with a
+    /// [`ChunkRenderer`] id attached.
+    ///
+    /// Fast path: when the snapshot has zero folds, delegates directly to
+    /// [`InlaySnapshot::chunks`] without any transform cursor work.
+    pub fn chunks<'a>(
+        &'a self,
+        range: Range<FoldOffset>,
+        endpoints: Arc<[HighlightEndpoint]>,
+    ) -> FoldChunks<'a> {
+        if self.fold_count() == 0 {
+            // Without folds, fold offsets equal inlay offsets.
+            return FoldChunks::Passthrough(self.inlay_snapshot.chunks(
+                InlayOffset(range.start.0)..InlayOffset(range.end.0),
+                endpoints,
+            ));
+        }
+
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<FoldOffset, InputOffset>>(());
+        cursor.seek(&range.start, Bias::Right);
+
+        FoldChunks::Transforming(Box::new(FoldChunksInner {
+            snapshot: self,
+            endpoints,
+            cursor,
+            inlay_chunks: None,
+            offset: range.start,
+            end: range.end,
+        }))
+    }
+
     pub fn is_line_folded(&self, inlay_row: u32) -> bool {
         let row_start = InlayPoint::new(inlay_row, 0);
         let row_end = InlayPoint::new(inlay_row, u32::MAX);
@@ -1175,6 +1279,102 @@ impl FoldSnapshot {
     }
 }
 
+/// Iterator returned by [`FoldSnapshot::chunks`].
+pub enum FoldChunks<'a> {
+    /// Snapshot has no folds; this is a thin wrapper around [`InlayChunks`].
+    Passthrough(InlayChunks<'a>),
+    /// Snapshot has at least one fold; walks transforms to interleave
+    /// placeholder chunks with inlay chunks.
+    Transforming(Box<FoldChunksInner<'a>>),
+}
+
+#[doc(hidden)]
+pub struct FoldChunksInner<'a> {
+    snapshot: &'a FoldSnapshot,
+    endpoints: Arc<[HighlightEndpoint]>,
+    cursor: Cursor<'a, 'static, Transform, Dimensions<FoldOffset, InputOffset>>,
+    inlay_chunks: Option<InlayChunks<'a>>,
+    offset: FoldOffset,
+    end: FoldOffset,
+}
+
+impl<'a> Iterator for FoldChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        match self {
+            FoldChunks::Passthrough(inner) => inner.next(),
+            FoldChunks::Transforming(inner) => inner.next(),
+        }
+    }
+}
+
+impl<'a> FoldChunksInner<'a> {
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        loop {
+            if self.offset >= self.end {
+                return None;
+            }
+
+            if let Some(ic) = self.inlay_chunks.as_mut() {
+                if let Some(chunk) = ic.next() {
+                    self.offset.0 += chunk.text.len();
+                    return Some(chunk);
+                }
+                self.inlay_chunks = None;
+                self.cursor.next();
+                continue;
+            }
+
+            let Some(transform) = self.cursor.item() else {
+                return None;
+            };
+            let cursor_start = self.cursor.start();
+            let cursor_end = self.cursor.end();
+            let trans_start_fold = cursor_start.0;
+            let trans_end_fold = cursor_end.0;
+            let trans_start_inlay = cursor_start.1 .0;
+
+            if trans_start_fold.0 >= self.end.0 {
+                return None;
+            }
+
+            if let Some(placeholder) = transform.placeholder.as_ref() {
+                // Emit placeholder text as a single chunk. Placeholders span the
+                // entire transform in fold-offset space regardless of how many
+                // inlay-side bytes they collapse.
+                let text: &'a str = placeholder
+                    .collapsed_text
+                    .as_deref()
+                    .unwrap_or(placeholder.text.as_ref());
+                let fold_id = transform.fold_id;
+                let trans_end = trans_end_fold;
+                self.cursor.next();
+                self.offset = trans_end;
+                return Some(Chunk {
+                    text: Cow::Borrowed(text),
+                    highlight_style: None,
+                    renderer: fold_id.map(|id| super::highlights::ChunkRenderer {
+                        id: super::highlights::ChunkRendererId::Fold(id.0),
+                    }),
+                    ..Default::default()
+                });
+            }
+
+            // Isomorphic transform: compute the inlay range that corresponds
+            // to the clipped fold range, then delegate to InlayChunks.
+            let local_start_fold = self.offset.0.max(trans_start_fold.0);
+            let local_end_fold = self.end.0.min(trans_end_fold.0);
+            let local_start_inlay = trans_start_inlay + (local_start_fold - trans_start_fold.0);
+            let local_end_inlay = trans_start_inlay + (local_end_fold - trans_start_fold.0);
+            self.inlay_chunks = Some(self.snapshot.inlay_snapshot.chunks(
+                InlayOffset(local_start_inlay)..InlayOffset(local_end_inlay),
+                self.endpoints.clone(),
+            ));
+        }
+    }
+}
+
 pub struct FoldPointCursor<'a> {
     cursor: Cursor<'a, 'static, Transform, Dimensions<InlayPoint, FoldPoint>>,
 }
@@ -1316,7 +1516,7 @@ impl Iterator for FoldLineChars<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FoldMap, FoldPlaceholder, FoldPoint};
+    use super::{FoldMap, FoldOffset, FoldPlaceholder, FoldPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::inlay_map::{InlayKind, InlayMap, InlayPoint},
@@ -1818,5 +2018,36 @@ mod tests {
         );
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         assert_eq!(snap.fold_count(), 2);
+    }
+
+    #[test]
+    fn chunks_no_folds_passthrough() {
+        let snap = make_snapshot("hello\nworld");
+        let end = snap.len();
+        let text: String = snap
+            .chunks(FoldOffset(0)..end, Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(text, "hello\nworld");
+    }
+
+    #[test]
+    fn chunks_with_fold_emits_placeholder() {
+        // "hello world foo" with fold at columns 5..11 -> "hello... foo"
+        let snap = make_snapshot_with_folds(
+            "hello world foo",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(0, 11))],
+        );
+        let end = snap.len();
+        let chunks: Vec<_> = snap
+            .chunks(FoldOffset(0)..end, Arc::from(Vec::new()))
+            .collect();
+        let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "hello... foo");
+
+        // Exactly one chunk must carry a fold renderer (the placeholder).
+        let fold_chunks: Vec<_> = chunks.iter().filter(|c| c.renderer.is_some()).collect();
+        assert_eq!(fold_chunks.len(), 1);
+        assert_eq!(fold_chunks[0].text.as_ref(), "...");
     }
 }

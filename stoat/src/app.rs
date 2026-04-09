@@ -1,14 +1,9 @@
 use crate::{
     action_handlers,
-    buffer::BufferId,
+    buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     command_palette::{CommandPalette, PaletteOutcome},
-    display_map::{
-        highlights::{
-            create_highlight_endpoints, highlighted_chunks, SemanticTokenHighlight, TextHighlights,
-        },
-        syntax_theme::SyntaxStyles,
-    },
+    display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
@@ -22,11 +17,19 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 use slotmap::SlotMap;
-use std::{io, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use stoat_action::{Action, OpenFile};
-use stoat_language::{self as language, LanguageRegistry, SyntaxState};
-use stoat_scheduler::Executor;
-use stoat_text::{Bias, Point};
+use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
+use stoat_scheduler::{Executor, Task};
+use stoat_text::Bias;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
@@ -49,6 +52,26 @@ pub struct Stoat {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
+    parse_jobs: HashMap<BufferId, ParseJob>,
+}
+
+/// In-flight tree-sitter parse for a buffer.
+///
+/// `target_version` is the buffer version the task is parsing. While a job is
+/// in flight for a given buffer, no new job is spawned for the same version;
+/// once it completes, [`Stoat::drive_parse_jobs`] schedules a follow-up parse
+/// if the buffer has advanced.
+struct ParseJob {
+    target_version: u64,
+    task: Task<Option<ParseJobOutput>>,
+}
+
+/// Result of a successful background parse, ready to be installed on the
+/// foreground thread.
+struct ParseJobOutput {
+    buffer_id: BufferId,
+    syntax: SyntaxState,
+    tokens: Arc<[SemanticTokenHighlight]>,
 }
 
 impl Stoat {
@@ -96,6 +119,7 @@ impl Stoat {
             command_palette: None,
             language_registry: Arc::new(LanguageRegistry::standard()),
             syntax_styles: SyntaxStyles::standard(),
+            parse_jobs: HashMap::new(),
         }
     }
 
@@ -178,78 +202,100 @@ impl Stoat {
         effect
     }
 
-    fn ensure_visible_buffers_parsed(&mut self) {
-        let mut visible: Vec<(EditorId, BufferId)> = Vec::new();
-        for (_, pane) in self.panes.split_panes() {
-            if let View::Editor(editor_id) = pane.view {
-                if let Some(editor) = self.editors.get(editor_id) {
-                    visible.push((editor_id, editor.buffer_id));
+    /// Drive background parse jobs: poll any in-flight tasks for completion,
+    /// install their results, then spawn new jobs for visible buffers whose
+    /// stored syntax version is stale.
+    ///
+    /// At most one job per buffer is in flight at a time. If a buffer advances
+    /// past the in-flight job's `target_version`, the new job is queued only
+    /// after the old one completes. Anchors in the result are computed using
+    /// the parsed snapshot, so they remain valid even if the buffer has been
+    /// edited further while the parse was running.
+    fn drive_parse_jobs(&mut self) {
+        // 1. Poll completed tasks and harvest their outputs.
+        let waker = futures::task::noop_waker();
+        let mut completed: Vec<ParseJobOutput> = Vec::new();
+        self.parse_jobs.retain(|_, job| {
+            let mut cx = Context::from_waker(&waker);
+            match Pin::new(&mut job.task).poll(&mut cx) {
+                Poll::Ready(Some(out)) => {
+                    completed.push(out);
+                    false
+                },
+                Poll::Ready(None) => false,
+                Poll::Pending => true,
+            }
+        });
+        for out in completed {
+            self.buffers.store_syntax(out.buffer_id, out.syntax);
+            for editor in self.editors.values_mut() {
+                if editor.buffer_id == out.buffer_id {
+                    editor.display_map.set_semantic_token_highlights(
+                        out.buffer_id,
+                        out.tokens.clone(),
+                        self.syntax_styles.interner.clone(),
+                    );
                 }
             }
         }
 
-        let mut updates: Vec<(EditorId, BufferId, Arc<[SemanticTokenHighlight]>)> = Vec::new();
+        // 2. Spawn new jobs for visible buffers needing parse.
+        let mut visible: Vec<BufferId> = Vec::new();
+        for (_, pane) in self.panes.split_panes() {
+            if let View::Editor(editor_id) = pane.view {
+                if let Some(editor) = self.editors.get(editor_id) {
+                    if !visible.contains(&editor.buffer_id) {
+                        visible.push(editor.buffer_id);
+                    }
+                }
+            }
+        }
 
-        for (editor_id, buffer_id) in &visible {
-            let Some(lang) = self.buffers.language_for(*buffer_id) else {
+        for buffer_id in visible {
+            let Some(lang) = self.buffers.language_for(buffer_id) else {
                 continue;
             };
-            let Some(shared) = self.buffers.get(*buffer_id) else {
+            let Some(shared) = self.buffers.get(buffer_id) else {
                 continue;
             };
-
             let snapshot = {
                 let guard = shared.read().expect("buffer poisoned");
                 guard.snapshot.clone()
             };
             let cur_version = snapshot.version;
-            if self.buffers.syntax_version(*buffer_id) == Some(cur_version) {
+
+            if self.buffers.syntax_version(buffer_id) == Some(cur_version) {
+                continue;
+            }
+            if let Some(job) = self.parse_jobs.get(&buffer_id) {
+                if job.target_version == cur_version {
+                    continue;
+                }
+                // An older job is still in flight; let it finish before
+                // queuing a new one. Skip for now -- next call will retry.
                 continue;
             }
 
-            // FIXME(syntax-v2): allocates O(buffer) per parse. Replace with
-            // tree_sitter's parse_with callback that walks rope chunks.
-            let text = snapshot.visible_text.to_string();
-
-            let Some(tree) = language::parse(&lang, &text, None) else {
-                tracing::warn!("tree-sitter parse failed for buffer {:?}", buffer_id);
-                continue;
-            };
-
-            let spans = language::extract_highlights(&lang, &tree, &text);
-            let tokens: Arc<[SemanticTokenHighlight]> = spans
-                .into_iter()
-                .map(|sp| SemanticTokenHighlight {
-                    range: snapshot.anchor_at(sp.byte_range.start, Bias::Left)
-                        ..snapshot.anchor_at(sp.byte_range.end, Bias::Right),
-                    style: self.syntax_styles.id(sp.style),
-                })
-                .collect();
-
-            self.buffers.store_syntax(
-                *buffer_id,
-                SyntaxState {
-                    tree,
-                    version: cur_version,
+            // Take prior state out so the task owns it. If the task fails or
+            // is dropped, we lose incrementality but the next parse falls back
+            // to a full reparse.
+            let prior = self.buffers.take_syntax(buffer_id);
+            let styles = self.syntax_styles.clone();
+            let task = self
+                .executor
+                .spawn(parse_buffer_async(buffer_id, snapshot, lang, prior, styles));
+            self.parse_jobs.insert(
+                buffer_id,
+                ParseJob {
+                    target_version: cur_version,
+                    task,
                 },
             );
-
-            updates.push((*editor_id, *buffer_id, tokens));
-        }
-
-        for (editor_id, buffer_id, tokens) in updates {
-            if let Some(editor) = self.editors.get_mut(editor_id) {
-                editor.display_map.set_semantic_token_highlights(
-                    buffer_id,
-                    tokens,
-                    self.syntax_styles.interner.clone(),
-                );
-            }
         }
     }
 
     pub(crate) fn render(&mut self) -> Buffer {
-        self.ensure_visible_buffers_parsed();
+        self.drive_parse_jobs();
         let mut buf = Buffer::empty(self.size);
         let focused = self.panes.focus();
         for (id, pane) in self.panes.split_panes() {
@@ -317,6 +363,58 @@ impl KeymapState for StoatKeymapState {
             _ => None,
         }
     }
+}
+
+/// Background parse worker. Owns all inputs by value so the future is `Send`
+/// and can run on any executor thread. Constructs a fresh `tree_sitter::Parser`
+/// inside the future since `Parser` is `!Send`.
+async fn parse_buffer_async(
+    buffer_id: BufferId,
+    snapshot: TextBufferSnapshot,
+    lang: Arc<Language>,
+    prior: Option<SyntaxState>,
+    styles: SyntaxStyles,
+) -> Option<ParseJobOutput> {
+    let cur_version = snapshot.version;
+    let new_rope = snapshot.visible_text.clone();
+
+    let tree = match prior {
+        Some(mut prev) => {
+            let edits = snapshot.edits_since(prev.version);
+            language::edit_tree(
+                &mut prev.tree,
+                edits.edits(),
+                &prev.rope_snapshot,
+                &new_rope,
+            );
+            language::parse_rope(&lang, &new_rope, Some(&prev.tree))?
+        },
+        None => language::parse_rope(&lang, &new_rope, None)?,
+    };
+
+    let spans = language::extract_highlights_rope(&lang, &tree, &new_rope);
+    let tokens: Arc<[SemanticTokenHighlight]> = spans
+        .into_iter()
+        .map(|sp| SemanticTokenHighlight {
+            // Insertions at the start of a token attach to the previous span,
+            // not this one; insertions at the end attach to the next span.
+            // Keeps a typed character from silently extending a keyword or
+            // string into neighboring text.
+            range: snapshot.anchor_at(sp.byte_range.start, Bias::Right)
+                ..snapshot.anchor_at(sp.byte_range.end, Bias::Left),
+            style: styles.id(sp.style),
+        })
+        .collect();
+
+    Some(ParseJobOutput {
+        buffer_id,
+        syntax: SyntaxState {
+            tree,
+            version: cur_version,
+            rope_snapshot: new_rope,
+        },
+        tokens,
+    })
 }
 
 pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
@@ -761,17 +859,6 @@ fn render_pane(
     }
 }
 
-// FIXME(syntax-v2): bypasses BlockChunks because BlockSnapshot::chunks
-// currently ignores its Highlights argument. Properly fixing BlockChunks
-// to apply endpoint merging while traversing block transforms is the
-// right long-term home for this logic. Bypass works for v1 because folds,
-// wraps, inlays, and blocks are not active in normal flow.
-//
-// FIXME(syntax-v2): all syntax tokens share HighlightKey::SemanticToken
-// in the merger, so nested captures (e.g. escape_sequence inside
-// string_literal) collapse into a single span. Outer-wins via
-// (start, pattern_index) sort in extract_highlights is the v1 fallback;
-// proper layered overlap requires per-span priority on the merger key.
 fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
     let snapshot = editor.display_map.snapshot();
     let visible_rows = inner.height as u32;
@@ -781,65 +868,31 @@ fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
         return;
     }
 
-    let buf_snap = snapshot.buffer_snapshot();
-    let buffer_line_count = buf_snap.line_count();
+    let mut x = inner.x;
+    let mut y = inner.y;
+    let right = inner.x + inner.width;
+    let bottom = inner.y + inner.height;
 
-    // FIXME(syntax-v2): assumes display_row == buffer_row. Folds, wraps,
-    // and inlays will break this. Replace with a proper display->buffer
-    // row mapping (or fix BlockChunks to consume Highlights).
-    let view_start_offset = if editor.scroll_row >= buffer_line_count {
-        buf_snap.rope().len()
-    } else {
-        buf_snap
-            .rope()
-            .point_to_offset(Point::new(editor.scroll_row, 0))
-    };
-    let view_end_offset = if end_row >= buffer_line_count {
-        buf_snap.rope().len()
-    } else {
-        buf_snap.rope().point_to_offset(Point::new(end_row, 0))
-    };
-
-    let semantic_clone = snapshot.semantic_token_highlights().clone();
-    let empty_text_highlights: TextHighlights = Arc::new(std::collections::HashMap::new());
-    let resolve = |a: &stoat_text::Anchor| buf_snap.resolve_anchor(a);
-    let endpoints = create_highlight_endpoints(
-        &(view_start_offset..view_end_offset),
-        &empty_text_highlights,
-        Some(&semantic_clone),
-        &resolve,
-    );
-
-    for display_row in editor.scroll_row..end_row {
-        let line = snapshot.display_line(display_row);
-        let y = inner.y + (display_row - editor.scroll_row) as u16;
-        if line.is_empty() {
-            continue;
-        }
-
-        let line_start = if display_row >= buffer_line_count {
-            buf_snap.rope().len()
-        } else {
-            buf_snap.rope().point_to_offset(Point::new(display_row, 0))
-        };
-
-        let mut x = inner.x;
-        for chunk in highlighted_chunks(&line, line_start, &endpoints) {
-            let style = chunk
-                .style
-                .as_ref()
-                .map(|hs| hs.to_ratatui_style())
-                .unwrap_or(fallback_style);
-            for ch in chunk.text.chars() {
-                if x >= inner.x + inner.width {
-                    break;
+    for chunk in snapshot.highlighted_chunks(editor.scroll_row..end_row) {
+        let style = chunk
+            .highlight_style
+            .as_ref()
+            .map(|hs| hs.to_ratatui_style())
+            .unwrap_or(fallback_style);
+        for ch in chunk.text.chars() {
+            if ch == '\n' {
+                y += 1;
+                x = inner.x;
+                if y >= bottom {
+                    return;
                 }
-                buf[(x, y)].set_char(ch).set_style(style);
-                x += 1;
+                continue;
             }
-            if x >= inner.x + inner.width {
-                break;
+            if x >= right {
+                continue;
             }
+            buf[(x, y)].set_char(ch).set_style(style);
+            x += 1;
         }
     }
 }

@@ -3,6 +3,7 @@ use ratatui::style::Color;
 use std::sync::Arc;
 use stoat_language::TokenStyle;
 
+#[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
     table: Vec<HighlightStyleId>,
@@ -40,8 +41,12 @@ fn style_for(ts: TokenStyle) -> HighlightStyle {
             s.foreground = Some(Color::Blue);
             s.bold = Some(true);
         },
-        TokenStyle::String | TokenStyle::StringEscape => {
+        TokenStyle::String => {
             s.foreground = Some(Color::Green);
+        },
+        TokenStyle::StringEscape => {
+            s.foreground = Some(Color::LightGreen);
+            s.bold = Some(true);
         },
         TokenStyle::Comment => {
             s.foreground = Some(Color::DarkGray);
@@ -103,6 +108,18 @@ fn style_for(ts: TokenStyle) -> HighlightStyle {
         TokenStyle::LinkUri => {
             s.foreground = Some(Color::Blue);
             s.underline = Some(true);
+        },
+        TokenStyle::Emphasis => {
+            s.italic = Some(true);
+        },
+        TokenStyle::EmphasisStrong => {
+            s.bold = Some(true);
+        },
+        TokenStyle::LiteralMarkup => {
+            s.foreground = Some(Color::LightYellow);
+        },
+        TokenStyle::Strikethrough => {
+            s.strikethrough = Some(true);
         },
     }
     s

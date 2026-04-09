@@ -418,11 +418,22 @@ pub enum BlockRowKind<'a> {
     Block { block: &'a Block, line_index: u32 },
 }
 
+use super::{highlights::HighlightEndpoint, wrap_map::WrapChunks};
+
+/// Iterator over a range of block rows, emitting [`Chunk`]s that propagate
+/// highlight styles from the wrap layer below.
+///
+/// Walks the block transform tree row-by-row. For block transforms, emits one
+/// unstyled chunk per block line. For regular transforms, forwards chunks from
+/// [`WrapSnapshot::chunks`] for the matching wrap row. Newline separators are
+/// inserted between rows.
 pub struct BlockChunks<'a> {
     snapshot: &'a BlockSnapshot,
+    endpoints: Arc<[HighlightEndpoint]>,
     current_row: u32,
     end_row: u32,
-    emitted_line: bool,
+    pending_wrap_chunks: Option<WrapChunks<'a>>,
+    pending_newline: bool,
 }
 
 impl<'a> Iterator for BlockChunks<'a> {
@@ -430,29 +441,67 @@ impl<'a> Iterator for BlockChunks<'a> {
 
     fn next(&mut self) -> Option<Chunk<'a>> {
         loop {
-            if self.current_row >= self.end_row {
-                return None;
-            }
-
-            if !self.emitted_line {
-                self.emitted_line = true;
-                let line = self.snapshot.display_line(self.current_row);
-                if !line.is_empty() {
-                    return Some(Chunk {
-                        text: std::borrow::Cow::Owned(line),
-                        ..Default::default()
-                    });
-                }
-            }
-
-            self.current_row += 1;
-            self.emitted_line = false;
-            if self.current_row < self.end_row {
+            if self.pending_newline {
+                self.pending_newline = false;
                 return Some(Chunk {
                     text: std::borrow::Cow::Borrowed("\n"),
                     ..Default::default()
                 });
             }
+
+            if let Some(wc) = self.pending_wrap_chunks.as_mut() {
+                if let Some(chunk) = wc.next() {
+                    return Some(chunk);
+                }
+                self.pending_wrap_chunks = None;
+                self.current_row += 1;
+                if self.current_row < self.end_row {
+                    self.pending_newline = true;
+                }
+                continue;
+            }
+
+            if self.current_row >= self.end_row {
+                return None;
+            }
+
+            // Classify the current row via the block transform cursor.
+            let target = OutputRow(self.current_row + 1);
+            let mut cursor = self
+                .snapshot
+                .transforms
+                .cursor::<Dimensions<InputRow, OutputRow>>(());
+            cursor.seek(&target, Bias::Left);
+            let Dimensions(input_start, output_start, _) = *cursor.start();
+            let rows_into_transform = self.current_row - output_start.0;
+
+            let is_block = cursor.item().and_then(|t| t.block.as_ref()).is_some();
+
+            if is_block {
+                let mut line = String::new();
+                if let Some(transform) = cursor.item() {
+                    if let Some(ref block) = transform.block {
+                        block.write_line(&mut line, rows_into_transform);
+                    }
+                }
+                self.current_row += 1;
+                if self.current_row < self.end_row {
+                    self.pending_newline = true;
+                }
+                return Some(Chunk {
+                    text: std::borrow::Cow::Owned(line),
+                    ..Default::default()
+                });
+            }
+
+            // Regular transform: pull chunks from the wrap layer for exactly
+            // one wrap row.
+            let wrap_row = input_start.0 + rows_into_transform;
+            self.pending_wrap_chunks = Some(
+                self.snapshot
+                    .wrap_snapshot
+                    .chunks(wrap_row..wrap_row + 1, self.endpoints.clone()),
+            );
         }
     }
 }
@@ -1073,13 +1122,15 @@ impl BlockSnapshot {
     pub fn chunks(
         &self,
         rows: std::ops::Range<u32>,
-        _highlights: Highlights<'_>,
+        endpoints: Arc<[HighlightEndpoint]>,
     ) -> BlockChunks<'_> {
         BlockChunks {
             snapshot: self,
+            endpoints,
             current_row: rows.start,
             end_row: rows.end,
-            emitted_line: false,
+            pending_wrap_chunks: None,
+            pending_newline: false,
         }
     }
 

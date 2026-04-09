@@ -22,10 +22,11 @@ pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, Chunk, ChunkRenderer,
     ChunkRendererId, ChunkReplacement, Crease, CreaseId, CreaseMap, CreaseSnapshot, DisplayMap,
     DisplayMapId, DisplayPoint, DisplayRow, DisplaySnapshot, FoldMap, FoldPlaceholder, FoldPoint,
-    FoldSnapshot, HighlightKey, HighlightStyle, HighlightStyleId, HighlightStyleInterner,
-    HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, InlayId, InlayKind, InlayMap,
-    InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight, SemanticTokensHighlights,
-    TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap, WrapPoint, WrapSnapshot,
+    FoldSnapshot, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
+    HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, InlayId,
+    InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight,
+    SemanticTokensHighlights, TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap,
+    WrapPoint, WrapSnapshot,
 };
 pub use git::DiffStatus;
 pub use multi_buffer::{

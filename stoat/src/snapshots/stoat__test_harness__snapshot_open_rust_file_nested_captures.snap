@@ -1,0 +1,15 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: open_file
+focused: #1 of 1
+mode: normal
+size: 40x6
+---
+┌──────────────────────────────────────┐
+│fn main() { "a\nb"; }                 │
+│                                      │
+│                                      │
+│                                      │
+└──────────────────────────────────────┘

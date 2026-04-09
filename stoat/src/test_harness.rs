@@ -151,6 +151,50 @@ impl TestHarness {
         insta::assert_snapshot!(name, text);
     }
 
+    /// Edit the focused buffer at the given byte range, replacing it with
+    /// `text`. Triggers a capture so the next render reflects the edit.
+    /// Test-only helper for exercising the incremental reparse path.
+    pub fn edit_focused(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let focused = self.stoat.panes.focus();
+        let editor_id = match self.stoat.panes.pane(focused).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("edit_focused: focused pane is not an editor"),
+        };
+        let editor = self
+            .stoat
+            .editors
+            .get(editor_id)
+            .expect("focused editor exists");
+        let buffer = self
+            .stoat
+            .buffers
+            .get(editor.buffer_id)
+            .expect("buffer exists");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(range, text);
+        }
+        self.capture("edit");
+    }
+
+    /// Fold the given buffer-point range on the focused editor's display
+    /// map, triggering a capture afterward. Test-only helper for exercising
+    /// the fold path of the chunks pipeline.
+    pub fn fold_focused(&mut self, range: std::ops::Range<stoat_text::Point>) {
+        let focused = self.stoat.panes.focus();
+        let editor_id = match self.stoat.panes.pane(focused).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("fold_focused: focused pane is not an editor"),
+        };
+        let editor = self
+            .stoat
+            .editors
+            .get_mut(editor_id)
+            .expect("focused editor exists");
+        editor.display_map.fold(vec![range]);
+        self.capture("fold");
+    }
+
     pub fn type_action(&mut self, action_expr: &str) {
         let parsed = stoat_config::parse_action(action_expr)
             .unwrap_or_else(|e| panic!("failed to parse action {action_expr:?}: {e:?}"));
@@ -215,6 +259,8 @@ impl TestHarness {
     }
 
     fn maybe_capture(&mut self, action: &str) {
+        let _ = self.stoat.render();
+        self.scheduler.run_until_parked();
         let buf = self.stoat.render();
         if self.last_buffer.as_ref() == Some(&buf) {
             if let Some(last) = self.frames.last_mut() {
@@ -237,6 +283,11 @@ impl TestHarness {
     }
 
     fn capture(&mut self, action: &str) {
+        // First render spawns any pending parse jobs. Settling the test
+        // scheduler runs them to completion. The second render polls the
+        // results and installs them so the snapshot reflects them.
+        let _ = self.stoat.render();
+        self.scheduler.run_until_parked();
         let buf = self.stoat.render();
         let is_different = self.last_buffer.as_ref() != Some(&buf);
         self.last_buffer = Some(buf.clone());
@@ -979,6 +1030,26 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_open_markdown_file_with_bold_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "bold.md", "# Title\n\n**bold** text\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_markdown_file_with_bold_inline");
+    }
+
+    #[test]
+    fn snapshot_open_markdown_file_with_bold_inline_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "bold.md", "# Title\n\n**bold** text\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot_styled("snapshot_open_markdown_file_with_bold_inline_styled");
+    }
+
+    #[test]
     fn snapshot_open_unknown_extension_no_highlights() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(dir.path(), "sample.txt", "fn main() {}\n");
@@ -986,5 +1057,83 @@ mod tests {
         let mut h = TestHarness::with_size(40, 6);
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_unknown_extension_no_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_nested_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "nested.rs", "fn main() { \"a\\nb\"; }\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_rust_file_nested_captures");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_then_edit_highlights() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "edit.rs", "fn a() {}\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        // Insert a `let x = 1;` statement inside the body. Byte 8 is the
+        // position right after the opening brace.
+        h.edit_focused(8..8, " let x = 1; ");
+        h.assert_snapshot("snapshot_open_rust_file_then_edit_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_then_edit_highlights_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "edit.rs", "fn a() {}\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.edit_focused(8..8, " let x = 1; ");
+        h.assert_snapshot_styled("snapshot_open_rust_file_then_edit_highlights_styled");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_with_fold() {
+        use stoat_text::Point;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "folded.rs",
+            "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
+        );
+
+        let mut h = TestHarness::with_size(40, 8);
+        h.open_file(&path);
+        // Fold the body of `fn b`: from after the open brace to just before
+        // the close brace.
+        h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
+        h.assert_snapshot("snapshot_open_rust_file_with_fold");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_with_fold_styled() {
+        use stoat_text::Point;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            dir.path(),
+            "folded.rs",
+            "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
+        );
+
+        let mut h = TestHarness::with_size(40, 8);
+        h.open_file(&path);
+        h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
+        h.assert_snapshot_styled("snapshot_open_rust_file_with_fold_styled");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_nested_captures_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "nested.rs", "fn main() { \"a\\nb\"; }\n");
+
+        let mut h = TestHarness::with_size(40, 6);
+        h.open_file(&path);
+        h.assert_snapshot_styled("snapshot_open_rust_file_nested_captures_styled");
     }
 }

@@ -1,8 +1,12 @@
-use crate::multi_buffer::MultiBufferSnapshot;
+use crate::{
+    display_map::highlights::{BufferChunks, Chunk, HighlightEndpoint},
+    multi_buffer::MultiBufferSnapshot,
+};
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    ops::{Add, AddAssign, Deref, Sub},
+    ops::{Add, AddAssign, Deref, Range, Sub},
     sync::{Arc, OnceLock},
 };
 use stoat_text::{
@@ -747,6 +751,140 @@ impl InlaySnapshot {
             cursor: self.transforms.cursor::<Dimensions<Point, InlayPoint>>(()),
         }
     }
+
+    /// Stream [`Chunk`]s covering `range` with highlight styles merged in.
+    ///
+    /// Walks the inlay transform tree and interleaves buffer text (from
+    /// [`BufferChunks`]) with inserted inlay text. Inlay text is emitted
+    /// unstyled and tagged via [`Chunk::is_inlay`] and [`Chunk::inlay_kind`].
+    ///
+    /// `endpoints` must be sorted over the buffer byte range that corresponds
+    /// to `range`. Inlay bytes contribute no highlights and are skipped over
+    /// when consulting endpoints.
+    ///
+    /// Fast path: when the snapshot has zero inlays, delegates directly to a
+    /// single [`BufferChunks`] over the matching buffer range without any
+    /// transform cursor work.
+    pub fn chunks<'a>(
+        &'a self,
+        range: Range<InlayOffset>,
+        endpoints: Arc<[HighlightEndpoint]>,
+    ) -> InlayChunks<'a> {
+        if !self.has_inlays() {
+            return InlayChunks::Passthrough(BufferChunks::new(
+                self.buffer.rope(),
+                range.start.0..range.end.0,
+                endpoints,
+            ));
+        }
+
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InlayOffset, InputOffset>>(());
+        cursor.seek(&range.start, Bias::Right);
+
+        InlayChunks::Transforming(Box::new(InlayChunksInner {
+            snapshot: self,
+            endpoints,
+            cursor,
+            buffer_chunks: None,
+            offset: range.start,
+            end: range.end,
+        }))
+    }
+}
+
+/// Iterator returned by [`InlaySnapshot::chunks`].
+pub enum InlayChunks<'a> {
+    /// Snapshot has no inlays; this is a thin wrapper around [`BufferChunks`].
+    Passthrough(BufferChunks<'a>),
+    /// Snapshot has at least one inlay; walks transforms to interleave inlay
+    /// text with buffer chunks.
+    Transforming(Box<InlayChunksInner<'a>>),
+}
+
+#[doc(hidden)]
+pub struct InlayChunksInner<'a> {
+    snapshot: &'a InlaySnapshot,
+    endpoints: Arc<[HighlightEndpoint]>,
+    cursor: Cursor<'a, 'static, Transform, Dimensions<InlayOffset, InputOffset>>,
+    buffer_chunks: Option<BufferChunks<'a>>,
+    offset: InlayOffset,
+    end: InlayOffset,
+}
+
+impl<'a> Iterator for InlayChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        match self {
+            InlayChunks::Passthrough(bc) => bc.next(),
+            InlayChunks::Transforming(inner) => inner.next(),
+        }
+    }
+}
+
+impl<'a> InlayChunksInner<'a> {
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        loop {
+            if self.offset >= self.end {
+                return None;
+            }
+
+            if let Some(bc) = self.buffer_chunks.as_mut() {
+                if let Some(chunk) = bc.next() {
+                    let len = chunk.text.len();
+                    self.offset.0 += len;
+                    return Some(chunk);
+                }
+                self.buffer_chunks = None;
+                self.cursor.next();
+                continue;
+            }
+
+            let Some(transform) = self.cursor.item() else {
+                return None;
+            };
+            let cursor_start = self.cursor.start();
+            let cursor_end = self.cursor.end();
+            let trans_start_inlay = cursor_start.0;
+            let trans_end_inlay = cursor_end.0;
+            let trans_start_buf = cursor_start.1 .0;
+
+            if trans_start_inlay.0 >= self.end.0 {
+                return None;
+            }
+
+            match transform {
+                Transform::Isomorphic(_) => {
+                    let local_start_inlay = self.offset.0.max(trans_start_inlay.0);
+                    let local_end_inlay = self.end.0.min(trans_end_inlay.0);
+                    let local_start_buf =
+                        trans_start_buf + (local_start_inlay - trans_start_inlay.0);
+                    let local_end_buf = trans_start_buf + (local_end_inlay - trans_start_inlay.0);
+                    self.buffer_chunks = Some(BufferChunks::new(
+                        self.snapshot.buffer.rope(),
+                        local_start_buf..local_end_buf,
+                        self.endpoints.clone(),
+                    ));
+                },
+                Transform::Inlay(inlay) => {
+                    let inlay_text: &'a str = inlay.text.as_ref();
+                    let kind = inlay.kind;
+                    let trans_end = trans_end_inlay;
+                    self.cursor.next();
+                    self.offset = trans_end;
+                    return Some(Chunk {
+                        text: Cow::Borrowed(inlay_text),
+                        is_inlay: true,
+                        inlay_kind: Some(kind),
+                        highlight_style: None,
+                        ..Default::default()
+                    });
+                },
+            }
+        }
+    }
 }
 
 pub struct InlayPointCursor<'a> {
@@ -979,5 +1117,56 @@ mod tests {
             inlay_snap.to_inlay_point(Point::new(0, 7)),
             InlayPoint::new(0, 12)
         );
+    }
+
+    #[test]
+    fn chunks_passthrough_no_inlays_round_trips() {
+        use super::InlayOffset;
+
+        let snap = make_snapshot("hello\nworld");
+        let endpoints = Arc::from(Vec::new());
+        let total = snap.buffer.rope().len();
+        let collected: String = snap
+            .chunks(InlayOffset(0)..InlayOffset(total), endpoints)
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(collected, "hello\nworld");
+    }
+
+    #[test]
+    fn chunks_with_inlay_emits_interleaved_text() {
+        use super::InlayOffset;
+
+        let snap =
+            make_snapshot_with_inlays("hello world", vec![(Point::new(0, 5), ": str".to_string())]);
+        // Total inlay-space length: "hello" + ": str" + " world" = 5 + 5 + 6 = 16
+        let total = 5 + 5 + 6;
+        let chunks: Vec<_> = snap
+            .chunks(InlayOffset(0)..InlayOffset(total), Arc::from(Vec::new()))
+            .collect();
+
+        let full_text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(full_text, "hello: str world");
+
+        // Exactly one chunk must carry the inlay marker with text ": str".
+        let inlay_chunks: Vec<_> = chunks.iter().filter(|c| c.is_inlay).collect();
+        assert_eq!(inlay_chunks.len(), 1);
+        assert_eq!(inlay_chunks[0].text.as_ref(), ": str");
+        assert_eq!(inlay_chunks[0].inlay_kind, Some(super::InlayKind::Hint));
+    }
+
+    #[test]
+    fn chunks_clamps_to_inlay_range() {
+        use super::InlayOffset;
+
+        let snap =
+            make_snapshot_with_inlays("abcdefghij", vec![(Point::new(0, 5), "!!".to_string())]);
+        // "abcde" (5) + "!!" (2) + "fghij" (5) = 12
+        // Ask for inlay offsets [3, 9): expect "de" + "!!" + "fg" = "de!!fg".
+        let chunks: Vec<_> = snap
+            .chunks(InlayOffset(3)..InlayOffset(9), Arc::from(Vec::new()))
+            .collect();
+        let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "de!!fg");
     }
 }

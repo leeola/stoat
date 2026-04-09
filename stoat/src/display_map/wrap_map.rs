@@ -1,10 +1,15 @@
-use super::tab_map::{TabPoint, TabSnapshot};
+use super::{
+    fold_map::FoldOffset,
+    highlights::{Chunk, HighlightEndpoint},
+    tab_map::{TabChunks, TabPoint, TabSnapshot},
+};
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::VecDeque,
     future::Future,
     mem,
-    ops::Deref,
+    ops::{Deref, Range},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -807,6 +812,55 @@ impl WrapSnapshot {
         result
     }
 
+    /// Stream [`Chunk`]s covering the given wrap-row range.
+    ///
+    /// Fast path: when `wrap_width` is `None`, delegates directly to
+    /// [`TabSnapshot::chunks`] over the matching fold-offset range.
+    ///
+    /// FIXME(syntax-v2-wrap): when `wrap_width` is `Some`, this currently
+    /// walks rows and produces unstyled chunks from the expanded line text
+    /// plus newline separators. Highlights are dropped on wrapped content.
+    /// Proper support requires tracking fold-byte offsets through tab-column
+    /// expansion and wrap-column splits in lockstep.
+    pub fn chunks<'a>(
+        &'a self,
+        rows: Range<u32>,
+        endpoints: Arc<[HighlightEndpoint]>,
+    ) -> WrapChunks<'a> {
+        if self.wrap_width.is_none() {
+            // wrap row = tab row = fold row in this mode. Compute the matching
+            // fold-offset range. The range spans from the start of the first
+            // row to the end of the last row's content (excluding the trailing
+            // newline). Intermediate newlines between rows are included
+            // naturally from the rope.
+            let fold = self.tab_snapshot.fold_snapshot();
+            let (start, end) = if rows.start >= rows.end {
+                (FoldOffset(0), FoldOffset(0))
+            } else {
+                let start = fold.row_start_offset(rows.start);
+                let last_row = rows.end - 1;
+                let line_count = fold.line_count();
+                let end = if last_row >= line_count {
+                    fold.len()
+                } else {
+                    let last_start = fold.row_start_offset(last_row);
+                    FoldOffset(last_start.0 + fold.line_len(last_row) as usize)
+                };
+                (start, end)
+            };
+            return WrapChunks::Passthrough {
+                tab_chunks: self.tab_snapshot.chunks(start..end, 0, endpoints),
+            };
+        }
+
+        WrapChunks::Wrapped(Box::new(WrappedChunksInner {
+            snapshot: self,
+            rows: rows.clone(),
+            current_row: rows.start,
+            pending_line: None,
+        }))
+    }
+
     pub fn longest_line(&self) -> (u32, u32) {
         (self.longest_row, self.longest_row_chars)
     }
@@ -892,6 +946,61 @@ impl WrapSnapshot {
                 .cursor::<Dimensions<InputRow, OutputRow>>(()),
             wrap_width: self.wrap_width,
         }
+    }
+}
+
+/// Iterator returned by [`WrapSnapshot::chunks`].
+pub enum WrapChunks<'a> {
+    /// No wrapping: a thin wrapper around [`TabChunks`].
+    Passthrough { tab_chunks: TabChunks<'a> },
+    /// Wrapping active: emits row-by-row using the expanded display line
+    /// text. Unstyled; see the FIXME on [`WrapSnapshot::chunks`].
+    Wrapped(Box<WrappedChunksInner<'a>>),
+}
+
+#[doc(hidden)]
+pub struct WrappedChunksInner<'a> {
+    snapshot: &'a WrapSnapshot,
+    rows: Range<u32>,
+    current_row: u32,
+    pending_line: Option<String>,
+}
+
+impl<'a> Iterator for WrapChunks<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        match self {
+            WrapChunks::Passthrough { tab_chunks } => tab_chunks.next(),
+            WrapChunks::Wrapped(inner) => inner.next(),
+        }
+    }
+}
+
+impl WrappedChunksInner<'_> {
+    fn next(&mut self) -> Option<Chunk<'static>> {
+        if let Some(line) = self.pending_line.take() {
+            return Some(Chunk {
+                text: Cow::Owned(line),
+                ..Default::default()
+            });
+        }
+        if self.current_row >= self.rows.end {
+            return None;
+        }
+        let row = self.current_row;
+        self.current_row += 1;
+        let mut line = String::new();
+        self.snapshot.write_display_line(&mut line, row);
+        // If this isn't the last row in the requested range, follow it with a
+        // newline chunk so the concatenated output separates rows.
+        if self.current_row < self.rows.end {
+            self.pending_line = Some("\n".to_string());
+        }
+        Some(Chunk {
+            text: Cow::Owned(line),
+            ..Default::default()
+        })
     }
 }
 
