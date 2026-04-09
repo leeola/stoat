@@ -71,6 +71,11 @@ struct ParseJob {
 struct ParseJobOutput {
     buffer_id: BufferId,
     syntax: SyntaxState,
+    /// Multi-layer parse state from [`stoat_language::SyntaxMap::reparse`].
+    /// Populated alongside [`Self::syntax`] so the legacy single-tree
+    /// highlight path and the capture-merging path can run side by side
+    /// while consumers migrate.
+    syntax_map: stoat_language::SyntaxMap,
     tokens: Arc<[SemanticTokenHighlight]>,
 }
 
@@ -108,6 +113,18 @@ impl Stoat {
         let mut panes = PaneTree::new(Rect::default());
         panes.pane_mut(panes.focus()).view = View::Editor(editor_id);
 
+        let syntax_styles = SyntaxStyles::standard();
+        let language_registry = Arc::new(LanguageRegistry::standard());
+        // Install a theme-driven HighlightMap on every loaded language.
+        // Done at registry-init time because adding new languages later
+        // would also need a fresh HighlightMap; today the registry is
+        // static so this one-shot install is sufficient.
+        let theme_keys = syntax_styles.theme_keys();
+        for lang in language_registry.languages() {
+            let map = stoat_language::HighlightMap::new(lang.highlight_capture_names(), theme_keys);
+            lang.set_highlight_map(map);
+        }
+
         Self {
             size: Rect::default(),
             panes,
@@ -117,8 +134,8 @@ impl Stoat {
             buffers,
             editors,
             command_palette: None,
-            language_registry: Arc::new(LanguageRegistry::standard()),
-            syntax_styles: SyntaxStyles::standard(),
+            language_registry,
+            syntax_styles,
             parse_jobs: HashMap::new(),
         }
     }
@@ -228,6 +245,7 @@ impl Stoat {
         });
         for out in completed {
             self.buffers.store_syntax(out.buffer_id, out.syntax);
+            self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
             for editor in self.editors.values_mut() {
                 if editor.buffer_id == out.buffer_id {
                     editor.display_map.set_semantic_token_highlights(
@@ -276,14 +294,50 @@ impl Stoat {
                 continue;
             }
 
-            // Take prior state out so the task owns it. If the task fails or
-            // is dropped, we lose incrementality but the next parse falls back
-            // to a full reparse.
-            let prior = self.buffers.take_syntax(buffer_id);
+            // Take prior state out so the parse pipeline owns it. On a sync
+            // miss the locals stay populated and flow into the background
+            // spawn; on parse failure the next call falls back to a full
+            // reparse.
+            let mut prior = self.buffers.take_syntax(buffer_id);
+            let mut prior_map = self.buffers.take_syntax_map(buffer_id);
+
+            // Sync fast path: small edits typically finish in well under a
+            // millisecond. Try to parse inline before paying the executor
+            // round-trip; if the deadline is exceeded the parser aborts and
+            // we fall through to the background spawn with `prior` /
+            // `prior_map` still intact.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+            if let Some(out) = parse_buffer_step(
+                buffer_id,
+                snapshot.clone(),
+                &lang,
+                &mut prior,
+                &mut prior_map,
+                &self.syntax_styles,
+                Some(deadline),
+            ) {
+                self.buffers.store_syntax(out.buffer_id, out.syntax);
+                self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
+                for editor in self.editors.values_mut() {
+                    if editor.buffer_id == out.buffer_id {
+                        editor.display_map.set_semantic_token_highlights(
+                            out.buffer_id,
+                            out.tokens.clone(),
+                            self.syntax_styles.interner.clone(),
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Sync attempt aborted. `prior` / `prior_map` were not consumed
+            // because the failure short-circuited before parse_buffer_step
+            // reached its take points; hand them to the background path so
+            // it can still reparse incrementally.
             let styles = self.syntax_styles.clone();
-            let task = self
-                .executor
-                .spawn(parse_buffer_async(buffer_id, snapshot, lang, prior, styles));
+            let task = self.executor.spawn(parse_buffer_async(
+                buffer_id, snapshot, lang, prior, prior_map, styles,
+            ));
             self.parse_jobs.insert(
                 buffer_id,
                 ParseJob {
@@ -365,46 +419,88 @@ impl KeymapState for StoatKeymapState {
     }
 }
 
-/// Background parse worker. Owns all inputs by value so the future is `Send`
-/// and can run on any executor thread. Constructs a fresh `tree_sitter::Parser`
-/// inside the future since `Parser` is `!Send`.
-async fn parse_buffer_async(
+/// Synchronous core of the parse pipeline. When `deadline` is `Some`, the
+/// host parse aborts if it would exceed it and the function returns `None`,
+/// signalling that the caller should fall back to the background path.
+/// `None` is also returned for ordinary parse failures (unsupported
+/// language, etc.); the difference does not matter for the call sites.
+fn parse_buffer_step(
     buffer_id: BufferId,
     snapshot: TextBufferSnapshot,
-    lang: Arc<Language>,
-    prior: Option<SyntaxState>,
-    styles: SyntaxStyles,
+    lang: &Arc<Language>,
+    prior: &mut Option<SyntaxState>,
+    prior_syntax_map: &mut Option<stoat_language::SyntaxMap>,
+    styles: &SyntaxStyles,
+    deadline: Option<std::time::Instant>,
 ) -> Option<ParseJobOutput> {
     let cur_version = snapshot.version;
     let new_rope = snapshot.visible_text.clone();
 
-    let tree = match prior {
-        Some(mut prev) => {
-            let edits = snapshot.edits_since(prev.version);
-            language::edit_tree(
-                &mut prev.tree,
-                edits.edits(),
-                &prev.rope_snapshot,
-                &new_rope,
-            );
-            language::parse_rope(&lang, &new_rope, Some(&prev.tree))?
+    // Edit a clone of the prior tree rather than mutating it in place. If
+    // the parse aborts (deadline exceeded, etc.) the caller's prior must
+    // remain valid for the next attempt; an in-place edit would leave the
+    // registry holding a half-edited tree that would double-stamp position
+    // offsets when re-edited next call.
+    //
+    // tree_sitter::Tree::clone is O(1) (refcount bump on the root subtree),
+    // and tree.edit goes through ts_subtree_edit which is copy-on-write, so
+    // editing the clone leaves the original untouched.
+    let edited_tree = prior.as_ref().map(|prev| {
+        let mut tree = prev.tree.clone();
+        let edits = snapshot.edits_since(prev.version);
+        language::edit_tree(&mut tree, edits.edits(), &prev.rope_snapshot, &new_rope);
+        tree
+    });
+
+    let tree = match edited_tree.as_ref() {
+        Some(old_tree) => match deadline {
+            Some(dl) => language::parse_rope_within(lang, &new_rope, Some(old_tree), dl)?,
+            None => language::parse_rope(lang, &new_rope, Some(old_tree))?,
         },
-        None => language::parse_rope(&lang, &new_rope, None)?,
+        None => match deadline {
+            Some(dl) => language::parse_rope_within(lang, &new_rope, None, dl)?,
+            None => language::parse_rope(lang, &new_rope, None)?,
+        },
     };
 
-    let spans = language::extract_highlights_rope(&lang, &tree, &new_rope);
-    let tokens: Arc<[SemanticTokenHighlight]> = spans
+    // Parse succeeded; from here on we consume the prior state.
+    let prev_injection_trees = prior
+        .take()
+        .map(|prev| prev.injection_trees)
+        .unwrap_or_default();
+
+    let extracted =
+        language::extract_highlights_rope_with_cache(lang, &tree, &new_rope, prev_injection_trees);
+    // Theme-driven path: span.id is set to the theme key index by
+    // collect_highlights_into via language.highlight_map(). Spans
+    // whose id is DEFAULT (capture not in the active theme) are
+    // skipped because they have no rendered style.
+    let tokens: Arc<[SemanticTokenHighlight]> = extracted
+        .spans
         .into_iter()
-        .map(|sp| SemanticTokenHighlight {
-            // Insertions at the start of a token attach to the previous span,
-            // not this one; insertions at the end attach to the next span.
-            // Keeps a typed character from silently extending a keyword or
-            // string into neighboring text.
-            range: snapshot.anchor_at(sp.byte_range.start, Bias::Right)
-                ..snapshot.anchor_at(sp.byte_range.end, Bias::Left),
-            style: styles.id(sp.style),
+        .filter_map(|sp| {
+            let style_id = styles.id_for_highlight(sp.id)?;
+            Some(SemanticTokenHighlight {
+                // Insertions at the start of a token attach to the
+                // previous span, not this one; insertions at the end
+                // attach to the next span. Keeps a typed character
+                // from silently extending a keyword or string into
+                // neighboring text.
+                range: snapshot.anchor_at(sp.byte_range.start, Bias::Right)
+                    ..snapshot.anchor_at(sp.byte_range.end, Bias::Left),
+                style: style_id,
+            })
         })
         .collect();
+
+    // Drive the multi-layer SyntaxMap alongside the legacy
+    // SyntaxState. We don't have an interpolation pass on the host
+    // side yet (it would need anchored byte offsets), so each parse
+    // produces a fresh SyntaxMap from scratch; the prior_syntax_map
+    // is consumed but only its captured tree is reused via
+    // SyntaxMap::reparse's internal `prior_injections` snapshot.
+    let mut syntax_map = prior_syntax_map.take().unwrap_or_default();
+    let _ = syntax_map.reparse(&new_rope, lang.clone(), cur_version);
 
     Some(ParseJobOutput {
         buffer_id,
@@ -412,9 +508,32 @@ async fn parse_buffer_async(
             tree,
             version: cur_version,
             rope_snapshot: new_rope,
+            injection_trees: extracted.injection_trees,
         },
+        syntax_map,
         tokens,
     })
+}
+
+/// Background parse worker. Owns all inputs by value so the future is `Send`
+/// and can run on any executor thread.
+async fn parse_buffer_async(
+    buffer_id: BufferId,
+    snapshot: TextBufferSnapshot,
+    lang: Arc<Language>,
+    mut prior: Option<SyntaxState>,
+    mut prior_syntax_map: Option<stoat_language::SyntaxMap>,
+    styles: SyntaxStyles,
+) -> Option<ParseJobOutput> {
+    parse_buffer_step(
+        buffer_id,
+        snapshot,
+        &lang,
+        &mut prior,
+        &mut prior_syntax_map,
+        &styles,
+        None,
+    )
 }
 
 pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
@@ -894,5 +1013,91 @@ fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
             buf[(x, y)].set_char(ch).set_style(style);
             x += 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::TextBuffer;
+    use std::path::Path;
+
+    /// When `parse_buffer_step` aborts on the deadline, the prior state
+    /// passed via `&mut Option<_>` must remain populated so the caller
+    /// can hand it to a follow-up parse without losing incrementality.
+    #[test]
+    fn parse_buffer_step_preserves_prior_on_deadline_abort() {
+        let lang = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .unwrap();
+        let styles = SyntaxStyles::standard();
+        let buffer_id = BufferId::new(1);
+
+        // Large enough that tree-sitter's progress callback fires at least
+        // once during parsing. ~100k bytes of valid rust.
+        let text = "fn a() {}\n".repeat(10_000);
+        let mut buf = TextBuffer::with_text(buffer_id, &text);
+        let snap1 = buf.snapshot.clone();
+
+        // Successful parse with no deadline.
+        let mut prior: Option<SyntaxState> = None;
+        let mut prior_map: Option<stoat_language::SyntaxMap> = None;
+        let out = parse_buffer_step(
+            buffer_id,
+            snap1,
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            None,
+        )
+        .expect("first parse should succeed");
+        let initial_version = out.syntax.version;
+
+        // Reinstall the parse output as the prior, then reparse against a
+        // bumped snapshot with an already-expired deadline.
+        let mut prior: Option<SyntaxState> = Some(out.syntax);
+        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(out.syntax_map);
+        buf.edit(0..0, "// edit\n");
+        let snap2 = buf.snapshot.clone();
+
+        let result = parse_buffer_step(
+            buffer_id,
+            snap2.clone(),
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            Some(std::time::Instant::now()),
+        );
+        assert!(result.is_none(), "expected deadline abort to return None");
+        let prior_state = prior
+            .as_ref()
+            .expect("prior must survive deadline abort, was consumed");
+        assert_eq!(
+            prior_state.version, initial_version,
+            "prior version must be unchanged",
+        );
+        assert!(
+            prior_map.is_some(),
+            "prior_syntax_map must survive deadline abort",
+        );
+
+        // The surviving prior must still be usable for a successful reparse.
+        // If the prior tree had been mutated by edit_tree on the failed
+        // attempt, this call would double-stamp the input edit.
+        let recovery = parse_buffer_step(
+            buffer_id,
+            snap2,
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            None,
+        )
+        .expect("recovery parse should succeed");
+        assert!(recovery.syntax.version > initial_version);
+        assert!(prior.is_none(), "successful parse must consume the prior");
+        assert!(prior_map.is_none());
     }
 }

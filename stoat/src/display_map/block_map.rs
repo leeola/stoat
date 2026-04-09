@@ -1134,6 +1134,51 @@ impl BlockSnapshot {
         }
     }
 
+    /// Conservatively bound the rope byte range covering `rows`.
+    ///
+    /// Walks forward from `rows.start` (and backward from `rows.end - 1`) to
+    /// find the first display rows that map to a buffer point. Display rows
+    /// inside custom blocks have no buffer mapping and are skipped. The end
+    /// is taken at the start of the buffer line *after* the last visible row
+    /// so its full content is included.
+    ///
+    /// Used by [`crate::display_map::DisplayMap::build_endpoints`] to bound
+    /// highlight endpoint construction to the viewport instead of the whole
+    /// rope.
+    pub fn row_range_to_buffer_byte_range(
+        &self,
+        rows: std::ops::Range<u32>,
+    ) -> std::ops::Range<usize> {
+        let buffer = self.buffer_snapshot();
+        let rope = buffer.rope();
+        let total = rope.len();
+        if rows.start >= rows.end || total == 0 {
+            return 0..0;
+        }
+
+        let max_row = self.total_rows;
+        let start_row = rows.start.min(max_row);
+        let end_row = rows.end.min(max_row);
+
+        let start_offset = (start_row..end_row)
+            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
+            .map(|p| rope.point_to_offset(p))
+            .unwrap_or(total);
+
+        let end_offset = (start_row..end_row)
+            .rev()
+            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
+            .map(|p| {
+                // Take through the start of the next buffer line so the
+                // entire visible row's content (incl. any trailing newline)
+                // is covered. point_to_offset clamps past-the-end points.
+                rope.point_to_offset(Point::new(p.row + 1, 0)).min(total)
+            })
+            .unwrap_or(start_offset);
+
+        start_offset.min(end_offset)..end_offset.max(start_offset)
+    }
+
     pub fn soft_wrap_indent(&self, block_row: u32) -> u32 {
         let target = OutputRow(block_row + 1);
         let mut cursor = self

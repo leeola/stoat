@@ -4,13 +4,18 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use stoat_language::{Language, SyntaxState};
+use stoat_language::{drop_syntax_in_background, Language, SyntaxMap, SyntaxState};
 
 struct BufferEntry {
     buffer: SharedBuffer,
     path: Option<PathBuf>,
     language: Option<Arc<Language>>,
     syntax: Option<SyntaxState>,
+    /// Multi-layer syntax storage. Populated alongside [`Self::syntax`]
+    /// so the legacy single-tree highlight path keeps working while
+    /// callers migrate to capture merging. The `parse_buffer_step`
+    /// pipeline writes to both fields on every reparse.
+    syntax_map: Option<SyntaxMap>,
 }
 
 pub(crate) struct BufferRegistry {
@@ -44,6 +49,7 @@ impl BufferRegistry {
                 path: None,
                 language: None,
                 syntax: None,
+                syntax_map: None,
             },
         );
         (id, buffer)
@@ -68,6 +74,7 @@ impl BufferRegistry {
                 path: Some(path_buf),
                 language: None,
                 syntax: None,
+                syntax_map: None,
             },
         );
         (id, buffer)
@@ -89,6 +96,7 @@ impl BufferRegistry {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.language = Some(lang);
             entry.syntax = None;
+            entry.syntax_map = None;
         }
     }
 
@@ -98,7 +106,11 @@ impl BufferRegistry {
 
     pub(crate) fn store_syntax(&mut self, id: BufferId, state: SyntaxState) {
         if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.syntax = Some(state);
+            // Send the displaced state to a background drainer so its
+            // potentially-large tree-sitter tree drops off the main thread.
+            if let Some(prev) = entry.syntax.replace(state) {
+                drop_syntax_in_background(prev);
+            }
         }
     }
 
@@ -107,6 +119,29 @@ impl BufferRegistry {
     /// [`Self::store_syntax`]. Returns `None` if no state has been stored.
     pub(crate) fn take_syntax(&mut self, id: BufferId) -> Option<SyntaxState> {
         self.buffers.get_mut(&id)?.syntax.take()
+    }
+
+    /// Borrow the multi-layer [`SyntaxMap`] for `id`, if one has been
+    /// installed by the parse pipeline. Used by the capture-merging
+    /// highlight path.
+    pub(crate) fn syntax_map(&self, id: BufferId) -> Option<&SyntaxMap> {
+        self.buffers.get(&id)?.syntax_map.as_ref()
+    }
+
+    /// Replace the multi-layer [`SyntaxMap`] for `id`. Called by
+    /// `parse_buffer_step` after each successful reparse so the
+    /// capture-merging consumers always see the latest layer set.
+    pub(crate) fn store_syntax_map(&mut self, id: BufferId, map: SyntaxMap) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.syntax_map = Some(map);
+        }
+    }
+
+    /// Move the multi-layer [`SyntaxMap`] for `id` out of the
+    /// registry, so the next reparse can interpolate it incrementally
+    /// before reinstalling.
+    pub(crate) fn take_syntax_map(&mut self, id: BufferId) -> Option<SyntaxMap> {
+        self.buffers.get_mut(&id)?.syntax_map.take()
     }
 }
 

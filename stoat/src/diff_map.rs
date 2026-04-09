@@ -119,6 +119,24 @@ impl DiffMap {
         }
     }
 
+    /// Build a [`DiffMap`] from a structural-diff result.
+    ///
+    /// `lhs_text` is the base content the diff was computed against;
+    /// `rhs_text` is the buffer content. Adjacent Lhs+Rhs runs from the
+    /// diff become [`DiffHunkStatus::Modified`] hunks; isolated runs
+    /// become [`DiffHunkStatus::Added`] (Rhs only) or
+    /// [`DiffHunkStatus::Deleted`] (Lhs only). The conversion preserves
+    /// the original byte ranges so the structural-diff sub-line spans
+    /// remain available via [`DiffHunk::token_detail`] in a follow-up.
+    pub fn from_structural_changes(
+        result: stoat_language::structural_diff::DiffResult,
+        lhs_text: &str,
+        rhs_text: &str,
+    ) -> Self {
+        let hunks = changes_to_hunks(&result.changes, lhs_text, rhs_text);
+        Self::from_hunks(hunks, Some(Arc::new(lhs_text.to_string())))
+    }
+
     pub fn version(&self) -> usize {
         self.version
     }
@@ -254,6 +272,97 @@ impl DiffMap {
         self.hunks.push(hunk, ());
         self.version = Self::next_version();
     }
+}
+
+/// Convert a structural-diff change list into [`DiffHunk`]s. Adjacent
+/// Lhs+Rhs runs (in either order) collapse into one [`DiffHunkStatus::Modified`]
+/// hunk; isolated runs are emitted as Added or Deleted. Hunks are
+/// returned sorted by their buffer start line so they can feed
+/// [`DiffMap::from_hunks`] directly.
+fn changes_to_hunks(
+    changes: &[stoat_language::structural_diff::DiffChange],
+    lhs_text: &str,
+    rhs_text: &str,
+) -> Vec<DiffHunk> {
+    use stoat_language::structural_diff::Side;
+    let mut hunks = Vec::new();
+    let mut i = 0;
+    while i < changes.len() {
+        let cur = &changes[i];
+        // FIXME: collapses any back-to-back Lhs+Rhs entries into a Modified
+        // hunk. Correct for the line-diff path (line_diff::collapse_runs_into_changes
+        // emits paired Lhs+Rhs in one iteration), but the structural-diff
+        // path walks each side independently in tree_diff::collect_changes
+        // and can emit [Lhs A, Lhs B, Rhs A, Rhs B], which would collapse
+        // the wrong pairs. A real byte-range adjacency / pairing-id check
+        // is needed before DiffMap::from_structural_changes is called with
+        // diff_with_language results in production.
+        if i + 1 < changes.len() && changes[i + 1].side != cur.side {
+            let (lhs_change, rhs_change) = match cur.side {
+                Side::Lhs => (cur, &changes[i + 1]),
+                Side::Rhs => (&changes[i + 1], cur),
+            };
+            let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
+            hunks.push(DiffHunk {
+                status: DiffHunkStatus::Modified,
+                buffer_start_line: line_range.start,
+                buffer_line_range: line_range,
+                base_byte_range: lhs_change.byte_range.clone(),
+                anchor_range: None,
+                token_detail: None,
+            });
+            i += 2;
+            continue;
+        }
+        match cur.side {
+            Side::Rhs => {
+                let line_range = byte_range_to_line_range(rhs_text, &cur.byte_range);
+                hunks.push(DiffHunk {
+                    status: DiffHunkStatus::Added,
+                    buffer_start_line: line_range.start,
+                    buffer_line_range: line_range,
+                    base_byte_range: 0..0,
+                    anchor_range: None,
+                    token_detail: None,
+                });
+            },
+            Side::Lhs => {
+                // Deleted-only: map the lhs byte range to a line on the
+                // lhs side and use that as the anchor.
+                // FIXME: structural diff does not emit pairing information
+                // identifying the corresponding rhs insertion point, so
+                // the deleted block displays at the lhs line index rather
+                // than between the surrounding rhs lines.
+                let lhs_line = lhs_text[..cur.byte_range.start.min(lhs_text.len())]
+                    .chars()
+                    .filter(|c| *c == '\n')
+                    .count() as u32;
+                hunks.push(DiffHunk {
+                    status: DiffHunkStatus::Deleted,
+                    buffer_start_line: lhs_line,
+                    buffer_line_range: lhs_line..lhs_line,
+                    base_byte_range: cur.byte_range.clone(),
+                    anchor_range: None,
+                    token_detail: None,
+                });
+            },
+        }
+        i += 1;
+    }
+    hunks.sort_by_key(|h| h.buffer_start_line);
+    hunks
+}
+
+fn byte_range_to_line_range(text: &str, byte_range: &Range<usize>) -> Range<u32> {
+    let start_byte = byte_range.start.min(text.len());
+    let end_byte = byte_range.end.min(text.len());
+    let start_line = text[..start_byte].chars().filter(|c| *c == '\n').count() as u32;
+    let end_line_inclusive = text[..end_byte].chars().filter(|c| *c == '\n').count() as u32;
+    // For an empty range, return start..start so callers can detect it.
+    if start_byte == end_byte {
+        return start_line..start_line;
+    }
+    start_line..(end_line_inclusive + 1)
 }
 
 #[cfg(test)]
@@ -464,5 +573,39 @@ mod tests {
         let dm = DiffMap::from_hunks([deleted_hunk(5, 0..8)], Some(Arc::new(base.to_string())));
         assert_eq!(dm.status_for_line(5), DiffStatus::Unchanged);
         assert_eq!(dm.status_for_line(6), DiffStatus::Unchanged);
+    }
+
+    #[test]
+    fn from_structural_changes_addition() {
+        // Pure RHS addition: a new line in the buffer that has no
+        // counterpart in base.
+        let lhs = "alpha\nbeta\n";
+        let rhs = "alpha\nbeta\ngamma\n";
+        let result = stoat_language::structural_diff::diff(lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        // The added line is on buffer line 2 (zero-indexed).
+        assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
+        assert_eq!(dm.status_for_line(1), DiffStatus::Unchanged);
+        assert_eq!(dm.status_for_line(2), DiffStatus::Added);
+    }
+
+    #[test]
+    fn from_structural_changes_modification() {
+        // A single replaced line.
+        let lhs = "alpha\nbeta\ngamma\n";
+        let rhs = "alpha\nBETA\ngamma\n";
+        let result = stoat_language::structural_diff::diff(lhs, rhs);
+        let dm = DiffMap::from_structural_changes(result, lhs, rhs);
+        assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
+        assert_eq!(dm.status_for_line(1), DiffStatus::Modified);
+        assert_eq!(dm.status_for_line(2), DiffStatus::Unchanged);
+    }
+
+    #[test]
+    fn from_structural_changes_identical_inputs() {
+        let txt = "one\ntwo\nthree\n";
+        let result = stoat_language::structural_diff::diff(txt, txt);
+        let dm = DiffMap::from_structural_changes(result, txt, txt);
+        assert!(dm.is_empty());
     }
 }

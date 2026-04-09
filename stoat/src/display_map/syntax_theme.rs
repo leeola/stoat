@@ -1,152 +1,215 @@
 use crate::display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner};
 use ratatui::style::Color;
 use std::sync::Arc;
-use stoat_language::TokenStyle;
+use stoat_language::HighlightId;
+
+/// Canonical theme key list. Each entry is a dot-separated capture
+/// name pattern. Tree-sitter capture names matched against this list
+/// via longest-prefix matching produce a [`HighlightId`] that indexes
+/// directly back into [`SyntaxStyles::theme_table`].
+///
+/// Adding a new entry: append it to [`THEME_KEYS`] and return its
+/// [`HighlightStyle`] from [`style_for_theme_key`]. New, finer-grained
+/// captures (e.g. distinct entries for `string.regex` vs
+/// `string.escape`) only require touching this file.
+const THEME_KEYS: &[&str] = &[
+    "keyword",
+    "keyword.control",
+    "string",
+    "string.escape",
+    "comment",
+    "comment.doc",
+    "function",
+    "function.method",
+    "function.special",
+    "type",
+    "type.builtin",
+    "type.interface",
+    "constant",
+    "constant.builtin",
+    "boolean",
+    "number",
+    "operator",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "property",
+    "attribute",
+    "variable",
+    "variable.parameter",
+    "variable.special",
+    "lifetime",
+    "title.markup",
+    "link_text.markup",
+    "link_uri.markup",
+    "emphasis.markup",
+    "emphasis.strong.markup",
+    "text.literal.markup",
+    "strikethrough.markup",
+];
 
 #[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
-    table: Vec<HighlightStyleId>,
+    /// Indexed by [`HighlightId`] (which is itself an index into
+    /// [`THEME_KEYS`]). The host populates each language's
+    /// [`stoat_language::Language::highlight_map`] using
+    /// [`SyntaxStyles::theme_keys`] so per-buffer extraction can
+    /// resolve captures directly to entries in this table.
+    theme_table: Vec<HighlightStyleId>,
 }
 
 impl SyntaxStyles {
     pub fn standard() -> Self {
         let mut interner = HighlightStyleInterner::default();
-        let table: Vec<HighlightStyleId> = TokenStyle::ALL
+        let theme_table: Vec<HighlightStyleId> = THEME_KEYS
             .iter()
-            .map(|ts| interner.intern(style_for(*ts)))
+            .map(|key| interner.intern(style_for_theme_key(key)))
             .collect();
         Self {
             interner: Arc::new(interner),
-            table,
+            theme_table,
         }
     }
 
-    pub fn id(&self, ts: TokenStyle) -> HighlightStyleId {
-        self.table[token_style_index(ts)]
+    /// Theme keys this style table was built against. Pass to
+    /// [`stoat_language::HighlightMap::new`] to build a per-language
+    /// capture-index lookup table.
+    pub fn theme_keys(&self) -> &'static [&'static str] {
+        THEME_KEYS
+    }
+
+    /// Resolve a theme-driven [`HighlightId`] to the corresponding
+    /// interned [`HighlightStyleId`]. Returns `None` for
+    /// [`HighlightId::DEFAULT`] (capture had no theme entry); the
+    /// renderer leaves such spans unstyled.
+    pub fn id_for_highlight(&self, id: HighlightId) -> Option<HighlightStyleId> {
+        if id.is_default() {
+            None
+        } else {
+            self.theme_table.get(id.0 as usize).copied()
+        }
     }
 }
 
-fn token_style_index(ts: TokenStyle) -> usize {
-    TokenStyle::ALL
-        .iter()
-        .position(|s| *s == ts)
-        .expect("TokenStyle::ALL must contain every variant")
-}
-
-fn style_for(ts: TokenStyle) -> HighlightStyle {
+fn style_for_theme_key(key: &str) -> HighlightStyle {
     let mut s = HighlightStyle::default();
-    match ts {
-        TokenStyle::Keyword | TokenStyle::KeywordControl => {
+    match key {
+        "keyword" | "keyword.control" => {
             s.foreground = Some(Color::Blue);
             s.bold = Some(true);
         },
-        TokenStyle::String => {
+        "string" => {
             s.foreground = Some(Color::Green);
         },
-        TokenStyle::StringEscape => {
+        "string.escape" => {
             s.foreground = Some(Color::LightGreen);
             s.bold = Some(true);
         },
-        TokenStyle::Comment => {
+        "comment" => {
             s.foreground = Some(Color::DarkGray);
             s.italic = Some(true);
         },
-        TokenStyle::CommentDoc => {
+        "comment.doc" => {
             s.foreground = Some(Color::Gray);
             s.italic = Some(true);
         },
-        TokenStyle::Function | TokenStyle::FunctionMethod => {
+        "function" | "function.method" => {
             s.foreground = Some(Color::Yellow);
         },
-        TokenStyle::FunctionSpecial => {
+        "function.special" => {
             s.foreground = Some(Color::LightYellow);
             s.bold = Some(true);
         },
-        TokenStyle::Type | TokenStyle::TypeBuiltin | TokenStyle::TypeInterface => {
+        "type" | "type.builtin" | "type.interface" => {
             s.foreground = Some(Color::Cyan);
         },
-        TokenStyle::Constant | TokenStyle::ConstantBuiltin => {
+        "constant" | "constant.builtin" | "boolean" | "number" => {
             s.foreground = Some(Color::Magenta);
         },
-        TokenStyle::Boolean | TokenStyle::Number => {
-            s.foreground = Some(Color::Magenta);
-        },
-        TokenStyle::Operator => {
+        "operator" => {
             s.foreground = Some(Color::LightCyan);
         },
-        TokenStyle::PunctuationBracket | TokenStyle::PunctuationDelimiter => {
+        "punctuation.bracket" | "punctuation.delimiter" => {
             s.foreground = Some(Color::Gray);
         },
-        TokenStyle::Property => {
+        "property" => {
             s.foreground = Some(Color::LightBlue);
         },
-        TokenStyle::Attribute => {
+        "attribute" => {
             s.foreground = Some(Color::LightMagenta);
         },
-        TokenStyle::Variable => {
+        "variable" | "variable.parameter" => {
             s.foreground = Some(Color::White);
         },
-        TokenStyle::VariableParameter => {
-            s.foreground = Some(Color::White);
-        },
-        TokenStyle::VariableSpecial => {
+        "variable.special" => {
             s.foreground = Some(Color::LightRed);
             s.italic = Some(true);
         },
-        TokenStyle::Lifetime => {
+        "lifetime" => {
             s.foreground = Some(Color::LightYellow);
             s.italic = Some(true);
         },
-        TokenStyle::Title => {
+        "title.markup" => {
             s.foreground = Some(Color::LightCyan);
             s.bold = Some(true);
         },
-        TokenStyle::LinkText => {
+        "link_text.markup" => {
             s.foreground = Some(Color::LightBlue);
         },
-        TokenStyle::LinkUri => {
+        "link_uri.markup" => {
             s.foreground = Some(Color::Blue);
             s.underline = Some(true);
         },
-        TokenStyle::Emphasis => {
+        "emphasis.markup" => {
             s.italic = Some(true);
         },
-        TokenStyle::EmphasisStrong => {
+        "emphasis.strong.markup" => {
             s.bold = Some(true);
         },
-        TokenStyle::LiteralMarkup => {
+        "text.literal.markup" => {
             s.foreground = Some(Color::LightYellow);
         },
-        TokenStyle::Strikethrough => {
+        "strikethrough.markup" => {
             s.strikethrough = Some(true);
         },
+        _ => {},
     }
     s
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SyntaxStyles;
-    use stoat_language::TokenStyle;
+    use super::{SyntaxStyles, THEME_KEYS};
+    use stoat_language::HighlightId;
 
     #[test]
-    fn id_resolves_every_token_style() {
+    fn id_for_highlight_resolves_every_theme_key() {
         let styles = SyntaxStyles::standard();
-        for ts in TokenStyle::ALL {
-            // Must not panic and must return a valid id (interned style exists).
-            let id = styles.id(*ts);
-            let _style = &styles.interner[id];
+        for idx in 0..THEME_KEYS.len() {
+            let id = HighlightId(idx as u32);
+            let style_id = styles
+                .id_for_highlight(id)
+                .expect("every theme key must resolve");
+            // The interned style must be valid.
+            let _style = &styles.interner[style_id];
         }
     }
 
     #[test]
-    fn distinct_token_styles_get_distinct_ids_when_styles_differ() {
+    fn id_for_highlight_returns_none_for_default() {
         let styles = SyntaxStyles::standard();
-        let kw = styles.id(TokenStyle::Keyword);
-        let string = styles.id(TokenStyle::String);
+        assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn distinct_theme_keys_get_distinct_styles() {
+        let styles = SyntaxStyles::standard();
+        let keyword_idx = THEME_KEYS.iter().position(|k| *k == "keyword").unwrap() as u32;
+        let string_idx = THEME_KEYS.iter().position(|k| *k == "string").unwrap() as u32;
+        let kw = styles.id_for_highlight(HighlightId(keyword_idx)).unwrap();
+        let st = styles.id_for_highlight(HighlightId(string_idx)).unwrap();
         assert_ne!(
-            styles.interner[kw], styles.interner[string],
+            styles.interner[kw], styles.interner[st],
             "Keyword and String should produce visually distinct styles"
         );
     }

@@ -214,6 +214,10 @@ pub struct DisplayMap {
     inserted_diff_block_ids: Vec<CustomBlockId>,
     last_diff_version: usize,
     cached_snapshot: Option<DisplaySnapshot>,
+    /// Set when any highlight collection is mutated. Checked inside
+    /// [`DisplayMap::snapshot_with_companion`] so a single rebuild
+    /// covers any number of highlight setters fired in the same frame.
+    highlights_dirty: bool,
 }
 
 impl DisplayMap {
@@ -248,6 +252,7 @@ impl DisplayMap {
             inserted_diff_block_ids: Vec::new(),
             last_diff_version: 0,
             cached_snapshot: None,
+            highlights_dirty: false,
         }
     }
 
@@ -347,7 +352,7 @@ impl DisplayMap {
                 .cmp(&buffer_snapshot.resolve_anchor(&b.start))
         });
         Arc::make_mut(&mut self.text_highlights).insert(key, Arc::new((style, sorted_ranges)));
-        self.cached_snapshot = None;
+        self.highlights_dirty = true;
     }
 
     pub fn clear_highlights(&mut self, key: HighlightKey) -> bool {
@@ -356,7 +361,7 @@ impl DisplayMap {
             .is_some();
         cleared |= self.inlay_highlights.remove(&key).is_some();
         if cleared {
-            self.cached_snapshot = None;
+            self.highlights_dirty = true;
         }
         cleared
     }
@@ -368,14 +373,12 @@ impl DisplayMap {
         interner: Arc<HighlightStyleInterner>,
     ) {
         Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, (tokens, interner));
-        // Cached display snapshot doesn't track highlight changes; invalidate
-        // it so the next snapshot picks up the new tokens.
-        self.cached_snapshot = None;
+        self.highlights_dirty = true;
     }
 
     pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
         Arc::make_mut(&mut self.semantic_token_highlights).remove(&buffer_id);
-        self.cached_snapshot = None;
+        self.highlights_dirty = true;
     }
 
     pub fn highlight_inlays(
@@ -443,6 +446,10 @@ impl DisplayMap {
         &mut self,
         companion_wrap_data: Option<(&WrapSnapshot, &Patch<u32>)>,
     ) -> DisplaySnapshot {
+        if self.highlights_dirty {
+            self.cached_snapshot = None;
+            self.highlights_dirty = false;
+        }
         let buffer_version = self.multi_buffer.buffer_version();
         if buffer_version == self.last_buffer_version
             && self.fold_map.version_unchanged()
@@ -588,7 +595,10 @@ impl DisplaySnapshot {
         display_rows: std::ops::Range<u32>,
         highlights: Highlights<'_>,
     ) -> block_map::BlockChunks<'_> {
-        let endpoints = self.build_endpoints(highlights);
+        let byte_range = self
+            .block_snapshot
+            .row_range_to_buffer_byte_range(display_rows.clone());
+        let endpoints = self.build_endpoints(highlights, byte_range);
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 
@@ -601,22 +611,25 @@ impl DisplaySnapshot {
             inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: Some(&self.semantic_token_highlights),
         };
-        let endpoints = self.build_endpoints(highlights);
+        let byte_range = self
+            .block_snapshot
+            .row_range_to_buffer_byte_range(display_rows.clone());
+        let endpoints = self.build_endpoints(highlights, byte_range);
         self.block_snapshot.chunks(display_rows, endpoints)
     }
 
     fn build_endpoints(
         &self,
         highlights: Highlights<'_>,
+        range: std::ops::Range<usize>,
     ) -> Arc<[crate::display_map::highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
-        let rope_len = buffer.rope().len();
         let empty: TextHighlights = Arc::new(HashMap::new());
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
         let eps = crate::display_map::highlights::create_highlight_endpoints(
-            &(0..rope_len),
+            &range,
             text_highlights_ref,
             semantic_ref,
             &resolve,

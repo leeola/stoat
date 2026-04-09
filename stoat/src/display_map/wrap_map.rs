@@ -817,11 +817,10 @@ impl WrapSnapshot {
     /// Fast path: when `wrap_width` is `None`, delegates directly to
     /// [`TabSnapshot::chunks`] over the matching fold-offset range.
     ///
-    /// FIXME(syntax-v2-wrap): when `wrap_width` is `Some`, this currently
-    /// walks rows and produces unstyled chunks from the expanded line text
-    /// plus newline separators. Highlights are dropped on wrapped content.
-    /// Proper support requires tracking fold-byte offsets through tab-column
-    /// expansion and wrap-column splits in lockstep.
+    /// Wrapped path: re-streams each tab row's chunks via
+    /// [`TabSnapshot::chunks`], slicing the per-chunk text to the wrap row's
+    /// display-column window so highlights and tab expansion are preserved
+    /// across the wrap boundary.
     pub fn chunks<'a>(
         &'a self,
         rows: Range<u32>,
@@ -855,9 +854,11 @@ impl WrapSnapshot {
 
         WrapChunks::Wrapped(Box::new(WrappedChunksInner {
             snapshot: self,
+            endpoints,
             rows: rows.clone(),
             current_row: rows.start,
-            pending_line: None,
+            row_state: None,
+            pending_newline: false,
         }))
     }
 
@@ -961,9 +962,23 @@ pub enum WrapChunks<'a> {
 #[doc(hidden)]
 pub struct WrappedChunksInner<'a> {
     snapshot: &'a WrapSnapshot,
+    endpoints: Arc<[HighlightEndpoint]>,
     rows: Range<u32>,
     current_row: u32,
-    pending_line: Option<String>,
+    row_state: Option<RowChunksState<'a>>,
+    pending_newline: bool,
+}
+
+/// Per-wrap-row streaming state. Holds an open [`TabChunks`] over the full
+/// underlying tab row plus the running display column. Chunks pulled from
+/// `tab_chunks` are sliced to the `[target_start, target_end)` display
+/// column window before being yielded.
+struct RowChunksState<'a> {
+    tab_chunks: TabChunks<'a>,
+    column: u32,
+    target_start: u32,
+    target_end: Option<u32>,
+    done: bool,
 }
 
 impl<'a> Iterator for WrapChunks<'a> {
@@ -977,31 +992,150 @@ impl<'a> Iterator for WrapChunks<'a> {
     }
 }
 
-impl WrappedChunksInner<'_> {
-    fn next(&mut self) -> Option<Chunk<'static>> {
-        if let Some(line) = self.pending_line.take() {
-            return Some(Chunk {
-                text: Cow::Owned(line),
-                ..Default::default()
-            });
+impl<'a> WrappedChunksInner<'a> {
+    fn next(&mut self) -> Option<Chunk<'a>> {
+        loop {
+            if self.pending_newline {
+                self.pending_newline = false;
+                return Some(Chunk {
+                    text: Cow::Borrowed("\n"),
+                    ..Default::default()
+                });
+            }
+
+            if self.row_state.is_none() {
+                if self.current_row >= self.rows.end {
+                    return None;
+                }
+                self.row_state = self.start_row(self.current_row);
+                if self.row_state.is_none() {
+                    self.advance_row();
+                    continue;
+                }
+            }
+
+            let state = self.row_state.as_mut().unwrap();
+            if state.done {
+                self.advance_row();
+                continue;
+            }
+
+            let Some(chunk) = state.tab_chunks.next() else {
+                self.advance_row();
+                continue;
+            };
+
+            if let Some(sliced) = slice_chunk_to_window(chunk, state) {
+                return Some(sliced);
+            }
+            // chunk fell entirely below or above the window; pull next.
         }
-        if self.current_row >= self.rows.end {
+    }
+
+    fn advance_row(&mut self) {
+        self.row_state = None;
+        self.current_row += 1;
+        if self.current_row < self.rows.end {
+            self.pending_newline = true;
+        }
+    }
+
+    fn start_row(&self, wrap_row: u32) -> Option<RowChunksState<'a>> {
+        let target = OutputRow(wrap_row + 1);
+        let mut cursor = self
+            .snapshot
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+
+        let Dimensions(input_start, output_start, _) = cursor.start();
+        let sub_row = (wrap_row - output_start.0) as usize;
+        let tab_row = input_start.0;
+
+        let transform = cursor.item()?;
+        let (target_start, target_end) = if sub_row < transform.wrap_columns.len() {
+            let start = transform.wrap_columns[sub_row];
+            let end = if sub_row + 1 < transform.wrap_columns.len() {
+                Some(transform.wrap_columns[sub_row + 1])
+            } else {
+                None
+            };
+            (start, end)
+        } else {
+            (0, None)
+        };
+
+        let fold = self.snapshot.tab_snapshot.fold_snapshot();
+        if tab_row >= fold.line_count() {
             return None;
         }
-        let row = self.current_row;
-        self.current_row += 1;
-        let mut line = String::new();
-        self.snapshot.write_display_line(&mut line, row);
-        // If this isn't the last row in the requested range, follow it with a
-        // newline chunk so the concatenated output separates rows.
-        if self.current_row < self.rows.end {
-            self.pending_line = Some("\n".to_string());
-        }
-        Some(Chunk {
-            text: Cow::Owned(line),
-            ..Default::default()
+        let row_start = fold.row_start_offset(tab_row);
+        let row_end = FoldOffset(row_start.0 + fold.line_len(tab_row) as usize);
+
+        let tab_chunks =
+            self.snapshot
+                .tab_snapshot
+                .chunks(row_start..row_end, 0, self.endpoints.clone());
+
+        Some(RowChunksState {
+            tab_chunks,
+            column: 0,
+            target_start,
+            target_end,
+            done: false,
         })
     }
+}
+
+/// Slice `chunk` to the display-column window described by `state`. Returns
+/// `None` if the chunk falls entirely outside the window. Updates
+/// `state.column` to reflect the column past the consumed input and sets
+/// `state.done` once the window has been exceeded.
+fn slice_chunk_to_window<'a>(
+    chunk: Chunk<'a>,
+    state: &mut RowChunksState<'a>,
+) -> Option<Chunk<'a>> {
+    let text: &str = chunk.text.as_ref();
+    let chunk_start_col = state.column;
+    let mut col = chunk_start_col;
+    let mut byte_start: Option<usize> = None;
+    let mut byte_end = text.len();
+
+    for (byte_idx, ch) in text.char_indices() {
+        // Tab chunks are pre-expanded to ASCII spaces, so each char is one
+        // display column wide. Non-tab chunks use the global width table.
+        let char_width = if chunk.is_tab {
+            1
+        } else {
+            super::display_width(ch)
+        };
+        let next_col = col + char_width;
+
+        if next_col <= state.target_start {
+            col = next_col;
+            continue;
+        }
+        if let Some(end) = state.target_end {
+            if col >= end {
+                byte_end = byte_idx;
+                state.done = true;
+                break;
+            }
+        }
+        if byte_start.is_none() {
+            byte_start = Some(byte_idx);
+        }
+        col = next_col;
+    }
+    state.column = col;
+
+    let bs = byte_start?;
+    let mut sliced = chunk;
+    sliced.text = match sliced.text {
+        Cow::Borrowed(s) => Cow::Borrowed(&s[bs..byte_end]),
+        Cow::Owned(s) => Cow::Owned(s[bs..byte_end].to_string()),
+    };
+    Some(sliced)
 }
 
 pub struct WrapPointCursor<'a> {
@@ -1453,5 +1587,90 @@ mod tests {
         let snap = make_snapshot("hello\nworld", None);
         assert_eq!(snap.longest_in_output_range(0, 0), (0, 0));
         assert_eq!(snap.longest_in_output_range(1, 0), (0, 0));
+    }
+
+    #[test]
+    fn wrapped_chunks_preserve_highlights() {
+        use crate::display_map::highlights::{
+            create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+        };
+        use ratatui::style::Color;
+        use std::collections::HashMap;
+        use stoat_text::Anchor;
+
+        // Wrap "abcdefghij" at width 5 -> two wrap rows: "abcde", "fghij".
+        // A highlight on bytes 2..8 (Red) should appear:
+        //   row 0: bytes 2..5 styled (chars c, d, e)
+        //   row 1: bytes 0..3 styled (chars f, g, h)
+        let snap = make_snapshot("abcdefghij", Some(5));
+        assert_eq!(snap.line_count(), 2);
+
+        let red = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+
+        let mut highlights_map = HashMap::new();
+        let key = HighlightKey::new(HighlightLayer::SyntaxToken, 0);
+        let mk_anchor = |offset: usize| Anchor {
+            timestamp: 0,
+            offset: offset as u32,
+            bias: stoat_text::Bias::Left,
+            buffer_id: None,
+        };
+        highlights_map.insert(
+            key,
+            Arc::new((red.clone(), vec![mk_anchor(2)..mk_anchor(8)])),
+        );
+        let highlights = Arc::new(highlights_map);
+        let resolve = |a: &Anchor| a.offset as usize;
+        let endpoints: Arc<[_]> = Arc::from(create_highlight_endpoints(
+            &(0..10),
+            &highlights,
+            None,
+            &resolve,
+        ));
+
+        let chunks: Vec<_> = snap.chunks(0..2, endpoints).collect();
+        let mut chars_with_style: Vec<(char, Option<Color>)> = Vec::new();
+        for chunk in &chunks {
+            let color = chunk.highlight_style.as_ref().and_then(|s| s.foreground);
+            for ch in chunk.text.chars() {
+                chars_with_style.push((ch, color));
+            }
+        }
+        let recovered: String = chars_with_style.iter().map(|(c, _)| c).collect();
+        assert_eq!(recovered, "abcde\nfghij", "wrap reconstruction must match");
+
+        // 'c','d','e' are red (bytes 2,3,4 of source) and 'f','g','h'
+        // are red (bytes 5,6,7 of source, on wrap row 1 at cols 0,1,2).
+        let expected_colors = [
+            ('a', None),
+            ('b', None),
+            ('c', Some(Color::Red)),
+            ('d', Some(Color::Red)),
+            ('e', Some(Color::Red)),
+            ('\n', None),
+            ('f', Some(Color::Red)),
+            ('g', Some(Color::Red)),
+            ('h', Some(Color::Red)),
+            ('i', None),
+            ('j', None),
+        ];
+        assert_eq!(
+            chars_with_style.len(),
+            expected_colors.len(),
+            "char count mismatch"
+        );
+        for (idx, (got, expected)) in chars_with_style
+            .iter()
+            .zip(expected_colors.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                got, expected,
+                "char {idx}: got {got:?}, expected {expected:?}"
+            );
+        }
     }
 }

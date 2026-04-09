@@ -412,7 +412,10 @@ pub fn highlighted_chunks<'a>(
         } else {
             remaining.len()
         };
-        let split_at = next_boundary.min(remaining.len());
+        let raw_split = next_boundary.min(remaining.len());
+        // Snap to a UTF-8 char boundary; see [`BufferChunks::next`] for the
+        // rationale. No-op for tree-sitter-derived endpoints.
+        let split_at = remaining.ceil_char_boundary(raw_split);
 
         let chunk_text = &remaining[..split_at];
         remaining = &remaining[split_at..];
@@ -521,11 +524,16 @@ impl<'a> Iterator for BufferChunks<'a> {
         } else {
             usize::MAX
         };
-        let split = self
+        let raw_split = self
             .pending
             .len()
             .min(next_ep_offset.saturating_sub(self.offset))
             .min(self.end.saturating_sub(self.offset));
+        // Tree-sitter byte ranges always align to UTF-8 boundaries, so this
+        // ceil is a no-op for the common case. Defensive against any future
+        // endpoint source that lands mid-codepoint: rounding up guarantees
+        // forward progress and that `split_at` never panics.
+        let split = self.pending.ceil_char_boundary(raw_split);
         let (emit, rest) = self.pending.split_at(split);
         self.pending = rest;
         self.offset += split;
@@ -855,5 +863,67 @@ mod tests {
         for c in &chunks {
             assert!(c.highlight_style.is_none());
         }
+    }
+
+    #[test]
+    fn buffer_chunks_endpoint_inside_multibyte_char_does_not_panic() {
+        use super::{BufferChunks, HighlightEndpoint};
+        use stoat_text::Rope;
+
+        // "h\u{e9}llo": the second byte lands inside the two-byte 'e-acute'
+        // codepoint. A correctly defended chunk splitter must round to a
+        // UTF-8 boundary instead of panicking on split_at(2).
+        let text = "h\u{e9}llo";
+        let rope = Rope::from(text);
+        let red = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(vec![
+            HighlightEndpoint {
+                offset: 2,
+                is_start: true,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: Some(red.clone()),
+            },
+            HighlightEndpoint {
+                offset: text.len(),
+                is_start: false,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: None,
+            },
+        ]);
+
+        let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 0..text.len(), endpoints).collect();
+        let joined: String = chunks.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(joined, text, "all bytes must be emitted exactly once");
+    }
+
+    #[test]
+    fn highlighted_chunks_endpoint_inside_multibyte_char_does_not_panic() {
+        use super::HighlightEndpoint;
+
+        let text = "h\u{e9}llo";
+        let red = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let endpoints = vec![
+            HighlightEndpoint {
+                offset: 2,
+                is_start: true,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: Some(red),
+            },
+            HighlightEndpoint {
+                offset: text.len(),
+                is_start: false,
+                key: HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                style: None,
+            },
+        ];
+        let chunks: Vec<_> = highlighted_chunks(text, 0, &endpoints).collect();
+        let joined: String = chunks.iter().map(|c| c.text).collect();
+        assert_eq!(joined, text);
     }
 }
