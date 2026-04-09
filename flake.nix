@@ -47,13 +47,6 @@
               xorg.libXcursor
               xorg.libXrandr
               xorg.libXi
-            ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              darwin.apple_sdk.frameworks.Security
-              darwin.apple_sdk.frameworks.Foundation
-              darwin.apple_sdk.frameworks.Cocoa
-              darwin.apple_sdk.frameworks.Carbon
-              darwin.apple_sdk.frameworks.WebKit
             ];
 
           # Library path for GUI applications (especially Wayland/iced)
@@ -72,6 +65,11 @@
               pkgs.xorg.libXi
             ]
           );
+
+          # Silence nixpkgs cc-wrapper's target-mismatch warning emitted
+          # when Rust's `cc` crate canonicalizes Apple triples before
+          # invoking clang (e.g. `aarch64-apple-darwin` -> `arm64-apple-macosx`).
+          NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
         };
       }
     );
