@@ -1,6 +1,6 @@
 use super::{
     fold_map::FoldPointCursor,
-    highlights::{Chunk, Highlights},
+    highlights::Chunk,
     inlay_map::InlayPointCursor,
     wrap_map::{WrapPointCursor, WrapSnapshot},
     Companion, DisplayMapId,

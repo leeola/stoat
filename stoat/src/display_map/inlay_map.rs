@@ -771,11 +771,11 @@ impl InlaySnapshot {
         endpoints: Arc<[HighlightEndpoint]>,
     ) -> InlayChunks<'a> {
         if !self.has_inlays() {
-            return InlayChunks::Passthrough(BufferChunks::new(
+            return InlayChunks::Passthrough(Box::new(BufferChunks::new(
                 self.buffer.rope(),
                 range.start.0..range.end.0,
                 endpoints,
-            ));
+            )));
         }
 
         let mut cursor = self
@@ -797,7 +797,7 @@ impl InlaySnapshot {
 /// Iterator returned by [`InlaySnapshot::chunks`].
 pub enum InlayChunks<'a> {
     /// Snapshot has no inlays; this is a thin wrapper around [`BufferChunks`].
-    Passthrough(BufferChunks<'a>),
+    Passthrough(Box<BufferChunks<'a>>),
     /// Snapshot has at least one inlay; walks transforms to interleave inlay
     /// text with buffer chunks.
     Transforming(Box<InlayChunksInner<'a>>),
@@ -842,9 +842,7 @@ impl<'a> InlayChunksInner<'a> {
                 continue;
             }
 
-            let Some(transform) = self.cursor.item() else {
-                return None;
-            };
+            let transform = self.cursor.item()?;
             let cursor_start = self.cursor.start();
             let cursor_end = self.cursor.end();
             let trans_start_inlay = cursor_start.0;

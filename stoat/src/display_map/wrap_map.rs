@@ -155,7 +155,6 @@ impl<'a> Dimension<'a, TransformSummary> for LongestInRange {
 }
 
 const WRAP_SYNC_THRESHOLD: u32 = 100;
-const WRAP_YIELD_ROW_INTERVAL: u32 = 100;
 
 pub struct WrapMap {
     snapshot: WrapSnapshot,
@@ -556,9 +555,7 @@ fn compute_wrap_columns(
             super::display_width(ch)
         };
 
-        if ch == ' ' || ch == '\t' {
-            last_break_candidate = Some(expanded_col + char_width);
-        } else if ch == '-' {
+        if ch == ' ' || ch == '\t' || ch == '-' {
             last_break_candidate = Some(expanded_col + char_width);
         } else if char_width >= 2 {
             // CJK and other wide characters can break at any boundary.
@@ -848,7 +845,7 @@ impl WrapSnapshot {
                 (start, end)
             };
             return WrapChunks::Passthrough {
-                tab_chunks: self.tab_snapshot.chunks(start..end, 0, endpoints),
+                tab_chunks: Box::new(self.tab_snapshot.chunks(start..end, 0, endpoints)),
             };
         }
 
@@ -953,7 +950,7 @@ impl WrapSnapshot {
 /// Iterator returned by [`WrapSnapshot::chunks`].
 pub enum WrapChunks<'a> {
     /// No wrapping: a thin wrapper around [`TabChunks`].
-    Passthrough { tab_chunks: TabChunks<'a> },
+    Passthrough { tab_chunks: Box<TabChunks<'a>> },
     /// Wrapping active: emits row-by-row using the expanded display line
     /// text. Unstyled; see the FIXME on [`WrapSnapshot::chunks`].
     Wrapped(Box<WrappedChunksInner<'a>>),
@@ -1014,7 +1011,7 @@ impl<'a> WrappedChunksInner<'a> {
                 }
             }
 
-            let state = self.row_state.as_mut().unwrap();
+            let state = self.row_state.as_mut().expect("checked Some above");
             if state.done {
                 self.advance_row();
                 continue;

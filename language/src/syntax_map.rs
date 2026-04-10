@@ -399,6 +399,7 @@ impl SyntaxMap {
             // walk the whole tree once.
             let filter_ranges: Vec<Range<usize>> = match injection_filter_ranges {
                 Some(ranges) if !ranges.is_empty() => ranges.to_vec(),
+                #[allow(clippy::single_range_in_vec_init)]
                 _ => vec![0..rope.len()],
             };
             for filter in filter_ranges {
@@ -433,7 +434,7 @@ impl SyntaxMap {
                 // For a single range we still produce one layer (the
                 // common case).
                 if ranges.len() == 1 {
-                    let r = ranges.into_iter().next().unwrap();
+                    let r = ranges.into_iter().next().expect("len checked == 1");
                     let prior = prior_injections.iter().find(|p| {
                         p.start_offset == r.start as u32
                             && p.end_offset == r.end as u32

@@ -6,6 +6,7 @@ use std::{
 };
 use stoat_language::{drop_syntax_in_background, Language, SyntaxMap, SyntaxState};
 
+#[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
     path: Option<PathBuf>,
@@ -84,6 +85,7 @@ impl BufferRegistry {
         self.buffers.get(&id).map(|e| e.buffer.clone())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }
@@ -124,6 +126,7 @@ impl BufferRegistry {
     /// Borrow the multi-layer [`SyntaxMap`] for `id`, if one has been
     /// installed by the parse pipeline. Used by the capture-merging
     /// highlight path.
+    #[allow(dead_code)]
     pub(crate) fn syntax_map(&self, id: BufferId) -> Option<&SyntaxMap> {
         self.buffers.get(&id)?.syntax_map.as_ref()
     }

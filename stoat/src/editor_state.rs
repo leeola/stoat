@@ -27,6 +27,7 @@ impl EditorState {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn from_multi_buffer(
         buffer_id: BufferId,
         multi_buffer: MultiBuffer,

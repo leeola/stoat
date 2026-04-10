@@ -328,7 +328,7 @@ impl<T: Item> SumTree<T> {
                     child_summaries,
                     child_trees,
                     ..
-                } = Arc::get_mut(&mut parent_node.0).unwrap()
+                } = Arc::get_mut(&mut parent_node.0).expect("sole owner of new Arc")
                 else {
                     unreachable!()
                 };
@@ -348,7 +348,7 @@ impl<T: Item> SumTree<T> {
         if nodes.is_empty() {
             Self::new(cx)
         } else {
-            nodes.pop().unwrap()
+            nodes.pop().expect("checked non-empty above")
         }
     }
 
@@ -653,10 +653,16 @@ impl<T: Item> SumTree<T> {
                 } else {
                     let tree_to_append = child_trees
                         .last_mut()
-                        .unwrap()
+                        .expect("internal node has children")
                         .push_tree_recursive(other, cx);
-                    *child_summaries.last_mut().unwrap() =
-                        child_trees.last().unwrap().0.summary().clone();
+                    *child_summaries
+                        .last_mut()
+                        .expect("internal node has children") = child_trees
+                        .last()
+                        .expect("internal node has children")
+                        .0
+                        .summary()
+                        .clone();
 
                     if let Some(split_tree) = tree_to_append {
                         summaries_to_append.push(split_tree.0.summary().clone());
@@ -760,9 +766,11 @@ impl<T: Item> SumTree<T> {
             Summary::add_summary(&mut full_summary, summary, cx);
             *summary = full_summary;
 
-            let first = child_trees.first_mut().unwrap();
+            let first = child_trees.first_mut().expect("internal node has children");
             let res = Self::append_large(small, first, cx);
-            *child_summaries.first_mut().unwrap() = first.summary().clone();
+            *child_summaries
+                .first_mut()
+                .expect("internal node has children") = first.summary().clone();
             if let Some(tree) = res {
                 if child_trees.len() < 2 * TREE_BASE {
                     child_summaries.insert(0, tree.summary().clone());
@@ -934,9 +942,13 @@ impl<T: Item> SumTree<T> {
                 child_trees,
                 ..
             } => {
-                let last_summary = child_summaries.last_mut().unwrap();
-                let last_child = child_trees.last_mut().unwrap();
-                *last_summary = last_child.update_last_recursive(f, cx).unwrap();
+                let last_summary = child_summaries
+                    .last_mut()
+                    .expect("internal node has children");
+                let last_child = child_trees.last_mut().expect("internal node has children");
+                *last_summary = last_child
+                    .update_last_recursive(f, cx)
+                    .expect("non-empty tree returns summary");
                 *summary = sum(child_summaries.iter(), cx);
                 Some(summary.clone())
             },
@@ -974,9 +986,13 @@ impl<T: Item> SumTree<T> {
                 child_trees,
                 ..
             } => {
-                let first_summary = child_summaries.first_mut().unwrap();
-                let first_child = child_trees.first_mut().unwrap();
-                *first_summary = first_child.update_first_recursive(f, cx).unwrap();
+                let first_summary = child_summaries
+                    .first_mut()
+                    .expect("internal node has children");
+                let first_child = child_trees.first_mut().expect("internal node has children");
+                *first_summary = first_child
+                    .update_first_recursive(f, cx)
+                    .expect("non-empty tree returns summary");
                 *summary = sum(child_summaries.iter(), cx);
                 Some(summary.clone())
             },
@@ -997,14 +1013,20 @@ impl<T: Item> SumTree<T> {
     fn leftmost_leaf(&self) -> &Self {
         match self.0.as_ref() {
             Node::Leaf { .. } => self,
-            Node::Internal { child_trees, .. } => child_trees.first().unwrap().leftmost_leaf(),
+            Node::Internal { child_trees, .. } => child_trees
+                .first()
+                .expect("internal node has children")
+                .leftmost_leaf(),
         }
     }
 
     fn rightmost_leaf(&self) -> &Self {
         match self.0.as_ref() {
             Node::Leaf { .. } => self,
-            Node::Internal { child_trees, .. } => child_trees.last().unwrap().rightmost_leaf(),
+            Node::Internal { child_trees, .. } => child_trees
+                .last()
+                .expect("internal node has children")
+                .rightmost_leaf(),
         }
     }
 
@@ -1380,7 +1402,7 @@ impl<'a, 'b, T: Item, D: Dimension<'a, T::Summary>> Cursor<'a, 'b, T, D> {
 
         while !self.stack.is_empty() {
             let new_subtree = {
-                let entry = self.stack.last_mut().unwrap();
+                let entry = self.stack.last_mut().expect("loop guard checks non-empty");
                 match entry.tree.0.as_ref() {
                     Node::Internal {
                         child_trees,
@@ -1476,7 +1498,7 @@ impl<'a, 'b, T: Item, D: Dimension<'a, T::Summary>> Cursor<'a, 'b, T, D> {
                 self.position = D::zero(self.cx);
             }
 
-            let entry = self.stack.last_mut().unwrap();
+            let entry = self.stack.last_mut().expect("loop guard checks non-empty");
             if !descending {
                 if entry.index == 0 {
                     self.stack.pop();

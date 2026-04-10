@@ -614,6 +614,10 @@ impl TextBufferSnapshot {
         self.visible_text.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.visible_text.len() == 0
+    }
+
     pub fn max_point(&self) -> Point {
         self.visible_text.max_point()
     }

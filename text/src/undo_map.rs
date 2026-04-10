@@ -1,19 +1,10 @@
 use crate::{Bias, ContextLessSummary, Item, KeyedItem, SumTree};
 use std::cmp;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct UndoMapKey {
     edit_id: u64,
     undo_id: u64,
-}
-
-impl Default for UndoMapKey {
-    fn default() -> Self {
-        Self {
-            edit_id: 0,
-            undo_id: 0,
-        }
-    }
 }
 
 impl ContextLessSummary for UndoMapKey {

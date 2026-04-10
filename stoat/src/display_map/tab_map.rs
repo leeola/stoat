@@ -342,7 +342,7 @@ impl<'a> Iterator for TabChunks<'a> {
             self.pending.as_ref()?;
         }
         // Take ownership of pending so we can mutate self freely.
-        let pending = self.pending.take().unwrap();
+        let pending = self.pending.take().expect("refilled above");
 
         let text: &str = pending.text.as_ref();
         let tab_idx = text.find('\t');

@@ -7,7 +7,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
-    review::{ReviewRow, ReviewSide},
+    review::ReviewRow,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -1179,6 +1179,7 @@ fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
 
 /// Render text with sub-line change span highlighting. Characters within
 /// any `spans` range get `highlight_style`; the rest get `base_style`.
+#[allow(clippy::too_many_arguments)]
 fn render_side_text(
     buf: &mut Buffer,
     start_x: u16,
@@ -1189,8 +1190,7 @@ fn render_side_text(
     spans: &[std::ops::Range<usize>],
     highlight_style: Style,
 ) {
-    let mut col = 0usize;
-    for (byte_idx, ch) in text.char_indices() {
+    for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
             break;
         }
@@ -1203,7 +1203,6 @@ fn render_side_text(
             .any(|s| byte_idx >= s.start && byte_idx < s.end);
         let style = if in_span { highlight_style } else { base_style };
         buf[(x, y)].set_char(ch).set_style(style);
-        col += 1;
     }
 }
 

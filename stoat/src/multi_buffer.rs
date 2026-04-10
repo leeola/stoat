@@ -134,6 +134,7 @@ impl ExcerptBoundary {
 // ---- Excerpt SumTree infrastructure ----
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ExcerptEntry {
     id: ExcerptId,
     locator: Locator,
@@ -222,6 +223,7 @@ impl<'a> Dimension<'a, ExcerptSummary> for Option<ExcerptId> {
 
 // ExcerptIdMapping for O(log n) ID-to-Locator lookup
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct ExcerptIdMapping {
     id: ExcerptId,
     locator: Locator,
@@ -492,6 +494,7 @@ pub struct MultiBufferSnapshot {
     text_cache: OnceLock<String>,
     pub diff_map: Option<DiffMap>,
     excerpt_tree: Option<SumTree<ExcerptEntry>>,
+    #[allow(dead_code)]
     excerpt_ids: Option<SumTree<ExcerptIdMapping>>,
 }
 
@@ -654,6 +657,7 @@ impl MultiBufferSnapshot {
         }
     }
 
+    #[allow(dead_code)]
     fn excerpt_locator_for_id(&self, id: ExcerptId) -> Option<&Locator> {
         if id == ExcerptId::min() {
             return Some(Locator::min_ref());

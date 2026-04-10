@@ -77,6 +77,7 @@ pub struct FoldPlaceholder {
 }
 
 impl FoldPlaceholder {
+    #[allow(dead_code)]
     fn display_text(&self) -> &str {
         self.collapsed_text.as_deref().unwrap_or(self.text.as_ref())
     }
@@ -1109,10 +1110,10 @@ impl FoldSnapshot {
     ) -> FoldChunks<'a> {
         if self.fold_count() == 0 {
             // Without folds, fold offsets equal inlay offsets.
-            return FoldChunks::Passthrough(self.inlay_snapshot.chunks(
+            return FoldChunks::Passthrough(Box::new(self.inlay_snapshot.chunks(
                 InlayOffset(range.start.0)..InlayOffset(range.end.0),
                 endpoints,
-            ));
+            )));
         }
 
         let mut cursor = self
@@ -1282,7 +1283,7 @@ impl FoldSnapshot {
 /// Iterator returned by [`FoldSnapshot::chunks`].
 pub enum FoldChunks<'a> {
     /// Snapshot has no folds; this is a thin wrapper around [`InlayChunks`].
-    Passthrough(InlayChunks<'a>),
+    Passthrough(Box<InlayChunks<'a>>),
     /// Snapshot has at least one fold; walks transforms to interleave
     /// placeholder chunks with inlay chunks.
     Transforming(Box<FoldChunksInner<'a>>),
@@ -1326,9 +1327,7 @@ impl<'a> FoldChunksInner<'a> {
                 continue;
             }
 
-            let Some(transform) = self.cursor.item() else {
-                return None;
-            };
+            let transform = self.cursor.item()?;
             let cursor_start = self.cursor.start();
             let cursor_end = self.cursor.end();
             let trans_start_fold = cursor_start.0;

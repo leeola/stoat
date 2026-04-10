@@ -113,7 +113,7 @@ pub(crate) fn with_parser<R>(f: impl FnOnce(&mut Parser) -> R) -> R {
         .lock()
         .expect("parser pool poisoned")
         .pop()
-        .unwrap_or_else(Parser::new);
+        .unwrap_or_default();
     let _ = parser.set_included_ranges(&[]);
     let result = f(&mut parser);
     PARSERS.lock().expect("parser pool poisoned").push(parser);

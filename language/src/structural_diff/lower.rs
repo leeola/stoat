@@ -23,7 +23,7 @@ use tree_sitter::TreeCursor;
 /// `source` must be the same byte slice that produced the tree. Atom
 /// content slices borrow from it, so the arena's lifetime is bounded
 /// by `source`.
-pub fn lower_tree<'a>(tree: &tree_sitter::Tree, source: &'a str) -> (SyntaxArena, SyntaxId) {
+pub fn lower_tree(tree: &tree_sitter::Tree, source: &str) -> (SyntaxArena, SyntaxId) {
     let mut arena = SyntaxArena::new();
     let mut cursor = tree.walk();
     let root_id = lower_node(&mut arena, &mut cursor, source);
@@ -31,11 +31,7 @@ pub fn lower_tree<'a>(tree: &tree_sitter::Tree, source: &'a str) -> (SyntaxArena
     (arena, root_id)
 }
 
-fn lower_node<'a>(
-    arena: &mut SyntaxArena,
-    cursor: &mut TreeCursor<'_>,
-    source: &'a str,
-) -> SyntaxId {
+fn lower_node(arena: &mut SyntaxArena, cursor: &mut TreeCursor<'_>, source: &str) -> SyntaxId {
     let node = cursor.node();
     let kind: &'static str = static_kind(node.kind());
 

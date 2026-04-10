@@ -226,7 +226,7 @@ impl DisplayMap {
         let version = buffer_snapshot.version();
         let (inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).expect("non-zero literal"));
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (wrap_map, _wrap_snapshot) = WrapMap::new(tab_snapshot, None, executor);
         let block_map = BlockMap::new();
@@ -626,13 +626,13 @@ impl DisplaySnapshot {
         &self,
         highlights: Highlights<'_>,
         range: std::ops::Range<usize>,
-    ) -> Arc<[crate::display_map::highlights::HighlightEndpoint]> {
+    ) -> Arc<[highlights::HighlightEndpoint]> {
         let buffer = self.buffer_snapshot();
         let empty: TextHighlights = Arc::new(HashMap::new());
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
-        let eps = crate::display_map::highlights::create_highlight_endpoints(
+        let eps = highlights::create_highlight_endpoints(
             &range,
             text_highlights_ref,
             semantic_ref,
