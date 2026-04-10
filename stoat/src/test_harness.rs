@@ -195,6 +195,73 @@ impl TestHarness {
         self.capture("fold");
     }
 
+    /// Set up a side-by-side review view from raw text pairs.
+    ///
+    /// Each entry is `(file_path, base_content, new_content)`. The
+    /// structural diff is computed per file, hunks are extracted, and
+    /// the review is displayed in the focused pane. No git repo needed.
+    pub fn open_review_from_texts(&mut self, files: &[(&str, &str, &str)]) {
+        use crate::{
+            display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
+            editor_state::EditorState,
+            pane::View,
+            review::{self, ReviewRow},
+        };
+        use ratatui::{style::Style, text::Line};
+
+        let mut review_rows: Vec<ReviewRow> = Vec::new();
+        let mut blocks: Vec<BlockProperties> = Vec::new();
+        let mut current_row: u32 = 0;
+
+        for &(path, base, buffer) in files {
+            let lang = self.stoat.language_registry.for_path(path.as_ref());
+            let hunks = review::extract_review_hunks(lang.as_ref(), base, buffer, 3);
+            if hunks.is_empty() {
+                continue;
+            }
+            let lang_name = lang.as_ref().map(|l| l.name).unwrap_or("");
+            let total = hunks.len();
+            for (i, hunk) in hunks.iter().enumerate() {
+                let label = format!("{path} --- {}/{total} --- {lang_name}", i + 1);
+                let render: RenderBlock = {
+                    let label = label.clone();
+                    Arc::new(move |_ctx| {
+                        vec![Line::styled(
+                            label.clone(),
+                            Style::default().fg(Color::Yellow),
+                        )]
+                    })
+                };
+                blocks.push(BlockProperties {
+                    placement: BlockPlacement::Above(current_row),
+                    height: Some(1),
+                    style: BlockStyle::Fixed,
+                    render,
+                    diff_status: None,
+                    priority: 0,
+                });
+                current_row += hunk.rows.len() as u32;
+                review_rows.extend(hunk.rows.iter().cloned());
+            }
+        }
+
+        let placeholder = " \n".repeat(review_rows.len().saturating_sub(1)) + " ";
+        let (buffer_id, buffer) = self.stoat.buffers.new_scratch();
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(0..0, &placeholder);
+            guard.dirty = false;
+        }
+        let mut editor = EditorState::new(buffer_id, buffer, self.stoat.executor.clone());
+        editor.display_map.insert_blocks(blocks);
+        editor.review_rows = Some(review_rows);
+
+        let new_id = self.stoat.editors.insert(editor);
+        let focused = self.stoat.panes.focus();
+        self.stoat.panes.pane_mut(focused).view = View::Editor(new_id);
+        self.capture("open_review");
+    }
+
     pub fn type_action(&mut self, action_expr: &str) {
         let parsed = stoat_config::parse_action(action_expr)
             .unwrap_or_else(|e| panic!("failed to parse action {action_expr:?}: {e:?}"));
@@ -1135,5 +1202,48 @@ mod tests {
         let mut h = TestHarness::with_size(40, 6);
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_rust_file_nested_captures_styled");
+    }
+
+    #[test]
+    fn snapshot_review_addition() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn a() {}\nfn b() {}\n",
+            "fn a() {}\nfn new() {}\nfn b() {}\n",
+        )]);
+        h.assert_snapshot_styled("review_addition");
+    }
+
+    #[test]
+    fn snapshot_review_deletion() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn a() {}\nfn old() {}\nfn b() {}\n",
+            "fn a() {}\nfn b() {}\n",
+        )]);
+        h.assert_snapshot_styled("review_deletion");
+    }
+
+    #[test]
+    fn snapshot_review_modification() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn main() {\n    let x = 1;\n}\n",
+            "fn main() {\n    let x = 2;\n}\n",
+        )]);
+        h.assert_snapshot_styled("review_modification");
+    }
+
+    #[test]
+    fn snapshot_review_multi_file() {
+        let mut h = TestHarness::with_size(80, 16);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+            ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+        ]);
+        h.assert_snapshot_styled("review_multi_file");
     }
 }

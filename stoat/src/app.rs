@@ -3,10 +3,11 @@ use crate::{
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     command_palette::{CommandPalette, PaletteOutcome},
-    display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
+    display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
+    review::{ReviewRow, ReviewSide},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -983,6 +984,11 @@ fn render_pane(
 }
 
 fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+    if editor.review_rows.is_some() {
+        render_review(editor, inner, fallback_style, buf);
+        return;
+    }
+
     let snapshot = editor.display_map.snapshot();
     let visible_rows = inner.height as u32;
     let total_rows = snapshot.line_count();
@@ -1017,6 +1023,187 @@ fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
             buf[(x, y)].set_char(ch).set_style(style);
             x += 1;
         }
+    }
+}
+
+/// Side-by-side review renderer.
+///
+/// Layout per row:
+/// ```text
+///  NNN  <left content>           │  NNN  <right content>
+/// ```
+///
+/// Changed tokens within a line are highlighted; the rest of the line
+/// is rendered in the default style so only the structural diff is
+/// visually emphasised (matching difftastic behaviour).
+fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+    let snapshot = editor.display_map.snapshot();
+    let rows = match editor.review_rows.as_ref() {
+        Some(r) => r,
+        None => return,
+    };
+    let total_rows = snapshot.line_count();
+    let visible = inner.height as u32;
+    let end_row = (editor.scroll_row + visible).min(total_rows);
+    if end_row <= editor.scroll_row {
+        return;
+    }
+
+    let full_w = inner.width as usize;
+    // Line-number gutter: " NNN " = 5 chars
+    let num_w: usize = 5;
+    // Separator column (1 char)
+    let sep: usize = 1;
+    // Each half = (full_w - sep) / 2, left half gets the extra column on odd widths.
+    let half_w = (full_w.saturating_sub(sep)) / 2;
+    let left_content_w = half_w.saturating_sub(num_w);
+    let right_start = inner.x + half_w as u16 + sep as u16;
+    let right_content_w = (full_w - half_w - sep).saturating_sub(num_w);
+
+    let dim_style = Style::default().fg(Color::DarkGray);
+    let del_hl = Style::default().fg(Color::Red);
+    let add_hl = Style::default().fg(Color::Green);
+
+    for display_row in editor.scroll_row..end_row {
+        let y = inner.y + (display_row - editor.scroll_row) as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+
+        // Render separator column
+        let sep_x = inner.x + half_w as u16;
+        if sep_x < inner.x + inner.width {
+            buf[(sep_x, y)].set_char('│').set_style(dim_style);
+        }
+
+        match snapshot.classify_row(display_row) {
+            BlockRowKind::BufferRow { buffer_row } => {
+                let Some(row) = rows.get(buffer_row as usize) else {
+                    continue;
+                };
+                match row {
+                    ReviewRow::Context { left, right } => {
+                        render_side_num(buf, inner.x, y, left.line_num, dim_style);
+                        render_side_text(
+                            buf,
+                            inner.x + num_w as u16,
+                            y,
+                            &left.text,
+                            left_content_w,
+                            fallback_style,
+                            &[],
+                            fallback_style,
+                        );
+                        render_side_num(buf, right_start, y, right.line_num, dim_style);
+                        render_side_text(
+                            buf,
+                            right_start + num_w as u16,
+                            y,
+                            &right.text,
+                            right_content_w,
+                            fallback_style,
+                            &[],
+                            fallback_style,
+                        );
+                    },
+                    ReviewRow::Changed { left, right } => {
+                        if let Some(l) = left {
+                            render_side_num(buf, inner.x, y, l.line_num, dim_style);
+                            render_side_text(
+                                buf,
+                                inner.x + num_w as u16,
+                                y,
+                                &l.text,
+                                left_content_w,
+                                fallback_style,
+                                &l.change_spans,
+                                del_hl,
+                            );
+                        } else {
+                            render_empty_num(buf, inner.x, y, dim_style);
+                        }
+                        if let Some(r) = right {
+                            render_side_num(buf, right_start, y, r.line_num, dim_style);
+                            render_side_text(
+                                buf,
+                                right_start + num_w as u16,
+                                y,
+                                &r.text,
+                                right_content_w,
+                                fallback_style,
+                                &r.change_spans,
+                                add_hl,
+                            );
+                        } else {
+                            render_empty_num(buf, right_start, y, dim_style);
+                        }
+                    },
+                }
+            },
+            BlockRowKind::Block { block, line_index } => {
+                let line = block.get_line(line_index);
+                for (i, ch) in line.chars().enumerate() {
+                    let x = inner.x + i as u16;
+                    if x >= inner.x + inner.width {
+                        break;
+                    }
+                    buf[(x, y)]
+                        .set_char(ch)
+                        .set_style(Style::default().fg(Color::Yellow));
+                }
+            },
+        }
+    }
+}
+
+fn render_side_num(buf: &mut Buffer, x: u16, y: u16, num: u32, style: Style) {
+    let s = format!("{num:>4} ");
+    for (i, ch) in s.chars().enumerate() {
+        let col = x + i as u16;
+        if col >= buf.area.x + buf.area.width {
+            break;
+        }
+        buf[(col, y)].set_char(ch).set_style(style);
+    }
+}
+
+fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
+    for i in 0..5u16 {
+        let col = x + i;
+        if col >= buf.area.x + buf.area.width {
+            break;
+        }
+        buf[(col, y)].set_char('.').set_style(style);
+    }
+}
+
+/// Render text with sub-line change span highlighting. Characters within
+/// any `spans` range get `highlight_style`; the rest get `base_style`.
+fn render_side_text(
+    buf: &mut Buffer,
+    start_x: u16,
+    y: u16,
+    text: &str,
+    max_cols: usize,
+    base_style: Style,
+    spans: &[std::ops::Range<usize>],
+    highlight_style: Style,
+) {
+    let mut col = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        if col >= max_cols {
+            break;
+        }
+        let x = start_x + col as u16;
+        if x >= buf.area.x + buf.area.width {
+            break;
+        }
+        let in_span = spans
+            .iter()
+            .any(|s| byte_idx >= s.start && byte_idx < s.end);
+        let style = if in_span { highlight_style } else { base_style };
+        buf[(x, y)].set_char(ch).set_style(style);
+        col += 1;
     }
 }
 

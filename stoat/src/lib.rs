@@ -11,6 +11,7 @@ pub mod host;
 pub mod keymap;
 pub mod multi_buffer;
 pub mod pane;
+mod review;
 pub mod ui;
 
 pub use app::{Stoat, UpdateEffect};

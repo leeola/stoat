@@ -293,6 +293,10 @@ impl DisplayMap {
         self.diagnostics_max_severity = severity;
     }
 
+    pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) {
+        self.block_map.insert(blocks);
+    }
+
     pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let anchor_ranges = ranges

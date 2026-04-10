@@ -2,14 +2,18 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     command_palette::CommandPalette,
-    diff_map::DiffMap,
+    display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::EditorState,
     git,
     pane::{Axis, Direction, View},
+    review::{self, ReviewRow},
 };
-use std::path::Path;
+use ratatui::{
+    style::{Color, Style},
+    text::Line,
+};
+use std::{path::Path, sync::Arc};
 use stoat_action::{Action, ActionKind, OpenFile};
-use stoat_language::structural_diff;
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     match action.kind() {
@@ -127,47 +131,110 @@ fn open_review(stoat: &mut Stoat) {
             return;
         },
     };
-
-    let changed = git::changed_files(&repo);
-    let first = match changed.first() {
-        Some(f) => f,
-        None => {
-            tracing::warn!("open_review: no changed files");
-            return;
-        },
-    };
-    let path = first.path.clone();
-    let base_text = git::head_content(&repo, &path).unwrap_or_default();
-
-    let buffer_id = match open_file(stoat, &path) {
-        Some(id) => id,
+    let workdir = match repo.workdir() {
+        Some(w) => w.to_path_buf(),
         None => return,
     };
 
-    let buffer_text = {
-        let shared = match stoat.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
+    let changed = git::changed_files(&repo);
+    if changed.is_empty() {
+        tracing::warn!("open_review: no changed files");
+        return;
+    }
+
+    let mut review_rows: Vec<ReviewRow> = Vec::new();
+    let mut blocks: Vec<BlockProperties> = Vec::new();
+    let mut current_row: u32 = 0;
+
+    for file in &changed {
+        let buffer_text = match std::fs::read_to_string(&file.path) {
+            Ok(t) => t,
+            Err(_) => continue,
         };
-        let guard = shared.read().expect("buffer poisoned");
-        guard.rope().to_string()
-    };
-
-    let diff_result = {
-        let lang = stoat.language_registry.for_path(&path);
-        match lang {
-            Some(ref l) => {
-                structural_diff::diff_with_language_or_lines(l, &base_text, &buffer_text)
-            },
-            None => structural_diff::diff(&base_text, &buffer_text),
+        let base_text = git::head_content(&repo, &file.path).unwrap_or_default();
+        let lang = stoat.language_registry.for_path(&file.path);
+        let hunks = review::extract_review_hunks(lang.as_ref(), &base_text, &buffer_text, 3);
+        if hunks.is_empty() {
+            continue;
         }
+
+        let rel_path = file
+            .path
+            .strip_prefix(&workdir)
+            .unwrap_or(&file.path)
+            .display()
+            .to_string();
+        let lang_name = lang.as_ref().map(|l| l.name.to_string());
+
+        let total_hunks = hunks.len();
+        for (hunk_idx, hunk) in hunks.iter().enumerate() {
+            let label = {
+                let lang_str = lang_name.as_deref().unwrap_or("");
+                format!(
+                    "{} --- {}/{} --- {}",
+                    rel_path,
+                    hunk_idx + 1,
+                    total_hunks,
+                    lang_str
+                )
+            };
+
+            let render: RenderBlock = {
+                let label = label.clone();
+                Arc::new(move |_ctx| {
+                    vec![Line::styled(
+                        label.clone(),
+                        Style::default().fg(Color::Yellow),
+                    )]
+                })
+            };
+            blocks.push(BlockProperties {
+                placement: BlockPlacement::Above(current_row),
+                height: Some(1),
+                style: BlockStyle::Fixed,
+                render,
+                diff_status: None,
+                priority: 0,
+            });
+
+            current_row += hunk.rows.len() as u32;
+            review_rows.extend(hunk.rows.iter().cloned());
+        }
+    }
+
+    if review_rows.is_empty() {
+        tracing::warn!("open_review: no diff hunks to display");
+        return;
+    }
+
+    // Placeholder buffer: one line per review row for scroll counting.
+    let placeholder = " \n".repeat(review_rows.len().saturating_sub(1)) + " ";
+    let (buffer_id, buffer) = stoat.buffers.new_scratch();
+    {
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(0..0, &placeholder);
+        guard.dirty = false;
+    }
+
+    let mut editor = EditorState::new(buffer_id, buffer, stoat.executor.clone());
+    editor.display_map.insert_blocks(blocks);
+    editor.review_rows = Some(review_rows);
+
+    let new_editor_id = stoat.editors.insert(editor);
+    let focused = stoat.panes.focus();
+    let old = match stoat.panes.pane(focused).view {
+        View::Editor(eid) => Some(eid),
+        View::Label(_) => None,
     };
-
-    let diff_map = DiffMap::from_structural_changes(diff_result, &base_text, &buffer_text);
-
-    if let Some(shared) = stoat.buffers.get(buffer_id) {
-        let mut guard = shared.write().expect("buffer poisoned");
-        guard.diff_map = Some(diff_map);
+    stoat.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+    if let Some(old_id) = old {
+        let still_referenced = stoat
+            .panes
+            .split_panes()
+            .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
+        if !still_referenced {
+            stoat.editors.remove(old_id);
+        }
     }
 }
 
