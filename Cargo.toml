@@ -52,6 +52,7 @@ async-task = "4"
 parking_lot = "0.12"
 tree-sitter = "0.26"
 cc = "1"
+lsp-types = "0.97"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

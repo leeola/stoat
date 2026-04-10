@@ -1,3 +1,14 @@
+mod claude_code;
+mod lsp;
+
+pub use self::{
+    claude_code::FakeClaudeCode,
+    lsp::{
+        change_params, completion_params, definition_params, document_highlight_params,
+        hover_params, inlay_hint_params, open_params, reference_params, workspace_symbol_params,
+        FakeLsp,
+    },
+};
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
 use compact_str::CompactString;
 use std::{
