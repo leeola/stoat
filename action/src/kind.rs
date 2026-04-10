@@ -12,4 +12,5 @@ pub enum ActionKind {
     ClosePane,
     OpenFile,
     OpenCommandPalette,
+    OpenReview,
 }

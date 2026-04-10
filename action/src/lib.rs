@@ -13,6 +13,7 @@ pub use defs::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitRight,
     },
+    review::OpenReview,
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue};

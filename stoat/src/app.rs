@@ -26,7 +26,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use stoat_action::{Action, OpenFile};
+use stoat_action::{Action, OpenFile, OpenReview};
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Bias;
@@ -150,6 +150,10 @@ impl Stoat {
             path: path.to_path_buf(),
         };
         action_handlers::dispatch(self, &action);
+    }
+
+    pub fn open_review(&mut self) {
+        action_handlers::dispatch(self, &OpenReview);
     }
 
     pub async fn run(

@@ -1,6 +1,5 @@
 ---
 source: stoat/src/test_harness.rs
-assertion_line: 134
 expression: text
 ---
 actions: :
@@ -23,8 +22,8 @@ size: 80x24
 │ │ FocusRight  focus pane right                                             │ │
 │ │ FocusUp     focus pane up                                                │ │
 │ │ OpenFile    open a file                                                  │ │
+│ │ OpenReview  review changed files                                         │ │
 │ │ Quit        exit stoat                                                   │ │
-│ │ SplitDown   split pane down                                              │ │
 │ │──────────────────────────────────────────────────────────────────────────│ │
 │ │Close the focused pane. Refuses if it is the last remaining pane.         │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │

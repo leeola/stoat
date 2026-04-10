@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{Axis, Stoat};
 use stoat_scheduler::TestScheduler;
@@ -6,8 +6,17 @@ use stoat_scheduler::TestScheduler;
 #[derive(Parser)]
 #[command(name = "stoat", about = "A modal text editor")]
 pub struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(help = "Files to open")]
     pub files: Vec<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Open the first changed file with a diff against HEAD
+    Review,
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,11 +39,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     rt.block_on(async {
         let mut stoat = Stoat::new(executor);
 
-        for (i, path) in args.files.iter().enumerate() {
-            if i > 0 {
-                stoat.panes.split(Axis::Vertical);
-            }
-            stoat.open_file(path);
+        match args.command {
+            Some(Command::Review) => stoat.open_review(),
+            None => {
+                for (i, path) in args.files.iter().enumerate() {
+                    if i > 0 {
+                        stoat.panes.split(Axis::Vertical);
+                    }
+                    stoat.open_file(path);
+                }
+            },
         }
 
         stoat.run(event_rx, render_tx).await

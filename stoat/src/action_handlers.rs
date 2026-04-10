@@ -1,11 +1,15 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
     command_palette::CommandPalette,
+    diff_map::DiffMap,
     editor_state::EditorState,
+    git,
     pane::{Axis, Direction, View},
 };
 use std::path::Path;
 use stoat_action::{Action, ActionKind, OpenFile};
+use stoat_language::structural_diff;
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     match action.kind() {
@@ -60,10 +64,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             stoat.command_palette = Some(CommandPalette::new());
             UpdateEffect::Redraw
         },
+        ActionKind::OpenReview => {
+            open_review(stoat);
+            UpdateEffect::Redraw
+        },
     }
 }
 
-fn open_file(stoat: &mut Stoat, path: &Path) {
+fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
     let absolute = std::fs::canonicalize(path)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join(path));
     let content = match std::fs::read_to_string(&absolute) {
@@ -71,7 +79,7 @@ fn open_file(stoat: &mut Stoat, path: &Path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             tracing::error!("failed to read {}: {}", absolute.display(), e);
-            return;
+            return None;
         },
     };
 
@@ -99,6 +107,67 @@ fn open_file(stoat: &mut Stoat, path: &Path) {
         if !still_referenced {
             stoat.editors.remove(old_id);
         }
+    }
+
+    Some(buffer_id)
+}
+
+fn open_review(stoat: &mut Stoat) {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("open_review: cannot determine cwd: {e}");
+            return;
+        },
+    };
+    let repo = match git::discover_repo(&cwd) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("open_review: not inside a git repository");
+            return;
+        },
+    };
+
+    let changed = git::changed_files(&repo);
+    let first = match changed.first() {
+        Some(f) => f,
+        None => {
+            tracing::warn!("open_review: no changed files");
+            return;
+        },
+    };
+    let path = first.path.clone();
+    let base_text = git::head_content(&repo, &path).unwrap_or_default();
+
+    let buffer_id = match open_file(stoat, &path) {
+        Some(id) => id,
+        None => return,
+    };
+
+    let buffer_text = {
+        let shared = match stoat.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let guard = shared.read().expect("buffer poisoned");
+        guard.rope().to_string()
+    };
+
+    let diff_result = {
+        let lang = stoat.language_registry.for_path(&path);
+        match lang {
+            Some(ref l) => {
+                structural_diff::diff_with_language_or_lines(l, &base_text, &buffer_text)
+            },
+            None => structural_diff::diff(&base_text, &buffer_text),
+        }
+    };
+
+    let diff_map = DiffMap::from_structural_changes(diff_result, &base_text, &buffer_text);
+
+    if let Some(shared) = stoat.buffers.get(buffer_id) {
+        let mut guard = shared.write().expect("buffer poisoned");
+        guard.diff_map = Some(diff_map);
     }
 }
 

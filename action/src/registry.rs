@@ -7,6 +7,7 @@ use crate::{
             ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
             SplitRight,
         },
+        review::OpenReview,
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
@@ -40,6 +41,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
     });
+    add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -81,6 +83,7 @@ mod tests {
         "FocusPrev",
         "ClosePane",
         "OpenCommandPalette",
+        "OpenReview",
     ];
 
     #[test]
@@ -139,7 +142,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 12);
+        assert_eq!(all().count(), 13);
     }
 
     #[test]
