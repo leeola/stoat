@@ -93,38 +93,96 @@ pub(crate) fn head_content(repo: &Repository, path: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+pub(crate) struct TestRepo {
+    pub repo: Repository,
+    _dir: tempfile::TempDir,
+}
 
-    fn init_repo(dir: &Path) -> Repository {
-        Repository::init(dir).expect("init repo")
+#[cfg(test)]
+impl TestRepo {
+    pub fn new() -> Self {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let repo = Repository::init(dir.path()).expect("init repo");
+        Self { repo, _dir: dir }
     }
 
-    fn commit_file(repo: &Repository, dir: &Path, name: &str, content: &str) {
-        fs::write(dir.join(name), content).expect("write file");
-        let mut index = repo.index().expect("index");
+    pub fn path(&self) -> &Path {
+        self.repo.workdir().expect("repo has workdir")
+    }
+
+    pub fn join(&self, name: &str) -> PathBuf {
+        self.path().join(name)
+    }
+
+    pub fn write(&self, name: &str, content: &str) -> &Self {
+        let path = self.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        std::fs::write(&path, content).expect("write file");
+        self
+    }
+
+    pub fn stage(&self, name: &str) -> &Self {
+        let mut index = self.repo.index().expect("index");
         index.add_path(Path::new(name)).expect("add path");
         index.write().expect("write index");
+        self
+    }
+
+    pub fn write_and_stage(&self, name: &str, content: &str) -> &Self {
+        self.write(name, content).stage(name)
+    }
+
+    pub fn commit(&self, message: &str) -> &Self {
+        let mut index = self.repo.index().expect("index");
         let tree_id = index.write_tree().expect("write tree");
-        let tree = repo.find_tree(tree_id).expect("find tree");
+        let tree = self.repo.find_tree(tree_id).expect("find tree");
         let sig = git2::Signature::now("test", "t@t").expect("sig");
-        let parents: Vec<_> = repo
+        let parents: Vec<_> = self
+            .repo
             .head()
             .ok()
             .and_then(|h| h.peel_to_commit().ok())
             .into_iter()
             .collect();
         let parent_refs: Vec<_> = parents.iter().collect();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &parent_refs)
+        self.repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
             .expect("commit");
+        self
     }
+
+    pub fn commit_file(&self, name: &str, content: &str) -> &Self {
+        self.write_and_stage(name, content).commit("c")
+    }
+
+    pub fn create_branch(&self, name: &str) -> &Self {
+        let head = self
+            .repo
+            .head()
+            .expect("HEAD")
+            .peel_to_commit()
+            .expect("commit");
+        self.repo.branch(name, &head, false).expect("create branch");
+        self.repo
+            .set_head(&format!("refs/heads/{name}"))
+            .expect("set HEAD");
+        self.repo
+            .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+            .expect("checkout");
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn discover_finds_repo() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let _repo = init_repo(dir.path());
-        assert!(discover_repo(dir.path()).is_some());
+        let r = TestRepo::new();
+        assert!(discover_repo(r.path()).is_some());
     }
 
     #[test]
@@ -135,19 +193,17 @@ mod tests {
 
     #[test]
     fn changed_files_empty_when_clean() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "fn main() {}");
-        assert!(changed_files(&repo).is_empty());
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "fn main() {}");
+        assert!(changed_files(&r.repo).is_empty());
     }
 
     #[test]
     fn changed_files_detects_modified() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "v1");
-        fs::write(dir.path().join("a.rs"), "v2").expect("write");
-        let files = changed_files(&repo);
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "v1");
+        r.write("a.rs", "v2");
+        let files = changed_files(&r.repo);
         assert_eq!(files.len(), 1);
         assert!(!files[0].staged);
         assert!(files[0].path.ends_with("a.rs"));
@@ -155,21 +211,12 @@ mod tests {
 
     #[test]
     fn changed_files_staged_first() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "v1");
-        commit_file(&repo, dir.path(), "b.rs", "v1");
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "v1").commit_file("b.rs", "v1");
+        r.write_and_stage("b.rs", "v2");
+        r.write("a.rs", "v2");
 
-        // Stage a change to b.rs
-        fs::write(dir.path().join("b.rs"), "v2").expect("write");
-        let mut index = repo.index().expect("index");
-        index.add_path(Path::new("b.rs")).expect("add");
-        index.write().expect("write");
-
-        // Unstaged change to a.rs
-        fs::write(dir.path().join("a.rs"), "v2").expect("write");
-
-        let files = changed_files(&repo);
+        let files = changed_files(&r.repo);
         assert_eq!(files.len(), 2);
         assert!(files[0].staged, "staged should sort first");
         assert!(files[0].path.ends_with("b.rs"));
@@ -179,54 +226,43 @@ mod tests {
 
     #[test]
     fn changed_files_deduplicates_staged_and_unstaged() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "v1");
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "v1");
+        r.write_and_stage("a.rs", "v2");
+        r.write("a.rs", "v3");
 
-        // Stage a change, then make another unstaged change
-        fs::write(dir.path().join("a.rs"), "v2").expect("write");
-        let mut index = repo.index().expect("index");
-        index.add_path(Path::new("a.rs")).expect("add");
-        index.write().expect("write");
-        fs::write(dir.path().join("a.rs"), "v3").expect("write");
-
-        let files = changed_files(&repo);
+        let files = changed_files(&r.repo);
         assert_eq!(files.len(), 1, "should deduplicate to staged only");
         assert!(files[0].staged);
     }
 
     #[test]
     fn changed_files_empty_on_no_commits() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        fs::write(dir.path().join("new.rs"), "x").expect("write");
-        assert!(changed_files(&repo).is_empty());
+        let r = TestRepo::new();
+        r.write("new.rs", "x");
+        assert!(changed_files(&r.repo).is_empty());
     }
 
     #[test]
     fn head_content_reads_blob() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "fn main() {}");
-        let workdir = repo.workdir().expect("workdir");
-        let content = head_content(&repo, &workdir.join("a.rs"));
-        assert_eq!(content.as_deref(), Some("fn main() {}"));
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "fn main() {}");
+        assert_eq!(
+            head_content(&r.repo, &r.join("a.rs")).as_deref(),
+            Some("fn main() {}")
+        );
     }
 
     #[test]
     fn head_content_none_for_new_file() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        commit_file(&repo, dir.path(), "a.rs", "v1");
-        let workdir = repo.workdir().expect("workdir");
-        assert!(head_content(&repo, &workdir.join("b.rs")).is_none());
+        let r = TestRepo::new();
+        r.commit_file("a.rs", "v1");
+        assert!(head_content(&r.repo, &r.join("b.rs")).is_none());
     }
 
     #[test]
     fn head_content_none_on_orphan_branch() {
-        let dir = tempfile::tempdir().expect("tmpdir");
-        let repo = init_repo(dir.path());
-        let workdir = repo.workdir().expect("workdir");
-        assert!(head_content(&repo, &workdir.join("a.rs")).is_none());
+        let r = TestRepo::new();
+        assert!(head_content(&r.repo, &r.join("a.rs")).is_none());
     }
 }
