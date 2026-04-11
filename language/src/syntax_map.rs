@@ -929,6 +929,7 @@ mod tests {
         let mut map = SyntaxMap::new();
         // Filter to bytes covering only the first line.
         let first_newline = source.find('\n').unwrap();
+        #[allow(clippy::single_range_in_vec_init)]
         let changed = vec![0..first_newline];
         map.reparse_within_changed_ranges(&rope, lang.clone(), 1, Some(&changed))
             .unwrap();

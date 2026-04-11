@@ -760,7 +760,7 @@ mod tests {
         // "kitten" -> "sitting" is the textbook 3-edit example, so
         // similarity = (7 - 3) / 7 = ~57%.
         let pct = levenshtein_pct("kitten", "sitting");
-        assert!(pct >= 50 && pct <= 70, "got {pct}");
+        assert!((50..=70).contains(&pct), "got {pct}");
     }
 
     #[test]

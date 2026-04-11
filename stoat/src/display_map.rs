@@ -1283,8 +1283,6 @@ mod tests {
 
     #[test]
     fn chunks_with_blocks_match_display_lines() {
-        use crate::display_map::{BlockPlacement, BlockProperties, BlockStyle};
-
         let diff = DiffMap::from_hunks(
             [DiffHunk {
                 status: DiffHunkStatus::Deleted,

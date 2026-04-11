@@ -17,6 +17,7 @@ pub mod lsp;
 
 pub use claude_code::{
     AgentMessage, ClaudeCodeFactory, ClaudeCodeHost, ClaudeCodeSessions, ClaudeSessionId,
+    PermissionCallback, PermissionResult, ToolPermissionContext,
 };
 #[cfg(test)]
 pub use fake::{

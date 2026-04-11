@@ -241,6 +241,40 @@ pub enum SdkMessage {
         #[serde(rename = "permissionMode")]
         permission_mode: PermissionMode,
     },
+
+    /// Partial-message streaming event.
+    ///
+    /// Emitted when the session was started with
+    /// `--include-partial-messages`. Carries one raw Anthropic API
+    /// streaming event (`message_start`, `content_block_start`,
+    /// `content_block_delta`, etc.). The payload is intentionally
+    /// retained as opaque JSON; callers interested in a specific event
+    /// subtype should use an accessor like [`SdkMessage::as_text_delta`]
+    /// rather than matching on the tree directly.
+    #[serde(rename = "stream_event")]
+    StreamEvent {
+        /// Raw Anthropic streaming-event JSON.
+        event: serde_json::Value,
+        /// Session identifier for message correlation.
+        session_id: String,
+        /// Parent tool-use id when the event originates from a
+        /// sub-agent; absent for primary assistant streams.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
+    },
+
+    /// Control-protocol request from the CLI (e.g. a `can_use_tool`
+    /// permission prompt or a `hook_callback`). The host replies via a
+    /// [`ControlResponse`] on stdin carrying the same `request_id`.
+    ///
+    /// The inner request payload is kept as raw JSON to keep the wire
+    /// model decoupled from the host trait; use accessors like
+    /// [`SdkMessage::as_can_use_tool`] to extract strongly-typed views.
+    #[serde(rename = "control_request")]
+    ControlRequest {
+        request_id: String,
+        request: serde_json::Value,
+    },
 }
 
 impl SdkMessage {
@@ -252,16 +286,19 @@ impl SdkMessage {
         matches!(self, SdkMessage::Result { .. })
     }
 
-    /// Extract the session ID from any message type.
+    /// Extract the session ID from any message type, when present.
     ///
-    /// All messages contain a session ID for correlation across
-    /// multiple turns and potential process restarts.
+    /// Most messages carry a session ID; [`SdkMessage::ControlRequest`]
+    /// does not (control-protocol framing is session-scoped implicitly
+    /// via the subprocess), so it returns `""` for that variant.
     pub fn session_id(&self) -> &str {
         match self {
             SdkMessage::Assistant { session_id, .. }
             | SdkMessage::User { session_id, .. }
             | SdkMessage::Result { session_id, .. }
-            | SdkMessage::System { session_id, .. } => session_id,
+            | SdkMessage::System { session_id, .. }
+            | SdkMessage::StreamEvent { session_id, .. } => session_id,
+            SdkMessage::ControlRequest { .. } => "",
         }
     }
 
@@ -272,6 +309,138 @@ impl SdkMessage {
             SdkMessage::User { .. } => "user",
             SdkMessage::Result { .. } => "result",
             SdkMessage::System { .. } => "system",
+            SdkMessage::StreamEvent { .. } => "stream_event",
+            SdkMessage::ControlRequest { .. } => "control_request",
+        }
+    }
+
+    /// If this is a `stream_event` carrying a `content_block_delta`
+    /// whose inner `delta.type` is `text_delta`, returns the delta's
+    /// text. Returns `None` for every other shape.
+    pub fn as_text_delta(&self) -> Option<&str> {
+        let SdkMessage::StreamEvent { event, .. } = self else {
+            return None;
+        };
+        if event.get("type").and_then(|v| v.as_str())? != "content_block_delta" {
+            return None;
+        }
+        let delta = event.get("delta")?;
+        if delta.get("type").and_then(|v| v.as_str())? != "text_delta" {
+            return None;
+        }
+        delta.get("text").and_then(|v| v.as_str())
+    }
+
+    /// If this is a `control_request` with `subtype == "can_use_tool"`,
+    /// returns a strongly-typed view of the permission request.
+    pub fn as_can_use_tool(&self) -> Option<CanUseToolRequest<'_>> {
+        let SdkMessage::ControlRequest {
+            request_id,
+            request,
+        } = self
+        else {
+            return None;
+        };
+        if request.get("subtype").and_then(|v| v.as_str())? != "can_use_tool" {
+            return None;
+        }
+        Some(CanUseToolRequest {
+            request_id: request_id.as_str(),
+            tool_name: request.get("tool_name").and_then(|v| v.as_str())?,
+            input: request.get("input")?,
+            permission_suggestions: request.get("permission_suggestions"),
+            tool_use_id: request.get("tool_use_id").and_then(|v| v.as_str()),
+            agent_id: request.get("agent_id").and_then(|v| v.as_str()),
+            blocked_path: request.get("blocked_path").and_then(|v| v.as_str()),
+        })
+    }
+
+    /// If this is a `control_request` with `subtype == "hook_callback"`,
+    /// returns a strongly-typed view of the hook invocation.
+    pub fn as_hook_callback(&self) -> Option<HookCallbackRequest<'_>> {
+        let SdkMessage::ControlRequest {
+            request_id,
+            request,
+        } = self
+        else {
+            return None;
+        };
+        if request.get("subtype").and_then(|v| v.as_str())? != "hook_callback" {
+            return None;
+        }
+        Some(HookCallbackRequest {
+            request_id: request_id.as_str(),
+            callback_id: request.get("callback_id").and_then(|v| v.as_str())?,
+            input: request.get("input"),
+            tool_use_id: request.get("tool_use_id").and_then(|v| v.as_str()),
+        })
+    }
+}
+
+/// Strongly-typed view of a `can_use_tool` control request, borrowed
+/// from the underlying [`SdkMessage::ControlRequest`]'s raw JSON.
+#[derive(Debug, Clone, Copy)]
+pub struct CanUseToolRequest<'a> {
+    pub request_id: &'a str,
+    pub tool_name: &'a str,
+    pub input: &'a serde_json::Value,
+    pub permission_suggestions: Option<&'a serde_json::Value>,
+    pub tool_use_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub blocked_path: Option<&'a str>,
+}
+
+/// Strongly-typed view of a `hook_callback` control request.
+#[derive(Debug, Clone, Copy)]
+pub struct HookCallbackRequest<'a> {
+    pub request_id: &'a str,
+    pub callback_id: &'a str,
+    pub input: Option<&'a serde_json::Value>,
+    pub tool_use_id: Option<&'a str>,
+}
+
+/// Outbound control-protocol response. Serialized once and written to
+/// child stdin; never inbound. The top-level `type` is
+/// `"control_response"`; the inner `response` carries a success or
+/// error subtype plus the original `request_id`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlResponse {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    pub response: ControlResponseBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "subtype", rename_all = "snake_case")]
+pub enum ControlResponseBody {
+    Success {
+        request_id: String,
+        response: serde_json::Value,
+    },
+    Error {
+        request_id: String,
+        error: String,
+    },
+}
+
+impl ControlResponse {
+    pub fn success(request_id: impl Into<String>, response: serde_json::Value) -> Self {
+        Self {
+            kind: "control_response",
+            response: ControlResponseBody::Success {
+                request_id: request_id.into(),
+                response,
+            },
+        }
+    }
+
+    pub fn error(request_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            kind: "control_response",
+            response: ControlResponseBody::Error {
+                request_id: request_id.into(),
+                error: error.into(),
+            },
         }
     }
 }
@@ -318,6 +487,25 @@ pub enum SystemSubtype {
     /// Indicates Claude is ready to receive messages and reports
     /// the session configuration including available tools and model.
     Init,
+}
+
+/// Source of settings (`.claude/settings.json`) loaded alongside the
+/// session. Mirrors the CLI's `--setting-sources` comma-separated list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSource {
+    User,
+    Project,
+    Local,
+}
+
+impl SettingSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SettingSource::User => "user",
+            SettingSource::Project => "project",
+            SettingSource::Local => "local",
+        }
+    }
 }
 
 /// Permission modes controlling tool execution behavior.
@@ -522,7 +710,8 @@ impl UserMessage {
             role: Role::User,
             content: UserContent::Blocks(vec![UserContentBlock::ToolResult {
                 tool_use_id: tool_use_id.into(),
-                content: content.into(),
+                content: ToolResultContent::Text(content.into()),
+                is_error: None,
             }]),
         }
     }
@@ -572,7 +761,8 @@ impl UserContent {
                     UserContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                    } => format!("[Tool Result {tool_use_id}]: {content}"),
+                        ..
+                    } => format!("[Tool Result {tool_use_id}]: {}", content.as_text()),
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -602,9 +792,37 @@ pub enum UserContentBlock {
     ToolResult {
         /// ID matching the original ToolUse request
         tool_use_id: String,
-        /// Execution result as string
-        content: String,
+        /// Execution result. Wire format accepts either a plain string or
+        /// a structured array of content blocks; [`ToolResultContent`]
+        /// preserves both and exposes them as one string on demand.
+        content: ToolResultContent,
+        /// Whether the tool execution resulted in an error. Optional per
+        /// the Anthropic API schema; absent implies `false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
     },
+}
+
+/// Body of a [`UserContentBlock::ToolResult`]. The wire format accepts
+/// both a plain string and an array of content blocks; this enum
+/// preserves the shape rather than flattening on deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<serde_json::Value>),
+}
+
+impl ToolResultContent {
+    /// Collapse to a single displayable string. Plain text passes
+    /// through unchanged; structured blocks are serialized to compact
+    /// JSON so callers can still surface their content as a string.
+    pub fn as_text(&self) -> String {
+        match self {
+            ToolResultContent::Text(s) => s.clone(),
+            ToolResultContent::Blocks(blocks) => serde_json::to_string(blocks).unwrap_or_default(),
+        }
+    }
 }
 
 // Custom serialization to handle both string and array formats for UserContent
@@ -691,6 +909,31 @@ pub enum MessageContent {
         input: HashMap<String, serde_json::Value>,
     },
 
+    /// Extended thinking block. Emitted when extended thinking is
+    /// enabled; `signature` preserves the cryptographic integrity tag
+    /// the API attaches to each thinking block.
+    Thinking { thinking: String, signature: String },
+
+    /// Redacted thinking block. Carries only the encrypted `data`
+    /// field; the plaintext thinking is withheld by the API.
+    RedactedThinking { data: String },
+
+    /// Server-side tool invocation (e.g. `web_search`, `code_execution`).
+    /// Same shape as [`ToolUse`](MessageContent::ToolUse) but executed
+    /// server-side and paired with a [`ServerToolResult`] rather than a
+    /// client-injected tool result.
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: HashMap<String, serde_json::Value>,
+    },
+
+    /// Result of a server-side tool invocation.
+    ServerToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+    },
+
     /// Content block with an unrecognized `type` tag, or a recognized tag
     /// whose fields did not match the expected shape. Carries the raw
     /// JSON so the information is preserved rather than silently dropped.
@@ -717,6 +960,22 @@ impl<'de> Deserialize<'de> for MessageContent {
                 name: String,
                 input: HashMap<String, serde_json::Value>,
             },
+            Thinking {
+                thinking: String,
+                signature: String,
+            },
+            RedactedThinking {
+                data: String,
+            },
+            ServerToolUse {
+                id: String,
+                name: String,
+                input: HashMap<String, serde_json::Value>,
+            },
+            ServerToolResult {
+                tool_use_id: String,
+                content: serde_json::Value,
+            },
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -725,6 +984,24 @@ impl<'de> Deserialize<'de> for MessageContent {
             Ok(Known::ToolUse { id, name, input }) => {
                 Ok(MessageContent::ToolUse { id, name, input })
             },
+            Ok(Known::Thinking {
+                thinking,
+                signature,
+            }) => Ok(MessageContent::Thinking {
+                thinking,
+                signature,
+            }),
+            Ok(Known::RedactedThinking { data }) => Ok(MessageContent::RedactedThinking { data }),
+            Ok(Known::ServerToolUse { id, name, input }) => {
+                Ok(MessageContent::ServerToolUse { id, name, input })
+            },
+            Ok(Known::ServerToolResult {
+                tool_use_id,
+                content,
+            }) => Ok(MessageContent::ServerToolResult {
+                tool_use_id,
+                content,
+            }),
             Err(_) => Ok(MessageContent::Unknown(value)),
         }
     }
@@ -891,5 +1168,245 @@ mod tests {
         assert!(message.content[0].is_text());
         assert!(message.content[1].is_unknown());
         assert!(message.content[2].is_tool_use());
+    }
+
+    #[test]
+    fn message_content_thinking_parses() {
+        let json = r#"{"type":"thinking","thinking":"let me think","signature":"sig-abc"}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "let me think");
+                assert_eq!(signature, "sig-abc");
+            },
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_redacted_thinking_parses() {
+        let json = r#"{"type":"redacted_thinking","data":"encrypted-blob"}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::RedactedThinking { data } => assert_eq!(data, "encrypted-blob"),
+            other => panic!("expected RedactedThinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_server_tool_use_parses() {
+        let json = r#"{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"query":"rust"}}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::ServerToolUse { id, name, input } => {
+                assert_eq!(id, "srv_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input.get("query"), Some(&serde_json::json!("rust")));
+            },
+            other => panic!("expected ServerToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_server_tool_result_parses() {
+        let json = r#"{"type":"server_tool_result","tool_use_id":"srv_1","content":"found"}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::ServerToolResult {
+                tool_use_id,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "srv_1");
+                assert_eq!(content, serde_json::json!("found"));
+            },
+            other => panic!("expected ServerToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_content_block_tool_result_accepts_plain_string() {
+        let json = r#"{"type":"tool_result","tool_use_id":"t1","content":"ok"}"#;
+        let parsed: UserContentBlock = serde_json::from_str(json).unwrap();
+        match parsed {
+            UserContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "t1");
+                assert_eq!(content.as_text(), "ok");
+                assert_eq!(is_error, None);
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_content_block_tool_result_accepts_structured_blocks() {
+        let json = r#"{
+            "type":"tool_result",
+            "tool_use_id":"t1",
+            "content":[{"type":"text","text":"line1"},{"type":"text","text":"line2"}],
+            "is_error": true
+        }"#;
+        let parsed: UserContentBlock = serde_json::from_str(json).unwrap();
+        match parsed {
+            UserContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "t1");
+                assert_eq!(is_error, Some(true));
+                let flattened = content.as_text();
+                assert!(flattened.contains("line1"));
+                assert!(flattened.contains("line2"));
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_content_block_tool_result_is_error_absent_defaults_none() {
+        let json = r#"{"type":"tool_result","tool_use_id":"t1","content":"ok"}"#;
+        let parsed: UserContentBlock = serde_json::from_str(json).unwrap();
+        match parsed {
+            UserContentBlock::ToolResult { is_error, .. } => assert_eq!(is_error, None),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_event_parses_and_exposes_text_delta() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hello "}
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.message_type(), "stream_event");
+        assert_eq!(parsed.session_id(), "sess-s");
+        assert_eq!(parsed.as_text_delta(), Some("hello "));
+    }
+
+    #[test]
+    fn stream_event_non_text_delta_returns_none() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"x\":"}
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.as_text_delta(), None);
+    }
+
+    #[test]
+    fn stream_event_message_start_returns_none() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {"type": "message_start", "message": {}}
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.as_text_delta(), None);
+    }
+
+    #[test]
+    fn non_stream_event_text_delta_returns_none() {
+        let msg = SdkMessage::Result {
+            subtype: ResultSubtype::Success,
+            duration_ms: 1,
+            duration_api_ms: 1,
+            is_error: false,
+            num_turns: 1,
+            result: None,
+            session_id: "sess".into(),
+            total_cost_usd: 0.0,
+        };
+        assert_eq!(msg.as_text_delta(), None);
+    }
+
+    #[test]
+    fn control_request_can_use_tool_parses_and_extracts() {
+        let json = r#"{
+            "type": "control_request",
+            "request_id": "req_7",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls /"},
+                "tool_use_id": "toolu_1"
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.message_type(), "control_request");
+        let req = parsed
+            .as_can_use_tool()
+            .expect("expected CanUseToolRequest view");
+        assert_eq!(req.request_id, "req_7");
+        assert_eq!(req.tool_name, "Bash");
+        assert_eq!(req.tool_use_id, Some("toolu_1"));
+        assert_eq!(req.input["command"], serde_json::json!("ls /"));
+        assert!(parsed.as_hook_callback().is_none());
+    }
+
+    #[test]
+    fn control_request_hook_callback_parses_and_extracts() {
+        let json = r#"{
+            "type": "control_request",
+            "request_id": "req_8",
+            "request": {
+                "subtype": "hook_callback",
+                "callback_id": "cb_0",
+                "input": {"foo": "bar"},
+                "tool_use_id": "toolu_2"
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        let req = parsed
+            .as_hook_callback()
+            .expect("expected HookCallbackRequest view");
+        assert_eq!(req.request_id, "req_8");
+        assert_eq!(req.callback_id, "cb_0");
+        assert_eq!(req.tool_use_id, Some("toolu_2"));
+        assert!(parsed.as_can_use_tool().is_none());
+    }
+
+    #[test]
+    fn control_response_success_serializes_to_expected_shape() {
+        let resp = ControlResponse::success(
+            "req_7",
+            serde_json::json!({"behavior": "allow", "updatedInput": {"command": "ls /"}}),
+        );
+        let encoded = serde_json::to_value(&resp).unwrap();
+        assert_eq!(encoded["type"], "control_response");
+        assert_eq!(encoded["response"]["subtype"], "success");
+        assert_eq!(encoded["response"]["request_id"], "req_7");
+        assert_eq!(encoded["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            encoded["response"]["response"]["updatedInput"]["command"],
+            "ls /"
+        );
+    }
+
+    #[test]
+    fn control_response_error_serializes_to_expected_shape() {
+        let resp = ControlResponse::error("req_7", "no callback");
+        let encoded = serde_json::to_value(&resp).unwrap();
+        assert_eq!(encoded["type"], "control_response");
+        assert_eq!(encoded["response"]["subtype"], "error");
+        assert_eq!(encoded["response"]["request_id"], "req_7");
+        assert_eq!(encoded["response"]["error"], "no callback");
     }
 }

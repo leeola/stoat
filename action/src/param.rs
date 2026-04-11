@@ -130,8 +130,8 @@ mod tests {
             Ok(ParamValue::Number(42.0))
         );
         assert_eq!(
-            ParamValue::parse(ParamKind::Number, "-3.14"),
-            Ok(ParamValue::Number(-3.14))
+            ParamValue::parse(ParamKind::Number, "-2.5"),
+            Ok(ParamValue::Number(-2.5))
         );
     }
 

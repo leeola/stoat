@@ -598,6 +598,7 @@ mod tests {
             foreground: Some(Color::Red),
             ..Default::default()
         };
+        #[allow(clippy::single_range_in_vec_init)]
         let highlights = make_highlights(vec![(
             HighlightKey::layer(HighlightLayer::SearchHighlight),
             style.clone(),
@@ -628,6 +629,7 @@ mod tests {
             foreground: Some(Color::Red),
             ..Default::default()
         };
+        #[allow(clippy::single_range_in_vec_init)]
         let highlights = make_highlights(vec![
             (
                 HighlightKey::layer(HighlightLayer::SyntaxToken),
@@ -671,6 +673,7 @@ mod tests {
     #[test]
     fn empty_range_ignored() {
         let text = "hello";
+        #[allow(clippy::single_range_in_vec_init)]
         let highlights = make_highlights(vec![(
             HighlightKey::layer(HighlightLayer::SearchHighlight),
             HighlightStyle {
@@ -836,14 +839,14 @@ mod tests {
         }
         assert_eq!(colors.len(), text.len());
 
-        for byte in 50..55 {
-            assert_eq!(colors[byte], Some(Color::Red), "byte {byte} must be red");
+        for (byte, color) in colors.iter().enumerate().take(55).skip(50) {
+            assert_eq!(*color, Some(Color::Red), "byte {byte} must be red");
         }
-        for byte in 55..60 {
-            assert_eq!(colors[byte], None, "byte {byte} must be unstyled (gap)");
+        for (byte, color) in colors.iter().enumerate().take(60).skip(55) {
+            assert_eq!(*color, None, "byte {byte} must be unstyled (gap)");
         }
-        for byte in 60..65 {
-            assert_eq!(colors[byte], Some(Color::Blue), "byte {byte} must be blue");
+        for (byte, color) in colors.iter().enumerate().take(65).skip(60) {
+            assert_eq!(*color, Some(Color::Blue), "byte {byte} must be blue");
         }
         assert_eq!(colors[49], None, "byte before red span is unstyled");
         assert_eq!(colors[65], None, "byte after blue span is unstyled");

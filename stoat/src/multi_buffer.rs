@@ -940,6 +940,7 @@ mod tests {
         let shared2 = Arc::new(RwLock::new(buf2));
 
         let mut multi = MultiBuffer::singleton(id1, shared1);
+        #[allow(clippy::single_range_in_vec_init)]
         let new_ids = multi.insert_excerpts(id2, shared2, vec![0..5]);
         assert_eq!(new_ids.len(), 1);
         assert!(!multi.is_singleton());
@@ -966,6 +967,7 @@ mod tests {
         let shared2 = Arc::new(RwLock::new(buf2));
 
         let mut multi = MultiBuffer::singleton(id1, shared1);
+        #[allow(clippy::single_range_in_vec_init)]
         let new_ids = multi.insert_excerpts(id2, shared2, vec![0..3]);
         assert_eq!(multi.live_excerpts.len(), 2);
 

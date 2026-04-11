@@ -23,6 +23,7 @@ use stoat::host::{AgentMessage, ClaudeCodeHost};
 /// `Vec<MessageContent>`: text blocks, tool uses, and unknowns all
 /// become distinct `AgentMessage`s in source order.
 pub(crate) fn sdk_message_to_agent_messages(msg: SdkMessage) -> Vec<AgentMessage> {
+    let text_delta = msg.as_text_delta().map(str::to_owned);
     match msg {
         SdkMessage::System {
             session_id,
@@ -45,6 +46,35 @@ pub(crate) fn sdk_message_to_agent_messages(msg: SdkMessage) -> Vec<AgentMessage
                     name,
                     input: serde_json::to_string(&input).unwrap_or_default(),
                 },
+                MessageContent::Thinking {
+                    thinking,
+                    signature,
+                } => AgentMessage::Thinking {
+                    text: thinking,
+                    signature,
+                },
+                MessageContent::RedactedThinking { data } => AgentMessage::Unknown {
+                    raw: serde_json::json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    })
+                    .to_string(),
+                },
+                MessageContent::ServerToolUse { id, name, input } => AgentMessage::ServerToolUse {
+                    id,
+                    name,
+                    input: serde_json::to_string(&input).unwrap_or_default(),
+                },
+                MessageContent::ServerToolResult {
+                    tool_use_id,
+                    content,
+                } => AgentMessage::ServerToolResult {
+                    id: tool_use_id,
+                    content: match content {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    },
+                },
                 MessageContent::Unknown(value) => AgentMessage::Unknown {
                     raw: value.to_string(),
                 },
@@ -52,6 +82,29 @@ pub(crate) fn sdk_message_to_agent_messages(msg: SdkMessage) -> Vec<AgentMessage
             .collect(),
 
         SdkMessage::User { message, .. } => extract_tool_results(message),
+
+        SdkMessage::StreamEvent { event, .. } => match text_delta {
+            Some(text) => vec![AgentMessage::PartialText { text }],
+            None => vec![AgentMessage::Unknown {
+                raw: event.to_string(),
+            }],
+        },
+
+        // Control requests are normally intercepted by the permission
+        // dispatcher before they reach the host queue. If one arrives
+        // here, no dispatcher is active and the host is expected to
+        // treat it as an unrecognized message.
+        SdkMessage::ControlRequest {
+            request_id,
+            request,
+        } => vec![AgentMessage::Unknown {
+            raw: serde_json::json!({
+                "type": "control_request",
+                "request_id": request_id,
+                "request": request,
+            })
+            .to_string(),
+        }],
 
         SdkMessage::Result {
             total_cost_usd,
@@ -91,9 +144,10 @@ fn extract_tool_results(message: UserMessage) -> Vec<AgentMessage> {
                 UserContentBlock::ToolResult {
                     tool_use_id,
                     content,
+                    ..
                 } => Some(AgentMessage::ToolResult {
                     id: tool_use_id,
-                    content,
+                    content: content.as_text(),
                 }),
                 UserContentBlock::Text { .. } => None,
             })
@@ -110,7 +164,12 @@ impl ClaudeCodeHost for ClaudeCode {
     async fn recv(&self) -> Option<AgentMessage> {
         loop {
             // Drain any already-buffered expansion first.
-            if let Some(msg) = self.pending.lock().unwrap().pop_front() {
+            if let Some(msg) = self
+                .pending
+                .lock()
+                .expect("ClaudeCode pending mutex poisoned")
+                .pop_front()
+            {
                 return Some(msg);
             }
 
@@ -124,7 +183,10 @@ impl ClaudeCodeHost for ClaudeCode {
 
             // Expand and enqueue. The loop pops one on the next pass.
             let expanded = sdk_message_to_agent_messages(sdk_msg);
-            self.pending.lock().unwrap().extend(expanded);
+            self.pending
+                .lock()
+                .expect("ClaudeCode pending mutex poisoned")
+                .extend(expanded);
         }
     }
 
@@ -328,6 +390,130 @@ mod tests {
         match &out[0] {
             AgentMessage::Error { message } => assert_eq!(message, "boom"),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_assistant_thinking_maps_to_thinking() {
+        let out = sdk_message_to_agent_messages(assistant(vec![MessageContent::Thinking {
+            thinking: "let me ponder".into(),
+            signature: "sig-xyz".into(),
+        }]));
+        match &out[0] {
+            AgentMessage::Thinking { text, signature } => {
+                assert_eq!(text, "let me ponder");
+                assert_eq!(signature, "sig-xyz");
+            },
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_assistant_redacted_thinking_falls_back_to_unknown() {
+        let out =
+            sdk_message_to_agent_messages(assistant(vec![MessageContent::RedactedThinking {
+                data: "encrypted-xyz".into(),
+            }]));
+        match &out[0] {
+            AgentMessage::Unknown { raw } => {
+                let reparsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+                assert_eq!(reparsed["type"], "redacted_thinking");
+                assert_eq!(reparsed["data"], "encrypted-xyz");
+            },
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_assistant_server_tool_use_maps() {
+        let mut input = HashMap::new();
+        input.insert("query".to_string(), serde_json::json!("rust async"));
+        let out = sdk_message_to_agent_messages(assistant(vec![MessageContent::ServerToolUse {
+            id: "srvtoolu_1".into(),
+            name: "web_search".into(),
+            input,
+        }]));
+        match &out[0] {
+            AgentMessage::ServerToolUse { id, name, input } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(name, "web_search");
+                let parsed: serde_json::Value = serde_json::from_str(input).unwrap();
+                assert_eq!(parsed["query"], "rust async");
+            },
+            other => panic!("expected ServerToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_assistant_server_tool_result_maps() {
+        let out =
+            sdk_message_to_agent_messages(assistant(vec![MessageContent::ServerToolResult {
+                tool_use_id: "srvtoolu_1".into(),
+                content: serde_json::json!("10 results found"),
+            }]));
+        match &out[0] {
+            AgentMessage::ServerToolResult { id, content } => {
+                assert_eq!(id, "srvtoolu_1");
+                assert_eq!(content, "10 results found");
+            },
+            other => panic!("expected ServerToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_assistant_server_tool_result_structured_content_serializes() {
+        let out =
+            sdk_message_to_agent_messages(assistant(vec![MessageContent::ServerToolResult {
+                tool_use_id: "srvtoolu_2".into(),
+                content: serde_json::json!([{"type": "text", "text": "result 1"}]),
+            }]));
+        match &out[0] {
+            AgentMessage::ServerToolResult { id, content } => {
+                assert_eq!(id, "srvtoolu_2");
+                let parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+                assert_eq!(parsed[0]["text"], "result 1");
+            },
+            other => panic!("expected ServerToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_stream_event_text_delta_maps_to_partial_text() {
+        let msg = SdkMessage::StreamEvent {
+            event: serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hello "}
+            }),
+            session_id: "sess-s".into(),
+            parent_tool_use_id: None,
+        };
+        let out = sdk_message_to_agent_messages(msg);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentMessage::PartialText { text } => assert_eq!(text, "hello "),
+            other => panic!("expected PartialText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sdk_stream_event_non_text_delta_maps_to_unknown() {
+        let msg = SdkMessage::StreamEvent {
+            event: serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "m1"}
+            }),
+            session_id: "sess-s".into(),
+            parent_tool_use_id: None,
+        };
+        let out = sdk_message_to_agent_messages(msg);
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            AgentMessage::Unknown { raw } => {
+                let reparsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+                assert_eq!(reparsed["type"], "message_start");
+            },
+            other => panic!("expected Unknown, got {other:?}"),
         }
     }
 }

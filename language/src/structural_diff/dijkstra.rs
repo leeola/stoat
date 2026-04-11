@@ -287,7 +287,7 @@ mod tests {
         LanguageRegistry,
     };
 
-    fn rust_lang() -> std::sync::Arc<crate::Language> {
+    fn rust_lang() -> Arc<crate::Language> {
         LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.rs"))
             .unwrap()

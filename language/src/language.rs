@@ -345,11 +345,10 @@ mod tests {
         // At least one capture should resolve against each theme key
         // (rust's highlights.scm uses these standard categories).
         let resolved: Vec<HighlightId> = (0..map.len() as u32).map(|i| map.get(i)).collect();
-        for theme_idx in 0..theme_keys.len() {
+        for (theme_idx, theme_key) in theme_keys.iter().enumerate() {
             assert!(
                 resolved.contains(&HighlightId(theme_idx as u32)),
-                "no rust capture resolves to theme key {:?}",
-                theme_keys[theme_idx]
+                "no rust capture resolves to theme key {theme_key:?}",
             );
         }
     }

@@ -296,6 +296,10 @@ impl FakeLsp {
 
     // --- Navigation (definition, declaration, type definition, implementation) ---
 
+    // `LspKey` contains an `lsp_types::Uri`, which has interior mutability
+    // for parsed-state caching but is never mutated after construction in
+    // this fake. The `mutable_key_type` lint is a false positive here.
+    #[allow(clippy::mutable_key_type)]
     fn set_goto(
         map: &mut BTreeMap<LspKey, GotoDefinitionResponse>,
         path: &str,
@@ -524,6 +528,9 @@ impl FakeLsp {
     }
 }
 
+// `LspKey` contains an `lsp_types::Uri` whose interior mutability is
+// only used for parse-state caching, never observable mutation.
+#[allow(clippy::mutable_key_type)]
 fn lookup_goto(
     map: &BTreeMap<LspKey, GotoDefinitionResponse>,
     uri: &Uri,

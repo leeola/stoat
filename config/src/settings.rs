@@ -44,13 +44,10 @@ impl Settings {
 
     fn apply(&mut self, setting: &Setting) {
         let path: Vec<&str> = setting.path.iter().map(|p| p.node.as_str()).collect();
-        match path.as_slice() {
-            ["text_proto_log"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.text_proto_log = Some(b);
-                }
-            },
-            _ => {},
+        if let ["text_proto_log"] = path.as_slice() {
+            if let Value::Bool(b) = setting.value.node {
+                self.text_proto_log = Some(b);
+            }
         }
     }
 }

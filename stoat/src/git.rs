@@ -157,6 +157,7 @@ impl TestRepo {
         self.write_and_stage(name, content).commit("c")
     }
 
+    #[allow(dead_code)]
     pub fn create_branch(&self, name: &str) -> &Self {
         let head = self
             .repo

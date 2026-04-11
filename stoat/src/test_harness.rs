@@ -83,9 +83,8 @@ impl TestHarness {
 
         for key in parse_keys(seq) {
             let desc = key_description(&key);
-            match self.stoat.update(Event::Key(key)) {
-                UpdateEffect::Redraw => self.maybe_capture(&desc),
-                _ => {},
+            if self.stoat.update(Event::Key(key)) == UpdateEffect::Redraw {
+                self.maybe_capture(&desc);
             }
         }
     }
