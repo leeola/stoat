@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut claude = ClaudeCode::builder().model("sonnet").build().await?;
+    let claude = ClaudeCode::builder().model("sonnet").build().await?;
 
     // Send a message
     claude
@@ -33,13 +33,13 @@ async fn main() -> Result<()> {
     }
 
     // Check if process is still alive
-    if claude.is_alive().await {
+    if claude.is_alive_inner() {
         info!("Claude is still running");
     }
 
     // Get session ID
     info!("Session ID: {}", claude.get_session_id());
 
-    claude.shutdown().await?;
+    claude.shutdown_inner().await?;
     Ok(())
 }

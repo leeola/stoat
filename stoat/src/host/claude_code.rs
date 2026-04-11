@@ -27,6 +27,12 @@ pub enum AgentMessage {
     Error {
         message: String,
     },
+    /// Content block with an unrecognized `type` tag. Carries the raw
+    /// JSON so consumers can surface or persist it without this crate
+    /// needing to understand the schema.
+    Unknown {
+        raw: String,
+    },
 }
 
 #[allow(async_fn_in_trait)]

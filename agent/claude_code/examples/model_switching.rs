@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     // Gracefully shutdown
     info!("Shutting down...");
-    claude.shutdown().await?;
+    claude.shutdown_inner().await?;
 
     Ok(())
 }

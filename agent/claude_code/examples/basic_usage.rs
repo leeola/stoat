@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     info!("Starting Claude Code example");
 
     // Create ClaudeCode instance using builder
-    let mut claude = ClaudeCode::builder().model("sonnet").build().await?;
+    let claude = ClaudeCode::builder().model("sonnet").build().await?;
 
     // Send initial message
     info!("Sending initial message...");
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
 
     // Gracefully shutdown
     info!("Shutting down...");
-    claude.shutdown().await?;
+    claude.shutdown_inner().await?;
 
     Ok(())
 }
@@ -61,7 +61,7 @@ async fn example_with_tools() -> Result<()> {
 
     // ... interact with claude ...
 
-    claude.shutdown().await?;
+    claude.shutdown_inner().await?;
     Ok(())
 }
 
@@ -78,6 +78,6 @@ async fn example_resume_session(session_id: String) -> Result<()> {
 
     // ... interact with claude ...
 
-    claude.shutdown().await?;
+    claude.shutdown_inner().await?;
     Ok(())
 }

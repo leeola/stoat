@@ -644,9 +644,16 @@ mod user_content_serde {
 /// Content blocks within assistant messages.
 ///
 /// Assistant messages contain an ordered array of these blocks,
-/// which can be text responses or tool invocations. The order
-/// is significant and represents Claude's intended sequence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// which can be text responses, tool invocations, or blocks whose
+/// `type` tag is unrecognized by this crate. The order is significant
+/// and represents Claude's intended sequence.
+///
+/// Deserialization is schema-loose: any content block whose `type` tag
+/// does not match a known variant (or whose fields fail to parse for
+/// a known tag) is captured as [`MessageContent::Unknown`] carrying the
+/// raw JSON, so consumers can surface or persist unrecognized blocks
+/// without the entire assistant message being dropped.
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContent {
     /// Text response content.
@@ -683,6 +690,44 @@ pub enum MessageContent {
         /// Tool-specific input parameters as JSON object
         input: HashMap<String, serde_json::Value>,
     },
+
+    /// Content block with an unrecognized `type` tag, or a recognized tag
+    /// whose fields did not match the expected shape. Carries the raw
+    /// JSON so the information is preserved rather than silently dropped.
+    #[serde(skip)]
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Helper enum mirrors the known-variant shape. Falling through to
+        // `Unknown` preserves the original JSON for any block we cannot
+        // parse (new content types, malformed known types).
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Known {
+            Text {
+                text: String,
+            },
+            ToolUse {
+                id: String,
+                name: String,
+                input: HashMap<String, serde_json::Value>,
+            },
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match serde_json::from_value::<Known>(value.clone()) {
+            Ok(Known::Text { text }) => Ok(MessageContent::Text { text }),
+            Ok(Known::ToolUse { id, name, input }) => {
+                Ok(MessageContent::ToolUse { id, name, input })
+            },
+            Err(_) => Ok(MessageContent::Unknown(value)),
+        }
+    }
 }
 
 impl MessageContent {
@@ -694,6 +739,11 @@ impl MessageContent {
     /// Check if this is a tool use block.
     pub fn is_tool_use(&self) -> bool {
         matches!(self, MessageContent::ToolUse { .. })
+    }
+
+    /// Check if this is an unrecognized content block.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, MessageContent::Unknown(_))
     }
 
     /// Extract text content if this is a text block.
@@ -761,5 +811,85 @@ mod tests {
         let tool_msg = UserMessage::from_tool_result("tool_123", "Success");
         assert!(tool_msg.is_tool_result());
         assert_eq!(tool_msg.as_text(), None);
+    }
+
+    #[test]
+    fn message_content_known_text_parses() {
+        let json = r#"{"type":"text","text":"hi"}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::Text { text } => assert_eq!(text, "hi"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_known_tool_use_parses() {
+        let json = r#"{"type":"tool_use","id":"abc","name":"Read","input":{"path":"/tmp"}}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::ToolUse { id, name, input } => {
+                assert_eq!(id, "abc");
+                assert_eq!(name, "Read");
+                assert_eq!(
+                    input.get("path"),
+                    Some(&serde_json::Value::String("/tmp".to_string()))
+                );
+            },
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_unknown_tag_preserved() {
+        let json = r#"{"type":"image","source":{"kind":"base64","data":"xyz"}}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
+            MessageContent::Unknown(value) => {
+                assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("image"));
+                assert_eq!(
+                    value
+                        .get("source")
+                        .and_then(|s| s.get("data"))
+                        .and_then(|d| d.as_str()),
+                    Some("xyz")
+                );
+            },
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_malformed_tool_use_falls_back() {
+        let json = r#"{"type":"tool_use","id":"x"}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        assert!(
+            parsed.is_unknown(),
+            "expected Unknown for malformed tool_use, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn sdk_assistant_with_unknown_content_still_parses() {
+        let json = r#"{
+            "type": "assistant",
+            "session_id": "sess-1",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "server_tool_use", "id": "srv_1", "tool": "web_search"},
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"p": "/x"}}
+                ]
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        let SdkMessage::Assistant { message, .. } = parsed else {
+            panic!("expected Assistant variant");
+        };
+        assert_eq!(message.content.len(), 3);
+        assert!(message.content[0].is_text());
+        assert!(message.content[1].is_unknown());
+        assert!(message.content[2].is_tool_use());
     }
 }

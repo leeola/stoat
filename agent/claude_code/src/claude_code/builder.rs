@@ -108,6 +108,9 @@ impl ClaudeCodeBuilder {
                 if let Some(mode) = &self.config.permission_mode {
                     process_builder = process_builder.permission_mode(mode.clone());
                 }
+                if let (Some(tx), Some(rx)) = (&self.tx_log, &self.rx_log) {
+                    process_builder = process_builder.text_proto_logs(tx.clone(), rx.clone());
+                }
 
                 // Create new session
                 let process = match process_builder.new_session().await {
@@ -151,6 +154,9 @@ impl ClaudeCodeBuilder {
                 }
                 if let Some(mode) = &self.config.permission_mode {
                     process_builder = process_builder.permission_mode(mode.clone());
+                }
+                if let (Some(tx), Some(rx)) = (&self.tx_log, &self.rx_log) {
+                    process_builder = process_builder.text_proto_logs(tx.clone(), rx.clone());
                 }
 
                 // Resume existing session

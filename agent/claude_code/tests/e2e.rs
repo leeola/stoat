@@ -58,7 +58,7 @@ mod e2e_tests {
 
         // Clean shutdown
         info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
+        claude.shutdown_inner().await.expect("Failed to shutdown");
         info!("Test completed successfully");
     }
 
@@ -96,11 +96,11 @@ mod e2e_tests {
         );
 
         // Test is_alive
-        assert!(claude.is_alive().await, "Expected Claude to be alive");
+        assert!(claude.is_alive_inner(), "Expected Claude to be alive");
 
         // Clean shutdown
         info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
+        claude.shutdown_inner().await.expect("Failed to shutdown");
         info!("Test completed successfully");
     }
 
@@ -175,13 +175,13 @@ mod e2e_tests {
 
         // Verify process is still alive
         assert!(
-            claude.is_alive().await,
+            claude.is_alive_inner(),
             "Expected Claude to be alive after switch"
         );
 
         // Clean shutdown
         info!("Shutting down");
-        claude.shutdown().await.expect("Failed to shutdown");
+        claude.shutdown_inner().await.expect("Failed to shutdown");
         info!("Model switching test completed successfully");
     }
 }

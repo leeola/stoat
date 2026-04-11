@@ -102,9 +102,9 @@ impl App {
                 };
 
                 match ClaudeCode::new(config).await {
-                    Ok(mut claude) => {
+                    Ok(claude) => {
                         let session_id = claude.get_session_id().to_string();
-                        let alive = claude.is_alive().await;
+                        let alive = claude.is_alive_inner();
                         *claude_arc.lock().await = Some(claude);
                         (format!("Session started: {session_id}"), alive)
                     },
@@ -181,6 +181,9 @@ impl App {
                                         name,
                                         &id[0..8.min(id.len())]
                                     ));
+                                },
+                                MessageContent::Unknown(value) => {
+                                    content_parts.push(format!("[Unknown content: {value}]"));
                                 },
                             }
                         }
@@ -319,16 +322,16 @@ impl App {
                 let claude = Arc::clone(&self.claude);
                 Task::perform(
                     async move {
-                        let mut claude_guard = claude.lock().await;
-                        if let Some(claude) = claude_guard.as_mut() {
+                        let claude_guard = claude.lock().await;
+                        if let Some(claude) = claude_guard.as_ref() {
                             // Check for any message type
                             if let Ok(Some(msg)) = claude
                                 .recv_any_message(tokio::time::Duration::from_millis(100))
                                 .await
                             {
-                                return Some((Some(msg), claude.is_alive().await));
+                                return Some((Some(msg), claude.is_alive_inner()));
                             }
-                            return Some((None, claude.is_alive().await));
+                            return Some((None, claude.is_alive_inner()));
                         }
                         None
                     },

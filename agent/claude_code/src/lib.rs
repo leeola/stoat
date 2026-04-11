@@ -1,5 +1,5 @@
-pub mod buffer;
 pub mod claude_code;
+mod host_adapter;
 pub mod messages;
 
 pub use claude_code::{ClaudeCode, ClaudeCodeBuilder, SessionConfig};

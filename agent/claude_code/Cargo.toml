@@ -11,6 +11,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snafu = "0.8"
+stoat = { path = "../../stoat" }
 stoat_log = { path = "../../log" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -22,7 +23,6 @@ e2e_claude_code = []
 
 [dev-dependencies]
 iced = { version = "0.13.1", features = ["tokio"] }
-tokio-test = "0.4"
 
 [lints]
 workspace = true

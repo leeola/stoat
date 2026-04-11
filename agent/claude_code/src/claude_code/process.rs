@@ -117,11 +117,7 @@ impl ProcessBuilder {
         }
     }
 
-    pub fn text_proto_logs(
-        mut self,
-        tx_log: Arc<TextProtoLog>,
-        rx_log: Arc<TextProtoLog>,
-    ) -> Self {
+    pub fn text_proto_logs(mut self, tx_log: Arc<TextProtoLog>, rx_log: Arc<TextProtoLog>) -> Self {
         self.tx_log = Some(tx_log);
         self.rx_log = Some(rx_log);
         self
