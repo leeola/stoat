@@ -8,4 +8,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+dirs.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

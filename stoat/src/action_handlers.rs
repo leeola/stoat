@@ -265,7 +265,7 @@ mod tests {
 
     fn stoat() -> Stoat {
         let scheduler = Arc::new(TestScheduler::new());
-        Stoat::new(scheduler.executor())
+        Stoat::new(scheduler.executor(), stoat_config::Settings::default())
     }
 
     #[test]

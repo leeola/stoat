@@ -1,6 +1,7 @@
 use crate::messages::{PermissionMode, SdkMessage};
 use snafu::{ResultExt, Snafu};
-use std::{process::Stdio, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
+use stoat_log::TextProtoLog;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
@@ -94,6 +95,10 @@ pub struct ProcessBuilder {
     cwd: Option<String>,
     allowed_tools: Option<Vec<String>>,
     permission_mode: Option<PermissionMode>,
+
+    // Optional byte-faithful transcript logs (stdin -> Claude, Claude -> stdout).
+    tx_log: Option<Arc<TextProtoLog>>,
+    rx_log: Option<Arc<TextProtoLog>>,
 }
 
 impl ProcessBuilder {
@@ -107,7 +112,19 @@ impl ProcessBuilder {
             cwd: None,
             allowed_tools: None,
             permission_mode: None,
+            tx_log: None,
+            rx_log: None,
         }
+    }
+
+    pub fn text_proto_logs(
+        mut self,
+        tx_log: Arc<TextProtoLog>,
+        rx_log: Arc<TextProtoLog>,
+    ) -> Self {
+        self.tx_log = Some(tx_log);
+        self.rx_log = Some(rx_log);
+        self
     }
 
     pub fn session_id(mut self, id: impl Into<String>) -> Self {
@@ -195,9 +212,11 @@ impl ProcessBuilder {
             },
         };
 
-        // Now take ownership of channels
+        // Now take ownership of channels and logs
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
+        let tx_log = self.tx_log;
+        let rx_log = self.rx_log;
 
         let (stdin, stdout, stderr) = match Self::extract_stdio(&mut child) {
             Ok(stdio) => stdio,
@@ -214,7 +233,7 @@ impl ProcessBuilder {
         };
 
         let (stdin_handle, stdout_handle, stderr_handle) =
-            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
+            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, tx_log, rx_log);
 
         // Check for early exit/errors
         let mut process = Process {
@@ -311,9 +330,11 @@ impl ProcessBuilder {
             },
         };
 
-        // Now take ownership of channels
+        // Now take ownership of channels and logs
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
+        let tx_log = self.tx_log;
+        let rx_log = self.rx_log;
 
         let (stdin, stdout, stderr) = match Self::extract_stdio(&mut child) {
             Ok(stdio) => stdio,
@@ -330,7 +351,7 @@ impl ProcessBuilder {
         };
 
         let (stdin_handle, stdout_handle, stderr_handle) =
-            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx);
+            Self::setup_handlers(stdin, stdout, stderr, stdin_rx, stdout_tx, tx_log, rx_log);
 
         // Check for early exit/errors
         let mut process = Process {
@@ -492,13 +513,15 @@ impl ProcessBuilder {
         stderr: ChildStderr,
         stdin_rx: mpsc::Receiver<String>,
         stdout_tx: mpsc::Sender<SdkMessage>,
+        tx_log: Option<Arc<TextProtoLog>>,
+        rx_log: Option<Arc<TextProtoLog>>,
     ) -> (
         JoinHandle<mpsc::Receiver<String>>,
         JoinHandle<mpsc::Sender<SdkMessage>>,
         JoinHandle<String>,
     ) {
-        let stdin_handle = Self::spawn_stdin_handler(stdin, stdin_rx);
-        let stdout_handle = Self::spawn_stdout_handler(stdout, stdout_tx);
+        let stdin_handle = Self::spawn_stdin_handler(stdin, stdin_rx, tx_log);
+        let stdout_handle = Self::spawn_stdout_handler(stdout, stdout_tx, rx_log);
         let stderr_handle = Self::spawn_stderr_handler(stderr);
 
         (stdin_handle, stdout_handle, stderr_handle)
@@ -508,12 +531,16 @@ impl ProcessBuilder {
     fn spawn_stdin_handler(
         stdin: ChildStdin,
         mut stdin_rx: mpsc::Receiver<String>,
+        tx_log: Option<Arc<TextProtoLog>>,
     ) -> JoinHandle<mpsc::Receiver<String>> {
         tokio::spawn(async move {
             let mut stdin = stdin;
             loop {
                 match stdin_rx.recv().await {
                     Some(message) => {
+                        if let Some(log) = &tx_log {
+                            log.record(&message);
+                        }
                         if let Err(e) = Self::write_message(&mut stdin, message).await {
                             error!("Failed to write to stdin: {}", e);
                             break stdin_rx;
@@ -538,6 +565,7 @@ impl ProcessBuilder {
     fn spawn_stdout_handler(
         stdout: ChildStdout,
         stdout_tx: mpsc::Sender<SdkMessage>,
+        rx_log: Option<Arc<TextProtoLog>>,
     ) -> JoinHandle<mpsc::Sender<SdkMessage>> {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -553,6 +581,9 @@ impl ProcessBuilder {
                     Ok(_) => {
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
+                            if let Some(log) = &rx_log {
+                                log.record(trimmed);
+                            }
                             match serde_json::from_str::<SdkMessage>(trimmed) {
                                 Ok(message) => {
                                     trace!("Received message: {:?}", message);

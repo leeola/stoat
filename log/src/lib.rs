@@ -19,7 +19,10 @@
 //! 2. `RUST_LOG` - Standard tracing environment variable
 //! 3. Default - `warn` globally, `info` for stoat crates
 
+pub mod text_proto;
+
 use std::env;
+pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{fmt, EnvFilter};
 
 /// Initialize logging.

@@ -1,12 +1,14 @@
 mod ast;
 mod error;
 mod parser;
+mod settings;
 
 pub use ast::{
     Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart,
     LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, Value,
 };
 pub use error::{format_errors, ParseError};
+pub use settings::Settings;
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)

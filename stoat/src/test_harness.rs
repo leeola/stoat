@@ -14,6 +14,7 @@ use std::{
     fmt::Write,
     sync::Arc,
 };
+use stoat_config::Settings;
 use stoat_scheduler::TestScheduler;
 use unicode_width::UnicodeWidthStr;
 
@@ -52,7 +53,7 @@ impl TestHarness {
     fn new(width: u16, height: u16) -> Self {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let mut stoat = Stoat::new(executor);
+        let mut stoat = Stoat::new(executor, Settings::default());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {

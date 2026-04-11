@@ -28,6 +28,7 @@ use std::{
     task::{Context, Poll},
 };
 use stoat_action::{Action, OpenFile, OpenReview};
+use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Bias;
@@ -48,6 +49,7 @@ pub struct Stoat {
     pub mode: String,
     pub executor: Executor,
     keymap: Keymap,
+    pub settings: Settings,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) command_palette: Option<CommandPalette>,
@@ -95,7 +97,7 @@ impl Stoat {
         self.keymap.active_keys(&state)
     }
 
-    pub fn new(executor: Executor) -> Self {
+    pub fn new(executor: Executor, cli_settings: Settings) -> Self {
         let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
         if !errors.is_empty() {
             tracing::error!(
@@ -103,6 +105,11 @@ impl Stoat {
                 stoat_config::format_errors(DEFAULT_KEYMAP, &errors)
             );
         }
+        let settings = config
+            .as_ref()
+            .map(Settings::from_config)
+            .unwrap_or_default()
+            .merge(cli_settings);
         let keymap = config
             .map(|c| Keymap::compile(&c))
             .unwrap_or_else(|| Keymap::compile(&stoat_config::Config { blocks: vec![] }));
@@ -132,6 +139,7 @@ impl Stoat {
             mode: "normal".into(),
             executor,
             keymap,
+            settings,
             buffers,
             editors,
             command_palette: None,

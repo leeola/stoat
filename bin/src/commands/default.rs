@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
-use stoat::{Axis, Stoat};
+use stoat::{Axis, Settings, Stoat};
 use stoat_scheduler::TestScheduler;
 
 #[derive(Parser)]
@@ -11,6 +11,11 @@ pub struct Args {
 
     #[arg(help = "Files to open")]
     pub files: Vec<PathBuf>,
+
+    /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
+    /// the stcfg `text_proto_log` setting when set.
+    #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
+    pub text_proto_log: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -36,8 +41,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler = Arc::new(TestScheduler::new());
     let executor = scheduler.executor();
 
+    let cli_settings = Settings {
+        text_proto_log: args.text_proto_log,
+    };
+
     rt.block_on(async {
-        let mut stoat = Stoat::new(executor);
+        let mut stoat = Stoat::new(executor, cli_settings);
 
         match args.command {
             Some(Command::Review) => stoat.open_review(),

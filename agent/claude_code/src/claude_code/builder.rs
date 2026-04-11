@@ -3,12 +3,16 @@ use crate::{
     messages::PermissionMode,
 };
 use anyhow::Result;
+use std::sync::Arc;
+use stoat_log::TextProtoLog;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Default)]
 pub struct ClaudeCodeBuilder {
     config: SessionConfig,
     managed_session_id: Option<uuid::Uuid>,
+    tx_log: Option<Arc<TextProtoLog>>,
+    rx_log: Option<Arc<TextProtoLog>>,
 }
 
 impl ClaudeCodeBuilder {
@@ -54,6 +58,19 @@ impl ClaudeCodeBuilder {
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.config.model = Some(model.into());
+        self
+    }
+
+    /// Attaches byte-faithful transcript logs to the subprocess channels.
+    /// `tx_log` receives every payload sent to Claude, `rx_log` every payload
+    /// received from Claude, each as one JSON object per line.
+    pub fn with_text_proto_logs(
+        mut self,
+        tx_log: Arc<TextProtoLog>,
+        rx_log: Arc<TextProtoLog>,
+    ) -> Self {
+        self.tx_log = Some(tx_log);
+        self.rx_log = Some(rx_log);
         self
     }
 
@@ -187,6 +204,9 @@ impl ClaudeCodeBuilder {
         if let Some(mode) = &self.config.permission_mode {
             process_builder = process_builder.permission_mode(mode.clone());
         }
+        if let (Some(tx), Some(rx)) = (&self.tx_log, &self.rx_log) {
+            process_builder = process_builder.text_proto_logs(tx.clone(), rx.clone());
+        }
 
         let process = match process_builder.new_session().await {
             Ok(process) => process,
@@ -234,6 +254,9 @@ impl ClaudeCodeBuilder {
         }
         if let Some(mode) = &self.config.permission_mode {
             process_builder = process_builder.permission_mode(mode.clone());
+        }
+        if let (Some(tx), Some(rx)) = (&self.tx_log, &self.rx_log) {
+            process_builder = process_builder.text_proto_logs(tx.clone(), rx.clone());
         }
 
         let process = match process_builder.resume_session().await {

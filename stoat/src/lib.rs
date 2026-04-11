@@ -35,4 +35,5 @@ pub use multi_buffer::{
     MultiBufferRow, MultiBufferSnapshot,
 };
 pub use pane::{Axis, Direction, Pane, PaneId, PaneTree, Placement, View};
+pub use stoat_config::Settings;
 pub use stoat_log as log;
