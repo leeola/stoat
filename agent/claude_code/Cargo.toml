@@ -21,8 +21,5 @@ uuid = { version = "1", features = ["v4"] }
 [features]
 e2e_claude_code = []
 
-[dev-dependencies]
-iced = { version = "0.13.1", features = ["tokio"] }
-
 [lints]
 workspace = true
