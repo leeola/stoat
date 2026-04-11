@@ -53,7 +53,7 @@ impl TestHarness {
     fn new(width: u16, height: u16) -> Self {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let mut stoat = Stoat::new(executor, Settings::default());
+        let mut stoat = Stoat::new(executor, Settings::default(), std::path::PathBuf::new());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -155,21 +155,14 @@ impl TestHarness {
     /// `text`. Triggers a capture so the next render reflects the edit.
     /// Test-only helper for exercising the incremental reparse path.
     pub fn edit_focused(&mut self, range: std::ops::Range<usize>, text: &str) {
-        let focused = self.stoat.panes.focus();
-        let editor_id = match self.stoat.panes.pane(focused).view {
+        let ws = self.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
             crate::pane::View::Editor(id) => id,
             _ => panic!("edit_focused: focused pane is not an editor"),
         };
-        let editor = self
-            .stoat
-            .editors
-            .get(editor_id)
-            .expect("focused editor exists");
-        let buffer = self
-            .stoat
-            .buffers
-            .get(editor.buffer_id)
-            .expect("buffer exists");
+        let editor = ws.editors.get(editor_id).expect("focused editor exists");
+        let buffer = ws.buffers.get(editor.buffer_id).expect("buffer exists");
         {
             let mut guard = buffer.write().expect("buffer poisoned");
             guard.edit(range, text);
@@ -181,13 +174,13 @@ impl TestHarness {
     /// map, triggering a capture afterward. Test-only helper for exercising
     /// the fold path of the chunks pipeline.
     pub fn fold_focused(&mut self, range: std::ops::Range<stoat_text::Point>) {
-        let focused = self.stoat.panes.focus();
-        let editor_id = match self.stoat.panes.pane(focused).view {
+        let ws = self.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
             crate::pane::View::Editor(id) => id,
             _ => panic!("fold_focused: focused pane is not an editor"),
         };
-        let editor = self
-            .stoat
+        let editor = ws
             .editors
             .get_mut(editor_id)
             .expect("focused editor exists");
@@ -246,19 +239,21 @@ impl TestHarness {
         }
 
         let placeholder = " \n".repeat(review_rows.len().saturating_sub(1)) + " ";
-        let (buffer_id, buffer) = self.stoat.buffers.new_scratch();
+        let executor = self.stoat.executor.clone();
+        let ws = self.stoat.active_workspace_mut();
+        let (buffer_id, buffer) = ws.buffers.new_scratch();
         {
             let mut guard = buffer.write().expect("buffer poisoned");
             guard.edit(0..0, &placeholder);
             guard.dirty = false;
         }
-        let mut editor = EditorState::new(buffer_id, buffer, self.stoat.executor.clone());
+        let mut editor = EditorState::new(buffer_id, buffer, executor);
         editor.display_map.insert_blocks(blocks);
         editor.review_rows = Some(review_rows);
 
-        let new_id = self.stoat.editors.insert(editor);
-        let focused = self.stoat.panes.focus();
-        self.stoat.panes.pane_mut(focused).view = View::Editor(new_id);
+        let new_id = ws.editors.insert(editor);
+        let focused = ws.panes.focus();
+        ws.panes.pane_mut(focused).view = View::Editor(new_id);
         self.capture("open_review");
     }
 
@@ -313,10 +308,10 @@ impl TestHarness {
     }
 
     fn pane_metadata(&self) -> (usize, usize) {
-        let focused_id = self.stoat.panes.focus();
-        let pane_count = self.stoat.panes.pane_count();
-        let focused_pos = self
-            .stoat
+        let ws = self.stoat.active_workspace();
+        let focused_id = ws.panes.focus();
+        let pane_count = ws.panes.pane_count();
+        let focused_pos = ws
             .panes
             .split_panes()
             .position(|(id, _)| id == focused_id)

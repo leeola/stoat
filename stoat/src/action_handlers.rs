@@ -21,38 +21,51 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SplitRight => split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => split_pane(stoat, Axis::Horizontal),
         ActionKind::FocusLeft => {
-            stoat.panes.focus_direction(Direction::Left);
+            stoat
+                .active_workspace_mut()
+                .panes
+                .focus_direction(Direction::Left);
             UpdateEffect::Redraw
         },
         ActionKind::FocusRight => {
-            stoat.panes.focus_direction(Direction::Right);
+            stoat
+                .active_workspace_mut()
+                .panes
+                .focus_direction(Direction::Right);
             UpdateEffect::Redraw
         },
         ActionKind::FocusUp => {
-            stoat.panes.focus_direction(Direction::Up);
+            stoat
+                .active_workspace_mut()
+                .panes
+                .focus_direction(Direction::Up);
             UpdateEffect::Redraw
         },
         ActionKind::FocusDown => {
-            stoat.panes.focus_direction(Direction::Down);
+            stoat
+                .active_workspace_mut()
+                .panes
+                .focus_direction(Direction::Down);
             UpdateEffect::Redraw
         },
         ActionKind::FocusNext => {
-            stoat.panes.focus_next();
+            stoat.active_workspace_mut().panes.focus_next();
             UpdateEffect::Redraw
         },
         ActionKind::FocusPrev => {
-            stoat.panes.focus_prev();
+            stoat.active_workspace_mut().panes.focus_prev();
             UpdateEffect::Redraw
         },
         ActionKind::ClosePane => {
-            let focused = stoat.panes.focus();
-            let editor_id = match stoat.panes.pane(focused).view {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            let editor_id = match ws.panes.pane(focused).view {
                 View::Editor(id) => Some(id),
                 _ => None,
             };
-            stoat.panes.close(focused);
+            ws.panes.close(focused);
             if let Some(id) = editor_id {
-                stoat.editors.remove(id);
+                ws.editors.remove(id);
             }
             UpdateEffect::Redraw
         },
@@ -87,29 +100,32 @@ fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
         },
     };
 
-    let (buffer_id, buffer) = stoat.buffers.open(&absolute, &content);
-    if let Some(lang) = stoat.language_registry.for_path(&absolute) {
-        stoat.buffers.set_language(buffer_id, lang);
-    }
-    let new_editor_id =
-        stoat
-            .editors
-            .insert(EditorState::new(buffer_id, buffer, stoat.executor.clone()));
+    let lang = stoat.language_registry.for_path(&absolute);
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
 
-    let focused = stoat.panes.focus();
-    let old = match stoat.panes.pane(focused).view {
+    let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
+    if let Some(lang) = lang {
+        ws.buffers.set_language(buffer_id, lang);
+    }
+    let new_editor_id = ws
+        .editors
+        .insert(EditorState::new(buffer_id, buffer, executor));
+
+    let focused = ws.panes.focus();
+    let old = match ws.panes.pane(focused).view {
         View::Editor(eid) => Some(eid),
         View::Label(_) => None,
     };
-    stoat.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+    ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
 
     if let Some(old_id) = old {
-        let still_referenced = stoat
+        let still_referenced = ws
             .panes
             .split_panes()
             .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
         if !still_referenced {
-            stoat.editors.remove(old_id);
+            ws.editors.remove(old_id);
         }
     }
 
@@ -117,14 +133,8 @@ fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
 }
 
 fn open_review(stoat: &mut Stoat) {
-    let cwd = match std::env::current_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("open_review: cannot determine cwd: {e}");
-            return;
-        },
-    };
-    let repo = match git::discover_repo(&cwd) {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let repo = match git::discover_repo(&git_root) {
         Some(r) => r,
         None => {
             tracing::warn!("open_review: not inside a git repository");
@@ -209,47 +219,49 @@ fn open_review(stoat: &mut Stoat) {
 
     // Placeholder buffer: one line per review row for scroll counting.
     let placeholder = " \n".repeat(review_rows.len().saturating_sub(1)) + " ";
-    let (buffer_id, buffer) = stoat.buffers.new_scratch();
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(0..0, &placeholder);
         guard.dirty = false;
     }
 
-    let mut editor = EditorState::new(buffer_id, buffer, stoat.executor.clone());
+    let mut editor = EditorState::new(buffer_id, buffer, executor);
     editor.display_map.insert_blocks(blocks);
     editor.review_rows = Some(review_rows);
 
-    let new_editor_id = stoat.editors.insert(editor);
-    let focused = stoat.panes.focus();
-    let old = match stoat.panes.pane(focused).view {
+    let new_editor_id = ws.editors.insert(editor);
+    let focused = ws.panes.focus();
+    let old = match ws.panes.pane(focused).view {
         View::Editor(eid) => Some(eid),
         View::Label(_) => None,
     };
-    stoat.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+    ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
     if let Some(old_id) = old {
-        let still_referenced = stoat
+        let still_referenced = ws
             .panes
             .split_panes()
             .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
         if !still_referenced {
-            stoat.editors.remove(old_id);
+            ws.editors.remove(old_id);
         }
     }
 }
 
 fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
-    let new_pane_id = stoat.panes.split(axis);
-    if let View::Editor(old_editor_id) = stoat.panes.pane(new_pane_id).view {
-        if let Some(old_editor) = stoat.editors.get(old_editor_id) {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let new_pane_id = ws.panes.split(axis);
+    if let View::Editor(old_editor_id) = ws.panes.pane(new_pane_id).view {
+        if let Some(old_editor) = ws.editors.get(old_editor_id) {
             let buffer_id = old_editor.buffer_id;
-            if let Some(buffer) = stoat.buffers.get(buffer_id) {
-                let new_editor_id = stoat.editors.insert(EditorState::new(
-                    buffer_id,
-                    buffer,
-                    stoat.executor.clone(),
-                ));
-                stoat.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
+            if let Some(buffer) = ws.buffers.get(buffer_id) {
+                let new_editor_id = ws
+                    .editors
+                    .insert(EditorState::new(buffer_id, buffer, executor));
+                ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
             }
         }
     }
@@ -265,7 +277,11 @@ mod tests {
 
     fn stoat() -> Stoat {
         let scheduler = Arc::new(TestScheduler::new());
-        Stoat::new(scheduler.executor(), stoat_config::Settings::default())
+        Stoat::new(
+            scheduler.executor(),
+            stoat_config::Settings::default(),
+            std::path::PathBuf::new(),
+        )
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod multi_buffer;
 pub mod pane;
 mod review;
 pub mod ui;
+pub mod workspace;
 
 pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]

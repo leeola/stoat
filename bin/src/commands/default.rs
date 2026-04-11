@@ -46,8 +46,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         text_proto_log: args.text_proto_log,
     };
 
+    let initial_git_root = std::env::current_dir().unwrap_or_default();
+
     rt.block_on(async {
-        let mut stoat = Stoat::new(executor, cli_settings);
+        let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
         stoat.set_claude_code_factory(Arc::new(ClaudeCodeLauncher::new()));
 
         match args.command {
@@ -55,7 +57,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             None => {
                 for (i, path) in args.files.iter().enumerate() {
                     if i > 0 {
-                        stoat.panes.split(Axis::Vertical);
+                        stoat.active_workspace_mut().panes.split(Axis::Vertical);
                     }
                     stoat.open_file(path);
                 }

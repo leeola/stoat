@@ -7,8 +7,9 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{ClaudeCodeFactory, ClaudeCodeSessions},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    pane::{Pane, PaneTree, View},
+    pane::{Pane, View},
     review::ReviewRow,
+    workspace::{Workspace, WorkspaceId},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -20,18 +21,14 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
-    collections::HashMap,
-    future::Future,
     io,
-    path::Path,
-    pin::Pin,
+    path::{Path, PathBuf},
     sync::Arc,
-    task::{Context, Poll},
 };
 use stoat_action::{Action, OpenFile, OpenReview};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
-use stoat_scheduler::{Executor, Task};
+use stoat_scheduler::Executor;
 use stoat_text::Bias;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -46,42 +43,29 @@ pub enum UpdateEffect {
 
 pub struct Stoat {
     size: Rect,
-    pub panes: PaneTree,
     pub mode: String,
     pub executor: Executor,
     keymap: Keymap,
     pub settings: Settings,
-    pub(crate) buffers: BufferRegistry,
-    pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
-    parse_jobs: HashMap<BufferId, ParseJob>,
+    pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
+    pub(crate) active_workspace: WorkspaceId,
     claude_sessions: ClaudeCodeSessions,
-}
-
-/// In-flight tree-sitter parse for a buffer.
-///
-/// `target_version` is the buffer version the task is parsing. While a job is
-/// in flight for a given buffer, no new job is spawned for the same version;
-/// once it completes, [`Stoat::drive_parse_jobs`] schedules a follow-up parse
-/// if the buffer has advanced.
-struct ParseJob {
-    target_version: u64,
-    task: Task<Option<ParseJobOutput>>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
 /// foreground thread.
-struct ParseJobOutput {
-    buffer_id: BufferId,
-    syntax: SyntaxState,
+pub(crate) struct ParseJobOutput {
+    pub(crate) buffer_id: BufferId,
+    pub(crate) syntax: SyntaxState,
     /// Multi-layer parse state from [`stoat_language::SyntaxMap::reparse`].
     /// Populated alongside [`Self::syntax`] so the legacy single-tree
     /// highlight path and the capture-merging path can run side by side
     /// while consumers migrate.
-    syntax_map: stoat_language::SyntaxMap,
-    tokens: Arc<[SemanticTokenHighlight]>,
+    pub(crate) syntax_map: stoat_language::SyntaxMap,
+    pub(crate) tokens: Arc<[SemanticTokenHighlight]>,
 }
 
 impl Stoat {
@@ -99,7 +83,7 @@ impl Stoat {
         self.keymap.active_keys(&state)
     }
 
-    pub fn new(executor: Executor, cli_settings: Settings) -> Self {
+    pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
         let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
         if !errors.is_empty() {
             tracing::error!(
@@ -116,13 +100,6 @@ impl Stoat {
             .map(|c| Keymap::compile(&c))
             .unwrap_or_else(|| Keymap::compile(&stoat_config::Config { blocks: vec![] }));
 
-        let mut buffers = BufferRegistry::new();
-        let (buffer_id, buffer) = buffers.new_scratch();
-        let mut editors = SlotMap::with_key();
-        let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
-        let mut panes = PaneTree::new(Rect::default());
-        panes.pane_mut(panes.focus()).view = View::Editor(editor_id);
-
         let syntax_styles = SyntaxStyles::standard();
         let language_registry = Arc::new(LanguageRegistry::standard());
         // Install a theme-driven HighlightMap on every loaded language.
@@ -135,21 +112,31 @@ impl Stoat {
             lang.set_highlight_map(map);
         }
 
+        let mut workspaces = SlotMap::with_key();
+        let active_workspace = workspaces.insert(Workspace::new(initial_git_root, &executor));
+        workspaces[active_workspace].id = active_workspace;
+
         Self {
             size: Rect::default(),
-            panes,
             mode: "normal".into(),
             executor,
             keymap,
             settings,
-            buffers,
-            editors,
             command_palette: None,
             language_registry,
             syntax_styles,
-            parse_jobs: HashMap::new(),
+            workspaces,
+            active_workspace,
             claude_sessions: ClaudeCodeSessions::default(),
         }
+    }
+
+    pub fn active_workspace(&self) -> &Workspace {
+        &self.workspaces[self.active_workspace]
+    }
+
+    pub fn active_workspace_mut(&mut self) -> &mut Workspace {
+        &mut self.workspaces[self.active_workspace]
     }
 
     pub fn set_claude_code_factory(&mut self, factory: Arc<dyn ClaudeCodeFactory>) {
@@ -203,7 +190,8 @@ impl Stoat {
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
-                self.panes.resize(self.size);
+                let size = self.size;
+                self.active_workspace_mut().panes.resize(size);
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
@@ -257,132 +245,24 @@ impl Stoat {
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
     fn drive_parse_jobs(&mut self) {
-        // 1. Poll completed tasks and harvest their outputs.
-        let waker = futures::task::noop_waker();
-        let mut completed: Vec<ParseJobOutput> = Vec::new();
-        self.parse_jobs.retain(|_, job| {
-            let mut cx = Context::from_waker(&waker);
-            match Pin::new(&mut job.task).poll(&mut cx) {
-                Poll::Ready(Some(out)) => {
-                    completed.push(out);
-                    false
-                },
-                Poll::Ready(None) => false,
-                Poll::Pending => true,
-            }
-        });
-        for out in completed {
-            self.buffers.store_syntax(out.buffer_id, out.syntax);
-            self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
-            for editor in self.editors.values_mut() {
-                if editor.buffer_id == out.buffer_id {
-                    editor.display_map.set_semantic_token_highlights(
-                        out.buffer_id,
-                        out.tokens.clone(),
-                        self.syntax_styles.interner.clone(),
-                    );
-                }
-            }
-        }
-
-        // 2. Spawn new jobs for visible buffers needing parse.
-        let mut visible: Vec<BufferId> = Vec::new();
-        for (_, pane) in self.panes.split_panes() {
-            if let View::Editor(editor_id) = pane.view {
-                if let Some(editor) = self.editors.get(editor_id) {
-                    if !visible.contains(&editor.buffer_id) {
-                        visible.push(editor.buffer_id);
-                    }
-                }
-            }
-        }
-
-        for buffer_id in visible {
-            let Some(lang) = self.buffers.language_for(buffer_id) else {
-                continue;
-            };
-            let Some(shared) = self.buffers.get(buffer_id) else {
-                continue;
-            };
-            let snapshot = {
-                let guard = shared.read().expect("buffer poisoned");
-                guard.snapshot.clone()
-            };
-            let cur_version = snapshot.version;
-
-            if self.buffers.syntax_version(buffer_id) == Some(cur_version) {
-                continue;
-            }
-            if let Some(job) = self.parse_jobs.get(&buffer_id) {
-                if job.target_version == cur_version {
-                    continue;
-                }
-                // An older job is still in flight; let it finish before
-                // queuing a new one. Skip for now -- next call will retry.
-                continue;
-            }
-
-            // Take prior state out so the parse pipeline owns it. On a sync
-            // miss the locals stay populated and flow into the background
-            // spawn; on parse failure the next call falls back to a full
-            // reparse.
-            let mut prior = self.buffers.take_syntax(buffer_id);
-            let mut prior_map = self.buffers.take_syntax_map(buffer_id);
-
-            // Sync fast path: small edits typically finish in well under a
-            // millisecond. Try to parse inline before paying the executor
-            // round-trip; if the deadline is exceeded the parser aborts and
-            // we fall through to the background spawn with `prior` /
-            // `prior_map` still intact.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
-            if let Some(out) = parse_buffer_step(
-                buffer_id,
-                snapshot.clone(),
-                &lang,
-                &mut prior,
-                &mut prior_map,
-                &self.syntax_styles,
-                Some(deadline),
-            ) {
-                self.buffers.store_syntax(out.buffer_id, out.syntax);
-                self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);
-                for editor in self.editors.values_mut() {
-                    if editor.buffer_id == out.buffer_id {
-                        editor.display_map.set_semantic_token_highlights(
-                            out.buffer_id,
-                            out.tokens.clone(),
-                            self.syntax_styles.interner.clone(),
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Sync attempt aborted. `prior` / `prior_map` were not consumed
-            // because the failure short-circuited before parse_buffer_step
-            // reached its take points; hand them to the background path so
-            // it can still reparse incrementally.
-            let styles = self.syntax_styles.clone();
-            let task = self.executor.spawn(parse_buffer_async(
-                buffer_id, snapshot, lang, prior, prior_map, styles,
-            ));
-            self.parse_jobs.insert(
-                buffer_id,
-                ParseJob {
-                    target_version: cur_version,
-                    task,
-                },
-            );
-        }
+        let Self {
+            workspaces,
+            active_workspace,
+            executor,
+            syntax_styles,
+            ..
+        } = self;
+        workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles);
     }
 
     pub(crate) fn render(&mut self) -> Buffer {
         self.drive_parse_jobs();
         let mut buf = Buffer::empty(self.size);
-        let focused = self.panes.focus();
-        for (id, pane) in self.panes.split_panes() {
+        let ws = &mut self.workspaces[self.active_workspace];
+        let focused = ws.panes.focus();
+        for (id, pane) in ws.panes.split_panes() {
             let is_focused = id == focused;
-            render_pane(pane, is_focused, &mut self.editors, &self.buffers, &mut buf);
+            render_pane(pane, is_focused, &mut ws.editors, &ws.buffers, &mut buf);
         }
         if let Some(palette) = &self.command_palette {
             render_command_palette(palette, self.size, &mut buf);
@@ -452,7 +332,7 @@ impl KeymapState for StoatKeymapState {
 /// signalling that the caller should fall back to the background path.
 /// `None` is also returned for ordinary parse failures (unsupported
 /// language, etc.); the difference does not matter for the call sites.
-fn parse_buffer_step(
+pub(crate) fn parse_buffer_step(
     buffer_id: BufferId,
     snapshot: TextBufferSnapshot,
     lang: &Arc<Language>,
@@ -545,7 +425,7 @@ fn parse_buffer_step(
 
 /// Background parse worker. Owns all inputs by value so the future is `Send`
 /// and can run on any executor thread.
-async fn parse_buffer_async(
+pub(crate) async fn parse_buffer_async(
     buffer_id: BufferId,
     snapshot: TextBufferSnapshot,
     lang: Arc<Language>,
