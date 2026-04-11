@@ -10,6 +10,7 @@ pub use self::{
     },
 };
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
+use async_trait::async_trait;
 use compact_str::CompactString;
 use std::{
     collections::BTreeMap,
@@ -96,6 +97,7 @@ impl FakeFs {
     }
 }
 
+#[async_trait]
 impl FsHost for FakeFs {
     async fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
         let state = self.state.lock().unwrap();

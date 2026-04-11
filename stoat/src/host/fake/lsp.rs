@@ -1,4 +1,5 @@
 use crate::host::lsp::{LspHost, LspNotification};
+use async_trait::async_trait;
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionList,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
@@ -531,6 +532,7 @@ fn lookup_goto(
     map.get(&LspKey::from_position(uri, pos)).cloned()
 }
 
+#[async_trait]
 impl LspHost for FakeLsp {
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
         let mut state = self.state.lock().unwrap();

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionParams,
     CompletionResponse, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
@@ -23,7 +24,7 @@ pub enum LspNotification {
     },
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait LspHost: Send + Sync {
     // Lifecycle
     async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult>;

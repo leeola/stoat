@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use compact_str::CompactString;
 use std::{io, path::Path, time::SystemTime};
 
@@ -16,7 +17,7 @@ pub struct FsDirEntry {
     pub is_symlink: bool,
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait FsHost: Send + Sync {
     /// Clears `buf` and fills it with the file's contents.
     async fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()>;

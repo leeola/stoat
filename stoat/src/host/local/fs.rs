@@ -1,10 +1,12 @@
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
+use async_trait::async_trait;
 use compact_str::CompactString;
 use std::{io, path::Path};
 use tokio::io::AsyncReadExt;
 
 pub struct LocalFs;
 
+#[async_trait]
 impl FsHost for LocalFs {
     async fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
         buf.clear();
