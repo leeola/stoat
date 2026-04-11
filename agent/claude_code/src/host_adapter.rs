@@ -13,6 +13,7 @@ use crate::{
     ClaudeCode,
     messages::{MessageContent, SdkMessage, UserContent, UserContentBlock, UserMessage},
 };
+use async_trait::async_trait;
 use std::io;
 use stoat::host::{AgentMessage, ClaudeCodeHost};
 
@@ -100,6 +101,7 @@ fn extract_tool_results(message: UserMessage) -> Vec<AgentMessage> {
     }
 }
 
+#[async_trait]
 impl ClaudeCodeHost for ClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
         self.send_message(content).await.map_err(io::Error::other)

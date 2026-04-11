@@ -117,6 +117,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.103",
+]
+
+[[package]]
 name = "atomic"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1862,6 +1873,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "stoat"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "compact_str 0.8.1",
  "crossterm",
  "futures",
@@ -1891,6 +1903,7 @@ name = "stoat_agent_claude_code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "snafu",
@@ -1908,6 +1921,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "stoat",
+ "stoat_agent_claude_code",
  "stoat_scheduler",
  "tokio",
  "tracing",

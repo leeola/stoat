@@ -5,6 +5,7 @@ use crate::{
     command_palette::{CommandPalette, PaletteOutcome},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
+    host::{ClaudeCodeFactory, ClaudeCodeSessions},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, PaneTree, View},
     review::ReviewRow,
@@ -56,6 +57,7 @@ pub struct Stoat {
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    claude_sessions: ClaudeCodeSessions,
 }
 
 /// In-flight tree-sitter parse for a buffer.
@@ -146,7 +148,20 @@ impl Stoat {
             language_registry,
             syntax_styles,
             parse_jobs: HashMap::new(),
+            claude_sessions: ClaudeCodeSessions::default(),
         }
+    }
+
+    pub fn set_claude_code_factory(&mut self, factory: Arc<dyn ClaudeCodeFactory>) {
+        self.claude_sessions.set_factory(factory);
+    }
+
+    pub fn claude_sessions(&self) -> &ClaudeCodeSessions {
+        &self.claude_sessions
+    }
+
+    pub fn claude_sessions_mut(&mut self) -> &mut ClaudeCodeSessions {
+        &mut self.claude_sessions
     }
 
     /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.

@@ -15,7 +15,9 @@ pub mod fs;
 pub mod local;
 pub mod lsp;
 
-pub use claude_code::{AgentMessage, ClaudeCodeHost};
+pub use claude_code::{
+    AgentMessage, ClaudeCodeFactory, ClaudeCodeHost, ClaudeCodeSessions, ClaudeSessionId,
+};
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,

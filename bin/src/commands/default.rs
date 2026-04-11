@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{Axis, Settings, Stoat};
+use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TestScheduler;
 
 #[derive(Parser)]
@@ -47,6 +48,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         let mut stoat = Stoat::new(executor, cli_settings);
+        stoat.set_claude_code_factory(Arc::new(ClaudeCodeLauncher::new()));
 
         match args.command {
             Some(Command::Review) => stoat.open_review(),

@@ -1,4 +1,5 @@
 use crate::host::claude_code::{AgentMessage, ClaudeCodeHost};
+use async_trait::async_trait;
 use std::{collections::VecDeque, io, sync::Mutex};
 
 pub struct FakeClaudeCode {
@@ -148,6 +149,7 @@ impl FakeClaudeCode {
     }
 }
 
+#[async_trait]
 impl ClaudeCodeHost for FakeClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
         self.state.lock().unwrap().sent.push(content.to_string());
