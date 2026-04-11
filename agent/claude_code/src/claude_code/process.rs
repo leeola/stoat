@@ -10,12 +10,6 @@ use tokio::{
 };
 use tracing::{debug, error, trace};
 
-/// Channels needed for process communication that can be recovered on error
-pub struct ProcessChannels {
-    pub stdin_rx: mpsc::Receiver<String>,
-    pub stdout_tx: mpsc::Sender<SdkMessage>,
-}
-
 /// Errors produced when starting or resuming a Claude subprocess session.
 ///
 /// Returned by [`ProcessBuilder::new_session`], [`ProcessBuilder::resume_session`],
@@ -138,7 +132,7 @@ impl ProcessBuilder {
 
     /// Default build method - generates a session id if missing, then creates
     /// a new session, otherwise resumes the supplied session id.
-    pub async fn build(self) -> Result<Process, (ProcessChannels, SessionError)> {
+    pub async fn build(self) -> Result<Process, SessionError> {
         if self.session_id.is_none() {
             let mut builder = self;
             builder.session_id = Some(uuid::Uuid::new_v4().to_string());
@@ -149,37 +143,19 @@ impl ProcessBuilder {
     }
 
     /// Create a new session (fails if session already exists)
-    pub async fn new_session(self) -> Result<Process, (ProcessChannels, SessionError)> {
-        // Validate session_id is present
-        let session_id = match &self.session_id {
-            Some(id) => id.clone(),
-            None => {
-                return Err((
-                    ProcessChannels {
-                        stdin_rx: self.stdin_rx,
-                        stdout_tx: self.stdout_tx,
-                    },
-                    SessionError::SessionIdMissing,
-                ));
-            },
-        };
+    pub async fn new_session(self) -> Result<Process, SessionError> {
+        let session_id = self
+            .session_id
+            .as_ref()
+            .ok_or(SessionError::SessionIdMissing)?
+            .clone();
 
-        // Build args and spawn child before taking ownership of channels
         let args = self.build_args(false);
-        let mut child = match self.spawn_child(args).await {
-            Ok(child) => child,
-            Err(e) => {
-                return Err((
-                    ProcessChannels {
-                        stdin_rx: self.stdin_rx,
-                        stdout_tx: self.stdout_tx,
-                    },
-                    SessionError::SpawnFailed { source: e },
-                ));
-            },
-        };
+        let mut child = self
+            .spawn_child(args)
+            .await
+            .map_err(|e| SessionError::SpawnFailed { source: e })?;
 
-        // Now take ownership of channels and logs
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
         let tx_log = self.tx_log;
@@ -189,13 +165,7 @@ impl ProcessBuilder {
             Ok(stdio) => stdio,
             Err(e) => {
                 let _ = child.kill().await;
-                return Err((
-                    ProcessChannels {
-                        stdin_rx,
-                        stdout_tx,
-                    },
-                    e,
-                ));
+                return Err(e);
             },
         };
 
@@ -212,46 +182,21 @@ impl ProcessBuilder {
         // Wait briefly to see if process fails to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if let Some(_error_msg) = process.check_early_exit().await {
+        if process.check_early_exit().await.is_some() {
             match process.close().await {
                 Ok(recovered) => {
                     if recovered.last_stderr.contains("is already in use") {
-                        return Err((
-                            ProcessChannels {
-                                stdin_rx: recovered.stdin_rx,
-                                stdout_tx: recovered.stdout_tx,
-                            },
-                            SessionError::SessionAlreadyExists {
-                                session_id: session_id.clone(),
-                            },
-                        ));
+                        return Err(SessionError::SessionAlreadyExists { session_id });
                     } else {
-                        return Err((
-                            ProcessChannels {
-                                stdin_rx: recovered.stdin_rx,
-                                stdout_tx: recovered.stdout_tx,
-                            },
-                            SessionError::SpawnFailed {
-                                source: std::io::Error::other(format!(
-                                    "Process failed: {}",
-                                    recovered.last_stderr
-                                )),
-                            },
-                        ));
+                        return Err(SessionError::SpawnFailed {
+                            source: std::io::Error::other(format!(
+                                "Process failed: {}",
+                                recovered.last_stderr
+                            )),
+                        });
                     }
                 },
-                Err(e) => {
-                    let (dummy_stdin_tx, dummy_stdin_rx) = mpsc::channel(1);
-                    let (dummy_stdout_tx, _) = mpsc::channel(1);
-                    drop(dummy_stdin_tx);
-                    return Err((
-                        ProcessChannels {
-                            stdin_rx: dummy_stdin_rx,
-                            stdout_tx: dummy_stdout_tx,
-                        },
-                        SessionError::ChannelRecoveryFailed { source: e },
-                    ));
-                },
+                Err(e) => return Err(SessionError::ChannelRecoveryFailed { source: e }),
             }
         }
 
@@ -259,37 +204,19 @@ impl ProcessBuilder {
     }
 
     /// Resume an existing session (fails if session doesn't exist)
-    pub async fn resume_session(self) -> Result<Process, (ProcessChannels, SessionError)> {
-        // Validate session_id is present
-        let session_id = match &self.session_id {
-            Some(id) => id.clone(),
-            None => {
-                return Err((
-                    ProcessChannels {
-                        stdin_rx: self.stdin_rx,
-                        stdout_tx: self.stdout_tx,
-                    },
-                    SessionError::SessionIdMissing,
-                ));
-            },
-        };
+    pub async fn resume_session(self) -> Result<Process, SessionError> {
+        let session_id = self
+            .session_id
+            .as_ref()
+            .ok_or(SessionError::SessionIdMissing)?
+            .clone();
 
-        // Build args and spawn child before taking ownership of channels
         let args = self.build_args(true);
-        let mut child = match self.spawn_child(args).await {
-            Ok(child) => child,
-            Err(e) => {
-                return Err((
-                    ProcessChannels {
-                        stdin_rx: self.stdin_rx,
-                        stdout_tx: self.stdout_tx,
-                    },
-                    SessionError::SpawnFailed { source: e },
-                ));
-            },
-        };
+        let mut child = self
+            .spawn_child(args)
+            .await
+            .map_err(|e| SessionError::SpawnFailed { source: e })?;
 
-        // Now take ownership of channels and logs
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
         let tx_log = self.tx_log;
@@ -299,13 +226,7 @@ impl ProcessBuilder {
             Ok(stdio) => stdio,
             Err(e) => {
                 let _ = child.kill().await;
-                return Err((
-                    ProcessChannels {
-                        stdin_rx,
-                        stdout_tx,
-                    },
-                    e,
-                ));
+                return Err(e);
             },
         };
 
@@ -322,49 +243,24 @@ impl ProcessBuilder {
         // Wait briefly to see if process fails to start
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if let Some(_error_msg) = process.check_early_exit().await {
+        if process.check_early_exit().await.is_some() {
             match process.close().await {
                 Ok(recovered) => {
                     if recovered
                         .last_stderr
                         .contains("No conversation found with session ID")
                     {
-                        return Err((
-                            ProcessChannels {
-                                stdin_rx: recovered.stdin_rx,
-                                stdout_tx: recovered.stdout_tx,
-                            },
-                            SessionError::SessionNotFound {
-                                session_id: session_id.clone(),
-                            },
-                        ));
+                        return Err(SessionError::SessionNotFound { session_id });
                     } else {
-                        return Err((
-                            ProcessChannels {
-                                stdin_rx: recovered.stdin_rx,
-                                stdout_tx: recovered.stdout_tx,
-                            },
-                            SessionError::SpawnFailed {
-                                source: std::io::Error::other(format!(
-                                    "Process failed: {}",
-                                    recovered.last_stderr
-                                )),
-                            },
-                        ));
+                        return Err(SessionError::SpawnFailed {
+                            source: std::io::Error::other(format!(
+                                "Process failed: {}",
+                                recovered.last_stderr
+                            )),
+                        });
                     }
                 },
-                Err(e) => {
-                    let (dummy_stdin_tx, dummy_stdin_rx) = mpsc::channel(1);
-                    let (dummy_stdout_tx, _) = mpsc::channel(1);
-                    drop(dummy_stdin_tx);
-                    return Err((
-                        ProcessChannels {
-                            stdin_rx: dummy_stdin_rx,
-                            stdout_tx: dummy_stdout_tx,
-                        },
-                        SessionError::ChannelRecoveryFailed { source: e },
-                    ));
-                },
+                Err(e) => return Err(SessionError::ChannelRecoveryFailed { source: e }),
             }
         }
 
