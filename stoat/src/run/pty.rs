@@ -1,7 +1,7 @@
 use super::RunId;
 use crate::host::terminal::{PtyTerminal, TerminalHost};
 use portable_pty::CommandBuilder;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
 
 pub enum PtyNotification {
@@ -16,30 +16,32 @@ pub enum PtyNotification {
 }
 
 pub struct ShellHandle {
-    host: Box<dyn TerminalHost>,
+    host: Arc<dyn TerminalHost>,
     pub active_sentinel: Option<String>,
 }
 
 impl ShellHandle {
-    pub(crate) fn new(host: Box<dyn TerminalHost>) -> Self {
+    pub(crate) fn new(host: Arc<dyn TerminalHost>) -> Self {
         Self {
             host,
             active_sentinel: None,
         }
     }
 
-    pub fn send_command(&mut self, command: &str, sentinel: &str) {
+    pub fn send_command(&self, command: &str, sentinel: &str) {
+        use futures::FutureExt;
         let payload = format!("{command}\necho {sentinel} $?\n");
-        let _ = self.host.write(payload.as_bytes());
-        self.active_sentinel = Some(sentinel.to_owned());
+        let _ = self.host.write(payload.as_bytes()).now_or_never();
     }
 
-    pub fn send_interrupt(&mut self) {
-        let _ = self.host.write(b"\x03");
+    pub fn send_interrupt(&self) {
+        use futures::FutureExt;
+        let _ = self.host.write(b"\x03").now_or_never();
     }
 
-    pub fn kill(&mut self) {
-        let _ = self.host.kill();
+    pub fn kill(&self) {
+        use futures::FutureExt;
+        let _ = self.host.kill().now_or_never();
     }
 }
 
@@ -81,12 +83,10 @@ pub fn spawn_shell(
         .try_clone_reader()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    tokio::task::spawn_blocking(move || {
-        pty_reader_task(reader, pty_tx, run_id);
-    });
+    let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
+    tokio::spawn(reader_task(host.clone(), run_id, pty_tx));
 
-    let terminal = PtyTerminal::new(writer, child);
-    Ok(ShellHandle::new(Box::new(terminal)))
+    Ok(ShellHandle::new(host))
 }
 
 pub fn spawn_oneshot(
@@ -126,25 +126,22 @@ pub fn spawn_oneshot(
         .try_clone_reader()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    tokio::task::spawn_blocking(move || {
-        pty_reader_task(reader, pty_tx, run_id);
-    });
+    let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
+    tokio::spawn(reader_task(host.clone(), run_id, pty_tx));
 
-    let terminal = PtyTerminal::new(writer, child);
-    Ok(ShellHandle::new(Box::new(terminal)))
+    Ok(ShellHandle::new(host))
 }
 
-fn pty_reader_task(
-    mut reader: Box<dyn std::io::Read + Send>,
-    tx: mpsc::Sender<PtyNotification>,
+async fn reader_task(
+    host: Arc<dyn TerminalHost>,
     run_id: RunId,
+    tx: mpsc::Sender<PtyNotification>,
 ) {
-    use std::io::Read;
     let mut buf = [0u8; 4096];
     let mut line_buf = String::new();
 
     loop {
-        let n = match reader.read(&mut buf) {
+        let n = match host.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
@@ -161,10 +158,12 @@ fn pty_reader_task(
 
                 if line_buf.starts_with("__STOAT_") && line_buf.contains("__") {
                     if let Some(status) = parse_sentinel_line(&line_buf) {
-                        let _ = tx.blocking_send(PtyNotification::CommandDone {
-                            run_id,
-                            exit_status: Some(status),
-                        });
+                        let _ = tx
+                            .send(PtyNotification::CommandDone {
+                                run_id,
+                                exit_status: Some(status),
+                            })
+                            .await;
                         line_buf.clear();
                         output_start = end + 1;
                         continue;
@@ -177,20 +176,23 @@ fn pty_reader_task(
         }
 
         if tx
-            .blocking_send(PtyNotification::Output {
+            .send(PtyNotification::Output {
                 run_id,
                 data: chunk.to_vec(),
             })
+            .await
             .is_err()
         {
             break;
         }
     }
 
-    let _ = tx.blocking_send(PtyNotification::CommandDone {
-        run_id,
-        exit_status: None,
-    });
+    let _ = tx
+        .send(PtyNotification::CommandDone {
+            run_id,
+            exit_status: None,
+        })
+        .await;
 }
 
 pub(super) fn parse_sentinel_line(line: &str) -> Option<i32> {

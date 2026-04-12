@@ -2,11 +2,14 @@ use crate::{
     host::terminal::TerminalHost,
     run::{pty::PtyNotification, RunId},
 };
+use async_trait::async_trait;
 use std::{io, sync::Mutex};
 use tokio::sync::mpsc;
 
 pub struct FakeTerminal {
     state: Mutex<FakeTerminalState>,
+    read_tx: mpsc::Sender<Vec<u8>>,
+    read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
 struct FakeTerminalState {
@@ -16,12 +19,19 @@ struct FakeTerminalState {
 
 impl FakeTerminal {
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(256);
         Self {
             state: Mutex::new(FakeTerminalState {
                 sent: Vec::new(),
                 killed: false,
             }),
+            read_tx: tx,
+            read_rx: tokio::sync::Mutex::new(rx),
         }
+    }
+
+    pub fn push_output(&self, data: &[u8]) {
+        let _ = self.read_tx.try_send(data.to_vec());
     }
 
     pub fn sent_bytes(&self) -> Vec<Vec<u8>> {
@@ -57,13 +67,26 @@ impl FakeTerminal {
     }
 }
 
+#[async_trait]
 impl TerminalHost for FakeTerminal {
-    fn write(&mut self, data: &[u8]) -> io::Result<()> {
+    async fn write(&self, data: &[u8]) -> io::Result<()> {
         self.state.lock().unwrap().sent.push(data.to_vec());
         Ok(())
     }
 
-    fn kill(&mut self) -> io::Result<()> {
+    async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut rx = self.read_rx.lock().await;
+        match rx.recv().await {
+            Some(chunk) => {
+                let n = chunk.len().min(buf.len());
+                buf[..n].copy_from_slice(&chunk[..n]);
+                Ok(n)
+            },
+            None => Ok(0),
+        }
+    }
+
+    async fn kill(&self) -> io::Result<()> {
         self.state.lock().unwrap().killed = true;
         Ok(())
     }
@@ -89,22 +112,44 @@ pub fn inject_done(tx: &mpsc::Sender<PtyNotification>, run_id: RunId, exit_code:
 mod tests {
     use super::*;
 
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn captures_writes() {
-        let mut fake = FakeTerminal::new();
-        fake.write(b"hello").unwrap();
-        fake.write(b"world").unwrap();
-        assert_eq!(fake.sent_strings(), ["hello", "world"]);
-        fake.assert_sent_count(2);
-        fake.assert_sent(0, b"hello");
+        rt().block_on(async {
+            let fake = FakeTerminal::new();
+            fake.write(b"hello").await.unwrap();
+            fake.write(b"world").await.unwrap();
+            assert_eq!(fake.sent_strings(), ["hello", "world"]);
+            fake.assert_sent_count(2);
+            fake.assert_sent(0, b"hello");
+        });
     }
 
     #[test]
     fn tracks_kill() {
-        let mut fake = FakeTerminal::new();
-        assert!(!fake.was_killed());
-        fake.kill().unwrap();
-        assert!(fake.was_killed());
+        rt().block_on(async {
+            let fake = FakeTerminal::new();
+            assert!(!fake.was_killed());
+            fake.kill().await.unwrap();
+            assert!(fake.was_killed());
+        });
+    }
+
+    #[test]
+    fn read_returns_pushed_data() {
+        rt().block_on(async {
+            let fake = FakeTerminal::new();
+            fake.push_output(b"hello");
+            let mut buf = [0u8; 64];
+            let n = fake.read(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"hello");
+        });
     }
 
     #[test]
