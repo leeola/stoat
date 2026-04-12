@@ -14,4 +14,11 @@ pub enum ActionKind {
     OpenCommandPalette,
     OpenReview,
     AddSelectionBelow,
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    MoveNextWordStart,
+    MoveNextWordEnd,
+    MovePrevWordStart,
 }

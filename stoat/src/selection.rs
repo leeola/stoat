@@ -62,6 +62,37 @@ impl SelectionsCollection {
         };
         self.disjoint.insert(pos, selection);
     }
+
+    pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
+    where
+        F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
+    {
+        let transformed: Vec<Selection<Anchor>> = self.disjoint.iter().map(&mut f).collect();
+        let mut indexed: Vec<(usize, Selection<Anchor>)> = transformed
+            .into_iter()
+            .map(|s| (snapshot.resolve_anchor(&s.start), s))
+            .collect();
+        indexed.sort_by_key(|(offset, sel)| (*offset, sel.id));
+
+        let mut deduped: Vec<Selection<Anchor>> = Vec::with_capacity(indexed.len());
+        let mut last_empty_offset: Option<usize> = None;
+        for (offset, sel) in indexed {
+            if sel.is_empty() {
+                if last_empty_offset == Some(offset) {
+                    let prev = deduped.last_mut().expect("empty collision without prior");
+                    if sel.id > prev.id {
+                        *prev = sel;
+                    }
+                    continue;
+                }
+                last_empty_offset = Some(offset);
+            } else {
+                last_empty_offset = None;
+            }
+            deduped.push(sel);
+        }
+        self.disjoint = deduped;
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +186,131 @@ mod tests {
             .map(|s| snapshot.resolve_anchor(&s.start))
             .collect();
         assert_eq!(offsets, vec![0, 3, 5, 7]);
+    }
+
+    #[test]
+    fn transform_advances_each_cursor() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        collection.transform(&snapshot, |sel| {
+            let offset = snapshot.resolve_anchor(&sel.head());
+            let anchor = snapshot.anchor_at(offset + 1, Bias::Right);
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        });
+
+        let offsets: Vec<usize> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| snapshot.resolve_anchor(&s.start))
+            .collect();
+        assert_eq!(offsets, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn transform_dedupes_empty_collisions() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        assert_eq!(collection.all_anchors().len(), 3);
+
+        collection.transform(&snapshot, |sel| {
+            let mut new = sel.clone();
+            let target = snapshot.anchor_at(5, Bias::Right);
+            new.collapse_to(target, SelectionGoal::None);
+            new
+        });
+
+        let offsets: Vec<usize> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| snapshot.resolve_anchor(&s.start))
+            .collect();
+        assert_eq!(offsets, vec![5]);
+    }
+
+    #[test]
+    fn transform_resorts_after_swap() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(7, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        collection.transform(&snapshot, |sel| {
+            let offset = snapshot.resolve_anchor(&sel.head());
+            let new_offset = if offset == 0 { 0 } else { 9 - offset };
+            let mut new = sel.clone();
+            new.collapse_to(
+                snapshot.anchor_at(new_offset, Bias::Right),
+                SelectionGoal::None,
+            );
+            new
+        });
+
+        let offsets: Vec<usize> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| snapshot.resolve_anchor(&s.start))
+            .collect();
+        assert_eq!(offsets, vec![0, 2, 7]);
+    }
+
+    #[test]
+    fn transform_preserves_ids() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        let original_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+
+        collection.transform(&snapshot, |sel| {
+            let offset = snapshot.resolve_anchor(&sel.head());
+            let mut new = sel.clone();
+            new.collapse_to(
+                snapshot.anchor_at(offset + 1, Bias::Right),
+                SelectionGoal::None,
+            );
+            new
+        });
+
+        let new_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+        assert_eq!(new_ids, original_ids);
     }
 
     #[test]

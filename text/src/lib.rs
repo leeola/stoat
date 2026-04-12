@@ -2,6 +2,7 @@ mod anchor;
 mod buffer_id;
 mod fragment;
 mod locator;
+mod movement;
 mod offset_utf16;
 pub mod patch;
 mod point;
@@ -17,6 +18,9 @@ pub use fragment::{
     Fragment, FragmentSummary, FragmentTextSummary, InsertionFragment, InsertionFragmentKey,
 };
 pub use locator::Locator;
+pub use movement::{
+    categorize_char, next_word_end, next_word_start, prev_word_start, CharCategory,
+};
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};
 pub use rope::{

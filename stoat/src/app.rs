@@ -965,28 +965,54 @@ fn render_editor(
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
+    let selection_style = Style::default().bg(Color::DarkGray);
+    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
     for selection in editor.selections.all_anchors() {
-        let head_anchor = selection.head();
-        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
+        let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
+        let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
+        let head_offset = buffer_snapshot.resolve_anchor(&selection.head());
+        let rope = buffer_snapshot.rope();
+
+        if start_offset != end_offset {
+            let mut offset = start_offset;
+            let mut chars = rope.chars_at(offset);
+            while offset < end_offset {
+                let Some(ch) = chars.next() else {
+                    break;
+                };
+                if ch != '\n' && offset != head_offset {
+                    let point = rope.offset_to_point(offset);
+                    let display = snapshot.buffer_to_display(point);
+                    if display.row >= editor.scroll_row && display.row < end_row {
+                        let y = inner.y + (display.row - editor.scroll_row) as u16;
+                        let x = inner.x + display.column as u16;
+                        if x < right && y < bottom {
+                            let cell = &mut buf[(x, y)];
+                            cell.set_style(selection_style);
+                        }
+                    }
+                }
+                offset += ch.len_utf8();
+            }
+        }
+
+        let head_point = buffer_snapshot.point_for_anchor(&selection.head());
         let display = snapshot.buffer_to_display(head_point);
-        if display.row < editor.scroll_row || display.row >= end_row {
-            continue;
+        if display.row >= editor.scroll_row && display.row < end_row {
+            let y = inner.y + (display.row - editor.scroll_row) as u16;
+            let x = inner.x + display.column as u16;
+            if x < right && y < bottom {
+                let cell = &mut buf[(x, y)];
+                let existing_char = cell.symbol().chars().next().unwrap_or(' ');
+                let char_to_paint = if existing_char == '\0' {
+                    ' '
+                } else {
+                    existing_char
+                };
+                cell.set_char(char_to_paint);
+                cell.set_style(cursor_style);
+            }
         }
-        let y = inner.y + (display.row - editor.scroll_row) as u16;
-        let x = inner.x + display.column as u16;
-        if x >= right || y >= bottom {
-            continue;
-        }
-        let cell = &mut buf[(x, y)];
-        let existing_char = cell.symbol().chars().next().unwrap_or(' ');
-        let char_to_paint = if existing_char == '\0' {
-            ' '
-        } else {
-            existing_char
-        };
-        let existing_style = cell.style();
-        cell.set_char(char_to_paint);
-        cell.set_style(existing_style.add_modifier(Modifier::REVERSED));
     }
 }
 

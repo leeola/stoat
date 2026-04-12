@@ -1,0 +1,14 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: e
+focused: #1 of 1
+mode: normal
+size: 30x5
+---
+[0m[36m┌────────────────────────────┐[0m
+[0m[36m│[0m[36m[100mfoo[0m[7m[36m [0m[36mbar baz[0m                 [0m[36m│[0m
+[0m[36m│[0m                            [0m[36m│[0m
+[0m[36m│[0m                            [0m[36m│[0m
+[0m[36m└────────────────────────────┘[0m

@@ -22,8 +22,8 @@ size: 80x24
 │ │ FocusPrev          focus previous pane                                   │ │
 │ │ FocusRight         focus pane right                                      │ │
 │ │ FocusUp            focus pane up                                         │ │
-│ │ OpenFile           open a file                                           │ │
-│ │ OpenReview         review changed files                                  │ │
+│ │ MoveDown           move cursor down                                      │ │
+│ │ MoveLeft           move cursor left                                      │ │
 │ │──────────────────────────────────────────────────────────────────────────│ │
 │ │Add a new cursor on the line below the newest cursor.                     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │

@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::{path::Path, sync::Arc};
 use stoat_action::{Action, ActionKind, OpenFile};
-use stoat_text::{Bias, SelectionGoal};
+use stoat_text::{next_word_end, next_word_start, prev_word_start, Bias, Selection, SelectionGoal};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     match action.kind() {
@@ -87,7 +87,21 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::AddSelectionBelow => add_selection_below(stoat),
+        ActionKind::MoveLeft => move_horizontal(stoat, -1),
+        ActionKind::MoveRight => move_horizontal(stoat, 1),
+        ActionKind::MoveUp => move_vertical(stoat, -1),
+        ActionKind::MoveDown => move_vertical(stoat, 1),
+        ActionKind::MoveNextWordStart => move_word(stoat, WordTarget::NextStart),
+        ActionKind::MoveNextWordEnd => move_word(stoat, WordTarget::NextEnd),
+        ActionKind::MovePrevWordStart => move_word(stoat, WordTarget::PrevStart),
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum WordTarget {
+    NextStart,
+    NextEnd,
+    PrevStart,
 }
 
 fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
@@ -137,6 +151,117 @@ fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
     editor
         .selections
         .insert_cursor(target, SelectionGoal::Column(goal_col), buffer_snapshot);
+    UpdateEffect::Redraw
+}
+
+fn move_horizontal(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        let new_offset = if delta > 0 {
+            match rope.chars_at(head_offset).next() {
+                Some(ch) => head_offset + ch.len_utf8(),
+                None => head_offset,
+            }
+        } else {
+            match rope.reversed_chars_at(head_offset).next() {
+                Some(ch) => head_offset - ch.len_utf8(),
+                None => head_offset,
+            }
+        };
+        if new_offset == head_offset {
+            return sel.clone();
+        }
+        let anchor = buffer_snapshot.anchor_at(new_offset, Bias::Right);
+        let mut new = sel.clone();
+        new.collapse_to(anchor, SelectionGoal::None);
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+fn move_vertical(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let max_row = display_snapshot.max_point().row;
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_anchor = sel.head();
+        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
+        let head_display = display_snapshot.buffer_to_display(head_point);
+        let goal_col = match sel.goal {
+            SelectionGoal::Column(c) => c,
+            SelectionGoal::None => head_display.column,
+        };
+        let new_row_i = head_display.row as i64 + delta as i64;
+        if new_row_i < 0 || new_row_i > max_row as i64 {
+            return sel.clone();
+        }
+        let new_row = new_row_i as u32;
+        let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
+        let raw = DisplayPoint::new(new_row, clamped_col);
+        let clipped = display_snapshot.clip_point(raw, Bias::Left);
+        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+            return sel.clone();
+        };
+        let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
+        let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
+        let mut new = sel.clone();
+        new.collapse_to(anchor, SelectionGoal::Column(goal_col));
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+        let target_offset = match target {
+            WordTarget::NextStart => next_word_start(rope, head_offset),
+            WordTarget::NextEnd => next_word_end(rope, head_offset),
+            WordTarget::PrevStart => prev_word_start(rope, head_offset),
+        };
+        if target_offset == head_offset {
+            return sel.clone();
+        }
+        let head_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        if target_offset > head_offset {
+            let tail_anchor = buffer_snapshot.anchor_at(head_offset, Bias::Right);
+            Selection {
+                id: sel.id,
+                start: tail_anchor,
+                end: head_anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+        } else {
+            let tail_offset = match rope.chars_at(head_offset).next() {
+                Some(ch) => head_offset + ch.len_utf8(),
+                None => head_offset,
+            };
+            let tail_anchor = buffer_snapshot.anchor_at(tail_offset, Bias::Right);
+            Selection {
+                id: sel.id,
+                start: head_anchor,
+                end: tail_anchor,
+                reversed: true,
+                goal: SelectionGoal::None,
+            }
+        }
+    });
     UpdateEffect::Redraw
 }
 
@@ -324,7 +449,10 @@ fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use stoat_action::{AddSelectionBelow, Quit};
+    use stoat_action::{
+        AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+        MovePrevWordStart, MoveRight, MoveUp, Quit,
+    };
     use stoat_scheduler::TestScheduler;
 
     fn stoat() -> Stoat {
@@ -347,6 +475,48 @@ mod tests {
         let buffer = ws.buffers.get(buffer_id).expect("buffer exists");
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(0..0, text);
+    }
+
+    fn head_offsets(stoat: &mut Stoat) -> Vec<usize> {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
+            .collect()
+    }
+
+    fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    buffer_snapshot.resolve_anchor(&sel.start),
+                    buffer_snapshot.resolve_anchor(&sel.end),
+                    sel.reversed,
+                )
+            })
+            .collect()
     }
 
     fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
@@ -375,6 +545,177 @@ mod tests {
     #[test]
     fn dispatch_quit() {
         assert_eq!(dispatch(&mut stoat(), &Quit), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn move_left_at_start_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "hello");
+        dispatch(&mut stoat, &MoveLeft);
+        assert_eq!(head_offsets(&mut stoat), vec![0]);
+    }
+
+    #[test]
+    fn move_right_advances_one_grapheme() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![1]);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![2]);
+    }
+
+    #[test]
+    fn move_right_at_end_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
+    }
+
+    #[test]
+    fn move_right_across_newline() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "ab\ncd");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
+    }
+
+    #[test]
+    fn move_right_multibyte() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "héllo");
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![1]);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
+    }
+
+    #[test]
+    fn move_down_advances_one_row() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        dispatch(&mut stoat, &MoveDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn move_up_at_first_row_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef");
+        dispatch(&mut stoat, &MoveUp);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn move_down_at_last_row_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &MoveDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn move_down_preserves_goal_column() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+        for _ in 0..7 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 7)]);
+        dispatch(&mut stoat, &MoveDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 2)]);
+        dispatch(&mut stoat, &MoveDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(2, 7)]);
+    }
+
+    #[test]
+    fn move_next_word_start_creates_selection() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 4, false)]);
+        assert_eq!(head_offsets(&mut stoat), vec![4]);
+    }
+
+    #[test]
+    fn move_next_word_start_repeated_snaps_tail() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar baz");
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 4, false)]);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(4, 8, false)]);
+    }
+
+    #[test]
+    fn move_next_word_end_creates_selection() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+    }
+
+    #[test]
+    fn move_next_word_end_at_eof_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo");
+        for _ in 0..3 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        dispatch(&mut stoat, &MoveNextWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(3, 3, false)]);
+    }
+
+    #[test]
+    fn move_prev_word_start_creates_reversed_selection() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..6 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(head_offsets(&mut stoat), vec![6]);
+        dispatch(&mut stoat, &MovePrevWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(4, 7, true)]);
+        assert_eq!(head_offsets(&mut stoat), vec![4]);
+    }
+
+    #[test]
+    fn move_prev_word_start_at_start_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &MovePrevWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+    }
+
+    #[test]
+    fn move_right_with_multiple_cursors_advances_each() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(head_offsets(&mut stoat), vec![1, 5]);
+    }
+
+    #[test]
+    fn move_next_word_start_multi_cursor_independent() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar\nbaz qux\n");
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(head_offsets(&mut stoat), vec![0, 8]);
+        dispatch(&mut stoat, &MoveNextWordStart);
+        assert_eq!(
+            selection_spans(&mut stoat),
+            vec![(0, 4, false), (8, 12, false)]
+        );
     }
 
     #[test]

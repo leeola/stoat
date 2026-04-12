@@ -1274,4 +1274,146 @@ mod tests {
         h.type_keys("shift-C");
         h.assert_snapshot_styled("shift_c_adds_selection_below_styled");
     }
+
+    #[test]
+    fn snapshot_move_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "hello world\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("l l l");
+        h.assert_snapshot("snapshot_move_right");
+    }
+
+    #[test]
+    fn snapshot_move_right_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "hello world\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("l l l");
+        h.assert_snapshot_styled("snapshot_move_right_styled");
+    }
+
+    #[test]
+    fn snapshot_move_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
+        let mut h = TestHarness::with_size(20, 6);
+        h.open_file(&path);
+        h.type_keys("j j");
+        h.assert_snapshot("snapshot_move_down");
+    }
+
+    #[test]
+    fn snapshot_move_down_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
+        let mut h = TestHarness::with_size(20, 6);
+        h.open_file(&path);
+        h.type_keys("j j");
+        h.assert_snapshot_styled("snapshot_move_down_styled");
+    }
+
+    #[test]
+    fn snapshot_word_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("w");
+        h.assert_snapshot("snapshot_word_forward");
+    }
+
+    #[test]
+    fn snapshot_word_forward_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("w");
+        h.assert_snapshot_styled("snapshot_word_forward_styled");
+    }
+
+    #[test]
+    fn snapshot_word_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("e");
+        h.assert_snapshot("snapshot_word_end");
+    }
+
+    #[test]
+    fn snapshot_word_end_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("e");
+        h.assert_snapshot_styled("snapshot_word_end_styled");
+    }
+
+    #[test]
+    fn snapshot_word_backward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("l l l l l l l");
+        h.type_keys("b");
+        h.assert_snapshot("snapshot_word_backward");
+    }
+
+    #[test]
+    fn snapshot_word_backward_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("l l l l l l l");
+        h.type_keys("b");
+        h.assert_snapshot_styled("snapshot_word_backward_styled");
+    }
+
+    #[test]
+    fn snapshot_word_forward_repeated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("w w");
+        h.assert_snapshot("snapshot_word_forward_repeated");
+    }
+
+    #[test]
+    fn snapshot_word_forward_repeated_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
+        let mut h = TestHarness::with_size(30, 5);
+        h.open_file(&path);
+        h.type_keys("w w");
+        h.assert_snapshot_styled("snapshot_word_forward_repeated_styled");
+    }
+
+    #[test]
+    fn snapshot_multi_cursor_move_right() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
+        let mut h = TestHarness::with_size(20, 6);
+        h.open_file(&path);
+        h.type_keys("C l l");
+        h.assert_snapshot("snapshot_multi_cursor_move_right");
+    }
+
+    #[test]
+    fn snapshot_multi_cursor_move_right_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
+        let mut h = TestHarness::with_size(20, 6);
+        h.open_file(&path);
+        h.type_keys("C l l");
+        h.assert_snapshot_styled("snapshot_multi_cursor_move_right_styled");
+    }
 }

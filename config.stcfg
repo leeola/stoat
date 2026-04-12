@@ -5,6 +5,13 @@ on key {
         Space -> SetMode(space);
         : -> OpenCommandPalette();
         C -> AddSelectionBelow();
+        h -> MoveLeft();
+        j -> MoveDown();
+        k -> MoveUp();
+        l -> MoveRight();
+        w -> MoveNextWordStart();
+        e -> MoveNextWordEnd();
+        b -> MovePrevWordStart();
     }
     mode == space {
         Escape -> SetMode(normal);

@@ -1,7 +1,10 @@
 use crate::{
     defs::{
         app::Quit,
-        editor::AddSelectionBelow,
+        editor::{
+            AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+            MovePrevWordStart, MoveRight, MoveUp,
+        },
         file::OpenFile,
         palette::OpenCommandPalette,
         pane::{
@@ -44,6 +47,13 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
+    add(MoveLeft::DEF, |_| Ok(Box::new(MoveLeft)));
+    add(MoveRight::DEF, |_| Ok(Box::new(MoveRight)));
+    add(MoveUp::DEF, |_| Ok(Box::new(MoveUp)));
+    add(MoveDown::DEF, |_| Ok(Box::new(MoveDown)));
+    add(MoveNextWordStart::DEF, |_| Ok(Box::new(MoveNextWordStart)));
+    add(MoveNextWordEnd::DEF, |_| Ok(Box::new(MoveNextWordEnd)));
+    add(MovePrevWordStart::DEF, |_| Ok(Box::new(MovePrevWordStart)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -87,6 +97,13 @@ mod tests {
         "OpenCommandPalette",
         "OpenReview",
         "AddSelectionBelow",
+        "MoveLeft",
+        "MoveRight",
+        "MoveUp",
+        "MoveDown",
+        "MoveNextWordStart",
+        "MoveNextWordEnd",
+        "MovePrevWordStart",
     ];
 
     #[test]
@@ -145,7 +162,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 14);
+        assert_eq!(all().count(), 21);
     }
 
     #[test]
