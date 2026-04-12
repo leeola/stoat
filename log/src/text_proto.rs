@@ -1,8 +1,7 @@
 //! Byte-faithful append-only log for text-based wire protocols.
 //!
 //! Each call to [`TextProtoLog::record`] enqueues one payload followed by
-//! `\n`, producing a pure JSONL file. The `&str` input type enforces UTF-8
-//! and prevents accidental use with binary protocols.
+//! `\n`, producing a pure JSONL file.
 //!
 //! Direction (in/out) is encoded by keeping separate files, one
 //! [`TextProtoLog`] instance per direction, so each file remains a
