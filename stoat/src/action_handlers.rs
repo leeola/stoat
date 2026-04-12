@@ -237,9 +237,14 @@ fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
         if target_offset == head_offset {
             return sel.clone();
         }
-        let head_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
         if target_offset > head_offset {
+            let end_offset = rope
+                .reversed_chars_at(target_offset)
+                .next()
+                .map(|ch| target_offset - ch.len_utf8())
+                .unwrap_or(target_offset);
             let tail_anchor = buffer_snapshot.anchor_at(head_offset, Bias::Right);
+            let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
             Selection {
                 id: sel.id,
                 start: tail_anchor,
@@ -248,6 +253,7 @@ fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
                 goal: SelectionGoal::None,
             }
         } else {
+            let head_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
             let tail_offset = match rope.chars_at(head_offset).next() {
                 Some(ch) => head_offset + ch.len_utf8(),
                 None => head_offset,
@@ -640,8 +646,8 @@ mod tests {
         let mut stoat = stoat();
         seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 4, false)]);
-        assert_eq!(head_offsets(&mut stoat), vec![4]);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
@@ -649,9 +655,9 @@ mod tests {
         let mut stoat = stoat();
         seed_focused_buffer(&mut stoat, "foo bar baz");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 4, false)]);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(4, 8, false)]);
+        assert_eq!(selection_spans(&mut stoat), vec![(3, 7, false)]);
     }
 
     #[test]
@@ -659,7 +665,7 @@ mod tests {
         let mut stoat = stoat();
         seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
     }
 
     #[test]
@@ -714,7 +720,7 @@ mod tests {
         dispatch(&mut stoat, &MoveNextWordStart);
         assert_eq!(
             selection_spans(&mut stoat),
-            vec![(0, 4, false), (8, 12, false)]
+            vec![(0, 3, false), (8, 11, false)]
         );
     }
 
