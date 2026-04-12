@@ -1241,4 +1241,37 @@ mod tests {
         ]);
         h.assert_snapshot_styled("review_multi_file");
     }
+
+    #[test]
+    fn snapshot_add_selection_below() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
+
+        let mut h = TestHarness::with_size(20, 5);
+        h.open_file(&path);
+        h.type_keys("C");
+        h.assert_snapshot("add_selection_below");
+    }
+
+    #[test]
+    fn snapshot_add_selection_below_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
+
+        let mut h = TestHarness::with_size(20, 5);
+        h.open_file(&path);
+        h.type_keys("C");
+        h.assert_snapshot_styled("add_selection_below_styled");
+    }
+
+    #[test]
+    fn snapshot_shift_c_adds_selection_below_styled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
+
+        let mut h = TestHarness::with_size(20, 5);
+        h.open_file(&path);
+        h.type_keys("shift-C");
+        h.assert_snapshot_styled("shift_c_adds_selection_below_styled");
+    }
 }

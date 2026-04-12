@@ -1,6 +1,7 @@
 use crate::{
     defs::{
         app::Quit,
+        editor::AddSelectionBelow,
         file::OpenFile,
         palette::OpenCommandPalette,
         pane::{
@@ -42,6 +43,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenCommandPalette))
     });
     add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
+    add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -84,6 +86,7 @@ mod tests {
         "ClosePane",
         "OpenCommandPalette",
         "OpenReview",
+        "AddSelectionBelow",
     ];
 
     #[test]
@@ -142,7 +145,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 13);
+        assert_eq!(all().count(), 14);
     }
 
     #[test]

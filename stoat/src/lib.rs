@@ -12,6 +12,7 @@ pub mod keymap;
 pub mod multi_buffer;
 pub mod pane;
 mod review;
+mod selection;
 pub mod ui;
 pub mod workspace;
 

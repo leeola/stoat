@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     command_palette::CommandPalette,
-    display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
+    display_map::{BlockPlacement, BlockProperties, BlockStyle, DisplayPoint, RenderBlock},
     editor_state::EditorState,
     git,
     pane::{Axis, Direction, View},
@@ -14,6 +14,7 @@ use ratatui::{
 };
 use std::{path::Path, sync::Arc};
 use stoat_action::{Action, ActionKind, OpenFile};
+use stoat_text::{Bias, SelectionGoal};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     match action.kind() {
@@ -85,7 +86,58 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             open_review(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::AddSelectionBelow => add_selection_below(stoat),
     }
+}
+
+fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    match ws.panes.pane(focused).view {
+        View::Editor(id) => ws.editors.get_mut(id),
+        _ => None,
+    }
+}
+
+fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+
+    let source = editor.selections.newest_anchor().clone();
+    let source_head = source.head();
+    let source_point = buffer_snapshot.point_for_anchor(&source_head);
+    let source_display = display_snapshot.buffer_to_display(source_point);
+
+    let goal_col = match source.goal {
+        SelectionGoal::Column(c) => c,
+        SelectionGoal::None => source_display.column,
+    };
+
+    let max_row = display_snapshot.max_point().row;
+    let mut row = source_display.row;
+    let target = loop {
+        if row >= max_row {
+            return UpdateEffect::None;
+        }
+        row += 1;
+        let clamped_col = goal_col.min(display_snapshot.line_len(row));
+        let raw = DisplayPoint::new(row, clamped_col);
+        let clipped = display_snapshot.clip_point(raw, Bias::Left);
+        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+            continue;
+        };
+        let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
+        let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
+        break anchor;
+    };
+
+    editor
+        .selections
+        .insert_cursor(target, SelectionGoal::Column(goal_col), buffer_snapshot);
+    UpdateEffect::Redraw
 }
 
 fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
@@ -272,7 +324,7 @@ fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use stoat_action::Quit;
+    use stoat_action::{AddSelectionBelow, Quit};
     use stoat_scheduler::TestScheduler;
 
     fn stoat() -> Stoat {
@@ -284,8 +336,115 @@ mod tests {
         )
     }
 
+    fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer exists");
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(0..0, text);
+    }
+
+    fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let head = sel.head();
+                let point = buffer_snapshot.point_for_anchor(&head);
+                let display = snapshot.buffer_to_display(point);
+                (display.row, display.column)
+            })
+            .collect()
+    }
+
     #[test]
     fn dispatch_quit() {
         assert_eq!(dispatch(&mut stoat(), &Quit), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn add_selection_below_with_no_editor_focus_is_noop() {
+        let mut stoat = stoat();
+        {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            ws.panes.pane_mut(focused).view = View::Label("nothing".into());
+        }
+        assert_eq!(dispatch(&mut stoat, &AddSelectionBelow), UpdateEffect::None);
+    }
+
+    #[test]
+    fn add_selection_below_adds_cursor_on_next_display_row() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+
+        assert_eq!(
+            dispatch(&mut stoat, &AddSelectionBelow),
+            UpdateEffect::Redraw
+        );
+
+        let positions = cursor_display_positions(&mut stoat);
+        assert_eq!(positions, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn add_selection_below_at_last_row_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+
+        assert_eq!(dispatch(&mut stoat, &AddSelectionBelow), UpdateEffect::None);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn add_selection_below_preserves_goal_column_on_short_line() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+
+        {
+            let ws = stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            let editor_id = match ws.panes.pane(focused).view {
+                View::Editor(id) => id,
+                _ => unreachable!(),
+            };
+            let editor = ws.editors.get_mut(editor_id).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buffer = snapshot.buffer_snapshot();
+            let offset = buffer.rope().point_to_offset(stoat_text::Point::new(0, 7));
+            let anchor = buffer.anchor_at(offset, Bias::Right);
+            editor
+                .selections
+                .insert_cursor(anchor, SelectionGoal::Column(7), buffer);
+        }
+
+        assert_eq!(
+            dispatch(&mut stoat, &AddSelectionBelow),
+            UpdateEffect::Redraw
+        );
+        let after_one = cursor_display_positions(&mut stoat);
+        assert_eq!(after_one, vec![(0, 0), (0, 7), (1, 2)]);
+
+        assert_eq!(
+            dispatch(&mut stoat, &AddSelectionBelow),
+            UpdateEffect::Redraw
+        );
+        let after_two = cursor_display_positions(&mut stoat);
+        assert_eq!(after_two, vec![(0, 0), (0, 7), (1, 2), (2, 7)]);
     }
 }

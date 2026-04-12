@@ -13,4 +13,5 @@ pub enum ActionKind {
     OpenFile,
     OpenCommandPalette,
     OpenReview,
+    AddSelectionBelow,
 }

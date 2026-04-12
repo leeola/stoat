@@ -7,6 +7,7 @@ pub mod registry;
 pub use action::{Action, ActionDef};
 pub use defs::{
     app::Quit,
+    editor::AddSelectionBelow,
     file::OpenFile,
     palette::OpenCommandPalette,
     pane::{

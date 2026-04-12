@@ -4,6 +4,7 @@ on key {
         Escape -> Quit();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
+        C -> AddSelectionBelow();
     }
     mode == space {
         Escape -> SetMode(normal);

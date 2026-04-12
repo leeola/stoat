@@ -3,6 +3,7 @@ use crate::{
     display_map::DisplayMap,
     multi_buffer::MultiBuffer,
     review::ReviewRow,
+    selection::SelectionsCollection,
 };
 use slotmap::new_key_type;
 use stoat_scheduler::Executor;
@@ -14,6 +15,7 @@ pub(crate) struct EditorState {
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
     pub(crate) review_rows: Option<Vec<ReviewRow>>,
+    pub(crate) selections: SelectionsCollection,
 }
 
 impl EditorState {
@@ -24,6 +26,7 @@ impl EditorState {
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             review_rows: None,
+            selections: SelectionsCollection::new(),
         }
     }
 
@@ -38,6 +41,7 @@ impl EditorState {
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
             review_rows: None,
+            selections: SelectionsCollection::new(),
         }
     }
 }

@@ -15,7 +15,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::Text,
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -204,6 +204,8 @@ impl Stoat {
             return UpdateEffect::Quit;
         }
 
+        let key = normalize_shift_letter(key);
+
         if self.command_palette.is_some() {
             return self.dispatch_palette_key(key);
         }
@@ -325,6 +327,28 @@ impl KeymapState for StoatKeymapState {
             _ => None,
         }
     }
+}
+
+/// Collapse Shift+letter events onto the bare uppercase form so keymap bindings
+/// written as `A` or `S-a` both match what terminals emit.
+///
+/// Default crossterm without the kitty keyboard protocol reports Shift+a as
+/// `(Char('A'), SHIFT)`, but a binding written as `A` compiles to
+/// `(Char('A'), NONE)`, and modifier comparison is strict. Normalizing the
+/// event up-front keeps bindings terminal-agnostic.
+fn normalize_shift_letter(key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return key;
+    }
+    let KeyCode::Char(ch) = key.code else {
+        return key;
+    };
+    if !ch.is_ascii_alphabetic() {
+        return key;
+    }
+    let mut modifiers = key.modifiers;
+    modifiers.remove(KeyModifiers::SHIFT);
+    KeyEvent::new(KeyCode::Char(ch.to_ascii_uppercase()), modifiers)
 }
 
 /// Synchronous core of the parse pipeline. When `deadline` is `Some`, the
@@ -879,14 +903,20 @@ fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, inner, text_style, buf);
+                render_editor(editor, inner, text_style, buf, is_focused);
             }
             let _ = buffers;
         },
     }
 }
 
-fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+fn render_editor(
+    editor: &mut EditorState,
+    inner: Rect,
+    fallback_style: Style,
+    buf: &mut Buffer,
+    is_focused: bool,
+) {
     if editor.review_rows.is_some() {
         render_review(editor, inner, fallback_style, buf);
         return;
@@ -900,32 +930,63 @@ fn render_editor(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
         return;
     }
 
-    let mut x = inner.x;
-    let mut y = inner.y;
     let right = inner.x + inner.width;
     let bottom = inner.y + inner.height;
 
-    for chunk in snapshot.highlighted_chunks(editor.scroll_row..end_row) {
-        let style = chunk
-            .highlight_style
-            .as_ref()
-            .map(|hs| hs.to_ratatui_style())
-            .unwrap_or(fallback_style);
-        for ch in chunk.text.chars() {
-            if ch == '\n' {
-                y += 1;
-                x = inner.x;
-                if y >= bottom {
-                    return;
+    {
+        let mut x = inner.x;
+        let mut y = inner.y;
+        'chunks: for chunk in snapshot.highlighted_chunks(editor.scroll_row..end_row) {
+            let style = chunk
+                .highlight_style
+                .as_ref()
+                .map(|hs| hs.to_ratatui_style())
+                .unwrap_or(fallback_style);
+            for ch in chunk.text.chars() {
+                if ch == '\n' {
+                    y += 1;
+                    x = inner.x;
+                    if y >= bottom {
+                        break 'chunks;
+                    }
+                    continue;
                 }
-                continue;
+                if x >= right {
+                    continue;
+                }
+                buf[(x, y)].set_char(ch).set_style(style);
+                x += 1;
             }
-            if x >= right {
-                continue;
-            }
-            buf[(x, y)].set_char(ch).set_style(style);
-            x += 1;
         }
+    }
+
+    if !is_focused {
+        return;
+    }
+
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    for selection in editor.selections.all_anchors() {
+        let head_anchor = selection.head();
+        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
+        let display = snapshot.buffer_to_display(head_point);
+        if display.row < editor.scroll_row || display.row >= end_row {
+            continue;
+        }
+        let y = inner.y + (display.row - editor.scroll_row) as u16;
+        let x = inner.x + display.column as u16;
+        if x >= right || y >= bottom {
+            continue;
+        }
+        let cell = &mut buf[(x, y)];
+        let existing_char = cell.symbol().chars().next().unwrap_or(' ');
+        let char_to_paint = if existing_char == '\0' {
+            ' '
+        } else {
+            existing_char
+        };
+        let existing_style = cell.style();
+        cell.set_char(char_to_paint);
+        cell.set_style(existing_style.add_modifier(Modifier::REVERSED));
     }
 }
 
