@@ -4,3 +4,4 @@ pub mod file;
 pub mod palette;
 pub mod pane;
 pub mod review;
+pub mod run;

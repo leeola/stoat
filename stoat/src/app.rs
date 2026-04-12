@@ -9,6 +9,7 @@ use crate::{
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, View},
     review::ReviewRow,
+    run::{PtyNotification, RunId, RunState},
     workspace::{Workspace, WorkspaceId},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -53,6 +54,9 @@ pub struct Stoat {
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
     pub(crate) active_workspace: WorkspaceId,
     claude_sessions: ClaudeCodeSessions,
+    pub(crate) pty_tx: Sender<PtyNotification>,
+    pty_rx: Receiver<PtyNotification>,
+    pub(crate) modal_run: Option<RunId>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -116,6 +120,8 @@ impl Stoat {
         let active_workspace = workspaces.insert(Workspace::new(initial_git_root, &executor));
         workspaces[active_workspace].id = active_workspace;
 
+        let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
+
         Self {
             size: Rect::default(),
             mode: "normal".into(),
@@ -128,6 +134,9 @@ impl Stoat {
             workspaces,
             active_workspace,
             claude_sessions: ClaudeCodeSessions::default(),
+            pty_tx,
+            pty_rx,
+            modal_run: None,
         }
     }
 
@@ -172,8 +181,19 @@ impl Stoat {
         mut events: Receiver<Event>,
         render: Sender<Buffer>,
     ) -> io::Result<()> {
-        while let Some(event) = events.recv().await {
-            match self.update(event) {
+        loop {
+            let effect = tokio::select! {
+                biased;
+                event = events.recv() => {
+                    let Some(event) = event else { break };
+                    self.update(event)
+                }
+                notif = self.pty_rx.recv() => {
+                    let Some(notif) = notif else { continue };
+                    self.handle_pty_notification(notif)
+                }
+            };
+            match effect {
                 UpdateEffect::Redraw => {
                     if render.send(self.render()).await.is_err() {
                         break;
@@ -201,13 +221,48 @@ impl Stoat {
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(run_id) = self.modal_run {
+                let ws = self.active_workspace_mut();
+                if let Some(run_state) = ws.runs.get_mut(run_id) {
+                    if let Some(handle) = &mut run_state.shell_handle {
+                        handle.kill();
+                    }
+                    if let Some(block) = run_state.active_block_mut() {
+                        block.finished = true;
+                    }
+                }
+                return UpdateEffect::Redraw;
+            }
+            if self.mode == "run" {
+                return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
+            }
             return UpdateEffect::Quit;
         }
 
         let key = normalize_shift_letter(key);
 
+        if let Some(run_id) = self.modal_run {
+            let finished = self
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .is_some_and(|r| !r.is_running());
+            if finished && key.code == KeyCode::Esc {
+                self.active_workspace_mut().runs.remove(run_id);
+                self.modal_run = None;
+                return UpdateEffect::Redraw;
+            }
+            return UpdateEffect::None;
+        }
+
         if self.command_palette.is_some() {
             return self.dispatch_palette_key(key);
+        }
+
+        if self.mode == "run" {
+            if let Some(effect) = self.handle_run_key(key) {
+                return effect;
+            }
         }
 
         let state = StoatKeymapState::new(&self.mode);
@@ -237,6 +292,109 @@ impl Stoat {
         effect
     }
 
+    fn handle_run_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {
+        let ws = self.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let View::Run(id) = ws.panes.pane(focused).view else {
+            return None;
+        };
+        let Some(run_state) = ws.runs.get_mut(id) else {
+            return None;
+        };
+
+        match key.code {
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                run_state.input.insert_char(ch);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Backspace => {
+                run_state.input.delete_backward();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Delete => {
+                run_state.input.delete_forward();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                run_state.input.move_word_left();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                run_state.input.move_word_right();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Left => {
+                run_state.input.move_left();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Right => {
+                run_state.input.move_right();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Home => {
+                run_state.input.move_home();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::End => {
+                run_state.input.move_end();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Up => {
+                run_state.history_up();
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Down => {
+                run_state.history_down();
+                Some(UpdateEffect::Redraw)
+            },
+            // Enter and Escape fall through to keymap dispatch
+            _ => None,
+        }
+    }
+
+    fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
+        let ws = self.active_workspace_mut();
+        match notif {
+            PtyNotification::Output { run_id, data } => {
+                let Some(run_state) = ws.runs.get_mut(run_id) else {
+                    return UpdateEffect::None;
+                };
+                let Some(block) = run_state.active_block_mut() else {
+                    return UpdateEffect::None;
+                };
+                block.feed(&data);
+                if block.grid.alt_screen_detected {
+                    block.error = Some("this command requires a full terminal".into());
+                    block.finished = true;
+                    block.grid.alt_screen_detected = false;
+                    if let Some(handle) = &mut run_state.shell_handle {
+                        handle.kill();
+                    }
+                    run_state.shell_handle = None;
+                }
+                UpdateEffect::Redraw
+            },
+            PtyNotification::CommandDone {
+                run_id,
+                exit_status,
+            } => {
+                let Some(run_state) = ws.runs.get_mut(run_id) else {
+                    return UpdateEffect::None;
+                };
+                let Some(block) = run_state.active_block_mut() else {
+                    return UpdateEffect::None;
+                };
+                if !block.finished {
+                    block.finished = true;
+                    block.exit_status = exit_status;
+                }
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
@@ -264,9 +422,20 @@ impl Stoat {
         let focused = ws.panes.focus();
         for (id, pane) in ws.panes.split_panes() {
             let is_focused = id == focused;
-            render_pane(pane, is_focused, &mut ws.editors, &ws.buffers, &mut buf);
+            render_pane(
+                pane,
+                is_focused,
+                &mut ws.editors,
+                &ws.buffers,
+                &ws.runs,
+                &mut buf,
+            );
         }
-        if let Some(palette) = &self.command_palette {
+        if let Some(run_id) = self.modal_run {
+            if let Some(run_state) = ws.runs.get(run_id) {
+                render_modal_run(run_state, self.size, &mut buf);
+            }
+        } else if let Some(palette) = &self.command_palette {
             render_command_palette(palette, self.size, &mut buf);
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
@@ -486,7 +655,7 @@ fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
     }
 }
 
-const PRIMARY_MODES: &[&str] = &["normal", "insert"];
+const PRIMARY_MODES: &[&str] = &["normal", "insert", "run"];
 
 fn action_display_desc(action: &ResolvedAction) -> String {
     if action.name == "SetMode" {
@@ -877,6 +1046,7 @@ fn render_pane(
     is_focused: bool,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    runs: &SlotMap<RunId, RunState>,
     buf: &mut Buffer,
 ) {
     let border_style = if is_focused {
@@ -907,7 +1077,211 @@ fn render_pane(
             }
             let _ = buffers;
         },
+        View::Run(run_id) => {
+            if let Some(run_state) = runs.get(*run_id) {
+                render_run_pane(run_state, inner, is_focused, buf);
+            }
+        },
     }
+}
+
+fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut Buffer) {
+    if area.height < 2 || area.width < 4 {
+        return;
+    }
+
+    let input_row = area.y + area.height - 1;
+    let output_height = area.height.saturating_sub(1);
+
+    // Collect all output lines from blocks (command headers + grid rows)
+    let mut output_lines: Vec<OutputLine<'_>> = Vec::new();
+    for block in &run_state.blocks {
+        output_lines.push(OutputLine::CommandHeader(block.command.as_str()));
+        for row_idx in 0..block.grid.line_count() {
+            output_lines.push(OutputLine::GridRow(&block.grid, row_idx));
+        }
+        if let Some(err) = &block.error {
+            output_lines.push(OutputLine::Error(err.as_str()));
+        }
+        if block.finished {
+            let status = block.exit_status.unwrap_or(-1);
+            output_lines.push(OutputLine::Status(status));
+        }
+        output_lines.push(OutputLine::Blank);
+    }
+
+    // Render output lines (bottom-aligned: show most recent output)
+    let total = output_lines.len();
+    let visible = output_height as usize;
+    let start = total.saturating_sub(visible + run_state.scroll_offset);
+    for (i, line) in output_lines.iter().skip(start).take(visible).enumerate() {
+        let y = area.y + i as u16;
+        match line {
+            OutputLine::CommandHeader(cmd) => {
+                write_str(buf, area.x, y, "$ ", Style::default().fg(Color::Green));
+                let max_w = (area.width as usize).saturating_sub(2);
+                let display: String = cmd.chars().take(max_w).collect();
+                write_str(
+                    buf,
+                    area.x + 2,
+                    y,
+                    &display,
+                    Style::default().fg(Color::Green),
+                );
+            },
+            OutputLine::GridRow(grid, row_idx) => {
+                let row = grid.row(*row_idx);
+                let w = (area.width as usize).min(grid.width() as usize);
+                for col in 0..w {
+                    let cell = &row[col];
+                    if cell.ch == ' '
+                        && cell.fg.is_none()
+                        && cell.bg.is_none()
+                        && cell.modifiers.is_empty()
+                    {
+                        continue;
+                    }
+                    let mut style = Style::default();
+                    if let Some(fg) = cell.fg {
+                        style = style.fg(fg);
+                    }
+                    if let Some(bg) = cell.bg {
+                        style = style.bg(bg);
+                    }
+                    style = style.add_modifier(cell.modifiers);
+                    let x = area.x + col as u16;
+                    if x < area.x + area.width {
+                        buf[(x, y)].set_char(cell.ch).set_style(style);
+                    }
+                }
+            },
+            OutputLine::Error(msg) => {
+                let max_w = area.width as usize;
+                let display: String = msg.chars().take(max_w).collect();
+                write_str(buf, area.x, y, &display, Style::default().fg(Color::Red));
+            },
+            OutputLine::Status(code) => {
+                let label = if *code == 0 {
+                    String::new()
+                } else {
+                    format!("[exit {}]", code)
+                };
+                if !label.is_empty() {
+                    write_str(buf, area.x, y, &label, Style::default().fg(Color::DarkGray));
+                }
+            },
+            OutputLine::Blank => {},
+        }
+    }
+
+    // Render input line
+    let prompt_style = Style::default().fg(Color::Cyan);
+    let input_style = Style::default().fg(Color::White);
+    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+
+    write_str(buf, area.x, input_row, "$ ", prompt_style);
+    let input_text = run_state.input.as_str();
+    let max_input = (area.width as usize).saturating_sub(2);
+    let display_input: String = input_text.chars().take(max_input).collect();
+    write_str(buf, area.x + 2, input_row, &display_input, input_style);
+
+    if is_focused {
+        let cursor_col = run_state.input.cursor_column();
+        let cx = area.x + 2 + cursor_col as u16;
+        if cx < area.x + area.width {
+            buf[(cx, input_row)].set_style(cursor_style);
+        }
+    }
+}
+
+enum OutputLine<'a> {
+    CommandHeader(&'a str),
+    GridRow(&'a crate::run::VtermGrid, usize),
+    Error(&'a str),
+    Status(i32),
+    Blank,
+}
+
+fn render_modal_run(run_state: &RunState, area: Rect, buf: &mut Buffer) {
+    if area.width < 20 || area.height < 8 {
+        return;
+    }
+
+    let box_width = (area.width * 7 / 10).min(area.width.saturating_sub(4));
+    let box_height = (area.height * 8 / 10).min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let modal_area = Rect::new(x, y, box_width, box_height);
+
+    let title = {
+        let raw = run_state
+            .title
+            .as_deref()
+            .or_else(|| run_state.active_block().map(|b| b.command.as_str()))
+            .unwrap_or("run");
+        let max = (box_width as usize).saturating_sub(4);
+        let display: String = raw.chars().take(max).collect();
+        format!(" {display} ")
+    };
+    let border = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(title)
+        .title_style(Style::default().fg(Color::Yellow));
+    let inner = border.inner(modal_area);
+    border.render(modal_area, buf);
+
+    let Some(active) = run_state.active_block() else {
+        return;
+    };
+
+    let grid = &active.grid;
+    let visible_rows = (inner.height as usize).saturating_sub(1);
+    let total = grid.line_count();
+    let start = total.saturating_sub(visible_rows + run_state.scroll_offset);
+    let w = (inner.width as usize).min(grid.width() as usize);
+
+    for (i, row_idx) in (start..total).take(visible_rows).enumerate() {
+        let y = inner.y + i as u16;
+        let row = grid.row(row_idx);
+        for col in 0..w {
+            let cell = &row[col];
+            if cell.ch == ' ' && cell.fg.is_none() && cell.bg.is_none() && cell.modifiers.is_empty()
+            {
+                continue;
+            }
+            let mut style = Style::default();
+            if let Some(fg) = cell.fg {
+                style = style.fg(fg);
+            }
+            if let Some(bg) = cell.bg {
+                style = style.bg(bg);
+            }
+            style = style.add_modifier(cell.modifiers);
+            let cx = inner.x + col as u16;
+            if cx < inner.x + inner.width {
+                buf[(cx, y)].set_char(cell.ch).set_style(style);
+            }
+        }
+    }
+
+    let status_row = inner.y + inner.height.saturating_sub(1);
+    let status = if active.finished {
+        let code = active.exit_status.unwrap_or(-1);
+        if code == 0 {
+            "done -- press Escape to dismiss".to_owned()
+        } else {
+            format!("exited {} -- press Escape to dismiss", code)
+        }
+    } else {
+        "running...".to_owned()
+    };
+    let status_style = if active.finished {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+    write_str(buf, inner.x, status_row, &status, status_style);
 }
 
 fn render_editor(

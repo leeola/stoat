@@ -1,4 +1,4 @@
-use crate::editor_state::EditorId;
+use crate::{editor_state::EditorId, run::RunId};
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 
@@ -27,6 +27,7 @@ pub enum Direction {
 pub enum View {
     Label(String),
     Editor(EditorId),
+    Run(RunId),
 }
 
 /// How a pane is presented on screen.

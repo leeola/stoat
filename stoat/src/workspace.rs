@@ -6,6 +6,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
     pane::{PaneTree, View},
+    run::{RunId, RunState},
 };
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
@@ -44,6 +45,7 @@ pub struct Workspace {
     pub panes: PaneTree,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
+    pub(crate) runs: SlotMap<RunId, RunState>,
     parse_jobs: HashMap<BufferId, ParseJob>,
 }
 
@@ -68,6 +70,7 @@ impl Workspace {
             panes,
             buffers,
             editors,
+            runs: SlotMap::with_key(),
             parse_jobs: HashMap::new(),
         }
     }
@@ -111,12 +114,15 @@ impl Workspace {
 
         let mut visible: Vec<BufferId> = Vec::new();
         for (_, pane) in self.panes.split_panes() {
-            if let View::Editor(editor_id) = pane.view {
-                if let Some(editor) = self.editors.get(editor_id) {
-                    if !visible.contains(&editor.buffer_id) {
-                        visible.push(editor.buffer_id);
+            match pane.view {
+                View::Editor(editor_id) => {
+                    if let Some(editor) = self.editors.get(editor_id) {
+                        if !visible.contains(&editor.buffer_id) {
+                            visible.push(editor.buffer_id);
+                        }
                     }
-                }
+                },
+                View::Label(_) | View::Run(_) => {},
             }
         }
 

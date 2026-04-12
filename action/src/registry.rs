@@ -12,6 +12,7 @@ use crate::{
             SplitRight,
         },
         review::OpenReview,
+        run::{OpenRun, Run, RunInterrupt, RunSubmit},
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
@@ -67,6 +68,22 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: PathBuf::from(raw),
         }))
     });
+    add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
+    add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
+    add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
+    add(Run::DEF, |params| {
+        let raw = params
+            .first()
+            .ok_or(ParamError::Missing("command"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "command",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(Run {
+            command: raw.to_owned(),
+        }))
+    });
 
     map
 }
@@ -104,6 +121,9 @@ mod tests {
         "MoveNextWordStart",
         "MoveNextWordEnd",
         "MovePrevWordStart",
+        "OpenRun",
+        "RunSubmit",
+        "RunInterrupt",
     ];
 
     #[test]
@@ -162,7 +182,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 21);
+        assert_eq!(all().count(), 25);
     }
 
     #[test]

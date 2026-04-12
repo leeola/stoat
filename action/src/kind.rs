@@ -21,4 +21,8 @@ pub enum ActionKind {
     MoveNextWordStart,
     MoveNextWordEnd,
     MovePrevWordStart,
+    OpenRun,
+    RunSubmit,
+    RunInterrupt,
+    Run,
 }

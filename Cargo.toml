@@ -55,6 +55,8 @@ tree-sitter = "0.26"
 cc = "1"
 lsp-types = "0.97"
 async-trait = "0.1"
+portable-pty = "0.8"
+vte = "0.13"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

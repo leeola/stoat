@@ -7,13 +7,14 @@ use crate::{
     git,
     pane::{Axis, Direction, View},
     review::{self, ReviewRow},
+    run::{OutputBlock, RunState},
 };
 use ratatui::{
     style::{Color, Style},
     text::Line,
 };
 use std::{path::Path, sync::Arc};
-use stoat_action::{Action, ActionKind, OpenFile};
+use stoat_action::{Action, ActionKind, OpenFile, Run};
 use stoat_text::{next_word_end, next_word_start, prev_word_start, Bias, Selection, SelectionGoal};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
@@ -60,13 +61,22 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ClosePane => {
             let ws = stoat.active_workspace_mut();
             let focused = ws.panes.focus();
-            let editor_id = match ws.panes.pane(focused).view {
-                View::Editor(id) => Some(id),
-                _ => None,
-            };
-            ws.panes.close(focused);
-            if let Some(id) = editor_id {
-                ws.editors.remove(id);
+            match ws.panes.pane(focused).view {
+                View::Editor(id) => {
+                    ws.panes.close(focused);
+                    ws.editors.remove(id);
+                },
+                View::Run(id) => {
+                    ws.panes.close(focused);
+                    if let Some(mut state) = ws.runs.remove(id) {
+                        if let Some(handle) = &mut state.shell_handle {
+                            handle.kill();
+                        }
+                    }
+                },
+                View::Label(_) => {
+                    ws.panes.close(focused);
+                },
             }
             UpdateEffect::Redraw
         },
@@ -94,6 +104,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MoveNextWordStart => move_word(stoat, WordTarget::NextStart),
         ActionKind::MoveNextWordEnd => move_word(stoat, WordTarget::NextEnd),
         ActionKind::MovePrevWordStart => move_word(stoat, WordTarget::PrevStart),
+        ActionKind::OpenRun => open_run(stoat),
+        ActionKind::RunSubmit => run_submit(stoat),
+        ActionKind::RunInterrupt => run_interrupt(stoat),
+        ActionKind::Run => {
+            let cmd = action
+                .as_any()
+                .downcast_ref::<Run>()
+                .expect("Run action downcast");
+            run_command(stoat, &cmd.command)
+        },
     }
 }
 
@@ -298,7 +318,7 @@ fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
     let focused = ws.panes.focus();
     let old = match ws.panes.pane(focused).view {
         View::Editor(eid) => Some(eid),
-        View::Label(_) => None,
+        _ => None,
     };
     ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
 
@@ -419,7 +439,7 @@ fn open_review(stoat: &mut Stoat) {
     let focused = ws.panes.focus();
     let old = match ws.panes.pane(focused).view {
         View::Editor(eid) => Some(eid),
-        View::Label(_) => None,
+        _ => None,
     };
     ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
     if let Some(old_id) = old {
@@ -449,6 +469,99 @@ fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         }
     }
     UpdateEffect::Redraw
+}
+
+fn open_run(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let cwd = ws.git_root.clone();
+    let id = ws.runs.insert(RunState::new(cwd));
+    let focused = ws.panes.focus();
+    ws.panes.pane_mut(focused).view = View::Run(id);
+    stoat.mode = "run".into();
+    UpdateEffect::Redraw
+}
+
+fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
+    let pty_tx = stoat.pty_tx.clone();
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let View::Run(id) = ws.panes.pane(focused).view else {
+        return UpdateEffect::None;
+    };
+    let Some(run_state) = ws.runs.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    let text = run_state.input.take();
+    if text.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    run_state.history.push(text.clone());
+    run_state.history_cursor = None;
+
+    let pane_area = ws.panes.pane(focused).area;
+    let width = pane_area.width.saturating_sub(2).max(20);
+    run_state.blocks.push(OutputBlock::new(text.clone(), width));
+
+    if let Some(handle) = &mut run_state.shell_handle {
+        let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
+        handle.send_command(&text, &sentinel);
+    } else if let Ok(handle) = crate::run::spawn_shell(&run_state.cwd, width, pty_tx, id) {
+        let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
+        run_state.shell_handle = Some(handle);
+        if let Some(h) = &mut run_state.shell_handle {
+            h.send_command(&text, &sentinel);
+        }
+    }
+
+    UpdateEffect::Redraw
+}
+
+fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let View::Run(id) = ws.panes.pane(focused).view else {
+        return UpdateEffect::None;
+    };
+    let Some(run_state) = ws.runs.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    if let Some(handle) = &mut run_state.shell_handle {
+        handle.send_interrupt();
+    }
+    UpdateEffect::Redraw
+}
+
+fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
+    let pty_tx = stoat.pty_tx.clone();
+    let ws = stoat.active_workspace();
+    let cwd = ws.git_root.clone();
+    let focused_area = ws.panes.pane(ws.panes.focus()).area;
+    let width = focused_area.width.saturating_sub(8).max(20);
+
+    let mut state = RunState::new(cwd.clone());
+    state.title = Some(command.to_owned());
+    state
+        .blocks
+        .push(OutputBlock::new(command.to_owned(), width));
+
+    let id = stoat.active_workspace_mut().runs.insert(state);
+
+    match crate::run::spawn_oneshot(command, &cwd, width, pty_tx, id) {
+        Ok(handle) => {
+            let ws = stoat.active_workspace_mut();
+            if let Some(run_state) = ws.runs.get_mut(id) {
+                run_state.shell_handle = Some(handle);
+            }
+            stoat.modal_run = Some(id);
+            UpdateEffect::Redraw
+        },
+        Err(e) => {
+            tracing::warn!("failed to spawn command: {e}");
+            stoat.active_workspace_mut().runs.remove(id);
+            UpdateEffect::None
+        },
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ pub mod keymap;
 pub mod multi_buffer;
 pub mod pane;
 mod review;
+pub mod run;
 mod selection;
 pub mod ui;
 pub mod workspace;
@@ -37,5 +38,6 @@ pub use multi_buffer::{
     MultiBufferRow, MultiBufferSnapshot,
 };
 pub use pane::{Axis, Direction, Pane, PaneId, PaneTree, Placement, View};
+pub use run::RunId;
 pub use stoat_config::Settings;
 pub use stoat_log as log;

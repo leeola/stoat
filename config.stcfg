@@ -17,11 +17,16 @@ on key {
         Escape -> SetMode(normal);
         q -> Quit();
         s -> SetMode(space_split);
+        t -> [OpenRun(), SetMode(run)];
         h -> [FocusLeft(), SetMode(normal)];
         j -> [FocusDown(), SetMode(normal)];
         k -> [FocusUp(), SetMode(normal)];
         l -> [FocusRight(), SetMode(normal)];
         : -> OpenCommandPalette();
+    }
+    mode == run {
+        Escape -> SetMode(normal);
+        Enter -> RunSubmit();
     }
     mode == space_split {
         Escape -> SetMode(normal);
