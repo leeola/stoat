@@ -14,6 +14,7 @@ pub mod fake;
 pub mod fs;
 pub mod local;
 pub mod lsp;
+pub mod terminal;
 
 pub use claude_code::{
     AgentMessage, ClaudeCodeFactory, ClaudeCodeHost, ClaudeCodeSessions, ClaudeSessionId,
@@ -22,9 +23,11 @@ pub use claude_code::{
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
-    inlay_hint_params, open_params, reference_params, workspace_symbol_params, FakeClaudeCode,
-    FakeLsp,
+    inlay_hint_params, open_params, reference_params,
+    terminal::{inject_done, inject_output, FakeTerminal},
+    workspace_symbol_params, FakeClaudeCode, FakeLsp,
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use local::LocalFs;
 pub use lsp::{LspHost, LspNotification};
+pub use terminal::TerminalHost;

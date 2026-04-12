@@ -1,6 +1,7 @@
 use super::RunId;
+use crate::host::terminal::{PtyTerminal, TerminalHost};
 use portable_pty::CommandBuilder;
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 pub enum PtyNotification {
@@ -15,26 +16,30 @@ pub enum PtyNotification {
 }
 
 pub struct ShellHandle {
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    host: Box<dyn TerminalHost>,
     pub active_sentinel: Option<String>,
 }
 
 impl ShellHandle {
+    pub(crate) fn new(host: Box<dyn TerminalHost>) -> Self {
+        Self {
+            host,
+            active_sentinel: None,
+        }
+    }
+
     pub fn send_command(&mut self, command: &str, sentinel: &str) {
         let payload = format!("{command}\necho {sentinel} $?\n");
-        let _ = self.writer.write_all(payload.as_bytes());
-        let _ = self.writer.flush();
+        let _ = self.host.write(payload.as_bytes());
         self.active_sentinel = Some(sentinel.to_owned());
     }
 
     pub fn send_interrupt(&mut self) {
-        let _ = self.writer.write_all(b"\x03");
-        let _ = self.writer.flush();
+        let _ = self.host.write(b"\x03");
     }
 
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        let _ = self.host.kill();
     }
 }
 
@@ -80,11 +85,8 @@ pub fn spawn_shell(
         pty_reader_task(reader, pty_tx, run_id);
     });
 
-    Ok(ShellHandle {
-        writer,
-        child,
-        active_sentinel: None,
-    })
+    let terminal = PtyTerminal::new(writer, child);
+    Ok(ShellHandle::new(Box::new(terminal)))
 }
 
 pub fn spawn_oneshot(
@@ -128,11 +130,8 @@ pub fn spawn_oneshot(
         pty_reader_task(reader, pty_tx, run_id);
     });
 
-    Ok(ShellHandle {
-        writer,
-        child,
-        active_sentinel: None,
-    })
+    let terminal = PtyTerminal::new(writer, child);
+    Ok(ShellHandle::new(Box::new(terminal)))
 }
 
 fn pty_reader_task(

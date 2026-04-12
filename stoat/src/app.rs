@@ -354,7 +354,7 @@ impl Stoat {
         }
     }
 
-    fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
+    pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::Output { run_id, data } => {

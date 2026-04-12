@@ -1,5 +1,6 @@
 mod claude_code;
 mod lsp;
+pub mod terminal;
 
 pub use self::{
     claude_code::FakeClaudeCode,

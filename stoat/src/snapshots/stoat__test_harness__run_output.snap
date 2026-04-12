@@ -1,0 +1,21 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: inject_output
+focused: #1 of 1
+mode: run
+size: 60x12
+---
+┌──────────────────────────────────────────────────────────┐
+│$ echo hello                                              │
+│hello                                                     │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│$                                                         │
+└──────────────────────────────────────────────────────────┘

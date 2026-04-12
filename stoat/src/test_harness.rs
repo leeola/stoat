@@ -257,6 +257,51 @@ impl TestHarness {
         self.capture("open_review");
     }
 
+    pub fn open_run(&mut self) -> crate::run::RunId {
+        use crate::pane::View;
+        self.type_action("OpenRun()");
+        let ws = self.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        match ws.panes.pane(focused).view {
+            View::Run(id) => id,
+            _ => panic!("open_run: focused pane is not a Run"),
+        }
+    }
+
+    pub fn submit_run(&mut self, text: &str) {
+        use crate::{pane::View, run::OutputBlock};
+        let ws = self.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let View::Run(id) = ws.panes.pane(focused).view else {
+            panic!("submit_run: focused pane is not a Run");
+        };
+        let run_state = ws.runs.get_mut(id).expect("run state exists");
+        run_state.history.push(text.to_owned());
+        let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
+        run_state
+            .blocks
+            .push(OutputBlock::new(text.to_owned(), width));
+        self.capture("submit_run");
+    }
+
+    pub fn inject_run_output(&mut self, run_id: crate::run::RunId, data: &[u8]) {
+        let notif = crate::run::PtyNotification::Output {
+            run_id,
+            data: data.to_vec(),
+        };
+        self.stoat.handle_pty_notification(notif);
+        self.capture("inject_output");
+    }
+
+    pub fn inject_run_done(&mut self, run_id: crate::run::RunId, exit_code: i32) {
+        let notif = crate::run::PtyNotification::CommandDone {
+            run_id,
+            exit_status: Some(exit_code),
+        };
+        self.stoat.handle_pty_notification(notif);
+        self.capture("inject_done");
+    }
+
     pub fn type_action(&mut self, action_expr: &str) {
         let parsed = stoat_config::parse_action(action_expr)
             .unwrap_or_else(|e| panic!("failed to parse action {action_expr:?}: {e:?}"));
@@ -1415,5 +1460,89 @@ mod tests {
         h.open_file(&path);
         h.type_keys("C l l");
         h.assert_snapshot_styled("snapshot_multi_cursor_move_right_styled");
+    }
+
+    #[test]
+    fn snapshot_run_empty() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        h.assert_snapshot("run_empty");
+    }
+
+    #[test]
+    fn snapshot_run_typed_input() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        h.type_text("echo hello");
+        h.assert_snapshot("run_typed_input");
+    }
+
+    #[test]
+    fn snapshot_run_typed_input_styled() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        h.type_text("echo hello");
+        h.assert_snapshot_styled("run_typed_input_styled");
+    }
+
+    #[test]
+    fn snapshot_run_output() {
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("echo hello");
+        h.inject_run_output(id, b"hello\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot("run_output");
+    }
+
+    #[test]
+    fn snapshot_run_output_styled() {
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("echo hello");
+        h.inject_run_output(id, b"hello\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot_styled("run_output_styled");
+    }
+
+    #[test]
+    fn snapshot_run_colored_output() {
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("ls --color");
+        h.inject_run_output(id, b"\x1b[32mgreen\x1b[0m \x1b[31mred\x1b[0m\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot_styled("run_colored_output");
+    }
+
+    #[test]
+    fn snapshot_run_exit_code() {
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("false");
+        h.inject_run_done(id, 1);
+        h.assert_snapshot("run_exit_code");
+    }
+
+    #[test]
+    fn snapshot_run_alt_screen_error() {
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("vim");
+        h.inject_run_output(id, b"\x1b[?1049h");
+        h.assert_snapshot("run_alt_screen_error");
+    }
+
+    #[test]
+    fn snapshot_run_multiple_blocks() {
+        let mut h = TestHarness::with_size(60, 16);
+        let id = h.open_run();
+        h.submit_run("echo one");
+        h.inject_run_output(id, b"one\n");
+        h.inject_run_done(id, 0);
+        h.submit_run("echo two");
+        h.inject_run_output(id, b"two\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot("run_multiple_blocks");
     }
 }
