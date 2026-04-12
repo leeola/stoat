@@ -49,7 +49,7 @@
               xorg.libXi
             ];
 
-          # Library path for GUI applications (especially Wayland/iced)
+          # Library path for GUI applications
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
             buildInputs
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
