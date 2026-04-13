@@ -21,16 +21,27 @@
 
 pub mod text_proto;
 
-use std::env;
+use std::{env, fs};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize logging.
+/// Initialize logging to `<data_local_dir>/stoat/logs/stoat-<pid>.log`.
 ///
-/// Respects environment variable priority: `STOAT_LOG` > `RUST_LOG` > defaults.
+/// Writes to a file so tracing output never hits the raw-mode terminal.
 pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let filter = create_filter()?;
-    fmt().with_env_filter(filter).try_init()?;
+    let dir = log_dir()?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("stoat-{}.log", std::process::id()));
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(file)
+        .with_ansi(false)
+        .try_init()?;
     Ok(())
 }
 
