@@ -7,6 +7,7 @@ pub mod registry;
 pub use action::{Action, ActionDef};
 pub use defs::{
     app::Quit,
+    claude::{ClaudeSubmit, OpenClaude, ToggleDockLeft, ToggleDockRight},
     editor::{
         AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordStart, MoveRight, MoveUp,

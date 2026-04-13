@@ -1,14 +1,15 @@
 use crate::{
     action_handlers,
-    badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection, THROBBER_FRAMES},
+    badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
+    claude_chat::ClaudeChatState,
     command_palette::{CommandPalette, PaletteOutcome},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
-    host::{AgentMessage, ClaudeCodeFactory, ClaudeCodeSessions, ClaudeSessionId},
+    host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    pane::{Pane, View},
+    pane::{DockPanel, DockSide, DockVisibility, FocusTarget, Pane, View},
     review::ReviewRow,
     run::{PtyNotification, RunId, RunState},
     workspace::{Workspace, WorkspaceId},
@@ -23,6 +24,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -54,7 +56,10 @@ pub struct Stoat {
     pub(crate) syntax_styles: SyntaxStyles,
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
     pub(crate) active_workspace: WorkspaceId,
+    claude_host: Option<Arc<dyn ClaudeCodeHost>>,
     claude_sessions: ClaudeCodeSessions,
+    pub(crate) claude_tx: Sender<ClaudeNotification>,
+    claude_rx: Receiver<ClaudeNotification>,
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
     pub(crate) modal_run: Option<RunId>,
@@ -123,6 +128,7 @@ impl Stoat {
         workspaces[active_workspace].id = active_workspace;
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
+        let (claude_tx, claude_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
             size: Rect::default(),
@@ -135,7 +141,10 @@ impl Stoat {
             syntax_styles,
             workspaces,
             active_workspace,
+            claude_host: None,
             claude_sessions: ClaudeCodeSessions::default(),
+            claude_tx,
+            claude_rx,
             pty_tx,
             pty_rx,
             modal_run: None,
@@ -151,8 +160,8 @@ impl Stoat {
         &mut self.workspaces[self.active_workspace]
     }
 
-    pub fn set_claude_code_factory(&mut self, factory: Arc<dyn ClaudeCodeFactory>) {
-        self.claude_sessions.set_factory(factory);
+    pub fn set_claude_code_host(&mut self, host: Arc<dyn ClaudeCodeHost>) {
+        self.claude_host = Some(host);
     }
 
     pub fn claude_sessions(&self) -> &ClaudeCodeSessions {
@@ -195,6 +204,10 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
                 }
+                notif = self.claude_rx.recv() => {
+                    let Some(notif) = notif else { continue };
+                    self.handle_claude_notification(notif)
+                }
             };
             match effect {
                 UpdateEffect::Redraw => {
@@ -214,7 +227,7 @@ impl Stoat {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 let size = self.size;
-                self.active_workspace_mut().panes.resize(size);
+                self.active_workspace_mut().layout(size);
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
@@ -264,6 +277,12 @@ impl Stoat {
 
         if self.mode == "run" {
             if let Some(effect) = self.handle_run_key(key) {
+                return effect;
+            }
+        }
+
+        if self.mode == "insert" {
+            if let Some(effect) = self.handle_insert_key(key) {
                 return effect;
             }
         }
@@ -355,6 +374,197 @@ impl Stoat {
         }
     }
 
+    fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
+        let ws = self.active_workspace();
+        let view = match ws.focus {
+            FocusTarget::SplitPane(_) => {
+                let focused = ws.panes.focus();
+                ws.panes.pane(focused).view.clone()
+            },
+            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+                Some(dock) => dock.view.clone(),
+                None => return None,
+            },
+        };
+        match view {
+            View::Editor(id) => {
+                let editor = ws.editors.get(id)?;
+                Some((id, editor.buffer_id))
+            },
+            View::Claude(session_id) => {
+                let chat = ws.chats.get(&session_id)?;
+                Some((chat.input_editor_id, chat.input_buffer_id))
+            },
+            _ => None,
+        }
+    }
+
+    fn focused_is_claude(&self) -> bool {
+        let ws = self.active_workspace();
+        let view = match ws.focus {
+            FocusTarget::SplitPane(_) => {
+                let focused = ws.panes.focus();
+                &ws.panes.pane(focused).view
+            },
+            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+                Some(dock) => &dock.view,
+                None => return false,
+            },
+        };
+        matches!(view, View::Claude(_))
+    }
+
+    fn handle_insert_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {
+        let (editor_id, buffer_id) = self.focused_editor_ids()?;
+
+        match key.code {
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                self.editor_insert(editor_id, buffer_id, s);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Backspace => {
+                self.editor_backspace(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Delete => {
+                self.editor_delete(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Enter
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.editor_insert(editor_id, buffer_id, "\n");
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if self.focused_is_claude() {
+                    // Fall through to keymap which dispatches ClaudeSubmit.
+                    None
+                } else {
+                    self.editor_insert(editor_id, buffer_id, "\n");
+                    Some(UpdateEffect::Redraw)
+                }
+            },
+            KeyCode::Left => {
+                action_handlers::dispatch(self, &stoat_action::MoveLeft);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Right => {
+                action_handlers::dispatch(self, &stoat_action::MoveRight);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Up => {
+                action_handlers::dispatch(self, &stoat_action::MoveUp);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Down => {
+                action_handlers::dispatch(self, &stoat_action::MoveDown);
+                Some(UpdateEffect::Redraw)
+            },
+            _ => None,
+        }
+    }
+
+    fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
+        let ws = self.active_workspace_mut();
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let buffer = match ws.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(offset..offset, text);
+        }
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let new_offset = offset + text.len();
+        let anchor = new_buf.anchor_at(new_offset, Bias::Right);
+        editor.selections.transform(new_buf, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
+    }
+
+    fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let ws = self.active_workspace_mut();
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let buffer = match ws.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        if offset == 0 {
+            return;
+        }
+        let rope = buf_snapshot.rope();
+        let prev_len = rope
+            .reversed_chars_at(offset)
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(0);
+        let start = offset - prev_len;
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(start..offset, "");
+        }
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let anchor = new_buf.anchor_at(start, Bias::Right);
+        editor.selections.transform(new_buf, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
+    }
+
+    fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let ws = self.active_workspace_mut();
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let buffer = match ws.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let rope = buf_snapshot.rope();
+        let next_len = rope
+            .chars_at(offset)
+            .next()
+            .map(|ch| ch.len_utf8())
+            .unwrap_or(0);
+        if next_len == 0 {
+            return;
+        }
+        let end = offset + next_len;
+        let mut guard = buffer.write().expect("poisoned");
+        guard.edit(offset..end, "");
+    }
+
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let ws = self.active_workspace_mut();
         match notif {
@@ -396,14 +606,190 @@ impl Stoat {
         }
     }
 
-    // FIXME: Wire into Stoat::run() async loop -- needs a third select! branch
-    // that polls all active Claude sessions and routes messages here.
+    fn handle_claude_notification(&mut self, notif: ClaudeNotification) -> UpdateEffect {
+        match notif {
+            ClaudeNotification::CreateRequested { session_id } => {
+                if let Some(host) = self.claude_host.clone() {
+                    let tx = self.claude_tx.clone();
+                    tokio::spawn(async move {
+                        match host.new_session().await {
+                            Ok(session) => {
+                                let _ = tx
+                                    .send(ClaudeNotification::SessionReady {
+                                        session_id,
+                                        session,
+                                    })
+                                    .await;
+                            },
+                            Err(e) => {
+                                let _ = tx
+                                    .send(ClaudeNotification::SessionError {
+                                        session_id,
+                                        error: e.to_string(),
+                                    })
+                                    .await;
+                            },
+                        }
+                    });
+                }
+                UpdateEffect::None
+            },
+            ClaudeNotification::SessionReady {
+                session_id,
+                session,
+            } => {
+                let session: Arc<dyn crate::host::ClaudeCodeSession> = Arc::from(session);
+                let claude_tx = self.claude_tx.clone();
+                self.claude_sessions.fill_slot(session_id, session.clone());
+                tokio::spawn(claude_polling_task(session_id, session.clone(), claude_tx));
+
+                let pending = {
+                    let ws = self.active_workspace_mut();
+                    ws.chats
+                        .get_mut(&session_id)
+                        .map(|chat| std::mem::take(&mut chat.pending_sends))
+                        .unwrap_or_default()
+                };
+                if !pending.is_empty() {
+                    tokio::spawn(async move {
+                        for text in pending {
+                            if let Err(e) = session.send(&text).await {
+                                tracing::error!("claude pending send error: {e}");
+                                break;
+                            }
+                        }
+                    });
+                }
+
+                UpdateEffect::Redraw
+            },
+            ClaudeNotification::SessionError { session_id, error } => {
+                use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+                tracing::error!("claude session {session_id:?} failed: {error}");
+                self.claude_sessions.remove(session_id);
+                let ws = self.active_workspace_mut();
+                if let Some(chat) = ws.chats.get_mut(&session_id) {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::Error(format!(
+                            "Failed to start session: {error}"
+                        )),
+                    });
+                }
+                UpdateEffect::Redraw
+            },
+            ClaudeNotification::Message {
+                session_id,
+                message,
+            } => self.handle_claude_message(session_id, &message),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn complete_pending_claude_sessions(&mut self) {
+        while let Ok(notif) = self.claude_rx.try_recv() {
+            if let ClaudeNotification::CreateRequested { session_id } = notif {
+                if let Some(host) = &self.claude_host {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("test runtime");
+                    match rt.block_on(host.new_session()) {
+                        Ok(session) => {
+                            self.claude_sessions
+                                .fill_slot(session_id, Arc::from(session));
+                        },
+                        Err(e) => {
+                            use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+                            self.claude_sessions.remove(session_id);
+                            let ws = self.active_workspace_mut();
+                            if let Some(chat) = ws.chats.get_mut(&session_id) {
+                                chat.messages.push(ChatMessage {
+                                    role: ChatRole::Assistant,
+                                    content: ChatMessageContent::Error(format!(
+                                        "Failed to start session: {e}"
+                                    )),
+                                });
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_claude_message(
         &mut self,
         session_id: ClaudeSessionId,
         message: &AgentMessage,
     ) -> UpdateEffect {
+        use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+
         let ws = self.active_workspace_mut();
+
+        // Populate chat state.
+        if let Some(chat) = ws.chats.get_mut(&session_id) {
+            match message {
+                AgentMessage::Text { text } => {
+                    chat.streaming_text = None;
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::Text(text.clone()),
+                    });
+                },
+                AgentMessage::PartialText { text } => {
+                    chat.streaming_text = Some(text.clone());
+                },
+                AgentMessage::Thinking { text, .. } => {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::Thinking { text: text.clone() },
+                    });
+                },
+                AgentMessage::ToolUse { name, input, .. } => {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::ToolUse {
+                            name: name.clone(),
+                            input: input.clone(),
+                        },
+                    });
+                },
+                AgentMessage::ToolResult { id, content } => {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::ToolResult {
+                            id: id.clone(),
+                            content: content.clone(),
+                        },
+                    });
+                },
+                AgentMessage::Result {
+                    cost_usd,
+                    duration_ms,
+                    num_turns,
+                } => {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::TurnComplete {
+                            cost_usd: *cost_usd,
+                            duration_ms: *duration_ms,
+                            num_turns: *num_turns,
+                        },
+                    });
+                },
+                AgentMessage::Error { message: msg } => {
+                    chat.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: ChatMessageContent::Error(msg.clone()),
+                    });
+                },
+                AgentMessage::Init { .. }
+                | AgentMessage::Unknown { .. }
+                | AgentMessage::ServerToolUse { .. }
+                | AgentMessage::ServerToolResult { .. } => {},
+            }
+        }
+
         let source = BadgeSource::Claude(session_id);
         let visible = ws.is_claude_visible(session_id);
 
@@ -515,9 +901,33 @@ impl Stoat {
         self.drive_parse_jobs();
         let mut buf = Buffer::empty(self.size);
         let ws = &mut self.workspaces[self.active_workspace];
-        let focused = ws.panes.focus();
+
+        ws.layout(self.size);
+
+        // Render dock panels.
+        for (dock_id, dock) in &ws.docks {
+            if matches!(dock.visibility, DockVisibility::Hidden) {
+                continue;
+            }
+            let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
+            if matches!(dock.visibility, DockVisibility::Minimized) {
+                render_dock_minimized(dock, is_focused, &mut buf);
+            } else {
+                render_dock_open(
+                    dock,
+                    is_focused,
+                    &mut ws.editors,
+                    &ws.buffers,
+                    &ws.chats,
+                    &mut buf,
+                );
+            }
+        }
+
+        // Render split panes.
+        let split_focused = ws.panes.focus();
         for (id, pane) in ws.panes.split_panes() {
-            let is_focused = id == focused;
+            let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
             render_pane(
                 pane,
                 is_focused,
@@ -1355,11 +1765,219 @@ fn badge_border_style(state: BadgeState) -> Style {
     }
 }
 
+async fn claude_polling_task(
+    session_id: ClaudeSessionId,
+    host: Arc<dyn crate::host::ClaudeCodeSession>,
+    tx: Sender<ClaudeNotification>,
+) {
+    while let Some(message) = host.recv().await {
+        if tx
+            .send(ClaudeNotification::Message {
+                session_id,
+                message,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 fn detail_for_message(message: &AgentMessage) -> Option<String> {
     match message {
         AgentMessage::ToolUse { name, .. } => Some(name.clone()),
         AgentMessage::Thinking { .. } => Some("thinking".into()),
         _ => None,
+    }
+}
+
+fn render_dock_minimized(dock: &DockPanel, is_focused: bool, buf: &mut Buffer) {
+    let area = dock.area;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    for y in area.y..area.y + area.height {
+        if let Some(cell) = buf.cell_mut((area.x, y)) {
+            cell.set_char('│').set_style(style);
+        }
+    }
+}
+
+fn render_dock_open(
+    dock: &DockPanel,
+    is_focused: bool,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
+    buf: &mut Buffer,
+) {
+    let area = dock.area;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Vertical separator on the edge facing the split area.
+    let sep_x = match dock.side {
+        DockSide::Left => area.x + area.width,
+        DockSide::Right => area.x.saturating_sub(1),
+    };
+    for y in area.y..area.y + area.height {
+        if let Some(cell) = buf.cell_mut((sep_x, y)) {
+            cell.set_char('│').set_style(border_style);
+        }
+    }
+
+    match &dock.view {
+        View::Claude(session_id) => {
+            if let Some(chat) = chats.get(session_id) {
+                render_claude_pane(chat, editors, buffers, area, is_focused, buf);
+            }
+        },
+        View::Editor(editor_id) => {
+            if let Some(editor) = editors.get_mut(*editor_id) {
+                render_editor(editor, area, border_style, buf, is_focused);
+            }
+        },
+        _ => {},
+    }
+}
+
+fn render_claude_pane(
+    chat: &ClaudeChatState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    area: Rect,
+    is_focused: bool,
+    buf: &mut Buffer,
+) {
+    use crate::claude_chat::{ChatMessageContent, ChatRole};
+
+    if area.height < 3 || area.width < 4 {
+        return;
+    }
+
+    // Determine input area height based on buffer content.
+    let input_lines = buffers
+        .get(chat.input_buffer_id)
+        .map(|b| {
+            let guard = b.read().expect("poisoned");
+            guard.snapshot.visible_text.max_point().row + 1
+        })
+        .unwrap_or(1);
+    let max_input = (area.height / 3).max(1);
+    let input_height = (input_lines as u16).clamp(1, max_input);
+    // +1 for the separator line between messages and input.
+    let separator_y = area.y + area.height - input_height - 1;
+    let msg_area = Rect::new(area.x, area.y, area.width, separator_y - area.y);
+    let input_area = Rect::new(area.x, separator_y + 1, area.width, input_height);
+
+    // Render separator.
+    let sep_style = Style::default().fg(Color::DarkGray);
+    for x in area.x..area.x + area.width {
+        if let Some(cell) = buf.cell_mut((x, separator_y)) {
+            cell.set_char('─').set_style(sep_style);
+        }
+    }
+
+    // Render messages (bottom-aligned).
+    let mut lines: Vec<(Style, String)> = Vec::new();
+    for msg in &chat.messages {
+        let (style, prefix) = match msg.role {
+            ChatRole::User => (Style::default().fg(Color::Green), "you: "),
+            ChatRole::Assistant => (Style::default().fg(Color::Blue), "claude: "),
+        };
+        match &msg.content {
+            ChatMessageContent::Text(text) => {
+                for line in text.lines() {
+                    lines.push((style, format!("{prefix}{line}")));
+                }
+                if text.is_empty() {
+                    lines.push((style, prefix.to_string()));
+                }
+            },
+            ChatMessageContent::Thinking { text } => {
+                let dim = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC);
+                for line in text.lines() {
+                    lines.push((dim, format!("  [thinking] {line}")));
+                }
+            },
+            ChatMessageContent::ToolUse { name, .. } => {
+                let tool_style = Style::default().fg(Color::Yellow);
+                lines.push((tool_style, format!("  [tool: {name}]")));
+            },
+            ChatMessageContent::ToolResult { .. } => {
+                let tool_style = Style::default().fg(Color::DarkGray);
+                lines.push((tool_style, "  [result]".into()));
+            },
+            ChatMessageContent::Error(msg) => {
+                let err_style = Style::default().fg(Color::Red);
+                lines.push((err_style, format!("  error: {msg}")));
+            },
+            ChatMessageContent::TurnComplete {
+                cost_usd,
+                duration_ms,
+                ..
+            } => {
+                let meta = Style::default().fg(Color::DarkGray);
+                lines.push((
+                    meta,
+                    format!(
+                        "  [{:.4}$ | {:.1}s]",
+                        cost_usd,
+                        *duration_ms as f64 / 1000.0
+                    ),
+                ));
+            },
+        }
+    }
+    // Streaming text.
+    if let Some(partial) = &chat.streaming_text {
+        let style = Style::default().fg(Color::Blue);
+        for line in partial.lines() {
+            lines.push((style, format!("claude: {line}")));
+        }
+    }
+
+    // Render bottom-aligned into msg_area.
+    let visible_lines = msg_area.height as usize;
+    let skip = lines
+        .len()
+        .saturating_sub(visible_lines + chat.scroll_offset);
+    let take = visible_lines;
+    let display: Vec<_> = lines.iter().skip(skip).take(take).collect();
+    let start_row = msg_area.y + msg_area.height.saturating_sub(display.len() as u16);
+    for (i, (style, text)) in display.iter().enumerate() {
+        let y = start_row + i as u16;
+        let max_w = msg_area.width as usize;
+        for (j, ch) in text.chars().take(max_w).enumerate() {
+            let x = msg_area.x + j as u16;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch).set_style(*style);
+            }
+        }
+    }
+
+    // Render input editor.
+    if let Some(editor) = editors.get_mut(chat.input_editor_id) {
+        let input_style = if is_focused {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        render_editor(editor, input_area, input_style, buf, is_focused);
     }
 }
 

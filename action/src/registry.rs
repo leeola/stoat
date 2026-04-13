@@ -1,6 +1,7 @@
 use crate::{
     defs::{
         app::Quit,
+        claude::{ClaudeSubmit, OpenClaude, ToggleDockLeft, ToggleDockRight},
         editor::{
             AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
             MovePrevWordStart, MoveRight, MoveUp,
@@ -71,6 +72,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
+    add(OpenClaude::DEF, |_| Ok(Box::new(OpenClaude)));
+    add(ClaudeSubmit::DEF, |_| Ok(Box::new(ClaudeSubmit)));
+    add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
+    add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(Run::DEF, |params| {
         let raw = params
             .first()
@@ -124,6 +129,10 @@ mod tests {
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
+        "OpenClaude",
+        "ClaudeSubmit",
+        "ToggleDockRight",
+        "ToggleDockLeft",
     ];
 
     #[test]
@@ -182,7 +191,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 25);
+        assert_eq!(all().count(), 29);
     }
 
     #[test]

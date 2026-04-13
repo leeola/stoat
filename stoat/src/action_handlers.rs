@@ -5,7 +5,7 @@ use crate::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle, DisplayPoint, RenderBlock},
     editor_state::EditorState,
     git,
-    pane::{Axis, Direction, View},
+    pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
     review::{self, ReviewRow},
     run::{OutputBlock, RunState},
 };
@@ -23,17 +23,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SplitRight => split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => split_pane(stoat, Axis::Horizontal),
         ActionKind::FocusLeft => {
-            stoat
-                .active_workspace_mut()
-                .panes
-                .focus_direction(Direction::Left);
+            focus_direction(stoat, Direction::Left);
             UpdateEffect::Redraw
         },
         ActionKind::FocusRight => {
-            stoat
-                .active_workspace_mut()
-                .panes
-                .focus_direction(Direction::Right);
+            focus_direction(stoat, Direction::Right);
             UpdateEffect::Redraw
         },
         ActionKind::FocusUp => {
@@ -114,6 +108,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("Run action downcast");
             run_command(stoat, &cmd.command)
         },
+        ActionKind::OpenClaude => open_claude(stoat),
+        ActionKind::ClaudeSubmit => claude_submit(stoat),
+        ActionKind::ToggleDockRight => toggle_dock(stoat, DockSide::Right),
+        ActionKind::ToggleDockLeft => toggle_dock(stoat, DockSide::Left),
     }
 }
 
@@ -126,9 +124,22 @@ enum WordTarget {
 
 fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    match ws.panes.pane(focused).view {
+    let view = match ws.focus {
+        FocusTarget::SplitPane(_) => {
+            let focused = ws.panes.focus();
+            ws.panes.pane(focused).view.clone()
+        },
+        FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+            Some(dock) => dock.view.clone(),
+            None => return None,
+        },
+    };
+    match view {
         View::Editor(id) => ws.editors.get_mut(id),
+        View::Claude(session_id) => {
+            let editor_id = ws.chats.get(&session_id)?.input_editor_id;
+            ws.editors.get_mut(editor_id)
+        },
         _ => None,
     }
 }
@@ -564,6 +575,206 @@ fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     }
 }
 
+fn focus_direction(stoat: &mut Stoat, direction: Direction) {
+    let ws = stoat.active_workspace_mut();
+    match (ws.focus, direction) {
+        (FocusTarget::Dock(dock_id), Direction::Left) => {
+            if ws
+                .docks
+                .get(dock_id)
+                .is_some_and(|d| d.side == DockSide::Right)
+            {
+                ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+            }
+        },
+        (FocusTarget::Dock(dock_id), Direction::Right) => {
+            if ws
+                .docks
+                .get(dock_id)
+                .is_some_and(|d| d.side == DockSide::Left)
+            {
+                ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+            }
+        },
+        (FocusTarget::SplitPane(_), Direction::Right) => {
+            if !ws.panes.focus_direction(Direction::Right) {
+                if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
+                    d.side == DockSide::Right && !matches!(d.visibility, DockVisibility::Hidden)
+                }) {
+                    ws.focus = FocusTarget::Dock(dock_id);
+                }
+            }
+        },
+        (FocusTarget::SplitPane(_), Direction::Left) => {
+            if !ws.panes.focus_direction(Direction::Left) {
+                if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
+                    d.side == DockSide::Left && !matches!(d.visibility, DockVisibility::Hidden)
+                }) {
+                    ws.focus = FocusTarget::Dock(dock_id);
+                }
+            }
+        },
+        (FocusTarget::SplitPane(_), _) => {
+            ws.panes.focus_direction(direction);
+        },
+        _ => {},
+    }
+}
+
+fn open_claude(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        claude_chat::ClaudeChatState,
+        editor_state::EditorState,
+        pane::{DockPanel, DockVisibility},
+    };
+
+    let ws = stoat.active_workspace_mut();
+
+    // If a Claude dock already exists, focus it and ensure it's visible.
+    for (dock_id, dock) in &mut ws.docks {
+        if matches!(&dock.view, View::Claude(_)) {
+            if matches!(dock.visibility, DockVisibility::Hidden) {
+                dock.visibility = DockVisibility::Open {
+                    width: dock.default_width,
+                };
+            }
+            ws.focus = FocusTarget::Dock(dock_id);
+            stoat.mode = "normal".into();
+            return UpdateEffect::Redraw;
+        }
+    }
+
+    let session_id = stoat.claude_sessions_mut().reserve_slot();
+    let _ = stoat
+        .claude_tx
+        .try_send(crate::host::ClaudeNotification::CreateRequested { session_id });
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    ws.claude_chat = Some(session_id);
+
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    let editor_id = ws
+        .editors
+        .insert(EditorState::new(buffer_id, buffer, executor));
+
+    ws.chats.insert(
+        session_id,
+        ClaudeChatState {
+            session_id,
+            input_editor_id: editor_id,
+            input_buffer_id: buffer_id,
+            messages: Vec::new(),
+            streaming_text: None,
+            scroll_offset: 0,
+            pending_sends: Vec::new(),
+        },
+    );
+
+    let dock_id = ws.docks.insert(DockPanel {
+        view: View::Claude(session_id),
+        side: DockSide::Right,
+        visibility: DockVisibility::Open { width: 40 },
+        default_width: 40,
+        area: ratatui::layout::Rect::default(),
+    });
+
+    ws.focus = FocusTarget::Dock(dock_id);
+    stoat.mode = "normal".into();
+    UpdateEffect::Redraw
+}
+
+fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+
+    let session_id = match stoat.active_workspace().claude_chat {
+        Some(id) => id,
+        None => return UpdateEffect::None,
+    };
+
+    // Read input text before mutating.
+    let text = {
+        let ws = stoat.active_workspace();
+        let chat = match ws.chats.get(&session_id) {
+            Some(c) => c,
+            None => return UpdateEffect::None,
+        };
+        let buffer = match ws.buffers.get(chat.input_buffer_id) {
+            Some(b) => b,
+            None => return UpdateEffect::None,
+        };
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.snapshot.visible_text.to_string()
+    };
+    if text.trim().is_empty() {
+        return UpdateEffect::None;
+    }
+
+    // Mutate chat state: push user message and clear input buffer.
+    {
+        let ws = stoat.active_workspace_mut();
+        let Some(chat) = ws.chats.get_mut(&session_id) else {
+            return UpdateEffect::None;
+        };
+        chat.messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: ChatMessageContent::Text(text.clone()),
+        });
+
+        let Some(buffer) = ws.buffers.get(chat.input_buffer_id) else {
+            return UpdateEffect::None;
+        };
+        {
+            let len = buffer.read().expect("poisoned").snapshot.visible_text.len();
+            buffer.write().expect("poisoned").edit(0..len, "");
+        }
+        let Some(editor) = ws.editors.get_mut(chat.input_editor_id) else {
+            return UpdateEffect::None;
+        };
+        editor.selections = crate::selection::SelectionsCollection::new();
+    }
+
+    // Send now if host is ready, otherwise queue for when it becomes available.
+    if let Some(host) = stoat.claude_sessions().get(session_id) {
+        let host = host.clone();
+        tokio::spawn(async move {
+            if let Err(e) = host.send(&text).await {
+                tracing::error!("claude send error: {e}");
+            }
+        });
+    } else {
+        let ws = stoat.active_workspace_mut();
+        if let Some(chat) = ws.chats.get_mut(&session_id) {
+            chat.pending_sends.push(text);
+        }
+    }
+
+    UpdateEffect::Redraw
+}
+
+fn toggle_dock(stoat: &mut Stoat, side: DockSide) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    for (dock_id, dock) in &mut ws.docks {
+        if dock.side != side {
+            continue;
+        }
+        dock.visibility = match dock.visibility {
+            DockVisibility::Open { .. } => DockVisibility::Minimized,
+            DockVisibility::Minimized => DockVisibility::Hidden,
+            DockVisibility::Hidden => DockVisibility::Open {
+                width: dock.default_width,
+            },
+        };
+        if matches!(dock.visibility, DockVisibility::Hidden)
+            && matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id)
+        {
+            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+        }
+        return UpdateEffect::Redraw;
+    }
+    UpdateEffect::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +1117,39 @@ mod tests {
         );
         let after_two = cursor_display_positions(&mut stoat);
         assert_eq!(after_two, vec![(0, 0), (0, 7), (1, 2), (2, 7)]);
+    }
+
+    #[test]
+    fn claude_submit_queues_when_session_not_ready() {
+        let mut stoat = stoat();
+
+        dispatch(&mut stoat, &stoat_action::OpenClaude);
+
+        let session_id = stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude_chat should be set");
+        assert!(
+            stoat.claude_sessions().get(session_id).is_none(),
+            "host slot should be None after reserve_slot"
+        );
+
+        {
+            let ws = stoat.active_workspace();
+            let chat = ws.chats.get(&session_id).expect("chat state exists");
+            let buffer = ws.buffers.get(chat.input_buffer_id).expect("buffer");
+            buffer.write().expect("poisoned").edit(0..0, "hello claude");
+        }
+
+        dispatch(&mut stoat, &stoat_action::ClaudeSubmit);
+
+        let ws = stoat.active_workspace();
+        let chat = ws.chats.get(&session_id).expect("chat state");
+        assert_eq!(chat.messages.len(), 1, "user message should be in chat");
+        assert_eq!(
+            chat.pending_sends,
+            vec!["hello claude"],
+            "message should be queued, not dropped"
+        );
     }
 }

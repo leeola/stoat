@@ -1,6 +1,10 @@
-use crate::host::claude_code::{AgentMessage, ClaudeCodeHost};
+use crate::host::claude_code::{AgentMessage, ClaudeCodeHost, ClaudeCodeSession};
 use async_trait::async_trait;
-use std::{collections::VecDeque, io, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    io,
+    sync::{Arc, Mutex},
+};
 
 pub struct FakeClaudeCode {
     state: Mutex<FakeClaudeCodeState>,
@@ -161,7 +165,7 @@ impl FakeClaudeCode {
 }
 
 #[async_trait]
-impl ClaudeCodeHost for FakeClaudeCode {
+impl ClaudeCodeSession for FakeClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
         self.state.lock().unwrap().sent.push(content.to_string());
         Ok(())
@@ -178,6 +182,40 @@ impl ClaudeCodeHost for FakeClaudeCode {
     async fn shutdown(&self) -> io::Result<()> {
         self.state.lock().unwrap().shut_down = true;
         Ok(())
+    }
+}
+
+pub struct FakeClaudeCodeHost {
+    sessions: Mutex<VecDeque<FakeClaudeCode>>,
+}
+
+impl Default for FakeClaudeCodeHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeClaudeCodeHost {
+    pub fn new() -> Self {
+        Self {
+            sessions: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn push_session(&self, session: FakeClaudeCode) {
+        self.sessions.lock().unwrap().push_back(session);
+    }
+}
+
+#[async_trait]
+impl ClaudeCodeHost for FakeClaudeCodeHost {
+    async fn new_session(&self) -> io::Result<Box<dyn ClaudeCodeSession>> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(|s| Box::new(s) as Box<dyn ClaudeCodeSession>)
+            .ok_or_else(|| io::Error::other("no fake sessions queued"))
     }
 }
 

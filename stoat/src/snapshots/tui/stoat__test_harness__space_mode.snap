@@ -19,12 +19,12 @@ size: 80x24
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 │                                               ┌ space ───────────────────────┐
 │                                               │Esc   normal mode             │
 │                                               │  q   exit stoat              │
 │                                               │  s   space_split mode        │
 │                                               │  t   open terminal           │
+│                                               │  c   open claude chat        │
 │                                               │  h   focus pane left         │
 │                                               │  j   focus pane down         │
 │                                               │  k   focus pane up           │

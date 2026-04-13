@@ -1,7 +1,7 @@
 #[cfg(feature = "e2e_claude_code")]
 mod e2e_tests {
     use std::time::Duration;
-    use stoat::host::{AgentMessage, ClaudeCodeHost};
+    use stoat::host::{AgentMessage, ClaudeCodeSession};
     use stoat_agent_claude_code::ClaudeCode;
     use tracing::info;
     use tracing_subscriber::EnvFilter;
@@ -22,7 +22,7 @@ mod e2e_tests {
     /// other non-text chatter. Returns `Err` on timeout, channel close, or
     /// an `Error` message.
     async fn collect_text_until_result(
-        host: &dyn ClaudeCodeHost,
+        host: &dyn ClaudeCodeSession,
         total_timeout: Duration,
     ) -> Result<String, String> {
         let deadline = tokio::time::Instant::now() + total_timeout;
@@ -73,7 +73,7 @@ mod e2e_tests {
             .expect("Failed to spawn Claude");
 
         info!("Sending initial message");
-        ClaudeCodeHost::send(&claude, "What is 2+2? Reply with just the number.")
+        ClaudeCodeSession::send(&claude, "What is 2+2? Reply with just the number.")
             .await
             .expect("Failed to send message");
 
@@ -88,7 +88,7 @@ mod e2e_tests {
         );
 
         info!("Shutting down");
-        ClaudeCodeHost::shutdown(&claude)
+        ClaudeCodeSession::shutdown(&claude)
             .await
             .expect("Failed to shutdown");
     }
@@ -105,7 +105,7 @@ mod e2e_tests {
             .expect("Failed to spawn Claude");
 
         info!("Sending message");
-        ClaudeCodeHost::send(&claude, "What is 10+10? Reply with just the number.")
+        ClaudeCodeSession::send(&claude, "What is 10+10? Reply with just the number.")
             .await
             .expect("Failed to send message");
 
@@ -120,12 +120,12 @@ mod e2e_tests {
         );
 
         assert!(
-            ClaudeCodeHost::is_alive(&claude),
+            ClaudeCodeSession::is_alive(&claude),
             "Expected Claude to be alive before shutdown"
         );
 
         info!("Shutting down");
-        ClaudeCodeHost::shutdown(&claude)
+        ClaudeCodeSession::shutdown(&claude)
             .await
             .expect("Failed to shutdown");
     }
@@ -146,7 +146,7 @@ mod e2e_tests {
             "Expected session id to be a valid UUID, got: {session_id}"
         );
 
-        ClaudeCodeHost::shutdown(&claude)
+        ClaudeCodeSession::shutdown(&claude)
             .await
             .expect("Failed to shutdown");
     }

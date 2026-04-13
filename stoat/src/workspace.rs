@@ -3,10 +3,11 @@ use crate::{
     badge::{BadgeSource, BadgeTray},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
+    claude_chat::ClaudeChatState,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
-    pane::{PaneId, PaneTree, View},
+    pane::{DockId, DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, View},
     run::{RunId, RunState},
 };
 use ratatui::layout::Rect;
@@ -44,9 +45,12 @@ pub struct Workspace {
     pub git_root: PathBuf,
     pub claude_chat: Option<ClaudeSessionId>,
     pub panes: PaneTree,
+    pub(crate) docks: SlotMap<DockId, DockPanel>,
+    pub(crate) focus: FocusTarget,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
+    pub(crate) chats: HashMap<ClaudeSessionId, ClaudeChatState>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -63,16 +67,20 @@ impl Workspace {
         let mut editors = SlotMap::with_key();
         let editor_id = editors.insert(EditorState::new(buffer_id, buffer, executor.clone()));
         let mut panes = PaneTree::new(Rect::default());
-        panes.pane_mut(panes.focus()).view = View::Editor(editor_id);
+        let initial_focus = panes.focus();
+        panes.pane_mut(initial_focus).view = View::Editor(editor_id);
 
         Self {
             id: WorkspaceId::default(),
             git_root,
             claude_chat: None,
             panes,
+            docks: SlotMap::with_key(),
+            focus: FocusTarget::SplitPane(initial_focus),
             buffers,
             editors,
             runs: SlotMap::with_key(),
+            chats: HashMap::new(),
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }
@@ -193,10 +201,67 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn layout(&mut self, total_area: Rect) {
+        let mut split_area = total_area;
+        let min_split_width: u16 = 20;
+
+        for dock in self.docks.values_mut() {
+            if dock.side != DockSide::Left {
+                continue;
+            }
+            let dock_width = dock.effective_width();
+            if dock_width == 0 {
+                dock.area = Rect::default();
+                continue;
+            }
+            if split_area.width.saturating_sub(dock_width + 1) < min_split_width {
+                dock.visibility = DockVisibility::Minimized;
+                dock.area = Rect::new(split_area.x, split_area.y, 1, split_area.height);
+                let consumed = 2; // 1 minimized + 1 separator
+                split_area.x += consumed;
+                split_area.width = split_area.width.saturating_sub(consumed);
+                continue;
+            }
+            dock.area = Rect::new(split_area.x, split_area.y, dock_width, split_area.height);
+            let consumed = dock_width + 1;
+            split_area.x += consumed;
+            split_area.width = split_area.width.saturating_sub(consumed);
+        }
+
+        for dock in self.docks.values_mut() {
+            if dock.side != DockSide::Right {
+                continue;
+            }
+            let dock_width = dock.effective_width();
+            if dock_width == 0 {
+                dock.area = Rect::default();
+                continue;
+            }
+            if split_area.width.saturating_sub(dock_width + 1) < min_split_width {
+                dock.visibility = DockVisibility::Minimized;
+                let x = split_area.x + split_area.width - 1;
+                dock.area = Rect::new(x, split_area.y, 1, split_area.height);
+                split_area.width = split_area.width.saturating_sub(2);
+                continue;
+            }
+            let x = split_area.x + split_area.width - dock_width;
+            dock.area = Rect::new(x, split_area.y, dock_width, split_area.height);
+            split_area.width = split_area.width.saturating_sub(dock_width + 1);
+        }
+
+        self.panes.resize(split_area);
+    }
+
     pub(crate) fn is_claude_visible(&self, session_id: ClaudeSessionId) -> bool {
-        self.panes
+        let in_split = self
+            .panes
             .split_panes()
-            .any(|(_, pane)| matches!(&pane.view, View::Claude(id) if *id == session_id))
+            .any(|(_, pane)| matches!(&pane.view, View::Claude(id) if *id == session_id));
+        let in_dock = self.docks.values().any(|dock| {
+            !matches!(dock.visibility, DockVisibility::Hidden)
+                && matches!(&dock.view, View::Claude(id) if *id == session_id)
+        });
+        in_split || in_dock
     }
 
     pub(crate) fn show_claude_session(&mut self, pane_id: PaneId, session_id: ClaudeSessionId) {

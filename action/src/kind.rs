@@ -25,4 +25,8 @@ pub enum ActionKind {
     RunSubmit,
     RunInterrupt,
     Run,
+    OpenClaude,
+    ClaudeSubmit,
+    ToggleDockRight,
+    ToggleDockLeft,
 }

@@ -4,7 +4,7 @@ use std::{io, sync::Arc};
 
 /// Host-provided callback for interactive tool-permission prompts.
 ///
-/// When a [`ClaudeCodeHost`] is built with a registered callback, the
+/// When a [`ClaudeCodeSession`] is built with a registered callback, the
 /// underlying wrapper asks the `claude` CLI to route permission prompts
 /// over the control protocol (`--permission-prompt-tool-name stdio`).
 /// Each incoming `can_use_tool` control request is forwarded here; the
@@ -123,67 +123,74 @@ pub enum AgentMessage {
     },
 }
 
+/// Per-session I/O handle for an active Claude Code conversation.
 #[async_trait]
-pub trait ClaudeCodeHost: Send + Sync {
+pub trait ClaudeCodeSession: Send + Sync {
     async fn send(&self, content: &str) -> io::Result<()>;
     async fn recv(&self) -> Option<AgentMessage>;
     fn is_alive(&self) -> bool;
     async fn shutdown(&self) -> io::Result<()>;
 }
 
-/// Spawns new [`ClaudeCodeHost`] instances on demand. Implemented outside of
-/// stoat (by the `stoat_agent_claude_code` crate) so stoat can create sessions
-/// without importing the concrete process-backed type.
+/// Session manager that creates new [`ClaudeCodeSession`] instances.
+///
+/// Production uses a launcher that spawns Claude CLI subprocesses.
+/// Tests use a fake that returns pre-configured sessions.
 #[async_trait]
-pub trait ClaudeCodeFactory: Send + Sync {
-    async fn create(&self) -> io::Result<Arc<dyn ClaudeCodeHost>>;
+pub trait ClaudeCodeHost: Send + Sync {
+    async fn new_session(&self) -> io::Result<Box<dyn ClaudeCodeSession>>;
 }
 
 new_key_type! {
     pub struct ClaudeSessionId;
 }
 
-/// Owns the lifecycle of zero or more active Claude Code sessions.
-///
-/// A `ClaudeCodeSessions` with no factory cannot spawn new sessions;
-/// [`Self::create_session`] returns an error until [`Self::set_factory`] is
-/// called. Tests and bare `Stoat` instances start without a factory.
+pub enum ClaudeNotification {
+    CreateRequested {
+        session_id: ClaudeSessionId,
+    },
+    SessionReady {
+        session_id: ClaudeSessionId,
+        session: Box<dyn ClaudeCodeSession>,
+    },
+    SessionError {
+        session_id: ClaudeSessionId,
+        error: String,
+    },
+    Message {
+        session_id: ClaudeSessionId,
+        message: AgentMessage,
+    },
+}
+
+/// Owns zero or more active Claude Code sessions.
 pub struct ClaudeCodeSessions {
-    factory: Option<Arc<dyn ClaudeCodeFactory>>,
-    sessions: SlotMap<ClaudeSessionId, Arc<dyn ClaudeCodeHost>>,
+    sessions: SlotMap<ClaudeSessionId, Option<Arc<dyn ClaudeCodeSession>>>,
 }
 
 impl ClaudeCodeSessions {
     pub fn new() -> Self {
         Self {
-            factory: None,
             sessions: SlotMap::with_key(),
         }
     }
 
-    pub fn set_factory(&mut self, factory: Arc<dyn ClaudeCodeFactory>) {
-        self.factory = Some(factory);
+    pub fn reserve_slot(&mut self) -> ClaudeSessionId {
+        self.sessions.insert(None)
     }
 
-    pub fn has_factory(&self) -> bool {
-        self.factory.is_some()
+    pub fn fill_slot(&mut self, id: ClaudeSessionId, session: Arc<dyn ClaudeCodeSession>) {
+        if let Some(slot) = self.sessions.get_mut(id) {
+            *slot = Some(session);
+        }
     }
 
-    pub async fn create_session(&mut self) -> io::Result<ClaudeSessionId> {
-        let factory = self
-            .factory
-            .as_ref()
-            .ok_or_else(|| io::Error::other("no claude code factory registered"))?;
-        let host = factory.create().await?;
-        Ok(self.sessions.insert(host))
+    pub fn get(&self, id: ClaudeSessionId) -> Option<&Arc<dyn ClaudeCodeSession>> {
+        self.sessions.get(id).and_then(|s| s.as_ref())
     }
 
-    pub fn get(&self, id: ClaudeSessionId) -> Option<&Arc<dyn ClaudeCodeHost>> {
-        self.sessions.get(id)
-    }
-
-    pub fn remove(&mut self, id: ClaudeSessionId) -> Option<Arc<dyn ClaudeCodeHost>> {
-        self.sessions.remove(id)
+    pub fn remove(&mut self, id: ClaudeSessionId) -> Option<Arc<dyn ClaudeCodeSession>> {
+        self.sessions.remove(id).flatten()
     }
 
     pub fn ids(&self) -> impl Iterator<Item = ClaudeSessionId> + '_ {
@@ -196,10 +203,6 @@ impl ClaudeCodeSessions {
 
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
-    }
-
-    pub fn insert_host(&mut self, host: Arc<dyn ClaudeCodeHost>) -> ClaudeSessionId {
-        self.sessions.insert(host)
     }
 }
 
@@ -214,53 +217,29 @@ mod tests {
     use super::*;
     use crate::host::fake::FakeClaudeCode;
 
-    struct FakeFactory;
-
-    #[async_trait]
-    impl ClaudeCodeFactory for FakeFactory {
-        async fn create(&self) -> io::Result<Arc<dyn ClaudeCodeHost>> {
-            Ok(Arc::new(FakeClaudeCode::new()))
-        }
-    }
-
-    fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    }
-
     #[test]
-    fn create_without_factory_errors() {
-        rt().block_on(async {
-            let mut sessions = ClaudeCodeSessions::new();
-            let err = sessions.create_session().await.unwrap_err();
-            assert_eq!(err.to_string(), "no claude code factory registered");
-            assert!(sessions.is_empty());
-        });
-    }
+    fn reserve_fill_get_remove() {
+        let mut sessions = ClaudeCodeSessions::new();
 
-    #[test]
-    fn create_get_remove_roundtrip() {
-        rt().block_on(async {
-            let mut sessions = ClaudeCodeSessions::new();
-            sessions.set_factory(Arc::new(FakeFactory));
+        let id_a = sessions.reserve_slot();
+        let id_b = sessions.reserve_slot();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.get(id_a).is_none(), "unfilled slot returns None");
 
-            let id_a = sessions.create_session().await.unwrap();
-            let id_b = sessions.create_session().await.unwrap();
-            assert_eq!(sessions.len(), 2);
-            assert_ne!(id_a, id_b);
+        let fake_a: Arc<dyn ClaudeCodeSession> = Arc::new(FakeClaudeCode::new());
+        let fake_b: Arc<dyn ClaudeCodeSession> = Arc::new(FakeClaudeCode::new());
+        sessions.fill_slot(id_a, fake_a);
+        sessions.fill_slot(id_b, fake_b);
 
-            assert!(sessions.get(id_a).is_some());
-            assert!(sessions.get(id_b).is_some());
+        assert!(sessions.get(id_a).is_some());
+        assert!(sessions.get(id_b).is_some());
 
-            let removed = sessions.remove(id_a).expect("session present");
-            assert!(removed.is_alive());
-            assert!(sessions.get(id_a).is_none());
-            assert_eq!(sessions.len(), 1);
+        let removed = sessions.remove(id_a).expect("session present");
+        assert!(removed.is_alive());
+        assert!(sessions.get(id_a).is_none());
+        assert_eq!(sessions.len(), 1);
 
-            let remaining: Vec<_> = sessions.ids().collect();
-            assert_eq!(remaining, vec![id_b]);
-        });
+        let remaining: Vec<_> = sessions.ids().collect();
+        assert_eq!(remaining, vec![id_b]);
     }
 }

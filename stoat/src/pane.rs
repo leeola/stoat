@@ -4,6 +4,7 @@ use slotmap::{new_key_type, SlotMap};
 
 new_key_type! {
     pub struct PaneId;
+    pub struct DockId;
     struct NodeId;
 }
 
@@ -49,6 +50,44 @@ pub enum Placement {
     Dock,
     /// Exists but not rendered.
     Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockVisibility {
+    Open { width: u16 },
+    Minimized,
+    Hidden,
+}
+
+#[derive(Debug)]
+pub struct DockPanel {
+    pub view: View,
+    pub side: DockSide,
+    pub visibility: DockVisibility,
+    pub default_width: u16,
+    pub area: Rect,
+}
+
+impl DockPanel {
+    pub fn effective_width(&self) -> u16 {
+        match self.visibility {
+            DockVisibility::Open { width } => width,
+            DockVisibility::Minimized => 1,
+            DockVisibility::Hidden => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    SplitPane(PaneId),
+    Dock(DockId),
 }
 
 #[derive(Debug)]

@@ -4,6 +4,7 @@ on key {
         Escape -> Quit();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
+        i -> SetMode(insert);
         C -> AddSelectionBelow();
         h -> MoveLeft();
         j -> MoveDown();
@@ -13,11 +14,16 @@ on key {
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
     }
+    mode == insert {
+        Escape -> SetMode(normal);
+        Enter -> ClaudeSubmit();
+    }
     mode == space {
         Escape -> SetMode(normal);
         q -> Quit();
         s -> SetMode(space_split);
         t -> [OpenRun(), SetMode(run)];
+        c -> [OpenClaude(), SetMode(normal)];
         h -> [FocusLeft(), SetMode(normal)];
         j -> [FocusDown(), SetMode(normal)];
         k -> [FocusUp(), SetMode(normal)];

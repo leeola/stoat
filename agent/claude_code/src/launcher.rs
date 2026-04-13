@@ -1,12 +1,12 @@
-//! [`ClaudeCodeFactory`] implementation that spawns real [`ClaudeCode`]
+//! [`ClaudeCodeHost`] implementation that spawns real [`ClaudeCode`]
 //! subprocesses. Stoat registers one of these at startup; each call to
-//! [`ClaudeCodeFactory::create`] launches a fresh subprocess using the
+//! [`ClaudeCodeHost::new_session`] launches a fresh subprocess using the
 //! launcher's configured defaults.
 
 use crate::{ClaudeCode, SessionConfig};
 use async_trait::async_trait;
-use std::{io, sync::Arc};
-use stoat::host::{ClaudeCodeFactory, ClaudeCodeHost};
+use std::io;
+use stoat::host::{ClaudeCodeHost, ClaudeCodeSession};
 
 #[derive(Debug, Default)]
 pub struct ClaudeCodeLauncher {
@@ -24,11 +24,11 @@ impl ClaudeCodeLauncher {
 }
 
 #[async_trait]
-impl ClaudeCodeFactory for ClaudeCodeLauncher {
-    async fn create(&self) -> io::Result<Arc<dyn ClaudeCodeHost>> {
+impl ClaudeCodeHost for ClaudeCodeLauncher {
+    async fn new_session(&self) -> io::Result<Box<dyn ClaudeCodeSession>> {
         let claude_code = ClaudeCode::new(self.default_config.clone())
             .await
             .map_err(io::Error::other)?;
-        Ok(Arc::new(claude_code) as Arc<dyn ClaudeCodeHost>)
+        Ok(Box::new(claude_code))
     }
 }

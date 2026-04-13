@@ -10,16 +10,6 @@ use tokio::{
 };
 use tracing::{debug, error, trace};
 
-const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(15);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InitRaceOutcome {
-    Initialized,
-    EarlyExit,
-    Timeout,
-    StdoutHandlerDied,
-}
-
 /// Bundle of dependencies handed to [`ProcessBuilder::setup_handlers`].
 /// Grouped into a struct so the function does not exceed Clippy's
 /// `too_many_arguments` threshold and to keep call sites readable.
@@ -296,16 +286,17 @@ impl ProcessBuilder {
         self.launch(true).await
     }
 
-    /// Spawn the subprocess and wait for the first `system(init)` message,
-    /// an early process exit, or the init timeout - whichever comes first.
-    /// A [`Process`] is only returned when init is observed.
+    /// Spawn the subprocess and return immediately. The CLI in `--print
+    /// --input-format stream-json` mode does not emit a system init
+    /// message until the first user message is sent, so we cannot block
+    /// on init here. The stdout handler still forwards every message
+    /// (including a future init) through the normal channel.
     async fn launch(self, use_resume: bool) -> Result<Process, SessionError> {
-        let session_id = self
+        let _session_id = self
             .session_id
             .as_ref()
             .ok_or(SessionError::SessionIdMissing)?
             .clone();
-        let init_timeout = self.init_timeout.unwrap_or(DEFAULT_INIT_TIMEOUT);
 
         let args = self.build_args(use_resume);
         let mut child = self
@@ -326,7 +317,6 @@ impl ProcessBuilder {
             },
         };
 
-        let (init_tx, init_rx) = oneshot::channel::<()>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let (stdin_handle, stdout_handle, stderr_handle) = Self::setup_handlers(HandlerDeps {
             stdin,
@@ -336,11 +326,11 @@ impl ProcessBuilder {
             stdout_tx,
             tx_log: tx_log.clone(),
             rx_log: rx_log.clone(),
-            init_tx: Some(init_tx),
+            init_tx: None,
             shutdown_rx,
         });
 
-        let mut process = Process {
+        Ok(Process {
             child,
             stdin_handle,
             stdout_handle,
@@ -348,49 +338,7 @@ impl ProcessBuilder {
             shutdown_tx: Some(shutdown_tx),
             tx_log,
             rx_log,
-        };
-
-        let outcome = tokio::select! {
-            init = init_rx => match init {
-                Ok(()) => InitRaceOutcome::Initialized,
-                Err(_) => InitRaceOutcome::StdoutHandlerDied,
-            },
-            _ = process.child.wait() => InitRaceOutcome::EarlyExit,
-            _ = tokio::time::sleep(init_timeout) => InitRaceOutcome::Timeout,
-        };
-
-        if outcome == InitRaceOutcome::Initialized {
-            return Ok(process);
-        }
-
-        match process.close().await {
-            Ok(recovered) => {
-                let stderr_tail = recovered.last_stderr;
-                if use_resume && stderr_tail.contains("No conversation found with session ID") {
-                    return Err(SessionError::SessionNotFound { session_id });
-                }
-                if !use_resume && stderr_tail.contains("is already in use") {
-                    return Err(SessionError::SessionAlreadyExists { session_id });
-                }
-                let context = match outcome {
-                    InitRaceOutcome::Timeout => format!(
-                        "Timed out waiting for init after {}s (stderr: {stderr_tail})",
-                        init_timeout.as_secs()
-                    ),
-                    InitRaceOutcome::EarlyExit => {
-                        format!("Process exited before init (stderr: {stderr_tail})")
-                    },
-                    InitRaceOutcome::StdoutHandlerDied => {
-                        format!("stdout handler terminated before init (stderr: {stderr_tail})")
-                    },
-                    InitRaceOutcome::Initialized => unreachable!(),
-                };
-                Err(SessionError::SpawnFailed {
-                    source: std::io::Error::other(context),
-                })
-            },
-            Err(e) => Err(SessionError::ChannelRecoveryFailed { source: e }),
-        }
+        })
     }
 
     // Build command arguments
@@ -989,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn launch_early_exit_returns_error_within_short_time() {
+    async fn launch_returns_immediately_even_if_process_exits_fast() {
         let Some(false_bin) = first_existing_path(&["/bin/false", "/usr/bin/false"]) else {
             eprintln!("skipping: no /bin/false on this platform");
             return;
@@ -1002,22 +950,19 @@ mod tests {
         let result = ProcessBuilder::new(stdin_rx, stdout_tx)
             .session_id("sess-race-test")
             .binary(false_bin)
-            .init_timeout(Duration::from_secs(10))
             .new_session()
             .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "expected error from fast-exit binary");
+        assert!(result.is_ok(), "launch should succeed immediately");
         assert!(
             elapsed < Duration::from_secs(2),
-            "race should resolve fast on early exit, took {elapsed:?}",
+            "launch should not block, took {elapsed:?}",
         );
     }
 
     #[tokio::test]
-    async fn launch_respects_init_timeout_with_slow_binary() {
-        // `sleep 60` never emits init; the race should abort on timeout far
-        // sooner than the 60s sleep completes.
+    async fn launch_returns_immediately_without_waiting_for_init() {
         let sleep_bin =
             match first_existing_path(&["/bin/sleep", "/usr/bin/sleep"]).or(Some("sleep")) {
                 Some(p) => p,
@@ -1032,28 +977,16 @@ mod tests {
 
         let start = std::time::Instant::now();
         let result = ProcessBuilder::new(stdin_rx, stdout_tx)
-            .session_id("sess-timeout-test")
+            .session_id("sess-no-wait-test")
             .binary(sleep_bin)
-            .init_timeout(Duration::from_millis(300))
             .new_session()
             .await;
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "expected timeout error from slow binary");
+        assert!(result.is_ok(), "launch should succeed without init");
         assert!(
             elapsed < Duration::from_secs(2),
-            "timeout branch should fire in ~300ms, took {elapsed:?}",
+            "launch should not wait for init, took {elapsed:?}",
         );
-        match result {
-            Err(SessionError::SpawnFailed { source }) => {
-                let msg = source.to_string();
-                assert!(
-                    msg.contains("Timed out") || msg.contains("terminated"),
-                    "expected timeout error, got: {msg}"
-                );
-            },
-            Err(other) => panic!("expected SpawnFailed, got {other:?}"),
-            Ok(_) => panic!("expected error, got success"),
-        }
     }
 }

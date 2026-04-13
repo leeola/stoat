@@ -3,6 +3,7 @@ pub mod app;
 pub mod badge;
 pub mod buffer;
 mod buffer_registry;
+pub mod claude_chat;
 pub mod command_palette;
 pub mod diff_map;
 pub mod display_map;
@@ -39,7 +40,10 @@ pub use multi_buffer::{
     ExcerptBoundary, ExcerptId, ExcerptInfo, MultiBuffer, MultiBufferAnchor, MultiBufferPoint,
     MultiBufferRow, MultiBufferSnapshot,
 };
-pub use pane::{Axis, Direction, Pane, PaneId, PaneTree, Placement, View};
+pub use pane::{
+    Axis, Direction, DockId, DockPanel, DockSide, DockVisibility, FocusTarget, Pane, PaneId,
+    PaneTree, Placement, View,
+};
 pub use run::RunId;
 pub use stoat_config::Settings;
 pub use stoat_log as log;

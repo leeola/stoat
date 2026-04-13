@@ -43,6 +43,7 @@ pub struct TestHarness {
     stoat: Stoat,
     #[allow(dead_code)]
     scheduler: Arc<TestScheduler>,
+    fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -53,12 +54,15 @@ impl TestHarness {
     fn new(width: u16, height: u16) -> Self {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
+        let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
         let mut stoat = Stoat::new(executor, Settings::default(), std::path::PathBuf::new());
+        stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
             stoat,
             scheduler,
+            fake_claude_host,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -393,11 +397,30 @@ impl TestHarness {
         self.sub_frame += 1;
     }
 
-    pub fn insert_claude_session(
+    pub fn open_claude_with_fake(
         &mut self,
-        host: Arc<crate::host::FakeClaudeCode>,
+        fake: crate::host::FakeClaudeCode,
     ) -> crate::host::ClaudeSessionId {
-        self.stoat.claude_sessions_mut().insert_host(host)
+        self.fake_claude_host.push_session(fake);
+        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenClaude);
+        self.stoat.complete_pending_claude_sessions();
+        let id = self
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("OpenClaude should set claude_chat");
+        self.capture("open_claude");
+        id
+    }
+
+    pub fn create_background_session(
+        &mut self,
+        fake: crate::host::FakeClaudeCode,
+    ) -> crate::host::ClaudeSessionId {
+        let id = self.stoat.claude_sessions_mut().reserve_slot();
+        let session: Arc<dyn crate::host::ClaudeCodeSession> = Arc::new(fake);
+        self.stoat.claude_sessions_mut().fill_slot(id, session);
+        id
     }
 
     pub fn inject_claude_message(
@@ -410,9 +433,19 @@ impl TestHarness {
     }
 
     pub fn show_claude_session(&mut self, session_id: crate::host::ClaudeSessionId) {
+        use crate::{
+            badge::BadgeSource,
+            pane::{DockVisibility, View},
+        };
         let ws = self.stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        ws.show_claude_session(focused, session_id);
+        for (_, dock) in &mut ws.docks {
+            if matches!(&dock.view, View::Claude(id) if *id == session_id) {
+                dock.visibility = DockVisibility::Open {
+                    width: dock.default_width,
+                };
+            }
+        }
+        ws.badges.remove_by_source(BadgeSource::Claude(session_id));
         self.capture("show_claude_session");
     }
 
@@ -1601,10 +1634,13 @@ mod tests {
         host::{AgentMessage, ClaudeSessionId, FakeClaudeCode},
     };
 
-    fn setup_claude_session(h: &mut TestHarness) -> (Arc<FakeClaudeCode>, ClaudeSessionId) {
-        let fake = Arc::new(FakeClaudeCode::new());
-        let id = h.insert_claude_session(fake.clone());
-        (fake, id)
+    fn setup_claude_session(h: &mut TestHarness) -> ((), ClaudeSessionId) {
+        let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        // Open -> Minimized -> Hidden: hide the dock so badge tests
+        // start with a non-visible session.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        ((), id)
     }
 
     #[test]
@@ -1750,11 +1786,10 @@ mod tests {
         let mut h = TestHarness::default();
         let (_, id) = setup_claude_session(&mut h);
 
-        // Split so we have two panes, show Claude in the new one
-        h.type_action("SplitRight()");
+        // Show the dock
         h.show_claude_session(id);
 
-        // Activity while visible - no badge
+        // Activity while visible -- no badge
         h.inject_claude_message(
             id,
             &AgentMessage::Thinking {
@@ -1764,10 +1799,11 @@ mod tests {
         );
         assert!(h.claude_badge_state(id).is_none());
 
-        // Close the Claude pane - hides it
-        h.type_action("ClosePane()");
+        // Hide the dock (Open -> Minimized -> Hidden)
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
 
-        // New activity while hidden - badge appears
+        // New activity while hidden -- badge appears
         h.inject_claude_message(
             id,
             &AgentMessage::ToolUse {
@@ -1803,7 +1839,7 @@ mod tests {
     fn multiple_sessions_independent() {
         let mut h = TestHarness::default();
         let (_, id_a) = setup_claude_session(&mut h);
-        let (_, id_b) = setup_claude_session(&mut h);
+        let id_b = h.create_background_session(FakeClaudeCode::new());
 
         h.inject_claude_message(
             id_a,

@@ -50,7 +50,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     rt.block_on(async {
         let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
-        stoat.set_claude_code_factory(Arc::new(ClaudeCodeLauncher::new()));
+        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new()));
 
         match args.command {
             Some(Command::Review) => stoat.open_review(),

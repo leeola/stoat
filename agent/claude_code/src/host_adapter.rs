@@ -1,4 +1,4 @@
-//! Adapter that exposes [`ClaudeCode`] via Stoat's [`ClaudeCodeHost`] trait.
+//! Adapter that exposes [`ClaudeCode`] via Stoat's [`ClaudeCodeSession`] trait.
 //!
 //! The wire protocol (`SdkMessage`) and the host trait (`AgentMessage`)
 //! have different shapes: a single `SdkMessage::Assistant` can carry an
@@ -15,7 +15,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::io;
-use stoat::host::{AgentMessage, ClaudeCodeHost};
+use stoat::host::{AgentMessage, ClaudeCodeSession};
 
 /// Expand one wire [`SdkMessage`] into zero or more [`AgentMessage`]s.
 ///
@@ -156,7 +156,7 @@ fn extract_tool_results(message: UserMessage) -> Vec<AgentMessage> {
 }
 
 #[async_trait]
-impl ClaudeCodeHost for ClaudeCode {
+impl ClaudeCodeSession for ClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
         self.send_message(content).await.map_err(io::Error::other)
     }

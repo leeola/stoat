@@ -17,15 +17,15 @@ pub mod lsp;
 pub mod terminal;
 
 pub use claude_code::{
-    AgentMessage, ClaudeCodeFactory, ClaudeCodeHost, ClaudeCodeSessions, ClaudeSessionId,
-    PermissionCallback, PermissionResult, ToolPermissionContext,
+    AgentMessage, ClaudeCodeHost, ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification,
+    ClaudeSessionId, PermissionCallback, PermissionResult, ToolPermissionContext,
 };
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminal},
-    workspace_symbol_params, FakeClaudeCode, FakeLsp,
+    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeLsp,
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use local::LocalFs;

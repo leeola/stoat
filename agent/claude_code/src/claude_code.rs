@@ -50,7 +50,7 @@ pub struct ClaudeCode {
 
     /// Buffered [`AgentMessage`]s produced by expanding a single wire
     /// [`SdkMessage`] into multiple host messages. Drained by the
-    /// `ClaudeCodeHost::recv` adapter before pulling the next wire
+    /// `ClaudeCodeSession::recv` adapter before pulling the next wire
     /// message.
     pub(crate) pending: StdMutex<VecDeque<AgentMessage>>,
 
@@ -110,7 +110,7 @@ impl ClaudeCode {
     }
 
     /// Shut the subprocess down. Inherent counterpart of
-    /// [`ClaudeCodeHost::shutdown`] so the trait impl can delegate here
+    /// [`ClaudeCodeSession::shutdown`] so the trait impl can delegate here
     /// without a name collision.
     pub(crate) async fn shutdown_inner(&self) -> Result<()> {
         info!(
@@ -134,7 +134,7 @@ impl ClaudeCode {
     }
 
     /// Check if the Claude process is still alive. Inherent counterpart
-    /// of [`ClaudeCodeHost::is_alive`].
+    /// of [`ClaudeCodeSession::is_alive`].
     pub(crate) fn is_alive_inner(&self) -> bool {
         let mut guard = self
             .process
