@@ -1,5 +1,6 @@
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
+    badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     display_map::syntax_theme::SyntaxStyles,
@@ -47,6 +48,7 @@ pub struct Workspace {
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    pub(crate) badges: BadgeTray,
 }
 
 struct ParseJob {
@@ -72,6 +74,7 @@ impl Workspace {
             editors,
             runs: SlotMap::with_key(),
             parse_jobs: HashMap::new(),
+            badges: BadgeTray::new(),
         }
     }
 

@@ -1,5 +1,6 @@
 use crate::{
     action_handlers,
+    badge::{Anchor, BadgeState, BadgeTray, StackDirection},
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     command_palette::{CommandPalette, PaletteOutcome},
@@ -431,6 +432,7 @@ impl Stoat {
                 &mut buf,
             );
         }
+        render_badges(&ws.badges, self.size, &mut buf);
         if let Some(run_id) = self.modal_run {
             if let Some(run_state) = ws.runs.get(run_id) {
                 render_modal_run(run_state, self.size, &mut buf);
@@ -1039,6 +1041,90 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
         lines.push(current);
     }
     lines
+}
+
+fn render_badges(badges: &BadgeTray, area: Rect, buf: &mut Buffer) {
+    if badges.is_empty() {
+        return;
+    }
+
+    for anchor in Anchor::ALL {
+        let tray = badges.tray(anchor);
+        let visible: Vec<_> = badges
+            .at_anchor(anchor)
+            .take(tray.max_visible as usize)
+            .collect();
+        if visible.is_empty() {
+            continue;
+        }
+
+        let (mut x, mut y) = anchor_origin(anchor, area);
+        let grows_left = matches!(
+            anchor,
+            Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight
+        );
+        let grows_up = matches!(
+            anchor,
+            Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight
+        );
+
+        for (_, badge) in &visible {
+            let text = match &badge.detail {
+                Some(d) => format!("[{} {}]", badge.label, d),
+                None => format!("[{}]", badge.label),
+            };
+            let width = (text.len() as u16).clamp(3, 8);
+            let draw_x = if grows_left {
+                x.saturating_sub(width)
+            } else {
+                x
+            };
+
+            let style = badge_style(badge.state);
+            write_str(buf, draw_x, y, &text, style);
+
+            match tray.stack {
+                StackDirection::Horizontal => {
+                    if grows_left {
+                        x = x.saturating_sub(width + 1);
+                    } else {
+                        x += width + 1;
+                    }
+                },
+                StackDirection::Vertical => {
+                    if grows_up {
+                        y = y.saturating_sub(1);
+                    } else {
+                        y += 1;
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn anchor_origin(anchor: Anchor, area: Rect) -> (u16, u16) {
+    let x = match anchor {
+        Anchor::TopLeft | Anchor::MidLeft | Anchor::BottomLeft => area.x,
+        Anchor::TopCenter | Anchor::BottomCenter => area.x + area.width / 2,
+        Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight => area.x + area.width,
+    };
+    let y = match anchor {
+        Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => area.y,
+        Anchor::MidLeft | Anchor::MidRight => area.y + area.height / 2,
+        Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
+            area.y + area.height.saturating_sub(1)
+        },
+    };
+    (x, y)
+}
+
+fn badge_style(state: BadgeState) -> Style {
+    match state {
+        BadgeState::Active => Style::default().fg(Color::Yellow),
+        BadgeState::Complete => Style::default().fg(Color::Green),
+        BadgeState::Error => Style::default().fg(Color::Red),
+    }
 }
 
 fn render_pane(
