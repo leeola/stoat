@@ -17,6 +17,12 @@ struct FakeTerminalState {
     killed: bool,
 }
 
+impl Default for FakeTerminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeTerminal {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(256);

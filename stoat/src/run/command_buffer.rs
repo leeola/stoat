@@ -3,6 +3,12 @@ pub struct CommandBuffer {
     cursor: usize,
 }
 
+impl Default for CommandBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandBuffer {
     pub fn new() -> Self {
         Self {

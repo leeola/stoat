@@ -134,11 +134,12 @@ impl vte::Perform for VtermGrid {
     ) {
         let params_vec: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
-        if intermediates == [b'?'] && action == 'h' {
-            if params_vec.contains(&1049) || params_vec.contains(&47) {
-                self.alt_screen_detected = true;
-                return;
-            }
+        if intermediates == [b'?']
+            && action == 'h'
+            && (params_vec.contains(&1049) || params_vec.contains(&47))
+        {
+            self.alt_screen_detected = true;
+            return;
         }
 
         match action {
@@ -252,13 +253,13 @@ impl vte::Perform for VtermGrid {
                 let row = &mut self.cells[self.cursor_row];
                 match mode {
                     0 => {
-                        for col in self.cursor_col..w {
-                            row[col] = StyledCell::default();
+                        for cell in row.iter_mut().take(w).skip(self.cursor_col) {
+                            *cell = StyledCell::default();
                         }
                     },
                     1 => {
-                        for col in 0..=self.cursor_col.min(w - 1) {
-                            row[col] = StyledCell::default();
+                        for cell in row.iter_mut().take(self.cursor_col.min(w - 1) + 1) {
+                            *cell = StyledCell::default();
                         }
                     },
                     2 => {

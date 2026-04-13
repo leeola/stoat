@@ -59,7 +59,7 @@ pub fn spawn_shell(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let mut cmd = CommandBuilder::new("bash");
     cmd.args(["--noediting", "--noprofile", "--norc"]);
@@ -71,17 +71,14 @@ pub fn spawn_shell(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
 
     let reader = pair
         .master
         .try_clone_reader()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
     tokio::spawn(reader_task(host.clone(), run_id, pty_tx));
@@ -104,7 +101,7 @@ pub fn spawn_oneshot(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let mut cmd = CommandBuilder::new("bash");
     cmd.args(["-c", command]);
@@ -114,17 +111,14 @@ pub fn spawn_oneshot(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
 
     let reader = pair
         .master
         .try_clone_reader()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
     tokio::spawn(reader_task(host.clone(), run_id, pty_tx));

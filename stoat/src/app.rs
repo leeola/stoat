@@ -299,9 +299,7 @@ impl Stoat {
         let View::Run(id) = ws.panes.pane(focused).view else {
             return None;
         };
-        let Some(run_state) = ws.runs.get_mut(id) else {
-            return None;
-        };
+        let run_state = ws.runs.get_mut(id)?;
 
         match key.code {
             KeyCode::Char(ch)
@@ -1218,8 +1216,7 @@ fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut
             OutputLine::GridRow(grid, row_idx) => {
                 let row = grid.row(*row_idx);
                 let w = (area.width as usize).min(grid.width() as usize);
-                for col in 0..w {
-                    let cell = &row[col];
+                for (col, cell) in row.iter().enumerate().take(w) {
                     if cell.ch == ' '
                         && cell.fg.is_none()
                         && cell.bg.is_none()
@@ -1330,8 +1327,7 @@ fn render_modal_run(run_state: &RunState, area: Rect, buf: &mut Buffer) {
     for (i, row_idx) in (start..total).take(visible_rows).enumerate() {
         let y = inner.y + i as u16;
         let row = grid.row(row_idx);
-        for col in 0..w {
-            let cell = &row[col];
+        for (col, cell) in row.iter().enumerate().take(w) {
             if cell.ch == ' ' && cell.fg.is_none() && cell.bg.is_none() && cell.modifiers.is_empty()
             {
                 continue;

@@ -44,6 +44,7 @@ pub enum BadgeSource {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Badge {
     pub(crate) source: BadgeSource,
     pub(crate) anchor: Anchor,
@@ -69,6 +70,7 @@ pub(crate) struct BadgeTray {
     trays: [Tray; 8],
 }
 
+#[allow(dead_code)]
 impl BadgeTray {
     pub(crate) fn new() -> Self {
         let trays = Anchor::ALL.map(|anchor| {
