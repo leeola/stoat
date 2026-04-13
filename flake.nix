@@ -70,6 +70,9 @@
           # when Rust's `cc` crate canonicalizes Apple triples before
           # invoking clang (e.g. `aarch64-apple-darwin` -> `arm64-apple-macosx`).
           NIX_CC_WRAPPER_SUPPRESS_TARGET_WARNING = "1";
+
+          # difftastic line-based diffing for TUI snapshots.
+          DFT_OVERRIDE = "stoat/src/snapshots/tui/*.snap:text";
         };
       }
     );

@@ -135,7 +135,9 @@ impl TestHarness {
     pub fn assert_snapshot(&mut self, name: &str) {
         self.capture("snapshot");
         let text = format_plain(self.frames.last().expect("no frames"));
-        insta::assert_snapshot!(name, text);
+        insta::with_settings!({snapshot_path => "snapshots/tui"}, {
+            insta::assert_snapshot!(name, text);
+        });
     }
 
     /// Snapshot the **styled** view: characters plus inline ANSI SGR escapes
@@ -148,7 +150,9 @@ impl TestHarness {
         let frame = self.frames.last().expect("no frames");
         let buf = self.last_buffer.as_ref().expect("no buffer");
         let text = format_styled(frame, buf);
-        insta::assert_snapshot!(name, text);
+        insta::with_settings!({snapshot_path => "snapshots/tui"}, {
+            insta::assert_snapshot!(name, text);
+        });
     }
 
     /// Edit the focused buffer at the given byte range, replacing it with
