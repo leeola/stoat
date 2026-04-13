@@ -197,6 +197,10 @@ impl ClaudeCodeSessions {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    pub fn insert_host(&mut self, host: Arc<dyn ClaudeCodeHost>) -> ClaudeSessionId {
+        self.sessions.insert(host)
+    }
 }
 
 impl Default for ClaudeCodeSessions {

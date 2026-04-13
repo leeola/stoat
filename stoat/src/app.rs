@@ -1,12 +1,12 @@
 use crate::{
     action_handlers,
-    badge::{Anchor, BadgeState, BadgeTray, StackDirection},
+    badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection, THROBBER_FRAMES},
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     command_palette::{CommandPalette, PaletteOutcome},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
-    host::{ClaudeCodeFactory, ClaudeCodeSessions},
+    host::{AgentMessage, ClaudeCodeFactory, ClaudeCodeSessions, ClaudeSessionId},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{Pane, View},
     review::ReviewRow,
@@ -58,6 +58,7 @@ pub struct Stoat {
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
     pub(crate) modal_run: Option<RunId>,
+    render_tick: u64,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -138,6 +139,7 @@ impl Stoat {
             pty_tx,
             pty_rx,
             modal_run: None,
+            render_tick: 0,
         }
     }
 
@@ -394,6 +396,100 @@ impl Stoat {
         }
     }
 
+    // FIXME: Wire into Stoat::run() async loop -- needs a third select! branch
+    // that polls all active Claude sessions and routes messages here.
+    pub(crate) fn handle_claude_message(
+        &mut self,
+        session_id: ClaudeSessionId,
+        message: &AgentMessage,
+    ) -> UpdateEffect {
+        let ws = self.active_workspace_mut();
+        let source = BadgeSource::Claude(session_id);
+        let visible = ws.is_claude_visible(session_id);
+
+        match message {
+            AgentMessage::Thinking { .. }
+            | AgentMessage::ToolUse { .. }
+            | AgentMessage::ToolResult { .. }
+            | AgentMessage::Text { .. }
+            | AgentMessage::PartialText { .. }
+            | AgentMessage::ServerToolUse { .. }
+            | AgentMessage::ServerToolResult { .. } => {
+                if visible {
+                    ws.badges.remove_by_source(source);
+                } else {
+                    match ws.badges.find_by_source(source) {
+                        Some(id) => {
+                            if let Some(badge) = ws.badges.get_mut(id) {
+                                badge.state = BadgeState::Active;
+                                badge.detail = detail_for_message(message);
+                            }
+                        },
+                        None => {
+                            ws.badges.insert(Badge {
+                                source,
+                                anchor: Anchor::TopCenter,
+                                state: BadgeState::Active,
+                                label: "claude".into(),
+                                detail: detail_for_message(message),
+                            });
+                        },
+                    }
+                }
+                UpdateEffect::Redraw
+            },
+            AgentMessage::Result { .. } => {
+                if visible {
+                    ws.badges.remove_by_source(source);
+                } else {
+                    match ws.badges.find_by_source(source) {
+                        Some(id) => {
+                            if let Some(badge) = ws.badges.get_mut(id) {
+                                badge.state = BadgeState::Complete;
+                                badge.detail = None;
+                            }
+                        },
+                        None => {
+                            ws.badges.insert(Badge {
+                                source,
+                                anchor: Anchor::TopCenter,
+                                state: BadgeState::Complete,
+                                label: "claude".into(),
+                                detail: None,
+                            });
+                        },
+                    }
+                }
+                UpdateEffect::Redraw
+            },
+            AgentMessage::Error { message: msg } => {
+                if visible {
+                    ws.badges.remove_by_source(source);
+                } else {
+                    match ws.badges.find_by_source(source) {
+                        Some(id) => {
+                            if let Some(badge) = ws.badges.get_mut(id) {
+                                badge.state = BadgeState::Error;
+                                badge.detail = Some(msg.clone());
+                            }
+                        },
+                        None => {
+                            ws.badges.insert(Badge {
+                                source,
+                                anchor: Anchor::TopCenter,
+                                state: BadgeState::Error,
+                                label: "claude".into(),
+                                detail: Some(msg.clone()),
+                            });
+                        },
+                    }
+                }
+                UpdateEffect::Redraw
+            },
+            AgentMessage::Init { .. } | AgentMessage::Unknown { .. } => UpdateEffect::None,
+        }
+    }
+
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
@@ -415,6 +511,7 @@ impl Stoat {
     }
 
     pub(crate) fn render(&mut self) -> Buffer {
+        self.render_tick += 1;
         self.drive_parse_jobs();
         let mut buf = Buffer::empty(self.size);
         let ws = &mut self.workspaces[self.active_workspace];
@@ -430,7 +527,7 @@ impl Stoat {
                 &mut buf,
             );
         }
-        render_badges(&ws.badges, self.size, &mut buf);
+        render_badges(&ws.badges, self.size, self.render_tick, &mut buf);
         if let Some(run_id) = self.modal_run {
             if let Some(run_state) = ws.runs.get(run_id) {
                 render_modal_run(run_state, self.size, &mut buf);
@@ -1005,6 +1102,12 @@ fn format_param_value(v: &stoat_action::ParamValue) -> String {
     }
 }
 
+fn write_cell(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
+    if x < buf.area.x + buf.area.width && y < buf.area.y + buf.area.height {
+        buf[(x, y)].set_char(ch).set_style(style);
+    }
+}
+
 fn write_str(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
     for (i, ch) in s.chars().enumerate() {
         let col = x + i as u16;
@@ -1041,7 +1144,119 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn render_badges(badges: &BadgeTray, area: Rect, buf: &mut Buffer) {
+fn badge_size(badge: &Badge) -> (u16, u16) {
+    let label_w = badge.label.chars().count() as u16;
+    (label_w + 2, 3)
+}
+
+fn border_char_at(col: u16, row: u16, w: u16, h: u16) -> char {
+    let top = row == 0;
+    let bot = row == h - 1;
+    let left = col == 0;
+    let right = col == w - 1;
+    match (top, bot, left, right) {
+        (true, _, true, _) => '\u{256d}',
+        (true, _, _, true) => '\u{256e}',
+        (_, true, true, _) => '\u{2570}',
+        (_, true, _, true) => '\u{256f}',
+        (true, _, _, _) | (_, true, _, _) => '\u{2500}',
+        _ => '\u{2502}',
+    }
+}
+
+/// Braille character that visually traces the box-drawing line at this
+/// border position. Dot placement matches the line direction:
+///
+/// ```text
+///   braille grid        used for
+///   1 4                 ╭ → ⣰  (bottom-right quadrant: right then down)
+///   2 5                 ╮ → ⣆  (bottom-left quadrant: left then down)
+///   3 6                 ╰ → ⠙  (top-right quadrant: right then up)
+///   7 8                 ╯ → ⠋  (top-left quadrant: left then up)
+///                       ─ top  → ⠉  (dots 1,4)
+///                       ─ bot  → ⣀  (dots 7,8)
+///                       │ left → ⡇  (dots 1,2,3,7)
+///                       │ right→ ⢸  (dots 4,5,6,8)
+/// ```
+fn spinner_char_at(col: u16, row: u16, w: u16, h: u16) -> char {
+    let top = row == 0;
+    let bot = row == h - 1;
+    let left = col == 0;
+    let right = col == w - 1;
+    match (top, bot, left, right) {
+        (true, _, true, _) => '\u{28f0}', // ⣰
+        (true, _, _, true) => '\u{28c6}', // ⣆
+        (_, true, true, _) => '\u{2819}', // ⠙
+        (_, true, _, true) => '\u{280b}', // ⠋
+        (true, _, _, _) => '\u{2809}',    // ⠉
+        (_, true, _, _) => '\u{28c0}',    // ⣀
+        (_, _, true, _) => '\u{2847}',    // ⡇
+        _ => '\u{28b8}',                  // ⢸
+    }
+}
+
+fn perimeter_position(index: usize, w: u16, h: u16) -> (u16, u16) {
+    let w = w as usize;
+    let h = h as usize;
+    let top = w;
+    let right = top + h.saturating_sub(2);
+    let bottom = right + w;
+    if index < top {
+        (index as u16, 0)
+    } else if index < right {
+        ((w - 1) as u16, (index - top + 1) as u16)
+    } else if index < bottom {
+        ((w - 1 - (index - right)) as u16, (h - 1) as u16)
+    } else {
+        (0, (h - 1 - (index - bottom + 1)) as u16)
+    }
+}
+
+fn render_single_badge(badge: &Badge, x: u16, y: u16, render_tick: u64, buf: &mut Buffer) {
+    let (w, h) = badge_size(badge);
+    let border_style = badge_border_style(badge.state);
+
+    let perimeter_len = 2 * (w as usize) + 2 * (h as usize) - 4;
+    let spinner_pos = if badge.state == BadgeState::Active {
+        Some(render_tick as usize % perimeter_len)
+    } else {
+        None
+    };
+
+    for col in x..x + w {
+        write_cell(buf, col, y, border_char_at(col - x, 0, w, h), border_style);
+    }
+    for col in x..x + w {
+        write_cell(
+            buf,
+            col,
+            y + h - 1,
+            border_char_at(col - x, h - 1, w, h),
+            border_style,
+        );
+    }
+    for row in y + 1..y + h - 1 {
+        write_cell(buf, x, row, border_char_at(0, row - y, w, h), border_style);
+        write_cell(
+            buf,
+            x + w - 1,
+            row,
+            border_char_at(w - 1, row - y, w, h),
+            border_style,
+        );
+    }
+
+    if let Some(pos) = spinner_pos {
+        let (sc, sr) = perimeter_position(pos, w, h);
+        let ch = spinner_char_at(sc, sr, w, h);
+        write_cell(buf, x + sc, y + sr, ch, border_style);
+    }
+
+    let content_style = Style::default().fg(Color::White);
+    write_str(buf, x + 1, y + 1, &badge.label, content_style);
+}
+
+fn render_badges(badges: &BadgeTray, area: Rect, render_tick: u64, buf: &mut Buffer) {
     if badges.is_empty() {
         return;
     }
@@ -1056,7 +1271,8 @@ fn render_badges(badges: &BadgeTray, area: Rect, buf: &mut Buffer) {
             continue;
         }
 
-        let (mut x, mut y) = anchor_origin(anchor, area);
+        let sizes: Vec<(u16, u16)> = visible.iter().map(|(_, b)| badge_size(b)).collect();
+        let (origin_x, origin_y) = anchor_origin(anchor, area);
         let grows_left = matches!(
             anchor,
             Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight
@@ -1065,35 +1281,47 @@ fn render_badges(badges: &BadgeTray, area: Rect, buf: &mut Buffer) {
             anchor,
             Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight
         );
+        let centered = matches!(anchor, Anchor::TopCenter | Anchor::BottomCenter);
 
-        for (_, badge) in &visible {
-            let text = match &badge.detail {
-                Some(d) => format!("[{} {}]", badge.label, d),
-                None => format!("[{}]", badge.label),
-            };
-            let width = (text.len() as u16).clamp(3, 8);
+        let (mut cx, mut cy) = (origin_x, origin_y);
+
+        if centered && tray.stack == StackDirection::Horizontal {
+            let total_w: u16 =
+                sizes.iter().map(|(w, _)| w).sum::<u16>() + sizes.len().saturating_sub(1) as u16;
+            cx = origin_x.saturating_sub(total_w / 2);
+        }
+
+        for (i, (_, badge)) in visible.iter().enumerate() {
+            let (bw, bh) = sizes[i];
+
             let draw_x = if grows_left {
-                x.saturating_sub(width)
+                cx.saturating_sub(bw)
+            } else if centered && tray.stack == StackDirection::Vertical {
+                cx.saturating_sub(bw / 2)
             } else {
-                x
+                cx
+            };
+            let draw_y = if grows_up {
+                cy.saturating_sub(bh - 1)
+            } else {
+                cy
             };
 
-            let style = badge_style(badge.state);
-            write_str(buf, draw_x, y, &text, style);
+            render_single_badge(badge, draw_x, draw_y, render_tick, buf);
 
             match tray.stack {
                 StackDirection::Horizontal => {
                     if grows_left {
-                        x = x.saturating_sub(width + 1);
+                        cx = cx.saturating_sub(bw + 1);
                     } else {
-                        x += width + 1;
+                        cx += bw + 1;
                     }
                 },
                 StackDirection::Vertical => {
                     if grows_up {
-                        y = y.saturating_sub(1);
+                        cy = cy.saturating_sub(bh);
                     } else {
-                        y += 1;
+                        cy += bh;
                     }
                 },
             }
@@ -1105,7 +1333,9 @@ fn anchor_origin(anchor: Anchor, area: Rect) -> (u16, u16) {
     let x = match anchor {
         Anchor::TopLeft | Anchor::MidLeft | Anchor::BottomLeft => area.x,
         Anchor::TopCenter | Anchor::BottomCenter => area.x + area.width / 2,
-        Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight => area.x + area.width,
+        Anchor::TopRight | Anchor::MidRight | Anchor::BottomRight => {
+            (area.x + area.width).saturating_sub(1)
+        },
     };
     let y = match anchor {
         Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => area.y,
@@ -1117,11 +1347,19 @@ fn anchor_origin(anchor: Anchor, area: Rect) -> (u16, u16) {
     (x, y)
 }
 
-fn badge_style(state: BadgeState) -> Style {
+fn badge_border_style(state: BadgeState) -> Style {
     match state {
         BadgeState::Active => Style::default().fg(Color::Yellow),
         BadgeState::Complete => Style::default().fg(Color::Green),
         BadgeState::Error => Style::default().fg(Color::Red),
+    }
+}
+
+fn detail_for_message(message: &AgentMessage) -> Option<String> {
+    match message {
+        AgentMessage::ToolUse { name, .. } => Some(name.clone()),
+        AgentMessage::Thinking { .. } => Some("thinking".into()),
+        _ => None,
     }
 }
 
@@ -1165,6 +1403,11 @@ fn render_pane(
             if let Some(run_state) = runs.get(*run_id) {
                 render_run_pane(run_state, inner, is_focused, buf);
             }
+        },
+        View::Claude(_) => {
+            Paragraph::new(Text::styled("[Claude]", text_style))
+                .centered()
+                .render(inner, buf);
         },
     }
 }

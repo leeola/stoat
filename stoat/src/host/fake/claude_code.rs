@@ -76,6 +76,17 @@ impl FakeClaudeCode {
             });
     }
 
+    pub fn push_thinking(&self, text: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::Thinking {
+                text: text.to_string(),
+                signature: "test-sig".to_string(),
+            });
+    }
+
     pub fn push_result(&self) {
         self.state
             .lock()

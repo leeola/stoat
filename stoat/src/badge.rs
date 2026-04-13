@@ -70,6 +70,8 @@ pub(crate) struct BadgeTray {
     trays: [Tray; 8],
 }
 
+pub(crate) const THROBBER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 #[allow(dead_code)]
 impl BadgeTray {
     pub(crate) fn new() -> Self {
@@ -111,6 +113,21 @@ impl BadgeTray {
 
     pub(crate) fn tray(&self, anchor: Anchor) -> &Tray {
         &self.trays[anchor as usize]
+    }
+
+    pub(crate) fn find_by_source(&self, source: BadgeSource) -> Option<BadgeId> {
+        self.badges
+            .iter()
+            .find(|(_, b)| b.source == source)
+            .map(|(id, _)| id)
+    }
+
+    pub(crate) fn remove_by_source(&mut self, source: BadgeSource) -> Option<Badge> {
+        if let Some(id) = self.find_by_source(source) {
+            self.remove(id)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {

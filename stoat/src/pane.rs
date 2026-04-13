@@ -1,4 +1,4 @@
-use crate::{editor_state::EditorId, run::RunId};
+use crate::{editor_state::EditorId, host::ClaudeSessionId, run::RunId};
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 
@@ -28,6 +28,7 @@ pub enum View {
     Label(String),
     Editor(EditorId),
     Run(RunId),
+    Claude(ClaudeSessionId),
 }
 
 /// How a pane is presented on screen.

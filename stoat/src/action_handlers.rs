@@ -74,7 +74,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                         }
                     }
                 },
-                View::Label(_) => {
+                View::Label(_) | View::Claude(_) => {
                     ws.panes.close(focused);
                 },
             }

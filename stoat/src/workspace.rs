@@ -1,12 +1,12 @@
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
-    badge::BadgeTray,
+    badge::{BadgeSource, BadgeTray},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
-    pane::{PaneTree, View},
+    pane::{PaneId, PaneTree, View},
     run::{RunId, RunState},
 };
 use ratatui::layout::Rect;
@@ -125,7 +125,7 @@ impl Workspace {
                         }
                     }
                 },
-                View::Label(_) | View::Run(_) => {},
+                View::Label(_) | View::Run(_) | View::Claude(_) => {},
             }
         }
 
@@ -191,5 +191,17 @@ impl Workspace {
                 },
             );
         }
+    }
+
+    pub(crate) fn is_claude_visible(&self, session_id: ClaudeSessionId) -> bool {
+        self.panes
+            .split_panes()
+            .any(|(_, pane)| matches!(&pane.view, View::Claude(id) if *id == session_id))
+    }
+
+    pub(crate) fn show_claude_session(&mut self, pane_id: PaneId, session_id: ClaudeSessionId) {
+        self.panes.pane_mut(pane_id).view = View::Claude(session_id);
+        self.badges
+            .remove_by_source(BadgeSource::Claude(session_id));
     }
 }
