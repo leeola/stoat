@@ -668,6 +668,7 @@ fn open_claude(stoat: &mut Stoat) -> UpdateEffect {
             streaming_text: None,
             scroll_offset: 0,
             pending_sends: Vec::new(),
+            active_since: None,
         },
     );
 
@@ -720,6 +721,7 @@ fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
             role: ChatRole::User,
             content: ChatMessageContent::Text(text.clone()),
         });
+        chat.active_since = Some(std::time::Instant::now());
 
         let Some(buffer) = ws.buffers.get(chat.input_buffer_id) else {
             return UpdateEffect::None;

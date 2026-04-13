@@ -1,4 +1,5 @@
 use crate::{buffer::BufferId, editor_state::EditorId, host::ClaudeSessionId};
+use std::time::Instant;
 
 pub struct ClaudeChatState {
     pub session_id: ClaudeSessionId,
@@ -10,6 +11,9 @@ pub struct ClaudeChatState {
     /// Messages the user submitted before the session host was ready.
     /// Drained and sent when the session becomes available.
     pub pending_sends: Vec<String>,
+    /// Set when the user submits a message; cleared when the turn
+    /// completes (Result) or errors. Drives the activity throbber.
+    pub active_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +29,7 @@ pub enum ChatMessageContent {
         text: String,
     },
     ToolUse {
+        id: String,
         name: String,
         input: String,
     },

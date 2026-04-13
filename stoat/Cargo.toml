@@ -16,7 +16,8 @@ stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 ratatui.workspace = true
 crossterm.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "time"] }
 futures.workspace = true
 tracing.workspace = true
 compact_str.workspace = true

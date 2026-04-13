@@ -2038,6 +2038,7 @@ dependencies = [
  "lsp-types",
  "portable-pty",
  "ratatui",
+ "serde_json",
  "slotmap",
  "stoat_action",
  "stoat_config",

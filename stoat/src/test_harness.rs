@@ -1972,4 +1972,118 @@ mod tests {
         );
         assert!(h.claude_badge_state(id).is_none());
     }
+
+    fn setup_visible_claude_session(h: &mut TestHarness) -> ClaudeSessionId {
+        h.open_claude_with_fake(FakeClaudeCode::new())
+    }
+
+    #[test]
+    fn claude_panel_pairs_tool_use_and_result() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::ToolUse {
+                id: "abc".into(),
+                name: "Bash".into(),
+                input: r#"{"command":"ls -la"}"#.into(),
+            },
+        );
+        h.inject_claude_message(
+            id,
+            &AgentMessage::ToolResult {
+                id: "abc".into(),
+                content: "file1\nfile2\nfile3".into(),
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        assert!(
+            frame.content.contains("Bash(ls -la)"),
+            "expected tool header: {}",
+            frame.content
+        );
+        assert!(
+            frame.content.contains("file1 (+2 more lines)"),
+            "expected tool result preview: {}",
+            frame.content
+        );
+    }
+
+    #[test]
+    fn claude_panel_collapses_thinking() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::Thinking {
+                text: "line one\nline two\nline three".into(),
+                signature: "".into(),
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        assert!(
+            frame.content.contains("Thinking... (3 lines)"),
+            "expected collapsed thinking: {}",
+            frame.content
+        );
+    }
+
+    #[test]
+    fn claude_panel_clears_throbber_on_result() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.stoat
+            .active_workspace_mut()
+            .chats
+            .get_mut(&id)
+            .unwrap()
+            .active_since = Some(std::time::Instant::now());
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::Result {
+                cost_usd: 0.01,
+                duration_ms: 100,
+                num_turns: 1,
+            },
+        );
+
+        let chat = &h.stoat.active_workspace().chats[&id];
+        assert!(
+            chat.active_since.is_none(),
+            "throbber state should clear on Result"
+        );
+    }
+
+    #[test]
+    fn claude_panel_session_totals_in_header() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::Result {
+                cost_usd: 0.0123,
+                duration_ms: 1234,
+                num_turns: 2,
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        assert!(
+            frame.content.contains("$0.0123"),
+            "expected cost in header: {}",
+            frame.content
+        );
+        assert!(
+            frame.content.contains("2 turns"),
+            "expected turn count: {}",
+            frame.content
+        );
+    }
 }

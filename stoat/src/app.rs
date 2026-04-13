@@ -164,6 +164,12 @@ impl Stoat {
         self.claude_host = Some(host);
     }
 
+    fn any_claude_active(&self) -> bool {
+        self.workspaces
+            .values()
+            .any(|ws| ws.chats.values().any(|c| c.active_since.is_some()))
+    }
+
     pub fn claude_sessions(&self) -> &ClaudeCodeSessions {
         &self.claude_sessions
     }
@@ -194,6 +200,7 @@ impl Stoat {
         render: Sender<Buffer>,
     ) -> io::Result<()> {
         loop {
+            let active = self.any_claude_active();
             let effect = tokio::select! {
                 biased;
                 event = events.recv() => {
@@ -208,6 +215,13 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_claude_notification(notif)
                 }
+                _ = async {
+                    if active {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                    } else {
+                        std::future::pending::<()>().await
+                    }
+                } => UpdateEffect::Redraw,
             };
             match effect {
                 UpdateEffect::Redraw => {
@@ -748,10 +762,11 @@ impl Stoat {
                         content: ChatMessageContent::Thinking { text: text.clone() },
                     });
                 },
-                AgentMessage::ToolUse { name, input, .. } => {
+                AgentMessage::ToolUse { id, name, input } => {
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::ToolUse {
+                            id: id.clone(),
                             name: name.clone(),
                             input: input.clone(),
                         },
@@ -771,6 +786,7 @@ impl Stoat {
                     duration_ms,
                     num_turns,
                 } => {
+                    chat.active_since = None;
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::TurnComplete {
@@ -781,6 +797,7 @@ impl Stoat {
                     });
                 },
                 AgentMessage::Error { message: msg } => {
+                    chat.active_since = None;
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::Error(msg.clone()),
@@ -922,6 +939,7 @@ impl Stoat {
                     &mut ws.editors,
                     &ws.buffers,
                     &ws.chats,
+                    self.render_tick,
                     &mut buf,
                 );
             }
@@ -1818,6 +1836,7 @@ fn render_dock_open(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
+    render_tick: u64,
     buf: &mut Buffer,
 ) {
     let area = dock.area;
@@ -1844,7 +1863,7 @@ fn render_dock_open(
     match &dock.view {
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(chat, editors, buffers, area, is_focused, buf);
+                render_claude_pane(chat, editors, buffers, area, is_focused, render_tick, buf);
             }
         },
         View::Editor(editor_id) => {
@@ -1862,15 +1881,18 @@ fn render_claude_pane(
     buffers: &BufferRegistry,
     area: Rect,
     is_focused: bool,
+    render_tick: u64,
     buf: &mut Buffer,
 ) {
-    use crate::claude_chat::{ChatMessageContent, ChatRole};
+    use crate::{
+        badge::THROBBER_FRAMES,
+        claude_chat::{ChatMessageContent, ChatRole},
+    };
 
-    if area.height < 3 || area.width < 4 {
+    if area.height < 4 || area.width < 4 {
         return;
     }
 
-    // Determine input area height based on buffer content.
     let input_lines = buffers
         .get(chat.input_buffer_id)
         .map(|b| {
@@ -1880,100 +1902,140 @@ fn render_claude_pane(
         .unwrap_or(1);
     let max_input = (area.height / 3).max(1);
     let input_height = (input_lines as u16).clamp(1, max_input);
-    // +1 for the separator line between messages and input.
     let separator_y = area.y + area.height - input_height - 1;
     let msg_area = Rect::new(area.x, area.y, area.width, separator_y - area.y);
     let input_area = Rect::new(area.x, separator_y + 1, area.width, input_height);
 
-    // Render separator.
     let sep_style = Style::default().fg(Color::DarkGray);
     for x in area.x..area.x + area.width {
-        if let Some(cell) = buf.cell_mut((x, separator_y)) {
-            cell.set_char('─').set_style(sep_style);
-        }
+        write_cell(buf, x, separator_y, '-', sep_style);
     }
 
-    // Render messages (bottom-aligned).
+    let meta_style = Style::default().fg(Color::DarkGray);
+    let (cost, turns) = compute_session_totals(&chat.messages);
+    let header = format!("Claude  ${cost:.4}  {turns} turns");
+    write_str(buf, msg_area.x, msg_area.y, &header, meta_style);
+
+    let body_area = Rect::new(
+        msg_area.x,
+        msg_area.y + 1,
+        msg_area.width,
+        msg_area.height.saturating_sub(1),
+    );
+    if body_area.height == 0 {
+        return;
+    }
+
+    let user_style = Style::default().fg(Color::Green);
+    let text_style = Style::default().fg(Color::White);
+    let thinking_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC);
+    let tool_header_style = Style::default().fg(Color::Blue);
+    let tool_body_style = Style::default().fg(Color::DarkGray);
+    let error_style = Style::default().fg(Color::Red);
+    let turn_sep_style = Style::default().fg(Color::DarkGray);
+    let throbber_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+
+    let result_map = build_tool_result_map(&chat.messages);
+    let body_width = body_area.width as usize;
     let mut lines: Vec<(Style, String)> = Vec::new();
+
     for msg in &chat.messages {
-        let (style, prefix) = match msg.role {
-            ChatRole::User => (Style::default().fg(Color::Green), "you: "),
-            ChatRole::Assistant => (Style::default().fg(Color::Blue), "claude: "),
-        };
-        match &msg.content {
-            ChatMessageContent::Text(text) => {
-                for line in text.lines() {
-                    lines.push((style, format!("{prefix}{line}")));
+        match (&msg.role, &msg.content) {
+            (ChatRole::User, ChatMessageContent::Text(t)) => {
+                for raw_line in t.lines() {
+                    for wrapped in wrap_text(raw_line, body_width.saturating_sub(2)) {
+                        lines.push((user_style, format!("> {wrapped}")));
+                    }
                 }
-                if text.is_empty() {
-                    lines.push((style, prefix.to_string()));
+                if t.is_empty() {
+                    lines.push((user_style, "> ".into()));
                 }
+                lines.push((text_style, String::new()));
             },
-            ChatMessageContent::Thinking { text } => {
-                let dim = Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC);
-                for line in text.lines() {
-                    lines.push((dim, format!("  [thinking] {line}")));
+            (ChatRole::Assistant, ChatMessageContent::Text(t)) => {
+                for raw_line in t.lines() {
+                    for wrapped in wrap_text(raw_line, body_width) {
+                        lines.push((text_style, wrapped));
+                    }
                 }
             },
-            ChatMessageContent::ToolUse { name, .. } => {
-                let tool_style = Style::default().fg(Color::Yellow);
-                lines.push((tool_style, format!("  [tool: {name}]")));
+            (ChatRole::Assistant, ChatMessageContent::Thinking { text }) => {
+                let n = text.lines().count().max(1);
+                lines.push((thinking_style, format!("~ Thinking... ({n} lines)")));
             },
-            ChatMessageContent::ToolResult { .. } => {
-                let tool_style = Style::default().fg(Color::DarkGray);
-                lines.push((tool_style, "  [result]".into()));
+            (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
+                let header = format_tool_header(name, input);
+                lines.push((tool_header_style, format!("> {header}")));
+                if let Some(content) = result_map.get(id.as_str()) {
+                    let preview = format_tool_result_preview(content);
+                    lines.push((tool_body_style, format!("  +-- {preview}")));
+                }
             },
-            ChatMessageContent::Error(msg) => {
-                let err_style = Style::default().fg(Color::Red);
-                lines.push((err_style, format!("  error: {msg}")));
+            (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => {},
+            (ChatRole::Assistant, ChatMessageContent::Error(m)) => {
+                lines.push((error_style, format!("! {m}")));
             },
-            ChatMessageContent::TurnComplete {
-                cost_usd,
-                duration_ms,
-                ..
-            } => {
-                let meta = Style::default().fg(Color::DarkGray);
+            (
+                ChatRole::Assistant,
+                ChatMessageContent::TurnComplete {
+                    cost_usd,
+                    duration_ms,
+                    num_turns,
+                },
+            ) => {
+                lines.push((turn_sep_style, "-".repeat(body_width)));
                 lines.push((
-                    meta,
+                    meta_style,
                     format!(
-                        "  [{:.4}$ | {:.1}s]",
+                        "  ${:.4}  {:.1}s  turn {}",
                         cost_usd,
-                        *duration_ms as f64 / 1000.0
+                        *duration_ms as f64 / 1000.0,
+                        num_turns,
                     ),
                 ));
+                lines.push((text_style, String::new()));
             },
-        }
-    }
-    // Streaming text.
-    if let Some(partial) = &chat.streaming_text {
-        let style = Style::default().fg(Color::Blue);
-        for line in partial.lines() {
-            lines.push((style, format!("claude: {line}")));
+            (ChatRole::User, _) => {},
         }
     }
 
-    // Render bottom-aligned into msg_area.
-    let visible_lines = msg_area.height as usize;
+    if let Some(partial) = &chat.streaming_text {
+        for raw_line in partial.lines() {
+            for wrapped in wrap_text(raw_line, body_width) {
+                lines.push((text_style, wrapped));
+            }
+        }
+    }
+
+    if let Some(since) = chat.active_since {
+        let frame = THROBBER_FRAMES[(render_tick as usize) % THROBBER_FRAMES.len()];
+        let elapsed = since.elapsed().as_secs();
+        let label = compute_throbber_label(&chat.messages, &result_map);
+        lines.push((throbber_style, format!("{frame} {label} ({elapsed}s)")));
+    }
+
+    let visible_lines = body_area.height as usize;
     let skip = lines
         .len()
         .saturating_sub(visible_lines + chat.scroll_offset);
     let take = visible_lines;
     let display: Vec<_> = lines.iter().skip(skip).take(take).collect();
-    let start_row = msg_area.y + msg_area.height.saturating_sub(display.len() as u16);
+    let start_row = body_area.y + body_area.height.saturating_sub(display.len() as u16);
     for (i, (style, text)) in display.iter().enumerate() {
         let y = start_row + i as u16;
-        let max_w = msg_area.width as usize;
+        let max_w = body_area.width as usize;
         for (j, ch) in text.chars().take(max_w).enumerate() {
-            let x = msg_area.x + j as u16;
+            let x = body_area.x + j as u16;
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch).set_style(*style);
             }
         }
     }
 
-    // Render input editor.
     if let Some(editor) = editors.get_mut(chat.input_editor_id) {
         let input_style = if is_focused {
             Style::default().fg(Color::White)
@@ -1982,6 +2044,147 @@ fn render_claude_pane(
         };
         render_editor(editor, input_area, input_style, buf, is_focused);
     }
+}
+
+fn format_tool_header(name: &str, input_json: &str) -> String {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(input_json);
+    let Ok(value) = parsed else {
+        return format!("{name}(...)");
+    };
+    let obj = value.as_object();
+
+    match name {
+        "Bash" => {
+            if let Some(cmd) = obj.and_then(|o| o.get("command")).and_then(|v| v.as_str()) {
+                return format!("Bash({})", truncate(cmd, 60));
+            }
+        },
+        "Read" => {
+            if let Some(p) = obj
+                .and_then(|o| o.get("file_path"))
+                .and_then(|v| v.as_str())
+            {
+                return format!("Read({})", short_path(p));
+            }
+        },
+        "Edit" | "Write" | "NotebookEdit" => {
+            if let Some(p) = obj
+                .and_then(|o| o.get("file_path"))
+                .and_then(|v| v.as_str())
+            {
+                return format!("{name}({})", short_path(p));
+            }
+        },
+        "Grep" => {
+            if let Some(p) = obj.and_then(|o| o.get("pattern")).and_then(|v| v.as_str()) {
+                return format!("Grep({})", truncate(p, 60));
+            }
+        },
+        "Glob" => {
+            if let Some(p) = obj.and_then(|o| o.get("pattern")).and_then(|v| v.as_str()) {
+                return format!("Glob({})", truncate(p, 60));
+            }
+        },
+        _ => {},
+    }
+
+    if let Some(o) = obj {
+        if let Some((k, v)) = o.iter().next() {
+            let vs = match v {
+                serde_json::Value::String(s) => truncate(s, 60),
+                other => truncate(&other.to_string(), 60),
+            };
+            return format!("{name}({k}={vs})");
+        }
+    }
+    format!("{name}(...)")
+}
+
+fn format_tool_result_preview(content: &str) -> String {
+    let first = content.lines().next().unwrap_or("");
+    let total_lines = content.lines().count();
+    let preview = truncate(first, 80);
+    if total_lines > 1 {
+        format!("{preview} (+{} more lines)", total_lines - 1)
+    } else {
+        preview
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        format!(
+            "{}...",
+            s.chars().take(max.saturating_sub(3)).collect::<String>()
+        )
+    }
+}
+
+fn short_path(p: &str) -> String {
+    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    match parts.len() {
+        0 => p.to_string(),
+        1 => parts[0].to_string(),
+        n => format!("{}/{}", parts[n - 2], parts[n - 1]),
+    }
+}
+
+fn build_tool_result_map(messages: &[crate::claude_chat::ChatMessage]) -> HashMap<&str, &str> {
+    use crate::claude_chat::ChatMessageContent;
+    let mut m = HashMap::new();
+    for msg in messages {
+        if let ChatMessageContent::ToolResult { id, content } = &msg.content {
+            m.insert(id.as_str(), content.as_str());
+        }
+    }
+    m
+}
+
+fn compute_throbber_label(
+    messages: &[crate::claude_chat::ChatMessage],
+    result_map: &HashMap<&str, &str>,
+) -> String {
+    use crate::claude_chat::{ChatMessageContent, ChatRole};
+    for msg in messages.iter().rev() {
+        if !matches!(msg.role, ChatRole::Assistant) {
+            break;
+        }
+        match &msg.content {
+            ChatMessageContent::ToolUse { id, name, .. } => {
+                if !result_map.contains_key(id.as_str()) {
+                    return format!("Running {name}...");
+                }
+            },
+            ChatMessageContent::Thinking { .. } | ChatMessageContent::Text(_) => {
+                return "Thinking...".to_string();
+            },
+            ChatMessageContent::TurnComplete { .. }
+            | ChatMessageContent::ToolResult { .. }
+            | ChatMessageContent::Error(_) => continue,
+        }
+    }
+    "Thinking...".to_string()
+}
+
+fn compute_session_totals(messages: &[crate::claude_chat::ChatMessage]) -> (f64, u32) {
+    use crate::claude_chat::ChatMessageContent;
+    let mut cost = 0.0;
+    let mut turns = 0u32;
+    for msg in messages {
+        if let ChatMessageContent::TurnComplete {
+            cost_usd,
+            num_turns,
+            ..
+        } = &msg.content
+        {
+            cost += *cost_usd;
+            turns = (*num_turns).max(turns);
+        }
+    }
+    (cost, turns)
 }
 
 fn render_pane(
