@@ -731,10 +731,13 @@ impl Stoat {
             match message {
                 AgentMessage::Text { text } => {
                     chat.streaming_text = None;
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::Text(text.clone()),
-                    });
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        chat.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: ChatMessageContent::Text(trimmed.to_string()),
+                        });
+                    }
                 },
                 AgentMessage::PartialText { text } => {
                     chat.streaming_text = Some(text.clone());

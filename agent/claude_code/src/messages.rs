@@ -568,14 +568,13 @@ pub struct McpServer {
 
 /// MCP server connection status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum McpServerStatus {
-    /// Successfully connected to MCP server
     Connected,
-    /// Connection failed or disconnected
     Disconnected,
-    /// Connection error with details
-    Error(String),
+    NeedsAuth,
+    #[serde(untagged)]
+    Other(String),
 }
 
 /// Message sender role in the conversation.
