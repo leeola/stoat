@@ -202,54 +202,29 @@ impl Workspace {
     }
 
     pub(crate) fn layout(&mut self, total_area: Rect) {
-        let mut split_area = total_area;
-        let min_split_width: u16 = 20;
+        self.panes.resize(total_area);
+
+        // Inset the dock vertically so it reads as an edge-attached popover rather
+        // than a full-height pane. One row of breathing space top and bottom puts
+        // the dock at ~95% of the workspace height on typical terminals.
+        let vertical_margin: u16 = 1;
+        let dock_y = total_area.y + vertical_margin;
+        let dock_height = total_area
+            .height
+            .saturating_sub(vertical_margin.saturating_mul(2));
 
         for dock in self.docks.values_mut() {
-            if dock.side != DockSide::Left {
-                continue;
-            }
-            let dock_width = dock.effective_width();
-            if dock_width == 0 {
+            let width = dock.effective_width().min(total_area.width);
+            if width == 0 || dock_height == 0 {
                 dock.area = Rect::default();
                 continue;
             }
-            if split_area.width.saturating_sub(dock_width + 1) < min_split_width {
-                dock.visibility = DockVisibility::Minimized;
-                dock.area = Rect::new(split_area.x, split_area.y, 1, split_area.height);
-                let consumed = 2; // 1 minimized + 1 separator
-                split_area.x += consumed;
-                split_area.width = split_area.width.saturating_sub(consumed);
-                continue;
-            }
-            dock.area = Rect::new(split_area.x, split_area.y, dock_width, split_area.height);
-            let consumed = dock_width + 1;
-            split_area.x += consumed;
-            split_area.width = split_area.width.saturating_sub(consumed);
+            let x = match dock.side {
+                DockSide::Left => total_area.x,
+                DockSide::Right => total_area.x + total_area.width - width,
+            };
+            dock.area = Rect::new(x, dock_y, width, dock_height);
         }
-
-        for dock in self.docks.values_mut() {
-            if dock.side != DockSide::Right {
-                continue;
-            }
-            let dock_width = dock.effective_width();
-            if dock_width == 0 {
-                dock.area = Rect::default();
-                continue;
-            }
-            if split_area.width.saturating_sub(dock_width + 1) < min_split_width {
-                dock.visibility = DockVisibility::Minimized;
-                let x = split_area.x + split_area.width - 1;
-                dock.area = Rect::new(x, split_area.y, 1, split_area.height);
-                split_area.width = split_area.width.saturating_sub(2);
-                continue;
-            }
-            let x = split_area.x + split_area.width - dock_width;
-            dock.area = Rect::new(x, split_area.y, dock_width, split_area.height);
-            split_area.width = split_area.width.saturating_sub(dock_width + 1);
-        }
-
-        self.panes.resize(split_area);
     }
 
     pub(crate) fn is_claude_visible(&self, session_id: ClaudeSessionId) -> bool {

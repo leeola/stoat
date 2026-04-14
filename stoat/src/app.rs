@@ -9,7 +9,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId},
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    pane::{DockPanel, DockSide, DockVisibility, FocusTarget, Pane, View},
+    pane::{DockPanel, DockVisibility, FocusTarget, Pane, View},
     review::ReviewRow,
     run::{PtyNotification, RunId, RunState},
     workspace::{Workspace, WorkspaceId},
@@ -20,7 +20,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Text,
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use slotmap::SlotMap;
 use std::{
@@ -924,7 +924,21 @@ impl Stoat {
 
         ws.layout(self.size);
 
-        // Render dock panels.
+        // Render split panes first so docks overlay on top.
+        let split_focused = ws.panes.focus();
+        for (id, pane) in ws.panes.split_panes() {
+            let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
+            render_pane(
+                pane,
+                is_focused,
+                &mut ws.editors,
+                &ws.buffers,
+                &ws.runs,
+                &mut buf,
+            );
+        }
+
+        // Render dock panels over the panes.
         for (dock_id, dock) in &ws.docks {
             if matches!(dock.visibility, DockVisibility::Hidden) {
                 continue;
@@ -943,20 +957,6 @@ impl Stoat {
                     &mut buf,
                 );
             }
-        }
-
-        // Render split panes.
-        let split_focused = ws.panes.focus();
-        for (id, pane) in ws.panes.split_panes() {
-            let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
-            render_pane(
-                pane,
-                is_focused,
-                &mut ws.editors,
-                &ws.buffers,
-                &ws.runs,
-                &mut buf,
-            );
         }
         render_badges(&ws.badges, self.size, self.render_tick, &mut buf);
         if let Some(run_id) = self.modal_run {
@@ -1849,26 +1849,23 @@ fn render_dock_open(
         Style::default().fg(Color::DarkGray)
     };
 
-    // Vertical separator on the edge facing the split area.
-    let sep_x = match dock.side {
-        DockSide::Left => area.x + area.width,
-        DockSide::Right => area.x.saturating_sub(1),
-    };
-    for y in area.y..area.y + area.height {
-        if let Some(cell) = buf.cell_mut((sep_x, y)) {
-            cell.set_char('│').set_style(border_style);
-        }
-    }
+    Clear.render(area, buf);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    block.render(area, buf);
 
     match &dock.view {
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(chat, editors, buffers, area, is_focused, render_tick, buf);
+                render_claude_pane(chat, editors, buffers, inner, is_focused, render_tick, buf);
             }
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, area, border_style, buf, is_focused);
+                render_editor(editor, inner, border_style, buf, is_focused);
             }
         },
         _ => {},

@@ -1912,6 +1912,44 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_dock_open_overlay() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        h.assert_snapshot("dock_open_overlay");
+    }
+
+    #[test]
+    fn snapshot_dock_open_overlay_styled() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        h.assert_snapshot_styled("dock_open_overlay_styled");
+    }
+
+    #[test]
+    fn snapshot_dock_minimized_overlay() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        h.assert_snapshot("dock_minimized_overlay");
+    }
+
+    #[test]
+    fn snapshot_dock_minimized_overlay_styled() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        h.assert_snapshot_styled("dock_minimized_overlay_styled");
+    }
+
+    #[test]
+    fn snapshot_dock_overlays_split_panes() {
+        let mut h = TestHarness::with_size(80, 10);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        h.assert_snapshot("dock_overlays_split_panes");
+    }
+
+    #[test]
     fn result_without_prior_activity_creates_badge() {
         let mut h = TestHarness::default();
         let (_, id) = setup_claude_session(&mut h);
