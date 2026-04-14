@@ -20,6 +20,7 @@
 //! successful record the writer thread prepends a
 //! `{"dropped": N}` breadcrumb so the transcript remains self-describing.
 
+use etcetera::base_strategy::{BaseStrategy, Xdg};
 use std::{
     fmt,
     fs::{File, OpenOptions},
@@ -232,15 +233,15 @@ fn write_record(
     Ok(())
 }
 
-/// Returns the base log directory: `<data_local_dir>/stoat/logs/`.
+/// Returns the base log directory: `<XDG_STATE_HOME>/stoat/logs/`.
 ///
 /// Does not create the directory. Callers that write files should ensure it
 /// exists via [`std::fs::create_dir_all`].
 pub fn log_dir() -> io::Result<PathBuf> {
-    let base = dirs::data_local_dir().ok_or_else(|| {
+    let base = Xdg::new().ok().and_then(|x| x.state_dir()).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "could not resolve data-local directory",
+            "could not resolve XDG state directory",
         )
     })?;
     Ok(base.join("stoat").join("logs"))

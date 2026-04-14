@@ -25,7 +25,7 @@ use std::{env, fs};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{fmt, EnvFilter};
 
-/// Initialize logging to `<data_local_dir>/stoat/logs/stoat-<pid>.log`.
+/// Initialize logging to `<XDG_STATE_HOME>/stoat/logs/stoat-<pid>.log`.
 ///
 /// Writes to a file so tracing output never hits the raw-mode terminal.
 pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
