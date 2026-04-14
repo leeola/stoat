@@ -52,10 +52,14 @@ pub struct TestHarness {
 
 impl TestHarness {
     fn new(width: u16, height: u16) -> Self {
+        Self::new_with_settings(width, height, Settings::default())
+    }
+
+    fn new_with_settings(width: u16, height: u16, settings: Settings) -> Self {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
         let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
-        let mut stoat = Stoat::new(executor, Settings::default(), std::path::PathBuf::new());
+        let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.update(Event::Resize(width, height));
 
@@ -74,6 +78,10 @@ impl TestHarness {
 
     pub fn with_size(width: u16, height: u16) -> Self {
         Self::new(width, height)
+    }
+
+    pub fn with_settings(settings: Settings) -> Self {
+        Self::new_with_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, settings)
     }
 
     pub fn open_file(&mut self, path: &std::path::Path) {
@@ -1636,6 +1644,10 @@ mod tests {
 
     fn setup_claude_session(h: &mut TestHarness) -> ((), ClaudeSessionId) {
         let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        // Move Claude into the right dock for badge tests: the badge
+        // machinery predates pane-based Claude and the layout expectations
+        // track the dock overlay.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         // Open -> Minimized -> Hidden: hide the dock so badge tests
         // start with a non-visible session.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
@@ -1915,6 +1927,7 @@ mod tests {
     fn snapshot_dock_open_overlay() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         h.assert_snapshot("dock_open_overlay");
     }
 
@@ -1922,6 +1935,7 @@ mod tests {
     fn snapshot_dock_open_overlay_styled() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         h.assert_snapshot_styled("dock_open_overlay_styled");
     }
 
@@ -1929,6 +1943,7 @@ mod tests {
     fn snapshot_dock_minimized_overlay() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         h.assert_snapshot("dock_minimized_overlay");
     }
@@ -1937,13 +1952,21 @@ mod tests {
     fn snapshot_dock_minimized_overlay_styled() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         h.assert_snapshot_styled("dock_minimized_overlay_styled");
     }
 
     #[test]
     fn snapshot_dock_overlays_split_panes() {
-        let mut h = TestHarness::with_size(80, 10);
+        let mut h = TestHarness::new_with_settings(
+            80,
+            10,
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
+            },
+        );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         let _ = h.open_claude_with_fake(FakeClaudeCode::new());
         h.assert_snapshot("dock_overlays_split_panes");
@@ -2123,5 +2146,171 @@ mod tests {
             "expected turn count: {}",
             frame.content
         );
+    }
+
+    // --- Claude placement tests ---
+
+    use crate::{
+        app::Stoat,
+        pane::{DockSide, DockVisibility, View},
+    };
+    use stoat_config::ClaudePlacement;
+
+    fn claude_panes(stoat: &Stoat) -> Vec<ClaudeSessionId> {
+        stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .filter_map(|(_, p)| match &p.view {
+                View::Claude(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn claude_docks(stoat: &Stoat) -> Vec<(DockSide, DockVisibility, u16)> {
+        stoat
+            .active_workspace()
+            .docks
+            .iter()
+            .filter_map(|(_, d)| match &d.view {
+                View::Claude(_) => Some((d.side, d.visibility, d.default_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn open_claude_defaults_to_pane() {
+        let mut h = TestHarness::default();
+        let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        assert_eq!(claude_panes(&h.stoat), vec![id]);
+        assert_eq!(claude_docks(&h.stoat), vec![]);
+    }
+
+    #[test]
+    fn open_claude_honors_dock_right_setting() {
+        let mut h = TestHarness::with_settings(Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockRight),
+        });
+        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        assert_eq!(claude_panes(&h.stoat), vec![]);
+        assert_eq!(
+            claude_docks(&h.stoat),
+            vec![(DockSide::Right, DockVisibility::Open { width: 40 }, 40)]
+        );
+    }
+
+    #[test]
+    fn open_claude_honors_dock_left_setting() {
+        let mut h = TestHarness::with_settings(Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockLeft),
+        });
+        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        assert_eq!(claude_panes(&h.stoat), vec![]);
+        assert_eq!(
+            claude_docks(&h.stoat),
+            vec![(DockSide::Left, DockVisibility::Open { width: 40 }, 40)]
+        );
+    }
+
+    #[test]
+    fn open_claude_twice_focuses_existing_pane() {
+        let mut h = TestHarness::default();
+        let first = h.open_claude_with_fake(FakeClaudeCode::new());
+        let second = h.open_claude_with_fake(FakeClaudeCode::new());
+        assert_eq!(first, second, "second open should reuse first session");
+        assert_eq!(claude_panes(&h.stoat), vec![first]);
+        assert_eq!(claude_docks(&h.stoat), vec![]);
+    }
+
+    #[test]
+    fn claude_to_pane_moves_from_dock() {
+        let mut h = TestHarness::with_settings(Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockRight),
+        });
+        let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToPane);
+        assert_eq!(claude_panes(&h.stoat), vec![id]);
+        assert_eq!(claude_docks(&h.stoat), vec![]);
+    }
+
+    #[test]
+    fn claude_to_dock_right_moves_from_pane() {
+        let mut h = TestHarness::default();
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
+        assert_eq!(claude_panes(&h.stoat), vec![]);
+        assert_eq!(
+            claude_docks(&h.stoat),
+            vec![(DockSide::Right, DockVisibility::Open { width: 40 }, 40)]
+        );
+        let has_editor = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .any(|(_, p)| matches!(p.view, View::Editor(_)));
+        assert!(
+            has_editor,
+            "Claude was the only pane; moving to dock should leave a scratch editor in that slot"
+        );
+    }
+
+    #[test]
+    fn claude_to_dock_flips_between_sides() {
+        let mut h = TestHarness::with_settings(Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockRight),
+        });
+        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        // Shrink dock so we can see the width is preserved across flips.
+        for (_, dock) in &mut h.stoat.active_workspace_mut().docks {
+            dock.visibility = DockVisibility::Open { width: 25 };
+        }
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockLeft);
+        assert_eq!(
+            claude_docks(&h.stoat),
+            vec![(DockSide::Left, DockVisibility::Open { width: 25 }, 40)]
+        );
+    }
+
+    #[test]
+    fn claude_to_pane_when_no_session_is_noop() {
+        let mut h = TestHarness::default();
+        let effect = crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToPane);
+        assert_eq!(effect, UpdateEffect::None);
+        assert_eq!(claude_panes(&h.stoat), vec![]);
+        assert_eq!(claude_docks(&h.stoat), vec![]);
+    }
+
+    #[test]
+    fn claude_to_dock_right_keeps_other_panes_intact() {
+        let mut h = TestHarness::default();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        // Now: left pane editor, right pane Claude (focused). Moving Claude
+        // to the right dock should close the right pane, leaving just the
+        // original editor pane.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
+        assert_eq!(claude_panes(&h.stoat), vec![]);
+        let editor_pane_count = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .filter(|(_, p)| matches!(p.view, View::Editor(_)))
+            .count();
+        assert_eq!(editor_pane_count, 1, "Claude's pane should have closed");
+    }
+
+    #[test]
+    fn snapshot_claude_as_pane_styled() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        h.assert_snapshot_styled("claude_as_pane_styled");
     }
 }

@@ -44,6 +44,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli_settings = Settings {
         text_proto_log: args.text_proto_log,
+        claude_default_placement: None,
     };
 
     let initial_git_root = std::env::current_dir().unwrap_or_default();

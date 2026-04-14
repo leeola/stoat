@@ -23,7 +23,7 @@ on key {
         q -> Quit();
         s -> SetMode(space_split);
         t -> [OpenRun(), SetMode(run)];
-        c -> [OpenClaude(), SetMode(normal)];
+        c -> SetMode(claude);
         h -> [FocusLeft(), SetMode(normal)];
         j -> [FocusDown(), SetMode(normal)];
         k -> [FocusUp(), SetMode(normal)];
@@ -40,5 +40,12 @@ on key {
         d -> [SplitDown(), SetMode(normal)];
         c -> [ClosePane(), SetMode(normal)];
         : -> OpenCommandPalette();
+    }
+    mode == claude {
+        Escape -> SetMode(normal);
+        c -> [OpenClaude(), SetMode(normal)];
+        p -> [ClaudeToPane(), SetMode(normal)];
+        l -> [ClaudeToDockLeft(), SetMode(normal)];
+        r -> [ClaudeToDockRight(), SetMode(normal)];
     }
 }

@@ -24,7 +24,7 @@ size: 80x24
 │                                               │  q   exit stoat              │
 │                                               │  s   space_split mode        │
 │                                               │  t   open terminal           │
-│                                               │  c   open claude chat        │
+│                                               │  c   claude mode             │
 │                                               │  h   focus pane left         │
 │                                               │  j   focus pane down         │
 │                                               │  k   focus pane up           │

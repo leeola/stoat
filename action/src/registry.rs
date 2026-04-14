@@ -1,7 +1,10 @@
 use crate::{
     defs::{
         app::Quit,
-        claude::{ClaudeSubmit, OpenClaude, ToggleDockLeft, ToggleDockRight},
+        claude::{
+            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
+            ToggleDockLeft, ToggleDockRight,
+        },
         editor::{
             AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
             MovePrevWordStart, MoveRight, MoveUp,
@@ -74,6 +77,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(OpenClaude::DEF, |_| Ok(Box::new(OpenClaude)));
     add(ClaudeSubmit::DEF, |_| Ok(Box::new(ClaudeSubmit)));
+    add(ClaudeToPane::DEF, |_| Ok(Box::new(ClaudeToPane)));
+    add(ClaudeToDockLeft::DEF, |_| Ok(Box::new(ClaudeToDockLeft)));
+    add(ClaudeToDockRight::DEF, |_| Ok(Box::new(ClaudeToDockRight)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(Run::DEF, |params| {
@@ -131,6 +137,9 @@ mod tests {
         "RunInterrupt",
         "OpenClaude",
         "ClaudeSubmit",
+        "ClaudeToPane",
+        "ClaudeToDockLeft",
+        "ClaudeToDockRight",
         "ToggleDockRight",
         "ToggleDockLeft",
     ];
@@ -191,7 +200,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 29);
+        assert_eq!(all().count(), 32);
     }
 
     #[test]

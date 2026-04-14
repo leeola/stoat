@@ -8,11 +8,21 @@
 
 use crate::ast::{Config, EventType, Setting, Statement, Value};
 
+/// Default placement for a newly-opened Claude chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudePlacement {
+    Pane,
+    DockLeft,
+    DockRight,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
     /// Enables the Claude Code / LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
+    /// Default placement of `OpenClaude`. `None` means "pane".
+    pub claude_default_placement: Option<ClaudePlacement>,
 }
 
 impl Settings {
@@ -39,15 +49,36 @@ impl Settings {
     pub fn merge(self, other: Settings) -> Settings {
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
+            claude_default_placement: other
+                .claude_default_placement
+                .or(self.claude_default_placement),
         }
     }
 
     fn apply(&mut self, setting: &Setting) {
         let path: Vec<&str> = setting.path.iter().map(|p| p.node.as_str()).collect();
-        if let ["text_proto_log"] = path.as_slice() {
-            if let Value::Bool(b) = setting.value.node {
-                self.text_proto_log = Some(b);
-            }
+        match path.as_slice() {
+            ["text_proto_log"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.text_proto_log = Some(b);
+                }
+            },
+            ["claude", "default_placement"] => {
+                let raw = match &setting.value.node {
+                    Value::String(s) | Value::Ident(s) => Some(s.as_str()),
+                    _ => None,
+                };
+                let placement = match raw {
+                    Some("pane") => Some(ClaudePlacement::Pane),
+                    Some("dock-left") => Some(ClaudePlacement::DockLeft),
+                    Some("dock-right") => Some(ClaudePlacement::DockRight),
+                    _ => None,
+                };
+                if let Some(p) = placement {
+                    self.claude_default_placement = Some(p);
+                }
+            },
+            _ => {},
         }
     }
 }
@@ -70,6 +101,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                claude_default_placement: None,
             }
         );
     }
@@ -81,6 +113,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                claude_default_placement: None,
             }
         );
     }
@@ -92,6 +125,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                claude_default_placement: None,
             }
         );
     }
@@ -112,14 +146,17 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
+            claude_default_placement: None,
         };
         let right = Settings {
             text_proto_log: Some(true),
+            claude_default_placement: None,
         };
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                claude_default_placement: None,
             }
         );
     }
@@ -128,12 +165,14 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
+            claude_default_placement: None,
         };
         let right = Settings::default();
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                claude_default_placement: None,
             }
         );
     }
@@ -143,6 +182,89 @@ mod tests {
         assert_eq!(
             Settings::default().merge(Settings::default()),
             Settings::default()
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_claude_default_placement_pane() {
+        let config = parse_ok(r#"on init { claude.default_placement = "pane"; }"#);
+        assert_eq!(
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(ClaudePlacement::Pane),
+            }
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_claude_default_placement_dock_left() {
+        let config = parse_ok(r#"on init { claude.default_placement = "dock-left"; }"#);
+        assert_eq!(
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(ClaudePlacement::DockLeft),
+            }
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_claude_default_placement_dock_right() {
+        let config = parse_ok(r#"on init { claude.default_placement = "dock-right"; }"#);
+        assert_eq!(
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(ClaudePlacement::DockRight),
+            }
+        );
+    }
+
+    #[test]
+    fn from_config_ignores_unknown_placement_value() {
+        let config = parse_ok(r#"on init { claude.default_placement = "elsewhere"; }"#);
+        assert_eq!(Settings::from_config(&config), Settings::default());
+    }
+
+    #[test]
+    fn from_config_ignores_wrong_type_placement_value() {
+        let config = parse_ok("on init { claude.default_placement = true; }");
+        assert_eq!(Settings::from_config(&config), Settings::default());
+    }
+
+    #[test]
+    fn merge_preserves_claude_placement() {
+        let left = Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockRight),
+        };
+        let right = Settings::default();
+        assert_eq!(
+            left.clone().merge(right),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(ClaudePlacement::DockRight),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_right_overrides_claude_placement() {
+        let left = Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::Pane),
+        };
+        let right = Settings {
+            text_proto_log: None,
+            claude_default_placement: Some(ClaudePlacement::DockLeft),
+        };
+        assert_eq!(
+            left.merge(right),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(ClaudePlacement::DockLeft),
+            }
         );
     }
 }

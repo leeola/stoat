@@ -8,7 +8,7 @@ pub use ast::{
     LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, Value,
 };
 pub use error::{format_errors, ParseError};
-pub use settings::Settings;
+pub use settings::{ClaudePlacement, Settings};
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)

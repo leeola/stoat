@@ -6,7 +6,34 @@ define_action!(
     "OpenClaude",
     ActionKind::OpenClaude,
     "open claude chat",
-    "Open a Claude Code chat panel in the right dock."
+    "Open a Claude Code chat panel. Placement is controlled by the `claude.default_placement` setting (defaults to a split pane)."
+);
+
+define_action!(
+    ClaudeToPaneDef,
+    ClaudeToPane,
+    "ClaudeToPane",
+    ActionKind::ClaudeToPane,
+    "move claude to pane",
+    "Move the active Claude chat into a new split pane. Reuses the existing session."
+);
+
+define_action!(
+    ClaudeToDockLeftDef,
+    ClaudeToDockLeft,
+    "ClaudeToDockLeft",
+    ActionKind::ClaudeToDockLeft,
+    "move claude to left dock",
+    "Move the active Claude chat to the left dock. Reuses the existing session."
+);
+
+define_action!(
+    ClaudeToDockRightDef,
+    ClaudeToDockRight,
+    "ClaudeToDockRight",
+    ActionKind::ClaudeToDockRight,
+    "move claude to right dock",
+    "Move the active Claude chat to the right dock. Reuses the existing session."
 );
 
 define_action!(

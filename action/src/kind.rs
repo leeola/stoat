@@ -27,6 +27,9 @@ pub enum ActionKind {
     Run,
     OpenClaude,
     ClaudeSubmit,
+    ClaudeToPane,
+    ClaudeToDockLeft,
+    ClaudeToDockRight,
     ToggleDockRight,
     ToggleDockLeft,
 }

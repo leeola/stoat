@@ -16,14 +16,14 @@ size: 80x24
 │ │──────────────────────────────────────────────────────────────────────────│ │
 │ │ AddSelectionBelow  add cursor below                                      │ │
 │ │ ClaudeSubmit       send to claude                                        │ │
+│ │ ClaudeToDockLeft   move claude to left dock                              │ │
+│ │ ClaudeToDockRight  move claude to right dock                             │ │
+│ │ ClaudeToPane       move claude to pane                                   │ │
 │ │ ClosePane          close pane                                            │ │
 │ │ FocusDown          focus pane down                                       │ │
 │ │ FocusLeft          focus pane left                                       │ │
 │ │ FocusNext          focus next pane                                       │ │
 │ │ FocusPrev          focus previous pane                                   │ │
-│ │ FocusRight         focus pane right                                      │ │
-│ │ FocusUp            focus pane up                                         │ │
-│ │ MoveDown           move cursor down                                      │ │
 │ │──────────────────────────────────────────────────────────────────────────│ │
 │ │Add a new cursor on the line below the newest cursor.                     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │

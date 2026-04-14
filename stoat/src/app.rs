@@ -934,6 +934,8 @@ impl Stoat {
                 &mut ws.editors,
                 &ws.buffers,
                 &ws.runs,
+                &ws.chats,
+                self.render_tick,
                 &mut buf,
             );
         }
@@ -2190,6 +2192,8 @@ fn render_pane(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     runs: &SlotMap<RunId, RunState>,
+    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
+    render_tick: u64,
     buf: &mut Buffer,
 ) {
     let border_style = if is_focused {
@@ -2225,10 +2229,10 @@ fn render_pane(
                 render_run_pane(run_state, inner, is_focused, buf);
             }
         },
-        View::Claude(_) => {
-            Paragraph::new(Text::styled("[Claude]", text_style))
-                .centered()
-                .render(inner, buf);
+        View::Claude(session_id) => {
+            if let Some(chat) = chats.get(session_id) {
+                render_claude_pane(chat, editors, buffers, inner, is_focused, render_tick, buf);
+            }
         },
     }
 }
