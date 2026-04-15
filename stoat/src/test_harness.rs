@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod claude;
+
 use crate::{
     app::{arg_as_str, Stoat, UpdateEffect},
     keymap::resolve_config_action,
@@ -10,7 +12,7 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write,
     sync::Arc,
 };
@@ -40,10 +42,13 @@ const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 
 pub struct TestHarness {
-    stoat: Stoat,
+    pub(crate) stoat: Stoat,
     #[allow(dead_code)]
     scheduler: Arc<TestScheduler>,
-    fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
+    pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
+    pub(crate) claude_fakes:
+        HashMap<crate::host::ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
+    pub(crate) claude_tool_id_counter: u64,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,
@@ -67,6 +72,8 @@ impl TestHarness {
             stoat,
             scheduler,
             fake_claude_host,
+            claude_fakes: HashMap::new(),
+            claude_tool_id_counter: 0,
             frames: Vec::new(),
             last_buffer: None,
             step: 0,
@@ -120,8 +127,17 @@ impl TestHarness {
         self.scheduler.tick()
     }
 
+    /// Drive the scheduler and Claude notification pipeline to a fixed
+    /// point. After returning, every spawned task has been polled to
+    /// suspension and every queued [`crate::host::ClaudeNotification`] has
+    /// been routed through the main dispatch path.
     pub fn settle(&mut self) {
-        self.scheduler.run_until_parked();
+        loop {
+            self.scheduler.run_until_parked();
+            if !self.stoat.drain_claude_notifications() {
+                break;
+            }
+        }
     }
 
     pub fn snapshot(&mut self) -> &Frame {
@@ -409,14 +425,15 @@ impl TestHarness {
         &mut self,
         fake: crate::host::FakeClaudeCode,
     ) -> crate::host::ClaudeSessionId {
-        self.fake_claude_host.push_session(fake);
+        let arc = self.fake_claude_host.push_session(fake);
         crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenClaude);
-        self.stoat.complete_pending_claude_sessions();
+        self.settle();
         let id = self
             .stoat
             .active_workspace()
             .claude_chat
             .expect("OpenClaude should set claude_chat");
+        self.claude_fakes.insert(id, arc);
         self.capture("open_claude");
         id
     }
@@ -425,19 +442,22 @@ impl TestHarness {
         &mut self,
         fake: crate::host::FakeClaudeCode,
     ) -> crate::host::ClaudeSessionId {
+        let arc = Arc::new(fake);
         let id = self.stoat.claude_sessions_mut().reserve_slot();
-        let session: Arc<dyn crate::host::ClaudeCodeSession> = Arc::new(fake);
-        self.stoat.claude_sessions_mut().fill_slot(id, session);
+        let session: Arc<dyn crate::host::ClaudeCodeSession> = arc.clone();
+        self.stoat
+            .claude_sessions_mut()
+            .fill_slot(id, session.clone());
+        // Spawn the polling task for this session so pushes flow through
+        // the real notification pipeline. Mirrors what the
+        // `SessionReady` notification does for OpenClaude-driven sessions.
+        let claude_tx = self.stoat.claude_tx.clone();
+        self.stoat
+            .executor
+            .spawn(crate::app::claude_polling_task(id, session, claude_tx))
+            .detach();
+        self.claude_fakes.insert(id, arc);
         id
-    }
-
-    pub fn inject_claude_message(
-        &mut self,
-        session_id: crate::host::ClaudeSessionId,
-        message: &crate::host::AgentMessage,
-    ) {
-        self.stoat.handle_claude_message(session_id, message);
-        self.capture("inject_claude_message");
     }
 
     pub fn show_claude_session(&mut self, session_id: crate::host::ClaudeSessionId) {
@@ -478,7 +498,14 @@ impl TestHarness {
             .and_then(|b| b.detail.clone())
     }
 
-    fn capture(&mut self, action: &str) {
+    /// Sub-harness for driving Claude Code sessions in tests. Returned by
+    /// short-lived reborrow; each method call on the harness re-acquires
+    /// `&mut self`, mirroring the `HashMap::entry` pattern.
+    pub fn claude(&mut self) -> claude::ClaudeHarness<'_> {
+        claude::ClaudeHarness::new(self)
+    }
+
+    pub(crate) fn capture(&mut self, action: &str) {
         // First render spawns any pending parse jobs. Settling the test
         // scheduler runs them to completion. The second render polls the
         // results and installs them so the snapshot reflects them.
@@ -1640,35 +1667,29 @@ mod tests {
     use crate::{
         badge::BadgeState,
         host::{AgentMessage, ClaudeSessionId, FakeClaudeCode},
+        test_harness::claude::ResultSpec,
     };
 
-    fn setup_claude_session(h: &mut TestHarness) -> ((), ClaudeSessionId) {
-        let id = h.open_claude_with_fake(FakeClaudeCode::new());
-        // Move Claude into the right dock for badge tests: the badge
-        // machinery predates pane-based Claude and the layout expectations
-        // track the dock overlay.
+    /// Badge tests need a non-visible Claude session: opened, moved into
+    /// the right dock, then toggled through Minimized to Hidden. The badge
+    /// machinery predates pane-based Claude and the layout expectations
+    /// track the dock overlay.
+    fn setup_hidden_claude_session(h: &mut TestHarness) -> ClaudeSessionId {
+        let id = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
-        // Open -> Minimized -> Hidden: hide the dock so badge tests
-        // start with a non-visible session.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
-        ((), id)
+        id
     }
 
     #[test]
     fn badge_appears_when_not_visible() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
         assert!(h.claude_badge_state(id).is_none());
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "let me think".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("let me think");
 
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id), Some("thinking".into()));
@@ -1677,38 +1698,19 @@ mod tests {
     #[test]
     fn badge_detail_updates_with_tool() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "hmm".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("hmm");
         assert_eq!(h.claude_badge_detail(id), Some("thinking".into()));
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolUse {
-                id: "toolu_1".into(),
-                name: "Read".into(),
-                input: "{}".into(),
-                kind: crate::host::ToolKind::Read,
-                title: "Read".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .read("/tmp/example.txt")
+            .pending();
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id), Some("Read".into()));
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Text {
-                text: "done reading".into(),
-            },
-        );
+        h.claude().get_session(id).text("done reading");
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id), None);
     }
@@ -1716,25 +1718,16 @@ mod tests {
     #[test]
     fn badge_completes_on_result() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("work");
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Result {
-                cost_usd: 0.01,
-                duration_ms: 1000,
-                num_turns: 1,
-            },
-        );
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 1000,
+            num_turns: 1,
+        });
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
         assert_eq!(h.claude_badge_detail(id), None);
     }
@@ -1742,22 +1735,13 @@ mod tests {
     #[test]
     fn badge_errors_on_error() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .thinking("work")
+            .error("rate limit");
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Error {
-                message: "rate limit".into(),
-            },
-        );
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
         assert_eq!(h.claude_badge_detail(id), Some("rate limit".into()));
     }
@@ -1765,15 +1749,9 @@ mod tests {
     #[test]
     fn badge_removed_when_session_shown() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("work");
         assert!(h.claude_badge_state(id).is_some());
 
         h.show_claude_session(id);
@@ -1783,55 +1761,31 @@ mod tests {
     #[test]
     fn no_badge_when_visible() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
         h.show_claude_session(id);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("work");
         assert!(h.claude_badge_state(id).is_none());
     }
 
     #[test]
     fn badge_reappears_after_hide() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        // Show the dock
         h.show_claude_session(id);
-
-        // Activity while visible -- no badge
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("work");
         assert!(h.claude_badge_state(id).is_none());
 
         // Hide the dock (Open -> Minimized -> Hidden)
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
 
-        // New activity while hidden -- badge appears
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolUse {
-                id: "toolu_1".into(),
-                name: "Edit".into(),
-                input: "{}".into(),
-                kind: crate::host::ToolKind::Edit,
-                title: "Edit".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .edit("/tmp/file.txt", "old", "new")
+            .pending();
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id), Some("Edit".into()));
     }
@@ -1839,62 +1793,33 @@ mod tests {
     #[test]
     fn init_and_unknown_inert() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Init {
-                session_id: "test".into(),
-                model: "test-model".into(),
-                tools: vec![],
-            },
-        );
+        h.claude().get_session(id).init();
         assert!(h.claude_badge_state(id).is_none());
 
-        h.inject_claude_message(id, &AgentMessage::Unknown { raw: "{}".into() });
+        h.claude()
+            .get_session(id)
+            .raw(AgentMessage::Unknown { raw: "{}".into() });
         assert!(h.claude_badge_state(id).is_none());
     }
 
     #[test]
     fn multiple_sessions_independent() {
         let mut h = TestHarness::default();
-        let (_, id_a) = setup_claude_session(&mut h);
+        let id_a = setup_hidden_claude_session(&mut h);
         let id_b = h.create_background_session(FakeClaudeCode::new());
 
-        h.inject_claude_message(
-            id_a,
-            &AgentMessage::Thinking {
-                text: "a".into(),
-                signature: "sig".into(),
-            },
-        );
-        h.inject_claude_message(
-            id_b,
-            &AgentMessage::ToolUse {
-                id: "toolu_1".into(),
-                name: "Bash".into(),
-                input: "{}".into(),
-                kind: crate::host::ToolKind::Execute,
-                title: "Bash".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
+        h.claude().get_session(id_a).thinking("a");
+        h.claude().get_session(id_b).bash("echo hi").pending();
 
         assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id_a), Some("thinking".into()));
         assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
         assert_eq!(h.claude_badge_detail(id_b), Some("Bash".into()));
 
-        // Complete session A, B stays active
-        h.inject_claude_message(
-            id_a,
-            &AgentMessage::Result {
-                cost_usd: 0.01,
-                duration_ms: 500,
-                num_turns: 1,
-            },
-        );
+        // Complete session A, B stays active.
+        h.claude().get_session(id_a).result();
         assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Complete));
         assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
     }
@@ -1902,43 +1827,30 @@ mod tests {
     #[test]
     fn snapshot_badge_active_styled() {
         let mut h = TestHarness::with_size(40, 10);
-        let (_, id) = setup_claude_session(&mut h);
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        let id = setup_hidden_claude_session(&mut h);
+        h.claude().get_session(id).thinking("work");
         h.assert_snapshot_styled("badge_active_styled");
     }
 
     #[test]
     fn snapshot_badge_complete_styled() {
         let mut h = TestHarness::with_size(40, 10);
-        let (_, id) = setup_claude_session(&mut h);
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Result {
+        let id = setup_hidden_claude_session(&mut h);
+        h.claude()
+            .get_session(id)
+            .thinking("work")
+            .result_with(ResultSpec {
                 cost_usd: 0.01,
                 duration_ms: 1000,
                 num_turns: 1,
-            },
-        );
+            });
         h.assert_snapshot_styled("badge_complete_styled");
     }
 
     #[test]
     fn snapshot_dock_open_overlay() {
         let mut h = TestHarness::with_size(60, 10);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         h.assert_snapshot("dock_open_overlay");
     }
@@ -1946,7 +1858,7 @@ mod tests {
     #[test]
     fn snapshot_dock_open_overlay_styled() {
         let mut h = TestHarness::with_size(60, 10);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         h.assert_snapshot_styled("dock_open_overlay_styled");
     }
@@ -1954,7 +1866,7 @@ mod tests {
     #[test]
     fn snapshot_dock_minimized_overlay() {
         let mut h = TestHarness::with_size(60, 10);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         h.assert_snapshot("dock_minimized_overlay");
@@ -1963,7 +1875,7 @@ mod tests {
     #[test]
     fn snapshot_dock_minimized_overlay_styled() {
         let mut h = TestHarness::with_size(60, 10);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         h.assert_snapshot_styled("dock_minimized_overlay_styled");
@@ -1980,37 +1892,29 @@ mod tests {
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         h.assert_snapshot("dock_overlays_split_panes");
     }
 
     #[test]
     fn result_without_prior_activity_creates_badge() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Result {
-                cost_usd: 0.01,
-                duration_ms: 100,
-                num_turns: 1,
-            },
-        );
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
     }
 
     #[test]
     fn error_without_prior_activity_creates_badge() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Error {
-                message: "failed".into(),
-            },
-        );
+        h.claude().get_session(id).error("failed");
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
         assert_eq!(h.claude_badge_detail(id), Some("failed".into()));
     }
@@ -2018,65 +1922,31 @@ mod tests {
     #[test]
     fn visible_session_result_removes_badge() {
         let mut h = TestHarness::default();
-        let (_, id) = setup_claude_session(&mut h);
+        let id = setup_hidden_claude_session(&mut h);
 
-        // Create badge while hidden
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "work".into(),
-                signature: "sig".into(),
-            },
-        );
+        h.claude().get_session(id).thinking("work");
         assert!(h.claude_badge_state(id).is_some());
 
-        // Show session, badge removed
         h.show_claude_session(id);
         assert!(h.claude_badge_state(id).is_none());
 
-        // Result while visible - no badge created
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Result {
-                cost_usd: 0.01,
-                duration_ms: 100,
-                num_turns: 1,
-            },
-        );
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
         assert!(h.claude_badge_state(id).is_none());
-    }
-
-    fn setup_visible_claude_session(h: &mut TestHarness) -> ClaudeSessionId {
-        h.open_claude_with_fake(FakeClaudeCode::new())
     }
 
     #[test]
     fn claude_panel_pairs_tool_use_and_result() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolUse {
-                id: "abc".into(),
-                name: "Bash".into(),
-                input: r#"{"command":"ls -la"}"#.into(),
-                kind: crate::host::ToolKind::Execute,
-                title: "Bash(ls -la)".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolResult {
-                id: "abc".into(),
-                content: "file1\nfile2\nfile3".into(),
-                status: crate::host::ToolCallStatus::Completed,
-                kind: crate::host::ToolKind::Execute,
-                terminal_meta: None,
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .bash("ls -la")
+            .result("file1\nfile2\nfile3");
 
         let frame = h.frames().last().expect("frame");
         assert!(
@@ -2094,15 +1964,11 @@ mod tests {
     #[test]
     fn claude_panel_collapses_thinking() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Thinking {
-                text: "line one\nline two\nline three".into(),
-                signature: "".into(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .thinking("line one\nline two\nline three");
 
         let frame = h.frames().last().expect("frame");
         assert!(
@@ -2115,7 +1981,7 @@ mod tests {
     #[test]
     fn claude_panel_clears_throbber_on_result() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
         h.stoat
             .active_workspace_mut()
@@ -2124,14 +1990,11 @@ mod tests {
             .unwrap()
             .active_since = Some(std::time::Instant::now());
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Result {
-                cost_usd: 0.01,
-                duration_ms: 100,
-                num_turns: 1,
-            },
-        );
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
 
         let chat = &h.stoat.active_workspace().chats[&id];
         assert!(
@@ -2155,14 +2018,11 @@ mod tests {
     #[test]
     fn claude_panel_preserves_paragraph_breaks() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Text {
-                text: "Para one here.\n\nPara two here.".into(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .text("Para one here.\n\nPara two here.");
 
         let frame = h.frames().last().expect("frame");
         let lines: Vec<&str> = frame.content.split('\n').collect();
@@ -2178,14 +2038,11 @@ mod tests {
     #[test]
     fn claude_panel_preserves_leading_indent() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Text {
-                text: "normal line\n    indented line".into(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .text("normal line\n    indented line");
 
         let frame = h.frames().last().expect("frame");
         assert!(
@@ -2198,26 +2055,13 @@ mod tests {
     #[test]
     fn claude_panel_separates_tool_from_text() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::Text {
-                text: "hello before tool".into(),
-            },
-        );
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolUse {
-                id: "abc".into(),
-                name: "Bash".into(),
-                input: r#"{"command":"ls"}"#.into(),
-                kind: crate::host::ToolKind::Execute,
-                title: "Bash(ls)".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
+        h.claude()
+            .get_session(id)
+            .text("hello before tool")
+            .bash("ls")
+            .pending();
 
         let frame = h.frames().last().expect("frame");
         let lines: Vec<&str> = frame.content.split('\n').collect();
@@ -2233,20 +2077,9 @@ mod tests {
     #[test]
     fn claude_panel_tool_use_prefix_distinct_from_user() {
         let mut h = TestHarness::with_size(80, 20);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
 
-        h.inject_claude_message(
-            id,
-            &AgentMessage::ToolUse {
-                id: "abc".into(),
-                name: "Bash".into(),
-                input: r#"{"command":"ls"}"#.into(),
-                kind: crate::host::ToolKind::Execute,
-                title: "Bash(ls)".into(),
-                content: Vec::new(),
-                locations: Vec::new(),
-            },
-        );
+        h.claude().get_session(id).bash("ls").pending();
 
         let frame = h.frames().last().expect("frame");
         assert!(
@@ -2258,72 +2091,10 @@ mod tests {
 
     // --- Step-by-step chat replay snapshots ---
 
-    use crate::host::{ToolCallStatus, ToolKind};
-
-    fn msg_text(s: &str) -> AgentMessage {
-        AgentMessage::Text { text: s.into() }
-    }
-
-    fn msg_partial(s: &str) -> AgentMessage {
-        AgentMessage::PartialText { text: s.into() }
-    }
-
-    fn msg_thinking(s: &str) -> AgentMessage {
-        AgentMessage::Thinking {
-            text: s.into(),
-            signature: String::new(),
-        }
-    }
-
-    fn msg_bash_use(tool_id: &str, cmd: &str) -> AgentMessage {
-        AgentMessage::ToolUse {
-            id: tool_id.into(),
-            name: "Bash".into(),
-            input: format!(r#"{{"command":"{cmd}"}}"#),
-            kind: ToolKind::Execute,
-            title: format!("Bash({cmd})"),
-            content: Vec::new(),
-            locations: Vec::new(),
-        }
-    }
-
-    fn msg_tool_result(tool_id: &str, content: &str) -> AgentMessage {
-        AgentMessage::ToolResult {
-            id: tool_id.into(),
-            content: content.into(),
-            status: ToolCallStatus::Completed,
-            kind: ToolKind::Execute,
-            terminal_meta: None,
-        }
-    }
-
-    fn msg_result(cost: f64, dur_ms: u64, turns: u32) -> AgentMessage {
-        AgentMessage::Result {
-            cost_usd: cost,
-            duration_ms: dur_ms,
-            num_turns: turns,
-        }
-    }
-
-    fn replay_chat(
-        h: &mut TestHarness,
-        id: ClaudeSessionId,
-        prefix: &str,
-        steps: &[(&str, AgentMessage)],
-    ) {
-        for (i, (label, msg)) in steps.iter().enumerate() {
-            h.inject_claude_message(id, msg);
-            let name = format!("{prefix}_step_{:02}_{label}_styled", i + 1);
-            h.assert_snapshot_styled(&name);
-        }
-        h.assert_snapshot(&format!("{prefix}_final"));
-    }
-
     #[test]
     fn chat_replay_real_session_ls_repo() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
-        let tool_id = "toolu_01CEDVVVKiCUWHatHAxw6sXf";
+        let id = h.claude().open();
         let final_text = "Here are the top-level files and directories in the \
                           repo:\n\n**Files:** `CLAUDE.md`, `CLAUDE.local.md`, \
                           `Cargo.lock`, `Cargo.toml`, `LICENSE`, `README.md`, \
@@ -2341,128 +2112,137 @@ mod tests {
                          references\nrust-toolchain.toml\nrustfmt.toml\n\
                          scheduler\nscript\nstoat\nstoat.log\ntarget\ntest.csv\n\
                          test_workspace\ntext\ntmp\nvendor\nviewport";
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_real_session_ls_repo",
-            &[
-                ("turn1_text_working", msg_text("\n\nWorking.")),
-                ("turn1_result", msg_result(0.0746, 1753, 1)),
-                (
-                    "turn2_thinking",
-                    msg_thinking("The user wants to see the files in the repo. Let me list them."),
-                ),
-                (
-                    "turn2_tool_use_ls",
-                    msg_bash_use(tool_id, "ls /Users/lee/projects/stoat"),
-                ),
-                ("turn2_tool_result", msg_tool_result(tool_id, ls_output)),
-                ("turn2_final_text", msg_text(final_text)),
-                ("turn2_result", msg_result(0.1066, 7458, 2)),
-            ],
-        );
+
+        h.claude()
+            .get_session(id)
+            .text("\n\nWorking.")
+            .snap_styled("chat_replay_real_session_ls_repo_step_01_turn1_text_working_styled")
+            .result_with(ResultSpec {
+                cost_usd: 0.0746,
+                duration_ms: 1753,
+                num_turns: 1,
+            })
+            .snap_styled("chat_replay_real_session_ls_repo_step_02_turn1_result_styled")
+            .thinking("The user wants to see the files in the repo. Let me list them.")
+            .snap_styled("chat_replay_real_session_ls_repo_step_03_turn2_thinking_styled")
+            .bash("ls /Users/lee/projects/stoat")
+            .snap_styled("chat_replay_real_session_ls_repo_step_04_turn2_tool_use_ls_styled")
+            .result(ls_output)
+            .snap_styled("chat_replay_real_session_ls_repo_step_05_turn2_tool_result_styled")
+            .text(final_text)
+            .snap_styled("chat_replay_real_session_ls_repo_step_06_turn2_final_text_styled")
+            .result_with(ResultSpec {
+                cost_usd: 0.1066,
+                duration_ms: 7458,
+                num_turns: 2,
+            })
+            .snap_styled("chat_replay_real_session_ls_repo_step_07_turn2_result_styled");
+
+        h.assert_snapshot("chat_replay_real_session_ls_repo_final");
     }
 
     #[test]
     fn chat_replay_multiline_paragraphs() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_multiline_paragraphs",
-            &[(
-                "text",
-                msg_text("First paragraph.\n\nSecond paragraph.\n\nThird paragraph."),
-            )],
-        );
+        let id = h.claude().open();
+
+        h.claude()
+            .get_session(id)
+            .text("First paragraph.\n\nSecond paragraph.\n\nThird paragraph.")
+            .snap_styled("chat_replay_multiline_paragraphs_step_01_text_styled");
+
+        h.assert_snapshot("chat_replay_multiline_paragraphs_final");
     }
 
     #[test]
     fn chat_replay_long_line_wraps() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
         let long = "one two three four five six seven eight nine ten \
                     eleven twelve thirteen fourteen fifteen sixteen \
                     seventeen eighteen nineteen twenty twenty-one";
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_long_line_wraps",
-            &[("long_text", msg_text(long))],
-        );
+
+        h.claude()
+            .get_session(id)
+            .text(long)
+            .snap_styled("chat_replay_long_line_wraps_step_01_long_text_styled");
+
+        h.assert_snapshot("chat_replay_long_line_wraps_final");
     }
 
     #[test]
     fn chat_replay_indented_lines() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
         let text = "here is some code:\n    fn foo() {\n        bar();\n    }\nend.";
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_indented_lines",
-            &[("indented_text", msg_text(text))],
-        );
+
+        h.claude()
+            .get_session(id)
+            .text(text)
+            .snap_styled("chat_replay_indented_lines_step_01_indented_text_styled");
+
+        h.assert_snapshot("chat_replay_indented_lines_final");
     }
 
     #[test]
     fn chat_replay_thinking_then_text() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_thinking_then_text",
-            &[
-                ("thinking", msg_thinking("line one\nline two\nline three")),
-                ("text", msg_text("Done thinking.")),
-            ],
-        );
+        let id = h.claude().open();
+
+        h.claude()
+            .get_session(id)
+            .thinking("line one\nline two\nline three")
+            .snap_styled("chat_replay_thinking_then_text_step_01_thinking_styled")
+            .text("Done thinking.")
+            .snap_styled("chat_replay_thinking_then_text_step_02_text_styled");
+
+        h.assert_snapshot("chat_replay_thinking_then_text_final");
     }
 
     #[test]
     fn chat_replay_tool_use_no_result_yet() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_tool_use_no_result_yet",
-            &[("tool_use_pending", msg_bash_use("t1", "ls"))],
-        );
+        let id = h.claude().open();
+
+        h.claude()
+            .get_session(id)
+            .bash("ls")
+            .snap_styled("chat_replay_tool_use_no_result_yet_step_01_tool_use_pending_styled")
+            .pending();
+
+        h.assert_snapshot("chat_replay_tool_use_no_result_yet_final");
     }
 
     #[test]
     fn chat_replay_partial_then_final_text() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_partial_then_final_text",
-            &[
-                ("partial_chunk_1", msg_partial("Hello ")),
-                ("partial_chunk_2", msg_partial("Hello world ")),
-                ("partial_chunk_3", msg_partial("Hello world from Claude.")),
-                ("final_text", msg_text("Hello world from Claude.")),
-            ],
-        );
+        let id = h.claude().open();
+
+        h.claude()
+            .get_session(id)
+            .partial("Hello ")
+            .snap_styled("chat_replay_partial_then_final_text_step_01_partial_chunk_1_styled")
+            .partial("Hello world ")
+            .snap_styled("chat_replay_partial_then_final_text_step_02_partial_chunk_2_styled")
+            .partial("Hello world from Claude.")
+            .snap_styled("chat_replay_partial_then_final_text_step_03_partial_chunk_3_styled")
+            .text("Hello world from Claude.")
+            .snap_styled("chat_replay_partial_then_final_text_step_04_final_text_styled");
+
+        h.assert_snapshot("chat_replay_partial_then_final_text_final");
     }
 
     #[test]
     fn chat_replay_narrow_pane_wrap() {
         let mut h = TestHarness::with_size(40, 16);
-        let id = setup_visible_claude_session(&mut h);
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_narrow_pane_wrap",
-            &[(
-                "text",
-                msg_text("Working on it. This reply should wrap several times in a 40-col pane."),
-            )],
-        );
+        let id = h.claude().open();
+
+        h.claude()
+            .get_session(id)
+            .text("Working on it. This reply should wrap several times in a 40-col pane.")
+            .snap_styled("chat_replay_narrow_pane_wrap_step_01_text_styled");
+
+        h.assert_snapshot("chat_replay_narrow_pane_wrap_final");
     }
 
     /// End-to-end sequence the production `ClaudeCode` adapter emits for
@@ -2475,22 +2255,37 @@ mod tests {
     #[test]
     fn chat_replay_streamed_text_then_final_and_result() {
         let mut h = TestHarness::with_size(80, 24);
-        let id = setup_visible_claude_session(&mut h);
+        let id = h.claude().open();
         let part1 = "| Directory | Primary Language |\n|---|---|";
         let part2 = format!("{part1}\n| `action/` | Rust |\n| `agent/` | Rust |");
         let full_text = format!("{part2}\n| `vendor/` | (vendor deps) |\n| `viewport/` | Rust |");
-        replay_chat(
-            &mut h,
-            id,
-            "chat_replay_streamed_text_then_final_and_result",
-            &[
-                ("partial_chunk_1", msg_partial(part1)),
-                ("partial_chunk_2", msg_partial(&part2)),
-                ("partial_chunk_3", msg_partial(&full_text)),
-                ("final_text", msg_text(&full_text)),
-                ("result", msg_result(0.2133, 58335, 3)),
-            ],
-        );
+
+        h.claude()
+            .get_session(id)
+            .partial(part1)
+            .snap_styled(
+                "chat_replay_streamed_text_then_final_and_result_step_01_partial_chunk_1_styled",
+            )
+            .partial(&part2)
+            .snap_styled(
+                "chat_replay_streamed_text_then_final_and_result_step_02_partial_chunk_2_styled",
+            )
+            .partial(&full_text)
+            .snap_styled(
+                "chat_replay_streamed_text_then_final_and_result_step_03_partial_chunk_3_styled",
+            )
+            .text(&full_text)
+            .snap_styled(
+                "chat_replay_streamed_text_then_final_and_result_step_04_final_text_styled",
+            )
+            .result_with(ResultSpec {
+                cost_usd: 0.2133,
+                duration_ms: 58335,
+                num_turns: 3,
+            })
+            .snap_styled("chat_replay_streamed_text_then_final_and_result_step_05_result_styled");
+
+        h.assert_snapshot("chat_replay_streamed_text_then_final_and_result_final");
     }
 
     // --- Claude placement tests ---
@@ -2528,7 +2323,7 @@ mod tests {
     #[test]
     fn open_claude_defaults_to_pane() {
         let mut h = TestHarness::default();
-        let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        let id = h.claude().open();
         assert_eq!(claude_panes(&h.stoat), vec![id]);
         assert_eq!(claude_docks(&h.stoat), vec![]);
     }
@@ -2539,7 +2334,7 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
         });
-        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _id = h.claude().open();
         assert_eq!(claude_panes(&h.stoat), vec![]);
         assert_eq!(
             claude_docks(&h.stoat),
@@ -2553,7 +2348,7 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockLeft),
         });
-        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _id = h.claude().open();
         assert_eq!(claude_panes(&h.stoat), vec![]);
         assert_eq!(
             claude_docks(&h.stoat),
@@ -2564,8 +2359,8 @@ mod tests {
     #[test]
     fn open_claude_twice_focuses_existing_pane() {
         let mut h = TestHarness::default();
-        let first = h.open_claude_with_fake(FakeClaudeCode::new());
-        let second = h.open_claude_with_fake(FakeClaudeCode::new());
+        let first = h.claude().open();
+        let second = h.claude().open();
         assert_eq!(first, second, "second open should reuse first session");
         assert_eq!(claude_panes(&h.stoat), vec![first]);
         assert_eq!(claude_docks(&h.stoat), vec![]);
@@ -2577,7 +2372,7 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
         });
-        let id = h.open_claude_with_fake(FakeClaudeCode::new());
+        let id = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToPane);
         assert_eq!(claude_panes(&h.stoat), vec![id]);
         assert_eq!(claude_docks(&h.stoat), vec![]);
@@ -2586,7 +2381,7 @@ mod tests {
     #[test]
     fn claude_to_dock_right_moves_from_pane() {
         let mut h = TestHarness::default();
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         assert_eq!(claude_panes(&h.stoat), vec![]);
         assert_eq!(
@@ -2611,7 +2406,7 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
         });
-        let _id = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _id = h.claude().open();
         // Shrink dock so we can see the width is preserved across flips.
         for (_, dock) in &mut h.stoat.active_workspace_mut().docks {
             dock.visibility = DockVisibility::Open { width: 25 };
@@ -2636,7 +2431,7 @@ mod tests {
     fn claude_to_dock_right_keeps_other_panes_intact() {
         let mut h = TestHarness::default();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         // Now: left pane editor, right pane Claude (focused). Moving Claude
         // to the right dock should close the right pane, leaving just the
         // original editor pane.
@@ -2655,7 +2450,188 @@ mod tests {
     #[test]
     fn snapshot_claude_as_pane_styled() {
         let mut h = TestHarness::with_size(60, 10);
-        let _ = h.open_claude_with_fake(FakeClaudeCode::new());
+        let _ = h.claude().open();
         h.assert_snapshot_styled("claude_as_pane_styled");
+    }
+
+    // --- ClaudeHarness session-tracking and transport coverage ---
+
+    #[test]
+    fn claude_harness_single_session_reports_id() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.claude().open();
+        assert_eq!(h.claude().session_ids(), vec![id]);
+    }
+
+    #[test]
+    fn claude_harness_init_sessions_multiple_background() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ids = h
+            .claude()
+            .init_sessions(["first session", "second session", "third session"]);
+        assert_eq!(ids.len(), 3);
+        let mut known = h.claude().session_ids();
+        known.sort_by_key(|id| ids.iter().position(|i| i == id).unwrap_or(usize::MAX));
+        assert_eq!(known, ids);
+    }
+
+    #[test]
+    fn claude_harness_list_sessions_reflects_seeded_summaries() {
+        use crate::host::ClaudeCodeHost;
+
+        let mut h = TestHarness::with_size(80, 24);
+        h.claude()
+            .init_sessions(["alpha".to_string(), "beta".to_string()]);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let summaries = rt
+            .block_on(h.fake_claude_host.list_sessions())
+            .expect("list_sessions");
+
+        let titles: Vec<&str> = summaries.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["alpha", "beta"]);
+        let expected_ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(expected_ids, vec!["sess-01", "sess-02"]);
+    }
+
+    #[test]
+    fn claude_harness_say_flows_through_real_polling() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.claude().open();
+        h.claude().get_session(id).say("Hello from the fake.");
+
+        let ws = h.stoat.active_workspace();
+        let chat = ws.chats.get(&id).expect("chat state");
+        let has_text = chat.messages.iter().any(|m| {
+            matches!(
+                &m.content,
+                crate::claude_chat::ChatMessageContent::Text(t)
+                    if t == "Hello from the fake."
+            )
+        });
+        assert!(
+            has_text,
+            "expected text message to land in chat state via the polling path"
+        );
+        let has_turn_complete = chat.messages.iter().any(|m| {
+            matches!(
+                &m.content,
+                crate::claude_chat::ChatMessageContent::TurnComplete { .. }
+            )
+        });
+        assert!(has_turn_complete, "say() should emit a Result message");
+    }
+
+    #[test]
+    fn claude_harness_bash_tool_pair_populates_kind_and_content() {
+        use crate::host::{ToolCallContent, ToolKind};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.claude().open();
+        h.claude()
+            .get_session(id)
+            .bash("ls /tmp")
+            .result("one\ntwo");
+
+        let ws = h.stoat.active_workspace();
+        let chat = ws.chats.get(&id).expect("chat state");
+        let use_msg = chat
+            .messages
+            .iter()
+            .find_map(|m| match &m.content {
+                crate::claude_chat::ChatMessageContent::ToolUse { name, input, id } => {
+                    Some((name.clone(), input.clone(), id.clone()))
+                },
+                _ => None,
+            })
+            .expect("ToolUse in chat");
+        assert_eq!(use_msg.0, "Bash");
+        assert!(use_msg.1.contains("ls /tmp"), "input JSON: {}", use_msg.1);
+        assert!(
+            use_msg.2.starts_with("toolu_"),
+            "tool id {} should match toolu_* shape",
+            use_msg.2
+        );
+
+        let result_msg = chat
+            .messages
+            .iter()
+            .find_map(|m| match &m.content {
+                crate::claude_chat::ChatMessageContent::ToolResult { id, content } => {
+                    Some((id.clone(), content.clone()))
+                },
+                _ => None,
+            })
+            .expect("ToolResult in chat");
+        assert_eq!(result_msg.0, use_msg.2, "result id pairs with use id");
+        assert_eq!(result_msg.1, "one\ntwo");
+
+        let _ = (
+            ToolKind::Execute,
+            ToolCallContent::Text {
+                text: String::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn claude_harness_stream_message_emits_partials() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.claude().open();
+        h.claude()
+            .get_session(id)
+            .stream_message("The quick brown fox jumps over the lazy dog.");
+
+        let ws = h.stoat.active_workspace();
+        let chat = ws.chats.get(&id).expect("chat state");
+        let has_final_text = chat.messages.iter().any(|m| {
+            matches!(
+                &m.content,
+                crate::claude_chat::ChatMessageContent::Text(t)
+                    if t == "The quick brown fox jumps over the lazy dog."
+            )
+        });
+        assert!(has_final_text, "final Text should land in chat history");
+        let has_turn_complete = chat.messages.iter().any(|m| {
+            matches!(
+                &m.content,
+                crate::claude_chat::ChatMessageContent::TurnComplete { .. }
+            )
+        });
+        assert!(
+            has_turn_complete,
+            "stream_message should terminate the turn with Result"
+        );
+        assert!(
+            chat.streaming_text.is_none(),
+            "streaming_text cleared after final Text: {:?}",
+            chat.streaming_text
+        );
+    }
+
+    #[test]
+    fn claude_harness_tool_pending_leaves_result_absent() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").pending();
+
+        let ws = h.stoat.active_workspace();
+        let chat = ws.chats.get(&id).expect("chat state");
+        let result_count = chat
+            .messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.content,
+                    crate::claude_chat::ChatMessageContent::ToolResult { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            result_count, 0,
+            "pending() should NOT emit a ToolResult message"
+        );
     }
 }

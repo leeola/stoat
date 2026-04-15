@@ -625,26 +625,28 @@ impl Stoat {
             ClaudeNotification::CreateRequested { session_id } => {
                 if let Some(host) = self.claude_host.clone() {
                     let tx = self.claude_tx.clone();
-                    tokio::spawn(async move {
-                        match host.new_session().await {
-                            Ok(session) => {
-                                let _ = tx
-                                    .send(ClaudeNotification::SessionReady {
-                                        session_id,
-                                        session,
-                                    })
-                                    .await;
-                            },
-                            Err(e) => {
-                                let _ = tx
-                                    .send(ClaudeNotification::SessionError {
-                                        session_id,
-                                        error: e.to_string(),
-                                    })
-                                    .await;
-                            },
-                        }
-                    });
+                    self.executor
+                        .spawn(async move {
+                            match host.new_session().await {
+                                Ok(session) => {
+                                    let _ = tx
+                                        .send(ClaudeNotification::SessionReady {
+                                            session_id,
+                                            session,
+                                        })
+                                        .await;
+                                },
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(ClaudeNotification::SessionError {
+                                            session_id,
+                                            error: e.to_string(),
+                                        })
+                                        .await;
+                                },
+                            }
+                        })
+                        .detach();
                 }
                 UpdateEffect::None
             },
@@ -655,7 +657,9 @@ impl Stoat {
                 let session: Arc<dyn crate::host::ClaudeCodeSession> = Arc::from(session);
                 let claude_tx = self.claude_tx.clone();
                 self.claude_sessions.fill_slot(session_id, session.clone());
-                tokio::spawn(claude_polling_task(session_id, session.clone(), claude_tx));
+                self.executor
+                    .spawn(claude_polling_task(session_id, session.clone(), claude_tx))
+                    .detach();
 
                 let pending = {
                     let ws = self.active_workspace_mut();
@@ -665,14 +669,16 @@ impl Stoat {
                         .unwrap_or_default()
                 };
                 if !pending.is_empty() {
-                    tokio::spawn(async move {
-                        for text in pending {
-                            if let Err(e) = session.send(&text).await {
-                                tracing::error!("claude pending send error: {e}");
-                                break;
+                    self.executor
+                        .spawn(async move {
+                            for text in pending {
+                                if let Err(e) = session.send(&text).await {
+                                    tracing::error!("claude pending send error: {e}");
+                                    break;
+                                }
                             }
-                        }
-                    });
+                        })
+                        .detach();
                 }
 
                 UpdateEffect::Redraw
@@ -699,36 +705,20 @@ impl Stoat {
         }
     }
 
+    /// Drain every queued [`ClaudeNotification`] and route it through
+    /// [`Self::handle_claude_notification`]. Used by the test harness in its
+    /// settle loop to advance the real transport pipeline without the
+    /// production `tokio::select!` in [`Self::run`]. Returns `true` if at
+    /// least one notification was processed, so callers can loop until the
+    /// pipeline reaches a fixed point.
     #[cfg(test)]
-    pub(crate) fn complete_pending_claude_sessions(&mut self) {
+    pub(crate) fn drain_claude_notifications(&mut self) -> bool {
+        let mut progressed = false;
         while let Ok(notif) = self.claude_rx.try_recv() {
-            if let ClaudeNotification::CreateRequested { session_id } = notif {
-                if let Some(host) = &self.claude_host {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .build()
-                        .expect("test runtime");
-                    match rt.block_on(host.new_session()) {
-                        Ok(session) => {
-                            self.claude_sessions
-                                .fill_slot(session_id, Arc::from(session));
-                        },
-                        Err(e) => {
-                            use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
-                            self.claude_sessions.remove(session_id);
-                            let ws = self.active_workspace_mut();
-                            if let Some(chat) = ws.chats.get_mut(&session_id) {
-                                chat.messages.push(ChatMessage {
-                                    role: ChatRole::Assistant,
-                                    content: ChatMessageContent::Error(format!(
-                                        "Failed to start session: {e}"
-                                    )),
-                                });
-                            }
-                        },
-                    }
-                }
-            }
+            self.handle_claude_notification(notif);
+            progressed = true;
         }
+        progressed
     }
 
     pub(crate) fn handle_claude_message(
@@ -1839,7 +1829,7 @@ fn badge_border_style(state: BadgeState) -> Style {
     }
 }
 
-async fn claude_polling_task(
+pub(crate) async fn claude_polling_task(
     session_id: ClaudeSessionId,
     host: Arc<dyn crate::host::ClaudeCodeSession>,
     tx: Sender<ClaudeNotification>,

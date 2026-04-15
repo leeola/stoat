@@ -882,11 +882,14 @@ fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
     // Send now if host is ready, otherwise queue for when it becomes available.
     if let Some(host) = stoat.claude_sessions().get(session_id) {
         let host = host.clone();
-        tokio::spawn(async move {
-            if let Err(e) = host.send(&text).await {
-                tracing::error!("claude send error: {e}");
-            }
-        });
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(e) = host.send(&text).await {
+                    tracing::error!("claude send error: {e}");
+                }
+            })
+            .detach();
     } else {
         let ws = stoat.active_workspace_mut();
         if let Some(chat) = ws.chats.get_mut(&session_id) {
