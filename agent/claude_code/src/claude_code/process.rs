@@ -77,6 +77,11 @@ pub struct Process {
     /// flush them after the handler tasks have exited.
     tx_log: Option<Arc<TextProtoLog>>,
     rx_log: Option<Arc<TextProtoLog>>,
+    /// Holds an MCP `--mcp-config` tempfile for the lifetime of the
+    /// subprocess. The file must exist until the CLI has read it at
+    /// startup; binding the `Arc<NamedTempFile>` here guarantees the
+    /// file is not deleted prematurely by drop order.
+    _mcp_config_tempfile: Option<Arc<tempfile::NamedTempFile>>,
 }
 
 pub struct RecoveredChannels {
@@ -119,6 +124,22 @@ pub struct ProcessBuilder {
     // Optional byte-faithful transcript logs (stdin -> Claude, Claude -> stdout).
     tx_log: Option<Arc<TextProtoLog>>,
     rx_log: Option<Arc<TextProtoLog>>,
+
+    // ---- Phase 6 additions ----
+    env: std::collections::HashMap<String, String>,
+    system_prompt: Option<String>,
+    system_prompt_file: Option<PathBuf>,
+    max_thinking_tokens: Option<u32>,
+    mcp_config_tempfile: Option<Arc<tempfile::NamedTempFile>>,
+    settings_arg: Option<String>,
+    agents: Option<serde_json::Value>,
+    tools_override: Option<Vec<String>>,
+    plugin_dirs: Vec<PathBuf>,
+    strict_mcp_config: bool,
+    fallback_model: Option<String>,
+    session_persistence: bool,
+    effort: Option<String>,
+    allow_dangerously_skip_permissions: bool,
 }
 
 impl ProcessBuilder {
@@ -149,7 +170,99 @@ impl ProcessBuilder {
             binary: None,
             tx_log: None,
             rx_log: None,
+            env: std::collections::HashMap::new(),
+            system_prompt: None,
+            system_prompt_file: None,
+            max_thinking_tokens: None,
+            mcp_config_tempfile: None,
+            settings_arg: None,
+            agents: None,
+            tools_override: None,
+            plugin_dirs: Vec::new(),
+            strict_mcp_config: false,
+            fallback_model: None,
+            session_persistence: true,
+            effort: None,
+            allow_dangerously_skip_permissions: false,
         }
+    }
+
+    // ---- Phase 6 builder setters ----
+
+    pub fn env_map(mut self, env: std::collections::HashMap<String, String>) -> Self {
+        self.env = env;
+        self
+    }
+
+    pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn system_prompt_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.system_prompt_file = Some(path.into());
+        self
+    }
+
+    pub fn max_thinking_tokens(mut self, tokens: u32) -> Self {
+        self.max_thinking_tokens = Some(tokens);
+        self
+    }
+
+    pub fn mcp_config_tempfile(mut self, file: Arc<tempfile::NamedTempFile>) -> Self {
+        self.mcp_config_tempfile = Some(file);
+        self
+    }
+
+    pub fn settings_arg(mut self, value: impl Into<String>) -> Self {
+        self.settings_arg = Some(value.into());
+        self
+    }
+
+    pub fn agents(mut self, value: serde_json::Value) -> Self {
+        self.agents = Some(value);
+        self
+    }
+
+    pub fn tools_override(mut self, tools: Vec<String>) -> Self {
+        self.tools_override = Some(tools);
+        self
+    }
+
+    pub fn plugin_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.plugin_dirs = dirs;
+        self
+    }
+
+    pub fn strict_mcp_config(mut self, enabled: bool) -> Self {
+        self.strict_mcp_config = enabled;
+        self
+    }
+
+    pub fn fallback_model(mut self, model: impl Into<String>) -> Self {
+        self.fallback_model = Some(model.into());
+        self
+    }
+
+    pub fn session_persistence(mut self, enabled: bool) -> Self {
+        self.session_persistence = enabled;
+        self
+    }
+
+    pub fn effort(mut self, value: impl Into<String>) -> Self {
+        self.effort = Some(value.into());
+        self
+    }
+
+    pub fn allow_dangerously_skip_permissions(mut self, enabled: bool) -> Self {
+        self.allow_dangerously_skip_permissions = enabled;
+        self
+    }
+
+    #[cfg(not(test))]
+    pub fn binary_path(mut self, path: impl Into<String>) -> Self {
+        self.binary = Some(path.into());
+        self
     }
 
     pub fn text_proto_logs(mut self, tx_log: Arc<TextProtoLog>, rx_log: Arc<TextProtoLog>) -> Self {
@@ -338,6 +451,7 @@ impl ProcessBuilder {
             shutdown_tx: Some(shutdown_tx),
             tx_log,
             rx_log,
+            _mcp_config_tempfile: self.mcp_config_tempfile.clone(),
         })
     }
 
@@ -392,8 +506,10 @@ impl ProcessBuilder {
 
         if let Some(mode) = &self.permission_mode {
             let mode_str = match mode {
+                PermissionMode::Auto => "auto",
                 PermissionMode::Default => "default",
                 PermissionMode::AcceptEdits => "acceptEdits",
+                PermissionMode::DontAsk => "dontAsk",
                 PermissionMode::BypassPermissions => "bypassPermissions",
                 PermissionMode::Plan => "plan",
             };
@@ -452,6 +568,55 @@ impl ProcessBuilder {
             args.push(name.clone());
         }
 
+        // Phase 6 additions - emit the remaining CLI flags.
+        if let Some(prompt) = &self.system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(prompt.clone());
+        }
+        if let Some(path) = &self.system_prompt_file {
+            args.push("--system-prompt-file".to_string());
+            args.push(path.to_string_lossy().into_owned());
+        }
+        if let Some(tempfile) = &self.mcp_config_tempfile {
+            args.push("--mcp-config".to_string());
+            args.push(tempfile.path().to_string_lossy().into_owned());
+        }
+        if let Some(value) = &self.settings_arg {
+            args.push("--settings".to_string());
+            args.push(value.clone());
+        }
+        if let Some(agents) = &self.agents {
+            args.push("--agents".to_string());
+            args.push(agents.to_string());
+        }
+        if let Some(tools) = &self.tools_override
+            && !tools.is_empty()
+        {
+            args.push("--tools".to_string());
+            args.push(tools.join(","));
+        }
+        for dir in &self.plugin_dirs {
+            args.push("--plugin-dir".to_string());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+        if self.strict_mcp_config {
+            args.push("--strict-mcp-config".to_string());
+        }
+        if let Some(model) = &self.fallback_model {
+            args.push("--fallback-model".to_string());
+            args.push(model.clone());
+        }
+        if !self.session_persistence {
+            args.push("--no-session-persistence".to_string());
+        }
+        if let Some(effort) = &self.effort {
+            args.push("--effort".to_string());
+            args.push(effort.clone());
+        }
+        if self.allow_dangerously_skip_permissions {
+            args.push("--allow-dangerously-skip-permissions".to_string());
+        }
+
         for (flag, value) in &self.extra_args {
             args.push(flag.clone());
             if let Some(v) = value {
@@ -473,6 +638,16 @@ impl ProcessBuilder {
 
         if let Some(cwd) = &self.cwd {
             cmd.current_dir(cwd);
+        }
+
+        // Inject configured env vars (Phase 6).
+        for (key, value) in &self.env {
+            cmd.env(key, value);
+        }
+        // `MAX_THINKING_TOKENS` is read from env by the CLI when
+        // extended thinking is active; translate the builder field.
+        if let Some(tokens) = self.max_thinking_tokens {
+            cmd.env("MAX_THINKING_TOKENS", tokens.to_string());
         }
 
         debug!("Spawning {binary} process with args: {:?}", args);
@@ -779,17 +954,21 @@ mod tests {
 
     #[test]
     fn build_args_permission_mode_uses_camel_case() {
-        let args = builder_with_session_id()
-            .permission_mode(PermissionMode::AcceptEdits)
-            .build_args(false);
-        let idx = index_of(&args, "--permission-mode").expect("flag missing");
-        assert_eq!(args.get(idx + 1), Some(&"acceptEdits".to_string()));
-
-        let args = builder_with_session_id()
-            .permission_mode(PermissionMode::BypassPermissions)
-            .build_args(false);
-        let idx = index_of(&args, "--permission-mode").expect("flag missing");
-        assert_eq!(args.get(idx + 1), Some(&"bypassPermissions".to_string()));
+        let cases = [
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::Default, "default"),
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::DontAsk, "dontAsk"),
+            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Plan, "plan"),
+        ];
+        for (mode, expected) in cases {
+            let args = builder_with_session_id()
+                .permission_mode(mode)
+                .build_args(false);
+            let idx = index_of(&args, "--permission-mode").expect("flag missing");
+            assert_eq!(args.get(idx + 1), Some(&expected.to_string()));
+        }
     }
 
     #[test]

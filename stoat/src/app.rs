@@ -762,7 +762,9 @@ impl Stoat {
                         content: ChatMessageContent::Thinking { text: text.clone() },
                     });
                 },
-                AgentMessage::ToolUse { id, name, input } => {
+                AgentMessage::ToolUse {
+                    id, name, input, ..
+                } => {
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::ToolUse {
@@ -772,7 +774,7 @@ impl Stoat {
                         },
                     });
                 },
-                AgentMessage::ToolResult { id, content } => {
+                AgentMessage::ToolResult { id, content, .. } => {
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::ToolResult {
@@ -806,7 +808,24 @@ impl Stoat {
                 AgentMessage::Init { .. }
                 | AgentMessage::Unknown { .. }
                 | AgentMessage::ServerToolUse { .. }
-                | AgentMessage::ServerToolResult { .. } => {},
+                | AgentMessage::ServerToolResult { .. }
+                | AgentMessage::ToolUpdate { .. }
+                | AgentMessage::PartialToolInput { .. }
+                | AgentMessage::Plan { .. }
+                | AgentMessage::Usage { .. }
+                | AgentMessage::ModeChanged { .. }
+                | AgentMessage::ModelChanged { .. }
+                | AgentMessage::FilesPersisted { .. }
+                | AgentMessage::ElicitationComplete { .. }
+                | AgentMessage::AuthRequired { .. }
+                | AgentMessage::SessionState(_)
+                | AgentMessage::TaskEvent(_)
+                | AgentMessage::Hook(_) => {
+                    // Phase 3 lands these variants structurally. UI
+                    // integration (diff rendering, plan widget, usage
+                    // meter, etc.) is a follow-up; for now the chat
+                    // state model ignores them.
+                },
             }
         }
 
@@ -892,7 +911,20 @@ impl Stoat {
                 }
                 UpdateEffect::Redraw
             },
-            AgentMessage::Init { .. } | AgentMessage::Unknown { .. } => UpdateEffect::None,
+            AgentMessage::Init { .. }
+            | AgentMessage::Unknown { .. }
+            | AgentMessage::ToolUpdate { .. }
+            | AgentMessage::PartialToolInput { .. }
+            | AgentMessage::Plan { .. }
+            | AgentMessage::Usage { .. }
+            | AgentMessage::ModeChanged { .. }
+            | AgentMessage::ModelChanged { .. }
+            | AgentMessage::FilesPersisted { .. }
+            | AgentMessage::ElicitationComplete { .. }
+            | AgentMessage::AuthRequired { .. }
+            | AgentMessage::SessionState(_)
+            | AgentMessage::TaskEvent(_)
+            | AgentMessage::Hook(_) => UpdateEffect::None,
         }
     }
 

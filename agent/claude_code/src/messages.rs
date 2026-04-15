@@ -130,6 +130,11 @@ pub enum SdkMessage {
         message: AssistantMessage,
         /// Session identifier for message correlation
         session_id: String,
+        /// Present when this assistant turn belongs to a subagent
+        /// invocation; the id matches the parent `tool_use` id that
+        /// spawned the subagent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
 
     /// Input messages to Claude.
@@ -155,6 +160,16 @@ pub enum SdkMessage {
         message: UserMessage,
         /// Session identifier for message correlation
         session_id: String,
+        /// Optional UUID the host stamped on outbound user frames.
+        /// Present on echoes when `replay-user-messages` is enabled;
+        /// the adapter uses it to drop the CLI's replay of our own
+        /// input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_uuid: Option<String>,
+        /// Parent tool_use id when this user message is a subagent
+        /// tool result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
 
     /// Terminal message ending a conversation.
@@ -187,12 +202,26 @@ pub enum SdkMessage {
         /// Number of conversation turns completed
         num_turns: u32,
         /// Final result text (usually assistant's last response)
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<String>,
         /// Session identifier for message correlation
         session_id: String,
         /// Total cost in USD for this conversation
         total_cost_usd: f64,
+        /// Aggregate token usage for the turn. Missing on older CLI
+        /// releases; callers should treat absence as "unknown", not zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+        /// Per-model usage breakdown when the session touched more than
+        /// one model. Keyed by model id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_usage: Option<HashMap<String, ModelUsage>>,
+        /// Reason the model stopped (`end_turn`, `max_tokens`, ...).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<StopReason>,
+        /// Set when this `Result` terminates a subagent's run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
     },
 
     /// Initialization message establishing session context.
@@ -222,24 +251,86 @@ pub enum SdkMessage {
     /// }
     /// ```
     System {
-        /// System message subtype (currently only Init)
+        /// System message subtype. `Init` carries the full session
+        /// context; other subtypes use only a subset of the fields
+        /// below.
         subtype: SystemSubtype,
-        /// Source of API key authentication
-        #[serde(rename = "apiKeySource")]
-        api_key_source: ApiKeySource,
-        /// Current working directory for file operations
-        cwd: String,
-        /// Session identifier for message correlation
+        /// Session identifier. Present on every system frame.
         session_id: String,
-        /// List of available tool names
-        tools: Vec<String>,
-        /// Connected MCP (Model Context Protocol) servers
-        mcp_servers: Vec<McpServer>,
-        /// Active model identifier
-        model: String,
-        /// Permission mode for tool execution
-        #[serde(rename = "permissionMode")]
-        permission_mode: PermissionMode,
+        /// Source of API key authentication (init only).
+        #[serde(
+            rename = "apiKeySource",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        api_key_source: Option<ApiKeySource>,
+        /// Current working directory for file operations (init only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// List of available tool names (init only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+        /// Connected MCP servers (init only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_servers: Option<Vec<McpServer>>,
+        /// Active model identifier (init only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Permission mode for tool execution (init only).
+        #[serde(
+            rename = "permissionMode",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        permission_mode: Option<PermissionMode>,
+        /// Session state payload for `session_state_changed`
+        /// (e.g. `"idle"`, `"busy"`, `"compacting"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// Status payload for `status` frames (e.g. `"compacting"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        /// Text payload used by `local_command_output` and some
+        /// `status`/`task_notification` frames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// Reason a compaction boundary fired
+        /// (`context_limit_pressure`, `manual`, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        /// Pre-compaction token total for `compact_boundary`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_tokens: Option<u64>,
+        /// Post-compaction token total for `compact_boundary`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        post_tokens: Option<u64>,
+        /// Subagent task identifier for `task_*` frames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        /// Human-readable title for `task_started` and related frames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Parent tool-use id for subagent `task_*` frames.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
+        /// Hook event kind for `hook_started` / `hook_progress` /
+        /// `hook_response`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_event_name: Option<String>,
+        /// File paths that the CLI just persisted (for `files_persisted`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paths: Option<Vec<String>>,
+        /// API retry attempt counter for `api_retry`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// API retry reason string for `api_retry`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Any additional subtype-specific fields we have not modelled
+        /// explicitly. Preserved so callers can inspect or forward the
+        /// raw JSON without schema loss.
+        #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+        extra: serde_json::Map<String, serde_json::Value>,
     },
 
     /// Partial-message streaming event.
@@ -275,6 +366,17 @@ pub enum SdkMessage {
         request_id: String,
         request: serde_json::Value,
     },
+
+    /// Inbound control-protocol response to a control_request that the
+    /// host sent earlier (e.g. interrupt, set_model, set_permission_mode).
+    /// The CLI replies with a matching `request_id`; the correlator
+    /// routes the response back to the awaiting caller.
+    #[serde(rename = "control_response")]
+    ControlResponse {
+        /// Usually a nested `{ subtype: "success" | "error", request_id, ... }`
+        /// object matching the wire shape defined by [`ControlResponse`].
+        response: serde_json::Value,
+    },
 }
 
 impl SdkMessage {
@@ -298,7 +400,7 @@ impl SdkMessage {
             | SdkMessage::Result { session_id, .. }
             | SdkMessage::System { session_id, .. }
             | SdkMessage::StreamEvent { session_id, .. } => session_id,
-            SdkMessage::ControlRequest { .. } => "",
+            SdkMessage::ControlRequest { .. } | SdkMessage::ControlResponse { .. } => "",
         }
     }
 
@@ -311,24 +413,114 @@ impl SdkMessage {
             SdkMessage::System { .. } => "system",
             SdkMessage::StreamEvent { .. } => "stream_event",
             SdkMessage::ControlRequest { .. } => "control_request",
+            SdkMessage::ControlResponse { .. } => "control_response",
         }
+    }
+
+    /// If this is an inbound `control_response`, return
+    /// `(request_id, subtype)` where `subtype` is `"success"` or
+    /// `"error"`. Used by the correlator to route responses back to
+    /// the caller waiting on the matching request_id.
+    pub fn as_control_response(&self) -> Option<(&str, &str, &serde_json::Value)> {
+        let SdkMessage::ControlResponse { response } = self else {
+            return None;
+        };
+        let request_id = response.get("request_id")?.as_str()?;
+        let subtype = response.get("subtype")?.as_str()?;
+        Some((request_id, subtype, response))
     }
 
     /// If this is a `stream_event` carrying a `content_block_delta`
     /// whose inner `delta.type` is `text_delta`, returns the delta's
     /// text. Returns `None` for every other shape.
     pub fn as_text_delta(&self) -> Option<&str> {
+        self.stream_event_delta("text_delta")?
+            .get("text")
+            .and_then(|v| v.as_str())
+    }
+
+    /// If this is a `stream_event` carrying a `content_block_delta`
+    /// whose inner `delta.type` is `input_json_delta`, returns the
+    /// partial JSON chunk. Used to stream tool-use `input` as it's
+    /// produced, before the full assistant message arrives.
+    pub fn as_input_json_delta(&self) -> Option<&str> {
+        self.stream_event_delta("input_json_delta")?
+            .get("partial_json")
+            .and_then(|v| v.as_str())
+    }
+
+    /// If this is a `stream_event` carrying a `content_block_delta`
+    /// whose inner `delta.type` is `thinking_delta`, returns the
+    /// streaming thinking text.
+    pub fn as_thinking_delta(&self) -> Option<&str> {
+        self.stream_event_delta("thinking_delta")?
+            .get("thinking")
+            .and_then(|v| v.as_str())
+    }
+
+    /// If this is a `stream_event` with `type == "content_block_start"`,
+    /// returns the inner `content_block` object and its `index`.
+    pub fn as_content_block_start(&self) -> Option<(u64, &serde_json::Value)> {
+        let event = self.stream_event_of_type("content_block_start")?;
+        let index = event.get("index")?.as_u64()?;
+        let block = event.get("content_block")?;
+        Some((index, block))
+    }
+
+    /// If this is a `stream_event` with `type == "content_block_stop"`,
+    /// returns the block `index`.
+    pub fn as_content_block_stop(&self) -> Option<u64> {
+        self.stream_event_of_type("content_block_stop")?
+            .get("index")?
+            .as_u64()
+    }
+
+    /// Returns the `index` field of any `content_block_delta` event,
+    /// regardless of the inner delta type.
+    pub fn content_block_delta_index(&self) -> Option<u64> {
+        self.stream_event_of_type("content_block_delta")?
+            .get("index")?
+            .as_u64()
+    }
+
+    /// If this is a `stream_event` with `type == "message_start"`,
+    /// returns the inner `message` object (raw JSON).
+    pub fn as_message_start(&self) -> Option<&serde_json::Value> {
+        self.stream_event_of_type("message_start")?.get("message")
+    }
+
+    /// If this is a `stream_event` with `type == "message_delta"`,
+    /// returns the inner `delta` object (raw JSON).
+    pub fn as_message_delta(&self) -> Option<&serde_json::Value> {
+        self.stream_event_of_type("message_delta")?.get("delta")
+    }
+
+    /// Returns true when this is a `stream_event` with `type == "message_stop"`.
+    pub fn is_message_stop(&self) -> bool {
+        self.stream_event_of_type("message_stop").is_some()
+    }
+
+    /// Internal: return the inner `event` object if it matches the
+    /// requested top-level `type` string; `None` otherwise.
+    fn stream_event_of_type(&self, expected: &str) -> Option<&serde_json::Value> {
         let SdkMessage::StreamEvent { event, .. } = self else {
             return None;
         };
-        if event.get("type").and_then(|v| v.as_str())? != "content_block_delta" {
+        if event.get("type").and_then(|v| v.as_str())? != expected {
             return None;
         }
+        Some(event)
+    }
+
+    /// Internal: walk the `content_block_delta` → `delta` branch and
+    /// confirm the inner `delta.type`. Returns the `delta` object on match.
+    fn stream_event_delta(&self, expected: &str) -> Option<&serde_json::Value> {
+        let event = self.stream_event_of_type("content_block_delta")?;
         let delta = event.get("delta")?;
-        if delta.get("type").and_then(|v| v.as_str())? != "text_delta" {
+        if delta.get("type").and_then(|v| v.as_str())? != expected {
             return None;
         }
-        delta.get("text").and_then(|v| v.as_str())
+        Some(delta)
     }
 
     /// If this is a `control_request` with `subtype == "can_use_tool"`,
@@ -449,6 +641,10 @@ impl ControlResponse {
 ///
 /// These appear in the final `Result` message to indicate how
 /// the conversation ended and whether it was successful.
+///
+/// Unrecognized subtype strings are captured in [`ResultSubtype::Unknown`]
+/// so the parser does not reject messages when the CLI introduces a new
+/// error category.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultSubtype {
@@ -465,6 +661,12 @@ pub enum ResultSubtype {
     /// infinite loops in tool usage.
     ErrorMaxTurns,
 
+    /// Conversation hit a configured USD budget ceiling (`--max-budget-usd`).
+    ErrorMaxBudgetUsd,
+
+    /// Structured-output retries hit their configured cap.
+    ErrorMaxStructuredOutputRetries,
+
     /// An error occurred during execution.
     ///
     /// This indicates a runtime error such as:
@@ -473,12 +675,76 @@ pub enum ResultSubtype {
     /// - Invalid message format
     /// - Process crash or timeout
     ErrorDuringExecution,
+
+    /// Unrecognized subtype. Preserves the raw string so callers can
+    /// surface or log the value without the message being dropped.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// Token usage accounting for a single assistant turn.
+///
+/// Emitted on `Assistant` messages and aggregated on `Result`. Cache
+/// fields are optional because the API only populates them when prompt
+/// caching is active on the turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+}
+
+/// Per-model usage breakdown emitted on the terminal `Result` message
+/// when the session touched more than one model (e.g. primary + sub-agent).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Reason the model stopped producing the current turn. Mirrors the
+/// Anthropic API's `stop_reason` values plus a fallback for unknown strings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    EndTurn,
+    MaxTokens,
+    StopSequence,
+    ToolUse,
+    PauseTurn,
+    Refusal,
+    /// Session was cancelled mid-turn.
+    Cancelled,
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// System message subtypes.
 ///
-/// Currently only `Init` is defined, but the protocol allows
-/// for future system message types.
+/// The CLI emits a variety of system messages during a session. `Init`
+/// is the only one required by the protocol contract (it's always the
+/// first frame on stdout); the rest describe transient events that a
+/// client may opt in to via flags like `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`
+/// or `--include-hook-events`.
+///
+/// Unknown subtype strings fall through to [`SystemSubtype::Unknown`] so
+/// a new CLI release cannot break stdout parsing just by emitting a new
+/// subtype name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemSubtype {
@@ -487,6 +753,38 @@ pub enum SystemSubtype {
     /// Indicates Claude is ready to receive messages and reports
     /// the session configuration including available tools and model.
     Init,
+    /// Lightweight status update (e.g. "compacting").
+    Status,
+    /// The CLI just finished a context-compaction pass. Accumulated
+    /// usage should reset at this boundary.
+    CompactBoundary,
+    /// Output from a local-only slash command (e.g. `/context`).
+    LocalCommandOutput,
+    /// Session transitioned between busy/idle/compacting states.
+    SessionStateChanged,
+    /// A hook event fired (pre/post tool use, stop, etc.).
+    HookStarted,
+    /// Progress signal for a long-running hook.
+    HookProgress,
+    /// Hook completed with a response body.
+    HookResponse,
+    /// Files were persisted by an editor tool.
+    FilesPersisted,
+    /// A subagent task started.
+    TaskStarted,
+    /// A subagent posted a user-facing notification.
+    TaskNotification,
+    /// Progress update from a running subagent task.
+    TaskProgress,
+    /// Subagent task state updated.
+    TaskUpdated,
+    /// Elicitation flow completed (interactive dialog with the client).
+    ElicitationComplete,
+    /// API call is being retried.
+    ApiRetry,
+    /// Subtype string not recognised by this crate; preserves raw value.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Source of settings (`.claude/settings.json`) loaded alongside the
@@ -515,6 +813,9 @@ impl SettingSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
+    /// Model classifier approves/denies tool use; no user confirmation.
+    Auto,
+
     /// Standard permission mode with normal confirmation flow.
     ///
     /// Tools require appropriate permissions and may prompt for
@@ -526,6 +827,9 @@ pub enum PermissionMode {
     /// Edit and Write tools will execute without user confirmation.
     /// Other potentially dangerous operations still require approval.
     AcceptEdits,
+
+    /// Never prompt the user; auto-deny anything not pre-approved.
+    DontAsk,
 
     /// Bypass all permission checks (dangerous!).
     ///
@@ -598,6 +902,22 @@ pub struct AssistantMessage {
     pub role: Role,
     /// Ordered array of content blocks
     pub content: Vec<MessageContent>,
+    /// Model id the API attributed this turn to. Not always present on
+    /// older CLI releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Token usage for this turn, when reported by the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Message id from the Anthropic API, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Reason the turn ended, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+    /// Stop sequence that triggered end-of-turn, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sequence: Option<String>,
 }
 
 impl AssistantMessage {
@@ -606,6 +926,11 @@ impl AssistantMessage {
         Self {
             role: Role::Assistant,
             content: vec![MessageContent::Text { text: text.into() }],
+            model: None,
+            usage: None,
+            id: None,
+            stop_reason: None,
+            stop_sequence: None,
         }
     }
 
@@ -933,6 +1258,13 @@ pub enum MessageContent {
         content: serde_json::Value,
     },
 
+    /// Image content block. The `source` sub-object is retained as raw
+    /// JSON because the Anthropic API supports several encodings
+    /// (`base64`, `url`, `file`) whose shape has evolved over time.
+    /// Callers that need structured access should destructure the
+    /// underlying `source.type` discriminant themselves.
+    Image { source: serde_json::Value },
+
     /// Content block with an unrecognized `type` tag, or a recognized tag
     /// whose fields did not match the expected shape. Carries the raw
     /// JSON so the information is preserved rather than silently dropped.
@@ -975,6 +1307,9 @@ impl<'de> Deserialize<'de> for MessageContent {
                 tool_use_id: String,
                 content: serde_json::Value,
             },
+            Image {
+                source: serde_json::Value,
+            },
         }
 
         let value = serde_json::Value::deserialize(deserializer)?;
@@ -1001,6 +1336,7 @@ impl<'de> Deserialize<'de> for MessageContent {
                 tool_use_id,
                 content,
             }),
+            Ok(Known::Image { source }) => Ok(MessageContent::Image { source }),
             Err(_) => Ok(MessageContent::Unknown(value)),
         }
     }
@@ -1046,6 +1382,10 @@ mod tests {
             result: Some("Done".to_string()),
             session_id: "test".to_string(),
             total_cost_usd: 0.001,
+            usage: None,
+            model_usage: None,
+            stop_reason: None,
+            parent_tool_use_id: None,
         };
 
         assert!(result.is_terminal());
@@ -1070,6 +1410,11 @@ mod tests {
                     text: "Done!".to_string(),
                 },
             ],
+            model: None,
+            usage: None,
+            id: None,
+            stop_reason: None,
+            stop_sequence: None,
         };
 
         assert_eq!(msg.get_text_content(), "Let me help.\nDone!");
@@ -1117,12 +1462,25 @@ mod tests {
     }
 
     #[test]
-    fn message_content_unknown_tag_preserved() {
+    fn message_content_image_parses() {
         let json = r#"{"type":"image","source":{"kind":"base64","data":"xyz"}}"#;
         let parsed: MessageContent = serde_json::from_str(json).unwrap();
         match parsed {
+            MessageContent::Image { source } => {
+                assert_eq!(source.get("data").and_then(|d| d.as_str()), Some("xyz"));
+                assert_eq!(source.get("kind").and_then(|k| k.as_str()), Some("base64"));
+            },
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_content_unknown_tag_preserved() {
+        let json = r#"{"type":"audio","source":{"data":"xyz"}}"#;
+        let parsed: MessageContent = serde_json::from_str(json).unwrap();
+        match parsed {
             MessageContent::Unknown(value) => {
-                assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("image"));
+                assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("audio"));
                 assert_eq!(
                     value
                         .get("source")
@@ -1332,6 +1690,10 @@ mod tests {
             result: None,
             session_id: "sess".into(),
             total_cost_usd: 0.0,
+            usage: None,
+            model_usage: None,
+            stop_reason: None,
+            parent_tool_use_id: None,
         };
         assert_eq!(msg.as_text_delta(), None);
     }
@@ -1407,5 +1769,241 @@ mod tests {
         assert_eq!(encoded["response"]["subtype"], "error");
         assert_eq!(encoded["response"]["request_id"], "req_7");
         assert_eq!(encoded["response"]["error"], "no callback");
+    }
+
+    #[test]
+    fn system_subtype_falls_back_to_unknown_variant() {
+        let parsed: SystemSubtype = serde_json::from_str("\"frobnication\"").unwrap();
+        assert_eq!(parsed, SystemSubtype::Unknown("frobnication".into()));
+        // Known values still map correctly.
+        let init: SystemSubtype = serde_json::from_str("\"init\"").unwrap();
+        assert_eq!(init, SystemSubtype::Init);
+        let compact: SystemSubtype = serde_json::from_str("\"compact_boundary\"").unwrap();
+        assert_eq!(compact, SystemSubtype::CompactBoundary);
+    }
+
+    #[test]
+    fn result_subtype_falls_back_to_unknown_variant() {
+        let parsed: ResultSubtype = serde_json::from_str("\"error_something_new\"").unwrap();
+        assert_eq!(parsed, ResultSubtype::Unknown("error_something_new".into()));
+        let max_budget: ResultSubtype = serde_json::from_str("\"error_max_budget_usd\"").unwrap();
+        assert_eq!(max_budget, ResultSubtype::ErrorMaxBudgetUsd);
+    }
+
+    #[test]
+    fn system_non_init_subtype_parses_with_missing_init_fields() {
+        // session_state_changed has no cwd/tools/model/permission_mode,
+        // only session_id and a `state` payload.
+        let json = r#"{
+            "type": "system",
+            "subtype": "session_state_changed",
+            "session_id": "sess-9",
+            "state": "idle"
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SdkMessage::System {
+                subtype,
+                session_id,
+                cwd,
+                tools,
+                model,
+                state,
+                ..
+            } => {
+                assert_eq!(subtype, SystemSubtype::SessionStateChanged);
+                assert_eq!(session_id, "sess-9");
+                assert!(cwd.is_none());
+                assert!(tools.is_none());
+                assert!(model.is_none());
+                assert_eq!(state.as_deref(), Some("idle"));
+            },
+            other => panic!("expected System, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_unknown_subtype_parses_and_preserves_extra_fields() {
+        let json = r#"{
+            "type": "system",
+            "subtype": "brand_new_event",
+            "session_id": "sess-10",
+            "payload": {"foo": 42},
+            "other_field": "value"
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SdkMessage::System {
+                subtype,
+                session_id,
+                extra,
+                ..
+            } => {
+                assert_eq!(subtype, SystemSubtype::Unknown("brand_new_event".into()));
+                assert_eq!(session_id, "sess-10");
+                assert!(extra.contains_key("payload"));
+                assert!(extra.contains_key("other_field"));
+            },
+            other => panic!("expected System, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_compact_boundary_parses_with_token_fields() {
+        let json = r#"{
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": "sess-11",
+            "trigger": "context_limit_pressure",
+            "pre_tokens": 50000,
+            "post_tokens": 10000
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SdkMessage::System {
+                subtype,
+                trigger,
+                pre_tokens,
+                post_tokens,
+                ..
+            } => {
+                assert_eq!(subtype, SystemSubtype::CompactBoundary);
+                assert_eq!(trigger.as_deref(), Some("context_limit_pressure"));
+                assert_eq!(pre_tokens, Some(50000));
+                assert_eq!(post_tokens, Some(10000));
+            },
+            other => panic!("expected System, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_parses_with_usage_and_model() {
+        let json = r#"{
+            "type": "assistant",
+            "session_id": "sess-12",
+            "message": {
+                "role": "assistant",
+                "id": "msg_01",
+                "model": "claude-sonnet-4-5",
+                "content": [{"type":"text","text":"hello"}],
+                "usage": {
+                    "input_tokens": 42,
+                    "output_tokens": 7,
+                    "cache_read_input_tokens": 100
+                },
+                "stop_reason": "end_turn"
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SdkMessage::Assistant { message, .. } => {
+                assert_eq!(message.model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(message.id.as_deref(), Some("msg_01"));
+                assert_eq!(message.stop_reason, Some(StopReason::EndTurn));
+                let usage = message.usage.expect("usage present");
+                assert_eq!(usage.input_tokens, 42);
+                assert_eq!(usage.output_tokens, 7);
+                assert_eq!(usage.cache_read_input_tokens, Some(100));
+            },
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_parses_with_usage_and_stop_reason() {
+        let json = r#"{
+            "type": "result",
+            "subtype": "success",
+            "session_id": "sess-13",
+            "duration_ms": 1000,
+            "duration_api_ms": 800,
+            "is_error": false,
+            "num_turns": 2,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "stop_reason": "end_turn"
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            SdkMessage::Result {
+                usage, stop_reason, ..
+            } => {
+                let usage = usage.expect("usage present");
+                assert_eq!(usage.input_tokens, 12);
+                assert_eq!(usage.output_tokens, 3);
+                assert_eq!(stop_reason, Some(StopReason::EndTurn));
+            },
+            other => panic!("expected Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_event_input_json_delta_accessor() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"cmd\":"}
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.as_input_json_delta(), Some("{\"cmd\":"));
+        assert_eq!(parsed.as_text_delta(), None);
+    }
+
+    #[test]
+    fn stream_event_thinking_delta_accessor() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "hmm"}
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.as_thinking_delta(), Some("hmm"));
+    }
+
+    #[test]
+    fn stream_event_content_block_start_accessor() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {
+                "type": "content_block_start",
+                "index": 3,
+                "content_block": {"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}
+            }
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        let (index, block) = parsed.as_content_block_start().expect("should extract");
+        assert_eq!(index, 3);
+        assert_eq!(block.get("name").and_then(|v| v.as_str()), Some("Bash"));
+    }
+
+    #[test]
+    fn stream_event_content_block_stop_accessor() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {"type": "content_block_stop", "index": 2}
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.as_content_block_stop(), Some(2));
+    }
+
+    #[test]
+    fn stream_event_message_stop_accessor() {
+        let json = r#"{
+            "type": "stream_event",
+            "session_id": "sess-s",
+            "event": {"type": "message_stop"}
+        }"#;
+        let parsed: SdkMessage = serde_json::from_str(json).unwrap();
+        assert!(parsed.is_message_stop());
     }
 }

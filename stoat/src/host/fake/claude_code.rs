@@ -1,10 +1,9 @@
-use crate::host::claude_code::{AgentMessage, ClaudeCodeHost, ClaudeCodeSession};
-use async_trait::async_trait;
-use std::{
-    collections::VecDeque,
-    io,
-    sync::{Arc, Mutex},
+use crate::host::claude_code::{
+    AgentMessage, ClaudeCodeHost, ClaudeCodeSession, HookLifecycleEvent, PlanEntry,
+    SessionStateEvent, TaskEvent, TokenUsage, ToolCallStatus, ToolKind,
 };
+use async_trait::async_trait;
+use std::{collections::VecDeque, io, path::PathBuf, sync::Mutex};
 
 pub struct FakeClaudeCode {
     state: Mutex<FakeClaudeCodeState>,
@@ -66,6 +65,10 @@ impl FakeClaudeCode {
                 id: format!("toolu_{name}"),
                 name: name.to_string(),
                 input: input.to_string(),
+                kind: ToolKind::Other,
+                title: name.to_string(),
+                content: Vec::new(),
+                locations: Vec::new(),
             });
     }
 
@@ -77,7 +80,122 @@ impl FakeClaudeCode {
             .push_back(AgentMessage::ToolResult {
                 id: id.to_string(),
                 content: content.to_string(),
+                status: ToolCallStatus::Completed,
+                kind: ToolKind::Other,
+                terminal_meta: None,
             });
+    }
+
+    pub fn push_tool_update(&self, id: &str, status: ToolCallStatus) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::ToolUpdate {
+                id: id.to_string(),
+                content: Vec::new(),
+                status,
+            });
+    }
+
+    pub fn push_partial_tool_input(&self, id: &str, delta: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::PartialToolInput {
+                id: id.to_string(),
+                json_delta: delta.to_string(),
+            });
+    }
+
+    pub fn push_plan(&self, entries: Vec<PlanEntry>) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::Plan { entries });
+    }
+
+    pub fn push_usage(&self, accumulated: TokenUsage, last: TokenUsage) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::Usage { accumulated, last });
+    }
+
+    pub fn push_mode_changed(&self, mode: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::ModeChanged {
+                mode: mode.to_string(),
+            });
+    }
+
+    pub fn push_model_changed(&self, model: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::ModelChanged {
+                model: model.to_string(),
+            });
+    }
+
+    pub fn push_files_persisted(&self, paths: Vec<PathBuf>) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::FilesPersisted { paths });
+    }
+
+    pub fn push_elicitation_complete(&self, id: &str, outcome_json: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::ElicitationComplete {
+                id: id.to_string(),
+                outcome_json: outcome_json.to_string(),
+            });
+    }
+
+    pub fn push_auth_required(&self, reason: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::AuthRequired {
+                reason: reason.to_string(),
+            });
+    }
+
+    pub fn push_session_state(&self, event: SessionStateEvent) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::SessionState(event));
+    }
+
+    pub fn push_task_event(&self, event: TaskEvent) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::TaskEvent(event));
+    }
+
+    pub fn push_hook(&self, event: HookLifecycleEvent) {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .push_back(AgentMessage::Hook(event));
     }
 
     pub fn push_thinking(&self, text: &str) {

@@ -70,7 +70,8 @@ fn inspect_sdk_message(msg: &SdkMessage, counts: &mut UnknownCounts) {
         SdkMessage::System { .. }
         | SdkMessage::Result { .. }
         | SdkMessage::StreamEvent { .. }
-        | SdkMessage::ControlRequest { .. } => {},
+        | SdkMessage::ControlRequest { .. }
+        | SdkMessage::ControlResponse { .. } => {},
     }
 }
 

@@ -18,7 +18,11 @@ pub mod terminal;
 
 pub use claude_code::{
     AgentMessage, ClaudeCodeHost, ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification,
-    ClaudeSessionId, PermissionCallback, PermissionResult, ToolPermissionContext,
+    ClaudeSessionId, ClaudeSessionSummary, HookCallback, HookDecision, HookEvent, HookKind,
+    HookLifecycleEvent, HookResponse, ModeInfo, ModelInfo, PermissionBehavior, PermissionCallback,
+    PermissionDestination, PermissionResult, PermissionRule, PermissionScope, PermissionSuggestion,
+    PlanEntry, PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta, TokenUsage,
+    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
 #[cfg(test)]
 pub use fake::{

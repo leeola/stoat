@@ -1694,6 +1694,10 @@ mod tests {
                 id: "toolu_1".into(),
                 name: "Read".into(),
                 input: "{}".into(),
+                kind: crate::host::ToolKind::Read,
+                title: "Read".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
             },
         );
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
@@ -1822,6 +1826,10 @@ mod tests {
                 id: "toolu_1".into(),
                 name: "Edit".into(),
                 input: "{}".into(),
+                kind: crate::host::ToolKind::Edit,
+                title: "Edit".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
             },
         );
         assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
@@ -1866,6 +1874,10 @@ mod tests {
                 id: "toolu_1".into(),
                 name: "Bash".into(),
                 input: "{}".into(),
+                kind: crate::host::ToolKind::Execute,
+                title: "Bash".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
             },
         );
 
@@ -2049,6 +2061,10 @@ mod tests {
                 id: "abc".into(),
                 name: "Bash".into(),
                 input: r#"{"command":"ls -la"}"#.into(),
+                kind: crate::host::ToolKind::Execute,
+                title: "Bash(ls -la)".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
             },
         );
         h.inject_claude_message(
@@ -2056,6 +2072,9 @@ mod tests {
             &AgentMessage::ToolResult {
                 id: "abc".into(),
                 content: "file1\nfile2\nfile3".into(),
+                status: crate::host::ToolCallStatus::Completed,
+                kind: crate::host::ToolKind::Execute,
+                terminal_meta: None,
             },
         );
 
