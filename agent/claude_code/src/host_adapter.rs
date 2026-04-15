@@ -388,33 +388,32 @@ fn stream_event_to_messages(msg: SdkMessage, state: &mut AdapterState) -> Vec<Ag
         return Vec::new();
     }
 
-    // Deltas: emit a PartialText/PartialToolInput and remember the
-    // block was streamed so the full message's duplicate is dropped.
+    // Deltas: emit a cumulative PartialText (the full block-so-far, not
+    // just the new chunk) so consumers can overwrite their live view on
+    // each event. A consumer that concatenated raw chunks itself would
+    // leave a permanent gap on any missed event; with cumulative text,
+    // the next delta corrects any prior loss.
     if let Some(text) = msg.as_text_delta() {
-        if let Some(index) = msg.content_block_delta_index() {
+        let cumulative = if let Some(index) = msg.content_block_delta_index() {
             state.streamed_text_indexes.insert(index);
-            state
-                .streaming_text_buffers
-                .entry(index)
-                .or_default()
-                .push_str(text);
-        }
-        return vec![AgentMessage::PartialText {
-            text: text.to_string(),
-        }];
+            let buf = state.streaming_text_buffers.entry(index).or_default();
+            buf.push_str(text);
+            buf.clone()
+        } else {
+            text.to_string()
+        };
+        return vec![AgentMessage::PartialText { text: cumulative }];
     }
     if let Some(text) = msg.as_thinking_delta() {
-        if let Some(index) = msg.content_block_delta_index() {
+        let cumulative = if let Some(index) = msg.content_block_delta_index() {
             state.streamed_thinking_indexes.insert(index);
-            state
-                .streaming_text_buffers
-                .entry(index)
-                .or_default()
-                .push_str(text);
-        }
-        return vec![AgentMessage::PartialText {
-            text: text.to_string(),
-        }];
+            let buf = state.streaming_text_buffers.entry(index).or_default();
+            buf.push_str(text);
+            buf.clone()
+        } else {
+            text.to_string()
+        };
+        return vec![AgentMessage::PartialText { text: cumulative }];
     }
     if let Some(delta) = msg.as_input_json_delta() {
         let id = msg
@@ -442,13 +441,12 @@ fn assistant_to_messages(message: AssistantMessage, state: &mut AdapterState) ->
         let idx = index as u64;
         match content {
             MessageContent::Text { text } => {
-                // Drop if this block was already delivered incrementally
-                // via `content_block_delta` text_delta events; the
-                // `PartialText` stream is the authoritative rendering.
-                if state.streamed_text_indexes.remove(&idx) {
-                    state.streaming_text_buffers.remove(&idx);
-                    continue;
-                }
+                // Final block is authoritative. Streaming deltas update the
+                // live view; on the finalised assistant message, forward the
+                // full `Text` so consumers can clear their streaming buffer
+                // and record a permanent copy.
+                state.streamed_text_indexes.remove(&idx);
+                state.streaming_text_buffers.remove(&idx);
                 out.push(AgentMessage::Text { text });
             },
             MessageContent::ToolUse { id, name, input } => {
@@ -496,11 +494,8 @@ fn assistant_to_messages(message: AssistantMessage, state: &mut AdapterState) ->
                 thinking,
                 signature,
             } => {
-                // Drop if delivered via `thinking_delta` already.
-                if state.streamed_thinking_indexes.remove(&idx) {
-                    state.streaming_text_buffers.remove(&idx);
-                    continue;
-                }
+                state.streamed_thinking_indexes.remove(&idx);
+                state.streaming_text_buffers.remove(&idx);
                 out.push(AgentMessage::Thinking {
                     text: thinking,
                     signature,
@@ -1073,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn streamed_text_dedup_drops_duplicate_on_full_message() {
+    fn streamed_text_still_emits_final_text_for_consumer_flush() {
         let mut state = AdapterState::default();
         // content_block_start announces a text block at index 0.
         let _ = super::sdk_message_to_agent_messages(
@@ -1094,8 +1089,9 @@ mod tests {
             &mut state,
         );
         assert!(matches!(out.as_slice(), [AgentMessage::PartialText { text }] if text == "hello "));
-        // Now the full Assistant message arrives with the same Text at
-        // index 0. The adapter should suppress it.
+        // The full Assistant message arrives with the authoritative Text.
+        // The adapter forwards it so consumers can clear their streaming
+        // buffer and record the permanent copy.
         let out = super::sdk_message_to_agent_messages(
             assistant(vec![MessageContent::Text {
                 text: "hello world".into(),
@@ -1103,13 +1099,17 @@ mod tests {
             &mut state,
         );
         assert!(
-            out.iter().all(|m| !matches!(m, AgentMessage::Text { .. })),
-            "streamed Text at index 0 should not re-emit, got {out:?}"
+            matches!(out.as_slice(), [AgentMessage::Text { text }] if text == "hello world"),
+            "expected final Text to flow through, got {out:?}"
+        );
+        assert!(
+            !state.streamed_text_indexes.contains(&0),
+            "streamed index should clear once final Text is emitted"
         );
     }
 
     #[test]
-    fn streamed_thinking_dedup_drops_duplicate_on_full_message() {
+    fn streamed_thinking_still_emits_final_thinking_for_consumer_flush() {
         let mut state = AdapterState::default();
         let _ = super::sdk_message_to_agent_messages(
             stream_event(serde_json::json!({
@@ -1135,10 +1135,65 @@ mod tests {
             &mut state,
         );
         assert!(
-            out.iter()
-                .all(|m| !matches!(m, AgentMessage::Thinking { .. })),
-            "streamed Thinking should not re-emit, got {out:?}"
+            matches!(out.as_slice(), [AgentMessage::Thinking { text, .. }] if text == "hmm"),
+            "expected final Thinking to flow through, got {out:?}"
         );
+    }
+
+    #[test]
+    fn text_deltas_emit_cumulative_partial_text() {
+        let mut state = AdapterState::default();
+        let _ = super::sdk_message_to_agent_messages(
+            stream_event(serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            })),
+            &mut state,
+        );
+        let deltas = ["Hello", ", ", "world", "!"];
+        let want = ["Hello", "Hello, ", "Hello, world", "Hello, world!"];
+        for (delta, expected) in deltas.iter().zip(want.iter()) {
+            let out = super::sdk_message_to_agent_messages(
+                stream_event(serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": delta}
+                })),
+                &mut state,
+            );
+            assert!(
+                matches!(out.as_slice(), [AgentMessage::PartialText { text }] if text == expected),
+                "delta {delta:?}: expected cumulative {expected:?}, got {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_deltas_emit_cumulative_partial_text() {
+        let mut state = AdapterState::default();
+        let _ = super::sdk_message_to_agent_messages(
+            stream_event(serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": ""}
+            })),
+            &mut state,
+        );
+        for (delta, expected) in [("hmm ", "hmm "), ("let me think", "hmm let me think")] {
+            let out = super::sdk_message_to_agent_messages(
+                stream_event(serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": delta}
+                })),
+                &mut state,
+            );
+            assert!(
+                matches!(out.as_slice(), [AgentMessage::PartialText { text }] if text == expected),
+                "delta {delta:?}: expected cumulative {expected:?}, got {out:?}"
+            );
+        }
     }
 
     #[test]

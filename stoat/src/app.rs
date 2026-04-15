@@ -757,6 +757,7 @@ impl Stoat {
                     chat.streaming_text = Some(text.clone());
                 },
                 AgentMessage::Thinking { text, .. } => {
+                    chat.streaming_text = None;
                     chat.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content: ChatMessageContent::Thinking { text: text.clone() },
@@ -1590,20 +1591,38 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return Vec::new();
     }
+    let trimmed_start = text.trim_start();
+    if trimmed_start.is_empty() {
+        return Vec::new();
+    }
+    let indent_byte_len = text.len() - trimmed_start.len();
+    let indent = text[..indent_byte_len].to_string();
+    let indent_w = indent.chars().count();
+    if indent_w >= width {
+        return vec![text.to_string()];
+    }
+
     let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
+    let mut current = indent.clone();
+    let mut current_w = indent_w;
+    for word in trimmed_start.split_whitespace() {
+        let needs_space = current_w > indent_w;
+        let word_w = word.chars().count();
+        let add_w = word_w + usize::from(needs_space);
+        if current_w + add_w <= width {
+            if needs_space {
+                current.push(' ');
+            }
             current.push_str(word);
-        } else if current.chars().count() + 1 + word.chars().count() <= width {
-            current.push(' ');
-            current.push_str(word);
+            current_w += add_w;
         } else {
             lines.push(std::mem::take(&mut current));
+            current = indent.clone();
             current.push_str(word);
+            current_w = indent_w + word_w;
         }
     }
-    if !current.is_empty() {
+    if current_w > indent_w {
         lines.push(current);
     }
     lines
@@ -1943,9 +1962,8 @@ fn render_claude_pane(
     }
 
     let meta_style = Style::default().fg(Color::DarkGray);
-    let (cost, turns) = compute_session_totals(&chat.messages);
-    let header = format!("Claude  ${cost:.4}  {turns} turns");
-    write_str(buf, msg_area.x, msg_area.y, &header, meta_style);
+    let time_style = Style::default().fg(Color::Gray);
+    write_str(buf, msg_area.x, msg_area.y, "Claude", meta_style);
 
     let body_area = Rect::new(
         msg_area.x,
@@ -1970,83 +1988,111 @@ fn render_claude_pane(
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
 
+    const TOOL_MARK: &str = "\u{23fa}";
+    const TOOL_RESULT_ELBOW: &str = "\u{2514}\u{2500}";
+
     let result_map = build_tool_result_map(&chat.messages);
     let body_width = body_area.width as usize;
     let mut lines: Vec<(Style, String)> = Vec::new();
 
+    let push_block = |lines: &mut Vec<(Style, String)>, block: Vec<(Style, String)>| {
+        if block.is_empty() {
+            return;
+        }
+        if !lines.is_empty() {
+            lines.push((text_style, String::new()));
+        }
+        lines.extend(block);
+    };
+
+    let render_flowing =
+        |t: &str, style: Style, width: usize, prefix: &str| -> Vec<(Style, String)> {
+            let inner = width.saturating_sub(prefix.chars().count());
+            let mut block = Vec::new();
+            let mut push_line = |block: &mut Vec<(Style, String)>, body: &str| {
+                if body.is_empty() {
+                    block.push((style, prefix.trim_end().to_string()));
+                } else {
+                    block.push((style, format!("{prefix}{body}")));
+                }
+            };
+            if t.is_empty() {
+                if !prefix.is_empty() {
+                    push_line(&mut block, "");
+                }
+                return block;
+            }
+            for raw_line in t.lines() {
+                if raw_line.trim().is_empty() {
+                    push_line(&mut block, "");
+                } else {
+                    for wrapped in wrap_text(raw_line, inner) {
+                        push_line(&mut block, &wrapped);
+                    }
+                }
+            }
+            block
+        };
+
     for msg in &chat.messages {
         match (&msg.role, &msg.content) {
             (ChatRole::User, ChatMessageContent::Text(t)) => {
-                for raw_line in t.lines() {
-                    for wrapped in wrap_text(raw_line, body_width.saturating_sub(2)) {
-                        lines.push((user_style, format!("> {wrapped}")));
-                    }
-                }
-                if t.is_empty() {
-                    lines.push((user_style, "> ".into()));
-                }
-                lines.push((text_style, String::new()));
+                push_block(&mut lines, render_flowing(t, user_style, body_width, "> "));
             },
             (ChatRole::Assistant, ChatMessageContent::Text(t)) => {
-                for raw_line in t.lines() {
-                    for wrapped in wrap_text(raw_line, body_width) {
-                        lines.push((text_style, wrapped));
-                    }
-                }
+                push_block(&mut lines, render_flowing(t, text_style, body_width, ""));
             },
             (ChatRole::Assistant, ChatMessageContent::Thinking { text }) => {
                 let n = text.lines().count().max(1);
-                lines.push((thinking_style, format!("~ Thinking... ({n} lines)")));
+                push_block(
+                    &mut lines,
+                    vec![(thinking_style, format!("~ Thinking... ({n} lines)"))],
+                );
             },
             (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
                 let header = format_tool_header(name, input);
-                lines.push((tool_header_style, format!("> {header}")));
+                let mut block = vec![(tool_header_style, format!("{TOOL_MARK} {header}"))];
                 if let Some(content) = result_map.get(id.as_str()) {
                     let preview = format_tool_result_preview(content);
-                    lines.push((tool_body_style, format!("  +-- {preview}")));
+                    block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} {preview}")));
                 }
+                push_block(&mut lines, block);
             },
             (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => {},
             (ChatRole::Assistant, ChatMessageContent::Error(m)) => {
-                lines.push((error_style, format!("! {m}")));
+                push_block(&mut lines, vec![(error_style, format!("! {m}"))]);
             },
-            (
-                ChatRole::Assistant,
-                ChatMessageContent::TurnComplete {
-                    cost_usd,
-                    duration_ms,
-                    num_turns,
-                },
-            ) => {
-                lines.push((turn_sep_style, "-".repeat(body_width)));
-                lines.push((
-                    meta_style,
-                    format!(
-                        "  ${:.4}  {:.1}s  turn {}",
-                        cost_usd,
-                        *duration_ms as f64 / 1000.0,
-                        num_turns,
-                    ),
-                ));
-                lines.push((text_style, String::new()));
+            (ChatRole::Assistant, ChatMessageContent::TurnComplete { duration_ms, .. }) => {
+                push_block(
+                    &mut lines,
+                    vec![
+                        (turn_sep_style, "-".repeat(body_width)),
+                        (
+                            time_style,
+                            format!("  {:.1}s", *duration_ms as f64 / 1000.0),
+                        ),
+                    ],
+                );
             },
             (ChatRole::User, _) => {},
         }
     }
 
     if let Some(partial) = &chat.streaming_text {
-        for raw_line in partial.lines() {
-            for wrapped in wrap_text(raw_line, body_width) {
-                lines.push((text_style, wrapped));
-            }
-        }
+        push_block(
+            &mut lines,
+            render_flowing(partial, text_style, body_width, ""),
+        );
     }
 
     if let Some(since) = chat.active_since {
         let frame = THROBBER_FRAMES[(render_tick as usize) % THROBBER_FRAMES.len()];
         let elapsed = since.elapsed().as_secs();
         let label = compute_throbber_label(&chat.messages, &result_map);
-        lines.push((throbber_style, format!("{frame} {label} ({elapsed}s)")));
+        push_block(
+            &mut lines,
+            vec![(throbber_style, format!("{frame} {label} ({elapsed}s)"))],
+        );
     }
 
     let visible_lines = body_area.height as usize;
@@ -2198,24 +2244,6 @@ fn compute_throbber_label(
         }
     }
     "Thinking...".to_string()
-}
-
-fn compute_session_totals(messages: &[crate::claude_chat::ChatMessage]) -> (f64, u32) {
-    use crate::claude_chat::ChatMessageContent;
-    let mut cost = 0.0;
-    let mut turns = 0u32;
-    for msg in messages {
-        if let ChatMessageContent::TurnComplete {
-            cost_usd,
-            num_turns,
-            ..
-        } = &msg.content
-        {
-            cost += *cost_usd;
-            turns = (*num_turns).max(turns);
-        }
-    }
-    (cost, turns)
 }
 
 fn render_pane(

@@ -1,0 +1,33 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: inject_claude_message
+focused: #1 of 1
+mode: normal
+size: 80x24
+---
+[0m[36m┌──────────────────────────────────────────────────────────────────────────────┐[0m
+[0m[36m│[0m[90mClaude[0m                                                                        [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[90m------------------------------------------------------------------------------[0m[36m│[0m
+[0m[36m│[0m[37m  1.8s[0m                                                                        [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[3m[90m~ Thinking... (1 lines)[0m                                                       [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[34m⏺ Bash(ls /Users/lee/projects/stoat)[0m                                          [0m[36m│[0m
+[0m[36m│[0m[90m  └─ CLAUDE.local.md (+33 more lines)[0m                                         [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[97mHere are the top-level files and directories in the repo:[0m                     [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[97m**Files:** `CLAUDE.md`, `CLAUDE.local.md`, `Cargo.lock`, `Cargo.toml`,[0m        [0m[36m│[0m
+[0m[36m│[0m[97m`LICENSE`, `README.md`, `TODO.md`, `clippy.toml`, `config.stcfg`,[0m             [0m[36m│[0m
+[0m[36m│[0m[97m`flake.lock`, `flake.nix`, `log.txt`, `rust-toolchain.toml`, `rustfmt.toml`,[0m  [0m[36m│[0m
+[0m[36m│[0m[97m`stoat.log`, `test.csv`[0m                                                       [0m[36m│[0m
+[0m[36m│[0m                                                                              [0m[36m│[0m
+[0m[36m│[0m[97m**Directories:** `action`, `agent`, `bin`, `config`, `examples`, `language`,[0m  [0m[36m│[0m
+[0m[36m│[0m[97m`log`, `logs`, `references`, `scheduler`, `script`, `stoat`, `target`,[0m        [0m[36m│[0m
+[0m[36m│[0m[97m`test_workspace`, `text`, `tmp`, `vendor`, `viewport`[0m                         [0m[36m│[0m
+[0m[36m│[0m[90m------------------------------------------------------------------------------[0m[36m│[0m
+[0m[36m│[0m[7m [0m                                                                             [0m[36m│[0m
+[0m[36m└──────────────────────────────────────────────────────────────────────────────┘[0m

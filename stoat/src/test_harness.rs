@@ -2140,30 +2140,356 @@ mod tests {
         );
     }
 
+    fn line_index_containing(lines: &[&str], needle: &str) -> usize {
+        lines
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "needle {needle:?} not found in frame:\n{}",
+                    lines.join("\n")
+                )
+            })
+    }
+
     #[test]
-    fn claude_panel_session_totals_in_header() {
+    fn claude_panel_preserves_paragraph_breaks() {
         let mut h = TestHarness::with_size(80, 20);
         let id = setup_visible_claude_session(&mut h);
 
         h.inject_claude_message(
             id,
-            &AgentMessage::Result {
-                cost_usd: 0.0123,
-                duration_ms: 1234,
-                num_turns: 2,
+            &AgentMessage::Text {
+                text: "Para one here.\n\nPara two here.".into(),
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        let lines: Vec<&str> = frame.content.split('\n').collect();
+        let idx_one = line_index_containing(&lines, "Para one here.");
+        let idx_two = line_index_containing(&lines, "Para two here.");
+        assert!(
+            idx_two >= idx_one + 2,
+            "expected blank separator row between paragraphs, got adjacent rows: {:?}",
+            &lines[idx_one..=idx_two],
+        );
+    }
+
+    #[test]
+    fn claude_panel_preserves_leading_indent() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::Text {
+                text: "normal line\n    indented line".into(),
             },
         );
 
         let frame = h.frames().last().expect("frame");
         assert!(
-            frame.content.contains("$0.0123"),
-            "expected cost in header: {}",
-            frame.content
+            frame.content.contains("    indented line"),
+            "expected leading indent preserved: {}",
+            frame.content,
         );
+    }
+
+    #[test]
+    fn claude_panel_separates_tool_from_text() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::Text {
+                text: "hello before tool".into(),
+            },
+        );
+        h.inject_claude_message(
+            id,
+            &AgentMessage::ToolUse {
+                id: "abc".into(),
+                name: "Bash".into(),
+                input: r#"{"command":"ls"}"#.into(),
+                kind: crate::host::ToolKind::Execute,
+                title: "Bash(ls)".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        let lines: Vec<&str> = frame.content.split('\n').collect();
+        let idx_text = line_index_containing(&lines, "hello before tool");
+        let idx_tool = line_index_containing(&lines, "Bash(ls)");
         assert!(
-            frame.content.contains("2 turns"),
-            "expected turn count: {}",
-            frame.content
+            idx_tool >= idx_text + 2,
+            "expected blank separator row between assistant text and tool call: {:?}",
+            &lines[idx_text..=idx_tool],
+        );
+    }
+
+    #[test]
+    fn claude_panel_tool_use_prefix_distinct_from_user() {
+        let mut h = TestHarness::with_size(80, 20);
+        let id = setup_visible_claude_session(&mut h);
+
+        h.inject_claude_message(
+            id,
+            &AgentMessage::ToolUse {
+                id: "abc".into(),
+                name: "Bash".into(),
+                input: r#"{"command":"ls"}"#.into(),
+                kind: crate::host::ToolKind::Execute,
+                title: "Bash(ls)".into(),
+                content: Vec::new(),
+                locations: Vec::new(),
+            },
+        );
+
+        let frame = h.frames().last().expect("frame");
+        assert!(
+            !frame.content.contains("> Bash("),
+            "tool-use header must not share the `> ` user prefix: {}",
+            frame.content,
+        );
+    }
+
+    // --- Step-by-step chat replay snapshots ---
+
+    use crate::host::{ToolCallStatus, ToolKind};
+
+    fn msg_text(s: &str) -> AgentMessage {
+        AgentMessage::Text { text: s.into() }
+    }
+
+    fn msg_partial(s: &str) -> AgentMessage {
+        AgentMessage::PartialText { text: s.into() }
+    }
+
+    fn msg_thinking(s: &str) -> AgentMessage {
+        AgentMessage::Thinking {
+            text: s.into(),
+            signature: String::new(),
+        }
+    }
+
+    fn msg_bash_use(tool_id: &str, cmd: &str) -> AgentMessage {
+        AgentMessage::ToolUse {
+            id: tool_id.into(),
+            name: "Bash".into(),
+            input: format!(r#"{{"command":"{cmd}"}}"#),
+            kind: ToolKind::Execute,
+            title: format!("Bash({cmd})"),
+            content: Vec::new(),
+            locations: Vec::new(),
+        }
+    }
+
+    fn msg_tool_result(tool_id: &str, content: &str) -> AgentMessage {
+        AgentMessage::ToolResult {
+            id: tool_id.into(),
+            content: content.into(),
+            status: ToolCallStatus::Completed,
+            kind: ToolKind::Execute,
+            terminal_meta: None,
+        }
+    }
+
+    fn msg_result(cost: f64, dur_ms: u64, turns: u32) -> AgentMessage {
+        AgentMessage::Result {
+            cost_usd: cost,
+            duration_ms: dur_ms,
+            num_turns: turns,
+        }
+    }
+
+    fn replay_chat(
+        h: &mut TestHarness,
+        id: ClaudeSessionId,
+        prefix: &str,
+        steps: &[(&str, AgentMessage)],
+    ) {
+        for (i, (label, msg)) in steps.iter().enumerate() {
+            h.inject_claude_message(id, msg);
+            let name = format!("{prefix}_step_{:02}_{label}_styled", i + 1);
+            h.assert_snapshot_styled(&name);
+        }
+        h.assert_snapshot(&format!("{prefix}_final"));
+    }
+
+    #[test]
+    fn chat_replay_real_session_ls_repo() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        let tool_id = "toolu_01CEDVVVKiCUWHatHAxw6sXf";
+        let final_text = "Here are the top-level files and directories in the \
+                          repo:\n\n**Files:** `CLAUDE.md`, `CLAUDE.local.md`, \
+                          `Cargo.lock`, `Cargo.toml`, `LICENSE`, `README.md`, \
+                          `TODO.md`, `clippy.toml`, `config.stcfg`, `flake.lock`, \
+                          `flake.nix`, `log.txt`, `rust-toolchain.toml`, \
+                          `rustfmt.toml`, `stoat.log`, `test.csv`\n\n\
+                          **Directories:** `action`, `agent`, `bin`, `config`, \
+                          `examples`, `language`, `log`, `logs`, `references`, \
+                          `scheduler`, `script`, `stoat`, `target`, \
+                          `test_workspace`, `text`, `tmp`, `vendor`, `viewport`";
+        let ls_output = "CLAUDE.local.md\nCLAUDE.md\nCargo.lock\nCargo.toml\n\
+                         LICENSE\nREADME.md\nTODO.md\naction\nagent\nbin\n\
+                         clippy.toml\nconfig\nconfig.stcfg\nexamples\n\
+                         flake.lock\nflake.nix\nlanguage\nlog\nlog.txt\nlogs\n\
+                         references\nrust-toolchain.toml\nrustfmt.toml\n\
+                         scheduler\nscript\nstoat\nstoat.log\ntarget\ntest.csv\n\
+                         test_workspace\ntext\ntmp\nvendor\nviewport";
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_real_session_ls_repo",
+            &[
+                ("turn1_text_working", msg_text("\n\nWorking.")),
+                ("turn1_result", msg_result(0.0746, 1753, 1)),
+                (
+                    "turn2_thinking",
+                    msg_thinking("The user wants to see the files in the repo. Let me list them."),
+                ),
+                (
+                    "turn2_tool_use_ls",
+                    msg_bash_use(tool_id, "ls /Users/lee/projects/stoat"),
+                ),
+                ("turn2_tool_result", msg_tool_result(tool_id, ls_output)),
+                ("turn2_final_text", msg_text(final_text)),
+                ("turn2_result", msg_result(0.1066, 7458, 2)),
+            ],
+        );
+    }
+
+    #[test]
+    fn chat_replay_multiline_paragraphs() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_multiline_paragraphs",
+            &[(
+                "text",
+                msg_text("First paragraph.\n\nSecond paragraph.\n\nThird paragraph."),
+            )],
+        );
+    }
+
+    #[test]
+    fn chat_replay_long_line_wraps() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        let long = "one two three four five six seven eight nine ten \
+                    eleven twelve thirteen fourteen fifteen sixteen \
+                    seventeen eighteen nineteen twenty twenty-one";
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_long_line_wraps",
+            &[("long_text", msg_text(long))],
+        );
+    }
+
+    #[test]
+    fn chat_replay_indented_lines() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        let text = "here is some code:\n    fn foo() {\n        bar();\n    }\nend.";
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_indented_lines",
+            &[("indented_text", msg_text(text))],
+        );
+    }
+
+    #[test]
+    fn chat_replay_thinking_then_text() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_thinking_then_text",
+            &[
+                ("thinking", msg_thinking("line one\nline two\nline three")),
+                ("text", msg_text("Done thinking.")),
+            ],
+        );
+    }
+
+    #[test]
+    fn chat_replay_tool_use_no_result_yet() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_tool_use_no_result_yet",
+            &[("tool_use_pending", msg_bash_use("t1", "ls"))],
+        );
+    }
+
+    #[test]
+    fn chat_replay_partial_then_final_text() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_partial_then_final_text",
+            &[
+                ("partial_chunk_1", msg_partial("Hello ")),
+                ("partial_chunk_2", msg_partial("Hello world ")),
+                ("partial_chunk_3", msg_partial("Hello world from Claude.")),
+                ("final_text", msg_text("Hello world from Claude.")),
+            ],
+        );
+    }
+
+    #[test]
+    fn chat_replay_narrow_pane_wrap() {
+        let mut h = TestHarness::with_size(40, 16);
+        let id = setup_visible_claude_session(&mut h);
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_narrow_pane_wrap",
+            &[(
+                "text",
+                msg_text("Working on it. This reply should wrap several times in a 40-col pane."),
+            )],
+        );
+    }
+
+    /// End-to-end sequence the production `ClaudeCode` adapter emits for
+    /// a streamed assistant response: cumulative `PartialText` blocks
+    /// that grow with each delta, then the authoritative `Text` block on
+    /// `message_stop`, then `Result` on turn completion. Each
+    /// `PartialText` contains the full block-so-far so the UI can
+    /// overwrite its live view on every event without having to
+    /// concatenate raw chunks itself.
+    #[test]
+    fn chat_replay_streamed_text_then_final_and_result() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = setup_visible_claude_session(&mut h);
+        let part1 = "| Directory | Primary Language |\n|---|---|";
+        let part2 = format!("{part1}\n| `action/` | Rust |\n| `agent/` | Rust |");
+        let full_text = format!("{part2}\n| `vendor/` | (vendor deps) |\n| `viewport/` | Rust |");
+        replay_chat(
+            &mut h,
+            id,
+            "chat_replay_streamed_text_then_final_and_result",
+            &[
+                ("partial_chunk_1", msg_partial(part1)),
+                ("partial_chunk_2", msg_partial(&part2)),
+                ("partial_chunk_3", msg_partial(&full_text)),
+                ("final_text", msg_text(&full_text)),
+                ("result", msg_result(0.2133, 58335, 3)),
+            ],
         );
     }
 
