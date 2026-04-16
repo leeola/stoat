@@ -28,7 +28,6 @@
 //! to avoid an external crate.
 
 use super::arena::{Syntax, SyntaxArena, SyntaxId};
-use std::collections::HashMap;
 
 /// What the preprocessing pass concluded about a node. The diff search
 /// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
@@ -48,11 +47,11 @@ pub enum ChangeKind {
     Moved,
 }
 
-/// Side-table mapping [`SyntaxId`] -> [`ChangeKind`]. Built once per
-/// arena and shared with the Dijkstra layer.
+/// Side-table mapping [`SyntaxId`] -> [`ChangeKind`]. Backed by a dense
+/// `Vec` indexed by [`SyntaxId`] for O(1) access with no hashing.
 #[derive(Clone, Debug, Default)]
 pub struct ChangeMap {
-    by_id: HashMap<SyntaxId, ChangeKind>,
+    data: Vec<ChangeKind>,
 }
 
 impl ChangeMap {
@@ -60,20 +59,29 @@ impl ChangeMap {
         Self::default()
     }
 
+    pub fn with_len(n: usize) -> Self {
+        Self {
+            data: vec![ChangeKind::Pending; n],
+        }
+    }
+
     pub fn get(&self, id: SyntaxId) -> ChangeKind {
-        self.by_id.get(&id).copied().unwrap_or(ChangeKind::Pending)
+        self.data.get(id.0).copied().unwrap_or(ChangeKind::Pending)
     }
 
     pub fn mark(&mut self, id: SyntaxId, kind: ChangeKind) {
-        self.by_id.insert(id, kind);
+        if id.0 >= self.data.len() {
+            self.data.resize(id.0 + 1, ChangeKind::Pending);
+        }
+        self.data[id.0] = kind;
     }
 
     pub fn len(&self) -> usize {
-        self.by_id.len()
+        self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.data.is_empty()
     }
 }
 
@@ -94,7 +102,10 @@ pub fn mark_unchanged(
     rhs_arena: &SyntaxArena,
     rhs_root: SyntaxId,
 ) -> PreprocessResult {
-    let mut result = PreprocessResult::default();
+    let mut result = PreprocessResult {
+        lhs_changes: ChangeMap::with_len(lhs_arena.len()),
+        rhs_changes: ChangeMap::with_len(rhs_arena.len()),
+    };
 
     // Top-level: roots are always lists in practice (they wrap the
     // whole document). If they share content_ids, every descendant is

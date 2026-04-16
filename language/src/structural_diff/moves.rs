@@ -41,6 +41,29 @@ use super::{
 };
 use std::collections::{HashMap, HashSet};
 
+fn precompute_leaf_counts(arena: &SyntaxArena) -> Vec<usize> {
+    let mut counts = vec![0usize; arena.len()];
+    for i in 0..arena.len() {
+        match arena.get(SyntaxId(i)) {
+            Syntax::Atom(_) => counts[i] = 1,
+            Syntax::List(list) => {
+                counts[i] = list.children.iter().map(|c| counts[c.0]).sum();
+            },
+        }
+    }
+    counts
+}
+
+fn precompute_depths(parents: &[Option<SyntaxId>]) -> Vec<usize> {
+    let mut depths = vec![0usize; parents.len()];
+    for i in (0..parents.len()).rev() {
+        if let Some(p) = parents[i] {
+            depths[i] = depths[p.0] + 1;
+        }
+    }
+    depths
+}
+
 /// Minimum number of atom leaves in a subtree for it to be considered a
 /// move candidate. Set to reject single identifiers (1 leaf), bare
 /// `return;` or `break;` (~2 leaves), and micro-expressions (~3 leaves).
@@ -100,9 +123,13 @@ pub fn find_moves(
 ) -> Vec<MoveRecord> {
     let lhs_parents = build_parent_map(lhs_arena);
     let rhs_parents = build_parent_map(rhs_arena);
+    let lhs_leaf_counts = precompute_leaf_counts(lhs_arena);
+    let rhs_leaf_counts = precompute_leaf_counts(rhs_arena);
+    let lhs_depths = precompute_depths(&lhs_parents);
+    let rhs_depths = precompute_depths(&rhs_parents);
 
-    let lhs_by_cid = index_all_candidates(lhs_arena);
-    let rhs_by_cid = index_all_candidates(rhs_arena);
+    let lhs_by_cid = index_all_candidates(lhs_arena, &lhs_leaf_counts);
+    let rhs_by_cid = index_all_candidates(rhs_arena, &rhs_leaf_counts);
 
     let mut shared: Vec<(ContentId, usize, usize)> = lhs_by_cid
         .iter()
@@ -110,13 +137,13 @@ pub fn find_moves(
             rhs_by_cid.get(cid).map(|rhs_ids| {
                 let leaves = ids
                     .iter()
-                    .map(|id| atom_leaf_count(lhs_arena, *id))
+                    .map(|id| lhs_leaf_counts[id.0])
                     .max()
                     .unwrap_or(0);
                 let min_depth = ids
                     .iter()
-                    .map(|id| node_depth(&lhs_parents, *id))
-                    .chain(rhs_ids.iter().map(|id| node_depth(&rhs_parents, *id)))
+                    .map(|id| lhs_depths[id.0])
+                    .chain(rhs_ids.iter().map(|id| rhs_depths[id.0]))
                     .min()
                     .unwrap_or(0);
                 (*cid, leaves, min_depth)
@@ -172,10 +199,10 @@ pub fn find_moves(
     }
 
     for id in &paired_lhs {
-        lhs_changes.mark(*id, ChangeKind::Moved);
+        mark_subtree_moved(lhs_arena, *id, lhs_changes);
     }
     for id in &paired_rhs {
-        rhs_changes.mark(*id, ChangeKind::Moved);
+        mark_subtree_moved(rhs_arena, *id, rhs_changes);
     }
 
     records.sort_by_key(|r| byte_start(rhs_arena, r.rhs_target));
@@ -190,14 +217,17 @@ pub fn find_moves(
 /// structural preservation. Applies the [`is_trivial`] denylist and
 /// [`MIN_LEAVES`] threshold at index time so noise candidates never
 /// enter the pairing loop.
-fn index_all_candidates(arena: &SyntaxArena) -> HashMap<ContentId, Vec<SyntaxId>> {
+fn index_all_candidates(
+    arena: &SyntaxArena,
+    leaf_counts: &[usize],
+) -> HashMap<ContentId, Vec<SyntaxId>> {
     let mut out: HashMap<ContentId, Vec<SyntaxId>> = HashMap::new();
     for i in 0..arena.len() {
         let id = SyntaxId(i);
         if is_trivial(arena, id) {
             continue;
         }
-        if atom_leaf_count(arena, id) < MIN_LEAVES {
+        if leaf_counts[i] < MIN_LEAVES {
             continue;
         }
         out.entry(arena.get(id).content_id()).or_default().push(id);
@@ -219,7 +249,7 @@ fn is_trivial(arena: &SyntaxArena, id: SyntaxId) -> bool {
 fn filter_unpaired(
     candidates: &[SyntaxId],
     paired: &HashSet<SyntaxId>,
-    parents: &HashMap<SyntaxId, SyntaxId>,
+    parents: &[Option<SyntaxId>],
 ) -> Vec<SyntaxId> {
     candidates
         .iter()
@@ -319,42 +349,37 @@ fn emit_records(
     }
 }
 
-fn build_parent_map(arena: &SyntaxArena) -> HashMap<SyntaxId, SyntaxId> {
-    let mut parents = HashMap::new();
+fn build_parent_map(arena: &SyntaxArena) -> Vec<Option<SyntaxId>> {
+    let mut parents = vec![None; arena.len()];
     for i in 0..arena.len() {
-        let id = SyntaxId(i);
-        if let Syntax::List(list) = arena.get(id) {
+        if let Syntax::List(list) = arena.get(SyntaxId(i)) {
             for child in &list.children {
-                parents.insert(*child, id);
+                parents[child.0] = Some(SyntaxId(i));
             }
         }
     }
     parents
 }
 
-fn ancestor_in_set(
-    parents: &HashMap<SyntaxId, SyntaxId>,
-    id: SyntaxId,
-    set: &HashSet<SyntaxId>,
-) -> bool {
-    let mut cur = parents.get(&id).copied();
+fn ancestor_in_set(parents: &[Option<SyntaxId>], id: SyntaxId, set: &HashSet<SyntaxId>) -> bool {
+    let mut cur = parents[id.0];
     while let Some(p) = cur {
         if set.contains(&p) {
             return true;
         }
-        cur = parents.get(&p).copied();
+        cur = parents[p.0];
     }
     false
 }
 
-fn node_depth(parents: &HashMap<SyntaxId, SyntaxId>, id: SyntaxId) -> usize {
-    let mut depth = 0usize;
-    let mut cur = parents.get(&id).copied();
-    while let Some(p) = cur {
-        depth += 1;
-        cur = parents.get(&p).copied();
+fn mark_subtree_moved(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeMap) {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        changes.mark(id, ChangeKind::Moved);
+        if let Syntax::List(list) = arena.get(id) {
+            stack.extend(list.children.iter().copied());
+        }
     }
-    depth
 }
 
 fn byte_start(arena: &SyntaxArena, id: SyntaxId) -> usize {
@@ -372,11 +397,12 @@ fn byte_start(arena: &SyntaxArena, id: SyntaxId) -> usize {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn is_moved(changes: &ChangeMap, id: SyntaxId) -> bool {
     matches!(changes.get(id), ChangeKind::Moved)
 }
 
+#[cfg(test)]
 fn atom_leaf_count(arena: &SyntaxArena, id: SyntaxId) -> usize {
     let mut stack = vec![id];
     let mut count = 0usize;

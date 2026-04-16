@@ -227,16 +227,21 @@ fn walk_emit_atoms(
             if atom.byte_range.start >= atom.byte_range.end {
                 return;
             }
-            if let Some(meta) = metadata.get(&id) {
-                callback(
-                    DiffChangeKind::Moved,
-                    Some(meta.clone()),
-                    atom.byte_range.clone(),
-                );
-            } else if changes.get(id) == ChangeKind::Pending {
-                callback(DiffChangeKind::Novel, None, atom.byte_range.clone());
+            match changes.get(id) {
+                ChangeKind::Moved => {
+                    if let Some(meta) = metadata.get(&id) {
+                        callback(
+                            DiffChangeKind::Moved,
+                            Some(meta.clone()),
+                            atom.byte_range.clone(),
+                        );
+                    }
+                },
+                ChangeKind::Pending => {
+                    callback(DiffChangeKind::Novel, None, atom.byte_range.clone());
+                },
+                ChangeKind::Unchanged => {},
             }
-            // Unchanged and Moved-without-metadata-entry atoms drop through.
         },
         Syntax::List(list) => {
             for child in &list.children {
