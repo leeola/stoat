@@ -8,13 +8,14 @@ pub mod command_palette;
 pub mod diff_map;
 pub mod display_map;
 mod editor_state;
-pub mod git;
 pub mod host;
 pub mod keymap;
 mod move_index;
 pub mod multi_buffer;
 pub mod pane;
 mod review;
+mod review_apply;
+mod review_session;
 pub mod run;
 mod selection;
 pub mod ui;
@@ -36,7 +37,7 @@ pub use display_map::{
     SemanticTokensHighlights, TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap,
     WrapPoint, WrapSnapshot,
 };
-pub use git::DiffStatus;
+pub use host::DiffStatus;
 pub use multi_buffer::{
     ExcerptBoundary, ExcerptId, ExcerptInfo, MultiBuffer, MultiBufferAnchor, MultiBufferPoint,
     MultiBufferRow, MultiBufferSnapshot,

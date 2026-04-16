@@ -7,7 +7,10 @@ use crate::{
     command_palette::{CommandPalette, PaletteOutcome},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
-    host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId},
+    host::{
+        AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
+        FsHost, GitHost, LocalFs, LocalGit,
+    },
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{DockPanel, DockVisibility, FocusTarget, Pane, View},
     review::ReviewRow,
@@ -64,6 +67,13 @@ pub struct Stoat {
     pty_rx: Receiver<PtyNotification>,
     pub(crate) modal_run: Option<RunId>,
     render_tick: u64,
+    /// Filesystem the UI layer reads through. Swapped to
+    /// [`crate::host::FakeFs`] in tests; all IO outside the host module
+    /// itself must route through this field.
+    pub(crate) fs_host: Arc<dyn FsHost>,
+    /// Git operations flow through this trait so tests can use
+    /// [`crate::host::FakeGit`] without a real repository.
+    pub(crate) git_host: Arc<dyn GitHost>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -149,7 +159,23 @@ impl Stoat {
             pty_rx,
             modal_run: None,
             render_tick: 0,
+            fs_host: Arc::new(LocalFs),
+            git_host: Arc::new(LocalGit::new()),
         }
+    }
+
+    /// Swap in an alternative [`FsHost`]. The default is [`LocalFs`]; the
+    /// test harness installs [`crate::host::FakeFs`] so review, open-file,
+    /// and other IO paths run in-memory.
+    pub fn set_fs_host(&mut self, host: Arc<dyn FsHost>) {
+        self.fs_host = host;
+    }
+
+    /// Swap in an alternative [`GitHost`]. The default is [`LocalGit`];
+    /// tests inject [`crate::host::FakeGit`] to drive the review flow
+    /// without a real repository.
+    pub fn set_git_host(&mut self, host: Arc<dyn GitHost>) {
+        self.git_host = host;
     }
 
     pub fn active_workspace(&self) -> &Workspace {
@@ -1000,7 +1026,30 @@ impl Stoat {
                     (key.as_str(), desc)
                 })
                 .collect();
-            render_mini_help(&self.mode, &bindings, self.size, &mut buf);
+            let footer = if self.mode == "review" {
+                ws.review.as_ref().map(|session| {
+                    let p = session.progress();
+                    let complete = session.is_complete();
+                    let text = if complete {
+                        format!("all {} reviewed", p.total)
+                    } else {
+                        let current = p.current_index.unwrap_or(0);
+                        format!(
+                            "{}/{} · {} staged · {} unstaged · {} pending",
+                            current, p.total, p.staged, p.unstaged, p.pending
+                        )
+                    };
+                    let style = if complete {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    MiniHelpFooter { text, style }
+                })
+            } else {
+                None
+            };
+            render_mini_help(&self.mode, &bindings, footer.as_ref(), self.size, &mut buf);
         }
         buf
     }
@@ -1241,7 +1290,13 @@ fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
     }
 }
 
-fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &mut Buffer) {
+fn render_mini_help(
+    mode: &str,
+    bindings: &[(&str, String)],
+    footer: Option<&MiniHelpFooter>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     if bindings.is_empty() || area.width < 10 || area.height < 4 {
         return;
     }
@@ -1249,12 +1304,14 @@ fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &m
     let key_width = bindings.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     let action_width = bindings.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
     let gap = 3;
-    let inner_width = key_width + gap + action_width;
+    let bindings_width = key_width + gap + action_width;
     let border_pad = 2;
     let title_width = mode.len() + 4;
-    let content_width = inner_width.max(title_width);
+    let footer_width = footer.map(|f| f.text.len()).unwrap_or(0);
+    let content_width = bindings_width.max(title_width).max(footer_width);
+    let extra_rows = footer.map(|_| 2).unwrap_or(0); // separator + footer line
     let box_width = (content_width + border_pad) as u16;
-    let box_height = (bindings.len() + border_pad) as u16;
+    let box_height = (bindings.len() + border_pad + extra_rows) as u16;
 
     if box_width > area.width || box_height > area.height {
         return;
@@ -1296,6 +1353,33 @@ fn render_mini_help(mode: &str, bindings: &[(&str, String)], area: Rect, buf: &m
             buf[(col, row)].set_char(ch).set_style(style);
         }
     }
+
+    if let Some(footer) = footer {
+        let sep_row = inner.y + bindings.len() as u16;
+        let text_row = sep_row + 1;
+        if sep_row < inner.y + inner.height {
+            for col_offset in 0..inner.width {
+                let col = inner.x + col_offset;
+                buf[(col, sep_row)]
+                    .set_char('─')
+                    .set_style(Style::default().fg(Color::DarkGray));
+            }
+        }
+        if text_row < inner.y + inner.height {
+            for (j, ch) in footer.text.chars().enumerate() {
+                let col = inner.x + j as u16;
+                if col >= inner.x + inner.width {
+                    break;
+                }
+                buf[(col, text_row)].set_char(ch).set_style(footer.style);
+            }
+        }
+    }
+}
+
+struct MiniHelpFooter {
+    text: String,
+    style: Style,
 }
 
 fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer) {
@@ -2491,7 +2575,7 @@ fn render_editor(
     buf: &mut Buffer,
     is_focused: bool,
 ) {
-    if editor.review_rows.is_some() {
+    if editor.review_view.is_some() {
         render_review(editor, inner, fallback_style, buf);
         return;
     }
@@ -2601,11 +2685,14 @@ fn render_editor(
 /// is rendered in the default style so only the structural diff is
 /// visually emphasised (matching difftastic behaviour).
 fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+    use crate::review_session::ChunkStatus;
+
     let snapshot = editor.display_map.snapshot();
-    let rows = match editor.review_rows.as_ref() {
-        Some(r) => r,
+    let view = match editor.review_view.as_ref() {
+        Some(v) => v,
         None => return,
     };
+    let rows = &view.rows;
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
     let end_row = (editor.scroll_row + visible).min(total_rows);
@@ -2614,15 +2701,16 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
     }
 
     let full_w = inner.width as usize;
-    // Line-number gutter: " NNN " = 5 chars
+    // One-char status column + 5-char line-number column per side.
+    let status_w: usize = 1;
     let num_w: usize = 5;
-    // Separator column (1 char)
+    let gutter_w: usize = status_w + num_w;
+    // Separator column (1 char) between the two sides.
     let sep: usize = 1;
-    // Each half = (full_w - sep) / 2, left half gets the extra column on odd widths.
     let half_w = (full_w.saturating_sub(sep)) / 2;
-    let left_content_w = half_w.saturating_sub(num_w);
+    let left_content_w = half_w.saturating_sub(gutter_w);
     let right_start = inner.x + half_w as u16 + sep as u16;
-    let right_content_w = (full_w - half_w - sep).saturating_sub(num_w);
+    let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
 
     let dim_style = Style::default().fg(Color::DarkGray);
     let del_hl = Style::default().fg(Color::Red);
@@ -2633,6 +2721,9 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
     let move_hl = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::ITALIC);
+    let current_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
 
     for display_row in editor.scroll_row..end_row {
         let y = inner.y + (display_row - editor.scroll_row) as u16;
@@ -2651,12 +2742,21 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                 let Some(row) = rows.get(buffer_row as usize) else {
                     continue;
                 };
+                if let Some((chunk_id, status)) = view.chunk_and_status_at_row(buffer_row) {
+                    let is_current = Some(chunk_id) == view.current_chunk;
+                    paint_status_gutter(buf, inner.x, y, status, is_current, current_style);
+                    paint_status_gutter(buf, right_start, y, status, is_current, current_style);
+                }
+                let left_num_x = inner.x + status_w as u16;
+                let right_num_x = right_start + status_w as u16;
+                let left_text_x = left_num_x + num_w as u16;
+                let right_text_x = right_num_x + num_w as u16;
                 match row {
                     ReviewRow::Context { left, right } => {
-                        render_side_num(buf, inner.x, y, left.line_num, dim_style);
+                        render_side_num(buf, left_num_x, y, left.line_num, dim_style);
                         render_side_text(
                             buf,
-                            inner.x + num_w as u16,
+                            left_text_x,
                             y,
                             &left.text,
                             left_content_w,
@@ -2666,10 +2766,10 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                             &[],
                             move_hl,
                         );
-                        render_side_num(buf, right_start, y, right.line_num, dim_style);
+                        render_side_num(buf, right_num_x, y, right.line_num, dim_style);
                         render_side_text(
                             buf,
-                            right_start + num_w as u16,
+                            right_text_x,
                             y,
                             &right.text,
                             right_content_w,
@@ -2682,10 +2782,10 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                     },
                     ReviewRow::Changed { left, right } => {
                         if let Some(l) = left {
-                            render_side_num(buf, inner.x, y, l.line_num, dim_style);
+                            render_side_num(buf, left_num_x, y, l.line_num, dim_style);
                             render_side_text(
                                 buf,
-                                inner.x + num_w as u16,
+                                left_text_x,
                                 y,
                                 &l.text,
                                 left_content_w,
@@ -2696,13 +2796,13 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                                 move_hl,
                             );
                         } else {
-                            render_empty_num(buf, inner.x, y, dim_style);
+                            render_empty_num(buf, left_num_x, y, dim_style);
                         }
                         if let Some(r) = right {
-                            render_side_num(buf, right_start, y, r.line_num, dim_style);
+                            render_side_num(buf, right_num_x, y, r.line_num, dim_style);
                             render_side_text(
                                 buf,
-                                right_start + num_w as u16,
+                                right_text_x,
                                 y,
                                 &r.text,
                                 right_content_w,
@@ -2713,7 +2813,7 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                                 move_hl,
                             );
                         } else {
-                            render_empty_num(buf, right_start, y, dim_style);
+                            render_empty_num(buf, right_num_x, y, dim_style);
                         }
                     },
                 }
@@ -2743,6 +2843,32 @@ fn render_side_num(buf: &mut Buffer, x: u16, y: u16, num: u32, style: Style) {
         }
         buf[(col, y)].set_char(ch).set_style(style);
     }
+}
+
+fn paint_status_gutter(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    status: crate::review_session::ChunkStatus,
+    is_current: bool,
+    current_style: Style,
+) {
+    use crate::review_session::ChunkStatus;
+
+    if x >= buf.area.x + buf.area.width {
+        return;
+    }
+    if is_current {
+        buf[(x, y)].set_char('│').set_style(current_style);
+        return;
+    }
+    let (ch, style) = match status {
+        ChunkStatus::Pending => (' ', Style::default().fg(Color::DarkGray)),
+        ChunkStatus::Staged => ('+', Style::default().fg(Color::Green)),
+        ChunkStatus::Unstaged => ('-', Style::default().fg(Color::Red)),
+        ChunkStatus::Skipped => ('~', Style::default().fg(Color::DarkGray)),
+    };
+    buf[(x, y)].set_char(ch).set_style(style);
 }
 
 fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {

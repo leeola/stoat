@@ -20,10 +20,10 @@ size: 80x24
 │ │ ClaudeToDockRight  move claude to right dock                             │ │
 │ │ ClaudeToPane       move claude to pane                                   │ │
 │ │ ClosePane          close pane                                            │ │
+│ │ CloseReview        close the active review                               │ │
 │ │ FocusDown          focus pane down                                       │ │
 │ │ FocusLeft          focus pane left                                       │ │
 │ │ FocusNext          focus next pane                                       │ │
-│ │ FocusPrev          focus previous pane                                   │ │
 │ │──────────────────────────────────────────────────────────────────────────│ │
 │ │Add a new cursor on the line below the newest cursor.                     │ │
 │ └──────────────────────────────────────────────────────────────────────────┘ │

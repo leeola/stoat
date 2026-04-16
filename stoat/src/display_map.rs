@@ -11,7 +11,7 @@ mod wrap_map;
 use crate::{
     buffer::BufferId,
     diff_map::{DiffMap, TokenDetail},
-    git::DiffStatus,
+    host::DiffStatus,
     multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{

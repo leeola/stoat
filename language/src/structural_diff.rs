@@ -86,6 +86,18 @@ pub struct DiffChange {
     pub byte_range: Range<usize>,
     pub kind: ChangeKind,
     pub move_metadata: Option<Arc<MoveMetadata>>,
+    /// Pairs an [`Lhs`](Side::Lhs) `Replaced` change with its
+    /// [`Rhs`](Side::Rhs) counterpart. Within a single [`DiffResult`],
+    /// a given `pair_id` appears on exactly one `Lhs` entry and one
+    /// `Rhs` entry. `None` for [`ChangeKind::Novel`] (pure add/delete)
+    /// and [`ChangeKind::Moved`] changes, which have other pairing
+    /// machinery.
+    pub pair_id: Option<u32>,
+    /// For [`Lhs`](Side::Lhs)-side deletions (`kind == Novel`), the
+    /// [`Rhs`](Side::Rhs) line number (0-based) where the deletion
+    /// logically belongs; used to anchor deleted content at the right
+    /// position in the buffer view. `None` for any other kind.
+    pub deletion_rhs_anchor: Option<u32>,
 }
 
 /// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the

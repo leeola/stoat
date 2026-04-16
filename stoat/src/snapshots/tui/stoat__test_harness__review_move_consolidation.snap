@@ -4,30 +4,30 @@ expression: text
 ---
 actions: open_review
 focused: #1 of 1
-mode: normal
+mode: review
 size: 100x24
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │consolidate.rs --- 1/1 --- rust                 │                                                 │
-│   1 fn first() {                               │   1 fn shared() {                               │
-│   2     let temp = heavy_computation(a, b, c); │   2     let temp = heavy_computation(a, b, c);  │
-│   3     save(temp);                            │   3     save(temp);                             │
-│   4 }                                          │   4 }                                           │
-│   5                                            │   5                                             │
-│.....                                           │   6 fn first() {                                │
-│.....                                           │   7     shared();                               │
-│   6 fn second() {                              │   8 }                                           │
-│   7     let temp = heavy_computation(a, b, c); │.....                                            │
-│   8     save(temp);                            │.....                                            │
-│   9 }                                          │   9                                             │
-│.....                                           │  10 fn second() {                               │
-│.....                                           │  11     shared();                               │
-│.....                                           │  12 }                                           │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+││   1 fn first() {                              ││   1 fn shared() {                              │
+││   2     let temp = heavy_computation(a, b, c);││   2     let temp = heavy_computation(a, b, c); │
+││   3     save(temp);                           ││   3     save(temp);                            │
+││   4 }                                         ││   4 }                                          │
+││   5                                           ││   5                                            │
+││.....                                         ┌ review ──────────────────────────────────────────┐
+││.....                                         │Esc   close the active review                     │
+││   6 fn second() {                            │  q   close the active review                     │
+││   7     let temp = heavy_computation(a, b, c)│  n   advance to the next review chunk            │
+││   8     save(temp);                          │  p   step back to the previous review chunk      │
+││   9 }                                        │  j   advance to the next review chunk            │
+││.....                                         │  k   step back to the previous review chunk      │
+││.....                                         │  s   mark the current chunk as staged            │
+││.....                                         │  u   mark the current chunk as unstaged          │
+│                                               │Spc   toggle staged/unstaged for the current chunk│
+│                                               │  S   skip the current chunk                      │
+│                                               │  A   apply staged chunks                         │
+│                                               │  r   rescan the review source                    │
+│                                               │  :   open the command palette                    │
+│                                               │──────────────────────────────────────────────────│
+│                                               │1/1 · 0 staged · 0 unstaged · 1 pending           │
+└───────────────────────────────────────────────└──────────────────────────────────────────────────┘

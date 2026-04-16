@@ -127,6 +127,7 @@ fn collapse_runs_into_changes(
     let mut rhs_idx = 0usize;
     let mut i = 0usize;
 
+    let mut next_pair_id: u32 = 0;
     while i < ops.len() {
         match ops[i] {
             WalkOp::Equal => {
@@ -159,12 +160,26 @@ fn collapse_runs_into_changes(
                 } else {
                     ChangeKind::Novel
                 };
+                let pair_id = if kind == ChangeKind::Replaced {
+                    let id = next_pair_id;
+                    next_pair_id += 1;
+                    Some(id)
+                } else {
+                    None
+                };
                 if lhs_count > 0 {
+                    let deletion_rhs_anchor = if kind == ChangeKind::Novel {
+                        Some(rhs_start as u32)
+                    } else {
+                        None
+                    };
                     changes.push(DiffChange {
                         side: Side::Lhs,
                         byte_range: range_for_lines(lhs, lhs_start, lhs_count),
                         kind,
                         move_metadata: None,
+                        pair_id,
+                        deletion_rhs_anchor,
                     });
                 }
                 if rhs_count > 0 {
@@ -173,6 +188,8 @@ fn collapse_runs_into_changes(
                         byte_range: range_for_lines(rhs, rhs_start, rhs_count),
                         kind,
                         move_metadata: None,
+                        pair_id,
+                        deletion_rhs_anchor: None,
                     });
                 }
                 let _ = run_start;
@@ -260,5 +277,62 @@ mod tests {
     fn fell_back_flag_is_set() {
         let r = diff_lines("a\n", "b\n");
         assert!(r.fell_back_to_line_diff);
+    }
+
+    #[test]
+    fn replaced_changes_share_pair_id() {
+        let result = changes("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
+        assert_eq!(result.len(), 2);
+        let lhs_change = result.iter().find(|c| c.side == Side::Lhs).unwrap();
+        let rhs_change = result.iter().find(|c| c.side == Side::Rhs).unwrap();
+        assert_eq!(lhs_change.kind, ChangeKind::Replaced);
+        assert_eq!(rhs_change.kind, ChangeKind::Replaced);
+        assert!(lhs_change.pair_id.is_some());
+        assert_eq!(lhs_change.pair_id, rhs_change.pair_id);
+    }
+
+    #[test]
+    fn novel_changes_have_no_pair_id() {
+        let result = changes("", "hello\n");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].kind, ChangeKind::Novel);
+        assert!(result[0].pair_id.is_none());
+    }
+
+    #[test]
+    fn deletion_carries_rhs_anchor() {
+        let result = changes("ctx1\nremoved\nctx2\n", "ctx1\nctx2\n");
+        let lhs = result.iter().find(|c| c.side == Side::Lhs).unwrap();
+        assert_eq!(lhs.kind, ChangeKind::Novel);
+        assert_eq!(lhs.deletion_rhs_anchor, Some(1));
+    }
+
+    #[test]
+    fn replacement_has_no_deletion_anchor() {
+        let result = changes("alpha\nold\n", "alpha\nnew\n");
+        let lhs = result.iter().find(|c| c.side == Side::Lhs).unwrap();
+        assert_eq!(lhs.deletion_rhs_anchor, None);
+    }
+
+    #[test]
+    fn pair_ids_are_distinct_per_run() {
+        let result = changes("a\nA\nb\nB\nc\n", "a\nAA\nb\nBB\nc\n");
+        let pair_ids: Vec<u32> = result.iter().filter_map(|c| c.pair_id).collect();
+        assert_eq!(pair_ids.len(), 4);
+        let mut lhs_ids: Vec<u32> = result
+            .iter()
+            .filter(|c| c.side == Side::Lhs)
+            .filter_map(|c| c.pair_id)
+            .collect();
+        let mut rhs_ids: Vec<u32> = result
+            .iter()
+            .filter(|c| c.side == Side::Rhs)
+            .filter_map(|c| c.pair_id)
+            .collect();
+        lhs_ids.sort_unstable();
+        rhs_ids.sort_unstable();
+        assert_eq!(lhs_ids, rhs_ids);
+        let unique: std::collections::HashSet<_> = lhs_ids.iter().copied().collect();
+        assert_eq!(unique.len(), lhs_ids.len(), "pair ids must be unique");
     }
 }

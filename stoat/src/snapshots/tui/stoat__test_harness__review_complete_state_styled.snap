@@ -1,0 +1,39 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: s
+focused: #1 of 1
+mode: review
+size: 120x30
+---
+[0m[36m┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
+[0m[36m│[0m[32m+[0m[90m   1 [0m[31ma[0m                                                   [0m[90m│[0m[32m+[0m[90m   1 [0m[32mA[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   2 [0m[36mb[0m                                                   [0m[90m│[0m[32m+[0m[90m   2 [0m[36mb[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   3 [0m[36mc[0m                                                   [0m[90m│[0m[32m+[0m[90m   3 [0m[36mc[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   4 [0m[36md[0m                                                   [0m[90m│[0m[32m+[0m[90m   4 [0m[36md[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[33ma.txt --- 2/2 --- [0m                                        [0m[90m│[0m                                                           [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  17 [0m[36mq[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  17 [0m[36mq[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  18 [0m[36mr[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  18 [0m[36mr[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  19 [0m[36ms[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  19 [0m[36ms[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  20 [0m[31mt[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  20 [0m[32mT[0m                                                    [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                   [0m[33m┌ review ──────────────────────────────────────────┐[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36mEsc[0m[97m   close the active review[0m                     [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  q[0m[97m   close the active review[0m                     [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  n[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  p[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  j[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  k[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  s[0m[97m   mark the current chunk as staged[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  u[0m[97m   mark the current chunk as unstaged[0m          [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36mSpc[0m[97m   toggle staged/unstaged for the current chunk[0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  S[0m[97m   skip the current chunk[0m                      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  A[0m[97m   apply staged chunks[0m                         [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  r[0m[97m   rescan the review source[0m                    [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m                    [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[90m──────────────────────────────────────────────────[0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[32mall 2 reviewed[0m         [0m[32m│[0m[97mreview complete: 2 chunks[0m[32m│[0m[33m│[0m
+[0m[36m└───────────────────────────────────────────────────────────────────[0m[33m└──────────────────────────────────────────────────┘[0m

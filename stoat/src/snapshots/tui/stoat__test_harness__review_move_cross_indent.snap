@@ -4,26 +4,26 @@ expression: text
 ---
 actions: open_review
 focused: #1 of 1
-mode: normal
+mode: review
 size: 100x20
 ---
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │nest.rs --- 1/1 --- rust                        │                                                 │
-│.....                                           │   1 fn outer() {}                               │
-│   1 fn outer() {                               │   2                                             │
-│   2     let relocated = compute(arg1, arg2, arg│.....                                            │
-│   3 }                                          │   3 fn wrapper() {                              │
-│   4                                            │   4     println!("hello");                      │
-│.....                                           │   5     let relocated = compute(arg1, arg2, arg3│
-│   5 fn wrapper() {                             │   6 }                                           │
-│   6     println!("hello");                     │.....                                            │
-│   7 }                                          │.....                                            │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+││.....                                          ││   1 fn outer() {}                              │
+││   1 fn outer() {                             ┌ review ──────────────────────────────────────────┐
+││   2     let relocated = compute(arg1, arg2, a│Esc   close the active review                     │
+││   3 }                                        │  q   close the active review                     │
+││   4                                          │  n   advance to the next review chunk            │
+││.....                                         │  p   step back to the previous review chunk2, arg│
+││   5 fn wrapper() {                           │  j   advance to the next review chunk            │
+││   6     println!("hello");                   │  k   step back to the previous review chunk      │
+││   7 }                                        │  s   mark the current chunk as staged            │
+│                                               │  u   mark the current chunk as unstaged          │
+│                                               │Spc   toggle staged/unstaged for the current chunk│
+│                                               │  S   skip the current chunk                      │
+│                                               │  A   apply staged chunks                         │
+│                                               │  r   rescan the review source                    │
+│                                               │  :   open the command palette                    │
+│                                               │──────────────────────────────────────────────────│
+│                                               │1/1 · 0 staged · 0 unstaged · 1 pending           │
+└───────────────────────────────────────────────└──────────────────────────────────────────────────┘

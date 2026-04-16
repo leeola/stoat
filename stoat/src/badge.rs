@@ -41,6 +41,9 @@ pub enum BadgeState {
 pub enum BadgeSource {
     Run(RunId),
     Claude(ClaudeSessionId),
+    /// Notification attached to the active review session. At most one
+    /// Review-sourced badge exists per workspace.
+    Review,
 }
 
 #[derive(Debug, Clone)]

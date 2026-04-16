@@ -16,8 +16,11 @@ use crate::{
             SplitRight,
         },
         review::{
-            JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource,
-            OpenReview, QueryMoveRelationships,
+            CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+            JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
+            QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk,
+            ReviewRefresh, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
+            ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunInterrupt, RunSubmit},
     },
@@ -64,6 +67,70 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(QueryMoveRelationships::DEF, |_| {
         Ok(Box::new(QueryMoveRelationships))
+    });
+    add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
+    add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
+    add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
+    add(ReviewUnstageChunk::DEF, |_| {
+        Ok(Box::new(ReviewUnstageChunk))
+    });
+    add(ReviewToggleStage::DEF, |_| Ok(Box::new(ReviewToggleStage)));
+    add(ReviewSkipChunk::DEF, |_| Ok(Box::new(ReviewSkipChunk)));
+    add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
+    add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
+    add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
+    add(OpenReviewCommit::DEF, |params| {
+        let workdir = params
+            .first()
+            .ok_or(ParamError::Missing("workdir"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "workdir",
+                expected: ParamKind::String,
+            })?;
+        let sha = params
+            .get(1)
+            .ok_or(ParamError::Missing("sha"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "sha",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(OpenReviewCommit {
+            workdir: PathBuf::from(workdir),
+            sha: sha.to_owned(),
+        }))
+    });
+    add(OpenReviewCommitRange::DEF, |params| {
+        let workdir = params
+            .first()
+            .ok_or(ParamError::Missing("workdir"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "workdir",
+                expected: ParamKind::String,
+            })?;
+        let from = params
+            .get(1)
+            .ok_or(ParamError::Missing("from"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "from",
+                expected: ParamKind::String,
+            })?;
+        let to = params
+            .get(2)
+            .ok_or(ParamError::Missing("to"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "to",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(OpenReviewCommitRange {
+            workdir: PathBuf::from(workdir),
+            from: from.to_owned(),
+            to: to.to_owned(),
+        }))
     });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
     add(MoveLeft::DEF, |_| Ok(Box::new(MoveLeft)));
@@ -151,6 +218,15 @@ mod tests {
         "MoveNextWordStart",
         "MoveNextWordEnd",
         "MovePrevWordStart",
+        "ReviewNextChunk",
+        "ReviewPrevChunk",
+        "ReviewStageChunk",
+        "ReviewUnstageChunk",
+        "ReviewToggleStage",
+        "ReviewSkipChunk",
+        "ReviewRefresh",
+        "ReviewApplyStaged",
+        "CloseReview",
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
@@ -219,7 +295,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 37);
+        assert_eq!(all().count(), 48);
     }
 
     #[test]

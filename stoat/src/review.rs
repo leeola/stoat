@@ -525,6 +525,8 @@ mod tests {
             byte_range: 4..7,
             kind: structural_diff::ChangeKind::Novel,
             move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
         }];
         assert_eq!(
             mark_changed_lines(&lines, &changes, Side::Lhs),
@@ -541,6 +543,8 @@ mod tests {
             byte_range: 6..11,
             kind: structural_diff::ChangeKind::Replaced,
             move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);

@@ -46,6 +46,8 @@ pub struct TestHarness {
     #[allow(dead_code)]
     scheduler: Arc<TestScheduler>,
     pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
+    pub(crate) fake_fs: Arc<crate::host::FakeFs>,
+    pub(crate) fake_git: Arc<crate::host::FakeGit>,
     pub(crate) claude_fakes:
         HashMap<crate::host::ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
     pub(crate) claude_tool_id_counter: u64,
@@ -64,14 +66,20 @@ impl TestHarness {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
         let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
+        let fake_fs = Arc::new(crate::host::FakeFs::new());
+        let fake_git = Arc::new(crate::host::FakeGit::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.set_claude_code_host(fake_claude_host.clone());
+        stoat.set_fs_host(fake_fs.clone());
+        stoat.set_git_host(fake_git.clone());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
             stoat,
             scheduler,
             fake_claude_host,
+            fake_fs,
+            fake_git,
             claude_fakes: HashMap::new(),
             claude_tool_id_counter: 0,
             frames: Vec::new(),
@@ -81,6 +89,136 @@ impl TestHarness {
         };
         harness.capture("resize");
         harness
+    }
+
+    /// Expose the [`crate::host::FakeFs`] backing this harness so tests can
+    /// seed file content directly. All open-file / read paths through
+    /// [`Stoat`] route through this handle.
+    pub fn fake_fs(&self) -> &Arc<crate::host::FakeFs> {
+        &self.fake_fs
+    }
+
+    /// Expose the [`crate::host::FakeGit`] backing this harness. Use its
+    /// `add_repo(...).with_fs(&self.fake_fs)` to populate a repository plus
+    /// working-tree state for review-mode tests.
+    pub fn fake_git(&self) -> &Arc<crate::host::FakeGit> {
+        &self.fake_git
+    }
+
+    /// Stage a working-tree review scenario in one call.
+    ///
+    /// Registers `workdir` as the active workspace's `git_root`, populates
+    /// the fake git repo with HEAD content for each `(rel_path, head, working)`
+    /// tuple, and writes the working version into the fake filesystem so
+    /// the review handler reads consistent state. Every entry must have
+    /// `head != working`: equal content is not a change and would silently
+    /// produce a review with zero hunks.
+    pub fn stage_review_scenario(
+        &mut self,
+        workdir: impl Into<std::path::PathBuf>,
+        files: &[(&str, &str, &str)],
+    ) {
+        let workdir = workdir.into();
+        self.stoat.active_workspace_mut().git_root = workdir.clone();
+        let mut builder = self.fake_git.add_repo(workdir).with_fs(&self.fake_fs);
+        for (rel, head, working) in files {
+            builder.modified(rel, head, working);
+        }
+    }
+
+    /// Dispatch `ReviewApplyStaged` against the current state. Does not
+    /// drive rendering; pair with [`Self::settle`] when a caller needs
+    /// the snapshot to reflect post-apply state.
+    pub fn dispatch_review_apply(&mut self) {
+        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewApplyStaged);
+    }
+
+    /// Dispatch `ReviewRefresh` directly (this action is palette-only and
+    /// not currently bound to a default key).
+    pub fn dispatch_review_refresh(&mut self) {
+        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::ReviewRefresh);
+    }
+
+    /// Set the status of the chunk at `order_index` in the active review
+    /// session. Panics if no session is open or the index is out of range.
+    pub fn set_review_status(
+        &mut self,
+        order_index: usize,
+        status: crate::review_session::ChunkStatus,
+    ) {
+        let session = self
+            .stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .expect("no review session");
+        let id = *session
+            .order
+            .get(order_index)
+            .expect("order index out of range");
+        session.set_status(id, status);
+    }
+
+    /// Variant of [`Self::stage_review_scenario`] that additionally seeds
+    /// pre-existing staged files into the fake git repo. Modified files
+    /// populate HEAD + unstaged working-tree state; staged entries are
+    /// marked staged in the index without a HEAD record.
+    pub fn stage_review_scenario_with_staged(
+        &mut self,
+        workdir: impl Into<std::path::PathBuf>,
+        modified: &[(&str, &str, &str)],
+        staged: &[(&str, &str)],
+    ) {
+        let workdir = workdir.into();
+        self.stoat.active_workspace_mut().git_root = workdir.clone();
+        let mut builder = self.fake_git.add_repo(workdir).with_fs(&self.fake_fs);
+        for (rel, head, working) in modified {
+            builder.modified(rel, head, working);
+        }
+        for (rel, working) in staged {
+            builder.staged_file(rel, working);
+        }
+    }
+
+    /// Open a review over a list of agent-proposed edits without touching git.
+    /// Each entry is `(rel_path, base_text, proposed_text)`.
+    pub fn open_agent_edit_review(&mut self, edits: &[(&str, &str, &str)]) {
+        use std::sync::Arc;
+        let action = stoat_action::OpenReviewAgentEdits {
+            edits: edits
+                .iter()
+                .map(|(p, base, proposed)| stoat_action::AgentEdit {
+                    path: std::path::PathBuf::from(p),
+                    base_text: Arc::new((*base).to_string()),
+                    proposed_text: Arc::new((*proposed).to_string()),
+                })
+                .collect(),
+        };
+        crate::action_handlers::dispatch(&mut self.stoat, &action);
+    }
+
+    /// Open a review of a single commit against its first parent.
+    pub fn open_commit_review(&mut self, workdir: impl Into<std::path::PathBuf>, sha: &str) {
+        let action = stoat_action::OpenReviewCommit {
+            workdir: workdir.into(),
+            sha: sha.to_string(),
+        };
+        crate::action_handlers::dispatch(&mut self.stoat, &action);
+    }
+
+    /// Open a review of a commit range (`from`..`to`).
+    pub fn open_commit_range_review(
+        &mut self,
+        workdir: impl Into<std::path::PathBuf>,
+        from: &str,
+        to: &str,
+    ) {
+        let action = stoat_action::OpenReviewCommitRange {
+            workdir: workdir.into(),
+            from: from.to_string(),
+            to: to.to_string(),
+        };
+        crate::action_handlers::dispatch(&mut self.stoat, &action);
     }
 
     pub fn with_size(width: u16, height: u16) -> Self {
@@ -227,65 +365,39 @@ impl TestHarness {
     /// the review is displayed in the focused pane. No git repo needed.
     pub fn open_review_from_texts(&mut self, files: &[(&str, &str, &str)]) {
         use crate::{
-            display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
-            editor_state::EditorState,
-            pane::View,
-            review::{self, ReviewRow},
+            action_handlers,
+            review_session::{InMemoryFile, ReviewSession, ReviewSource},
         };
-        use ratatui::{style::Style, text::Line};
+        use std::path::PathBuf;
 
-        let mut review_rows: Vec<ReviewRow> = Vec::new();
-        let mut blocks: Vec<BlockProperties> = Vec::new();
-        let mut current_row: u32 = 0;
+        let in_memory = files
+            .iter()
+            .map(|(p, b, n)| InMemoryFile {
+                path: PathBuf::from(p),
+                base_text: Arc::new(b.to_string()),
+                buffer_text: Arc::new(n.to_string()),
+            })
+            .collect::<Vec<_>>();
 
-        for &(path, base, buffer) in files {
-            let lang = self.stoat.language_registry.for_path(path.as_ref());
-            let hunks = review::extract_review_hunks(lang.as_ref(), base, buffer, 3);
-            if hunks.is_empty() {
-                continue;
-            }
-            let lang_name = lang.as_ref().map(|l| l.name).unwrap_or("");
-            let total = hunks.len();
-            for (i, hunk) in hunks.iter().enumerate() {
-                let label = format!("{path} --- {}/{total} --- {lang_name}", i + 1);
-                let render: RenderBlock = {
-                    let label = label.clone();
-                    Arc::new(move |_ctx| {
-                        vec![Line::styled(
-                            label.clone(),
-                            Style::default().fg(Color::Yellow),
-                        )]
-                    })
-                };
-                blocks.push(BlockProperties {
-                    placement: BlockPlacement::Above(current_row),
-                    height: Some(1),
-                    style: BlockStyle::Fixed,
-                    render,
-                    diff_status: None,
-                    priority: 0,
-                });
-                current_row += hunk.rows.len() as u32;
-                review_rows.extend(hunk.rows.iter().cloned());
-            }
+        let mut session = ReviewSession::new(ReviewSource::InMemory {
+            files: Arc::new(in_memory.clone()),
+        });
+        for file in &in_memory {
+            let lang = self.stoat.language_registry.for_path(&file.path);
+            let rel_path = file.path.display().to_string();
+            session.add_file(
+                file.path.clone(),
+                rel_path,
+                lang,
+                file.base_text.clone(),
+                file.buffer_text.clone(),
+            );
         }
 
-        let placeholder = " \n".repeat(review_rows.len().saturating_sub(1)) + " ";
-        let executor = self.stoat.executor.clone();
-        let ws = self.stoat.active_workspace_mut();
-        let (buffer_id, buffer) = ws.buffers.new_scratch();
-        {
-            let mut guard = buffer.write().expect("buffer poisoned");
-            guard.edit(0..0, &placeholder);
-            guard.dirty = false;
+        if session.order.is_empty() {
+            return;
         }
-        let mut editor = EditorState::new(buffer_id, buffer, executor);
-        editor.display_map.insert_blocks(blocks);
-        editor.review_rows = Some(review_rows);
-
-        let new_id = ws.editors.insert(editor);
-        let focused = ws.panes.focus();
-        ws.panes.pane_mut(focused).view = View::Editor(new_id);
+        action_handlers::install_review_session(&mut self.stoat, session);
         self.capture("open_review");
     }
 
@@ -1034,18 +1146,21 @@ mod tests {
         h.assert_snapshot("split_right_focus_left");
     }
 
-    fn write_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
-        let path = dir.join(name);
-        std::fs::write(&path, content).expect("write test file");
+    /// Seed a file in the harness' fake filesystem and return its path.
+    /// Replaces the old tempdir-plus-real-fs helper; all tests that went
+    /// through the old helper now exercise the same IO boundary that
+    /// production code uses in tests ([`crate::host::FakeFs`]).
+    fn write_file(h: &TestHarness, name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from("/test").join(name);
+        h.fake_fs.insert_file(&path, content.as_bytes());
         path
     }
 
     #[test]
     fn open_file_shows_in_focused_pane() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "test.txt", "hello world");
-
         let mut h = Stoat::test();
+        let path = write_file(&h, "test.txt", "hello world");
+
         h.open_file(&path);
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 1);
@@ -1054,11 +1169,10 @@ mod tests {
 
     #[test]
     fn open_file_replaces_focused_pane_does_not_split() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = write_file(dir.path(), "a.txt", "file A");
-        let b = write_file(dir.path(), "b.txt", "file B");
-
         let mut h = Stoat::test();
+        let a = write_file(&h, "a.txt", "file A");
+        let b = write_file(&h, "b.txt", "file B");
+
         h.open_file(&a);
         h.open_file(&b);
         let frame = h.snapshot();
@@ -1068,12 +1182,11 @@ mod tests {
 
     #[test]
     fn split_then_open_creates_multi_pane_layout() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = write_file(dir.path(), "a.txt", "AAA");
-        let b = write_file(dir.path(), "b.txt", "BBB");
-        let c = write_file(dir.path(), "c.txt", "CCC");
-
         let mut h = Stoat::test();
+        let a = write_file(&h, "a.txt", "AAA");
+        let b = write_file(&h, "b.txt", "BBB");
+        let c = write_file(&h, "c.txt", "CCC");
+
         h.open_file(&a);
         h.type_action("SplitRight()");
         h.open_file(&b);
@@ -1086,8 +1199,7 @@ mod tests {
 
     #[test]
     fn open_missing_file_creates_empty_buffer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does_not_exist.txt");
+        let path = std::path::PathBuf::from("/test/does_not_exist.txt");
 
         let mut h = Stoat::test();
         h.open_file(&path);
@@ -1097,11 +1209,10 @@ mod tests {
 
     #[test]
     fn command_palette_opens_file_end_to_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "palette_target.txt", "loaded via palette");
+        let mut h = Stoat::test();
+        let path = write_file(&h, "palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
-        let mut h = Stoat::test();
         h.type_text(":OpenFile");
         h.type_keys("enter");
         h.type_text(path_str);
@@ -1186,118 +1297,99 @@ mod tests {
 
     #[test]
     fn snapshot_open_rust_file_highlights() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(
-            dir.path(),
-            "sample.rs",
-            "fn main() {\n    let x = \"hi\";\n}\n",
-        );
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.rs", "fn main() {\n    let x = \"hi\";\n}\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_rust_file_highlights");
     }
 
     #[test]
     fn snapshot_open_rust_file_highlights_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(
-            dir.path(),
-            "sample.rs",
-            "fn main() {\n    let x = \"hi\";\n}\n",
-        );
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.rs", "fn main() {\n    let x = \"hi\";\n}\n");
+
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_rust_file_highlights_styled");
     }
 
     #[test]
     fn snapshot_open_json_file_highlights() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.json", "{\n  \"a\": 1\n}\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.json", "{\n  \"a\": 1\n}\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_json_file_highlights");
     }
 
     #[test]
     fn snapshot_open_json_file_highlights_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.json", "{\n  \"a\": 1\n}\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.json", "{\n  \"a\": 1\n}\n");
+
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_json_file_highlights_styled");
     }
 
     #[test]
     fn snapshot_open_markdown_file_highlights() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.md", "# Title\n\nbody\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.md", "# Title\n\nbody\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_markdown_file_highlights");
     }
 
     #[test]
     fn snapshot_open_markdown_file_highlights_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.md", "# Title\n\nbody\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.md", "# Title\n\nbody\n");
+
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_markdown_file_highlights_styled");
     }
 
     #[test]
     fn snapshot_open_markdown_file_with_bold_inline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "bold.md", "# Title\n\n**bold** text\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "bold.md", "# Title\n\n**bold** text\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_markdown_file_with_bold_inline");
     }
 
     #[test]
     fn snapshot_open_markdown_file_with_bold_inline_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "bold.md", "# Title\n\n**bold** text\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "bold.md", "# Title\n\n**bold** text\n");
+
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_markdown_file_with_bold_inline_styled");
     }
 
     #[test]
     fn snapshot_open_unknown_extension_no_highlights() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.txt", "fn main() {}\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "sample.txt", "fn main() {}\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_unknown_extension_no_highlights");
     }
 
     #[test]
     fn snapshot_open_rust_file_nested_captures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "nested.rs", "fn main() { \"a\\nb\"; }\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "nested.rs", "fn main() { \"a\\nb\"; }\n");
+
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_rust_file_nested_captures");
     }
 
     #[test]
     fn snapshot_open_rust_file_then_edit_highlights() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "edit.rs", "fn a() {}\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "edit.rs", "fn a() {}\n");
+
         h.open_file(&path);
         // Insert a `let x = 1;` statement inside the body. Byte 8 is the
         // position right after the opening brace.
@@ -1307,10 +1399,9 @@ mod tests {
 
     #[test]
     fn snapshot_open_rust_file_then_edit_highlights_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "edit.rs", "fn a() {}\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "edit.rs", "fn a() {}\n");
+
         h.open_file(&path);
         h.edit_focused(8..8, " let x = 1; ");
         h.assert_snapshot_styled("snapshot_open_rust_file_then_edit_highlights_styled");
@@ -1319,14 +1410,13 @@ mod tests {
     #[test]
     fn snapshot_open_rust_file_with_fold() {
         use stoat_text::Point;
-        let dir = tempfile::tempdir().unwrap();
+        let mut h = TestHarness::with_size(40, 8);
         let path = write_file(
-            dir.path(),
+            &h,
             "folded.rs",
             "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
         );
 
-        let mut h = TestHarness::with_size(40, 8);
         h.open_file(&path);
         // Fold the body of `fn b`: from after the open brace to just before
         // the close brace.
@@ -1337,14 +1427,13 @@ mod tests {
     #[test]
     fn snapshot_open_rust_file_with_fold_styled() {
         use stoat_text::Point;
-        let dir = tempfile::tempdir().unwrap();
+        let mut h = TestHarness::with_size(40, 8);
         let path = write_file(
-            dir.path(),
+            &h,
             "folded.rs",
             "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
         );
 
-        let mut h = TestHarness::with_size(40, 8);
         h.open_file(&path);
         h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
         h.assert_snapshot_styled("snapshot_open_rust_file_with_fold_styled");
@@ -1352,10 +1441,9 @@ mod tests {
 
     #[test]
     fn snapshot_open_rust_file_nested_captures_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "nested.rs", "fn main() { \"a\\nb\"; }\n");
-
         let mut h = TestHarness::with_size(40, 6);
+        let path = write_file(&h, "nested.rs", "fn main() { \"a\\nb\"; }\n");
+
         h.open_file(&path);
         h.assert_snapshot_styled("snapshot_open_rust_file_nested_captures_styled");
     }
@@ -1516,10 +1604,9 @@ fn second() {
 
     #[test]
     fn snapshot_add_selection_below() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
-
         let mut h = TestHarness::with_size(20, 5);
+        let path = write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+
         h.open_file(&path);
         h.type_keys("C");
         h.assert_snapshot("add_selection_below");
@@ -1527,10 +1614,9 @@ fn second() {
 
     #[test]
     fn snapshot_add_selection_below_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
-
         let mut h = TestHarness::with_size(20, 5);
+        let path = write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+
         h.open_file(&path);
         h.type_keys("C");
         h.assert_snapshot_styled("add_selection_below_styled");
@@ -1538,10 +1624,9 @@ fn second() {
 
     #[test]
     fn snapshot_shift_c_adds_selection_below_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "sample.txt", "abcd\nefgh\nijkl\n");
-
         let mut h = TestHarness::with_size(20, 5);
+        let path = write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+
         h.open_file(&path);
         h.type_keys("shift-C");
         h.assert_snapshot_styled("shift_c_adds_selection_below_styled");
@@ -1549,9 +1634,8 @@ fn second() {
 
     #[test]
     fn snapshot_move_right() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "hello world\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "hello world\n");
         h.open_file(&path);
         h.type_keys("l l l");
         h.assert_snapshot("snapshot_move_right");
@@ -1559,9 +1643,8 @@ fn second() {
 
     #[test]
     fn snapshot_move_right_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "hello world\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "hello world\n");
         h.open_file(&path);
         h.type_keys("l l l");
         h.assert_snapshot_styled("snapshot_move_right_styled");
@@ -1569,9 +1652,8 @@ fn second() {
 
     #[test]
     fn snapshot_move_down() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
         let mut h = TestHarness::with_size(20, 6);
+        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j");
         h.assert_snapshot("snapshot_move_down");
@@ -1579,9 +1661,8 @@ fn second() {
 
     #[test]
     fn snapshot_move_down_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
         let mut h = TestHarness::with_size(20, 6);
+        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j");
         h.assert_snapshot_styled("snapshot_move_down_styled");
@@ -1589,9 +1670,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_forward() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w");
         h.assert_snapshot("snapshot_word_forward");
@@ -1599,9 +1679,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_forward_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w");
         h.assert_snapshot_styled("snapshot_word_forward_styled");
@@ -1609,9 +1688,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("e");
         h.assert_snapshot("snapshot_word_end");
@@ -1619,9 +1697,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_end_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("e");
         h.assert_snapshot_styled("snapshot_word_end_styled");
@@ -1629,9 +1706,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_backward() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("l l l l l l l");
         h.type_keys("b");
@@ -1640,9 +1716,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_backward_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("l l l l l l l");
         h.type_keys("b");
@@ -1651,9 +1726,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_forward_repeated() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         h.assert_snapshot("snapshot_word_forward_repeated");
@@ -1661,9 +1735,8 @@ fn second() {
 
     #[test]
     fn snapshot_word_forward_repeated_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "foo bar baz\n");
         let mut h = TestHarness::with_size(30, 5);
+        let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         h.assert_snapshot_styled("snapshot_word_forward_repeated_styled");
@@ -1671,9 +1744,8 @@ fn second() {
 
     #[test]
     fn snapshot_multi_cursor_move_right() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
         let mut h = TestHarness::with_size(20, 6);
+        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("C l l");
         h.assert_snapshot("snapshot_multi_cursor_move_right");
@@ -1681,9 +1753,8 @@ fn second() {
 
     #[test]
     fn snapshot_multi_cursor_move_right_styled() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_file(dir.path(), "s.txt", "abc\ndef\nghi\n");
         let mut h = TestHarness::with_size(20, 6);
+        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("C l l");
         h.assert_snapshot_styled("snapshot_multi_cursor_move_right_styled");
@@ -1839,7 +1910,10 @@ fn second() {
             duration_ms: 1000,
             num_turns: 1,
         });
-        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+        assert_eq!(
+            h.claude_badge_state(id),
+            Some(crate::badge::BadgeState::Complete)
+        );
         assert_eq!(h.claude_badge_detail(id), None);
     }
 
@@ -1853,7 +1927,10 @@ fn second() {
             .thinking("work")
             .error("rate limit");
 
-        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
+        assert_eq!(
+            h.claude_badge_state(id),
+            Some(crate::badge::BadgeState::Error)
+        );
         assert_eq!(h.claude_badge_detail(id), Some("rate limit".into()));
     }
 
@@ -1931,7 +2008,10 @@ fn second() {
 
         // Complete session A, B stays active.
         h.claude().get_session(id_a).result();
-        assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Complete));
+        assert_eq!(
+            h.claude_badge_state(id_a),
+            Some(crate::badge::BadgeState::Complete)
+        );
         assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
     }
 
@@ -2017,7 +2097,10 @@ fn second() {
             duration_ms: 100,
             num_turns: 1,
         });
-        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+        assert_eq!(
+            h.claude_badge_state(id),
+            Some(crate::badge::BadgeState::Complete)
+        );
     }
 
     #[test]
@@ -2026,7 +2109,10 @@ fn second() {
         let id = setup_hidden_claude_session(&mut h);
 
         h.claude().get_session(id).error("failed");
-        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
+        assert_eq!(
+            h.claude_badge_state(id),
+            Some(crate::badge::BadgeState::Error)
+        );
         assert_eq!(h.claude_badge_detail(id), Some("failed".into()));
     }
 
@@ -2743,6 +2829,675 @@ fn second() {
         assert_eq!(
             result_count, 0,
             "pending() should NOT emit a ToolResult message"
+        );
+    }
+
+    /// Two hunks separated by unchanged context; cursor defaults to the
+    /// first chunk. Verifies the cyan current-chunk gutter and the
+    /// default progress footer.
+    const REVIEW_TWO_HUNK_BASE: &str =
+        "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\n";
+    const REVIEW_TWO_HUNK_BUFFER: &str =
+        "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nT\n";
+
+    #[test]
+    fn snapshot_review_session_open() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.assert_snapshot("review_session_open");
+        h.assert_snapshot_styled("review_session_open_styled");
+    }
+
+    #[test]
+    fn snapshot_review_navigate_next() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("n");
+        h.assert_snapshot("review_navigate_next");
+        h.assert_snapshot_styled("review_navigate_next_styled");
+    }
+
+    #[test]
+    fn snapshot_review_stage_current_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n");
+        h.assert_snapshot("review_stage_current_chunk");
+        h.assert_snapshot_styled("review_stage_current_chunk_styled");
+    }
+
+    #[test]
+    fn snapshot_review_unstage_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("u n");
+        h.assert_snapshot("review_unstage_chunk");
+        h.assert_snapshot_styled("review_unstage_chunk_styled");
+    }
+
+    #[test]
+    fn snapshot_review_toggle_cycles_binary() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("Space");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let id = session.cursor.current.expect("current chunk");
+            assert_eq!(
+                session.chunk(id).unwrap().status,
+                crate::review_session::ChunkStatus::Staged,
+            );
+        }
+        h.type_keys("Space");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let id = session.cursor.current.expect("current chunk");
+            assert_eq!(
+                session.chunk(id).unwrap().status,
+                crate::review_session::ChunkStatus::Unstaged,
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_review_skip_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("shift-S n");
+        h.assert_snapshot("review_skip_chunk");
+        h.assert_snapshot_styled("review_skip_chunk_styled");
+    }
+
+    #[test]
+    fn snapshot_review_progress_footer() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n");
+        h.assert_snapshot("review_progress_footer");
+        h.assert_snapshot_styled("review_progress_footer_styled");
+    }
+
+    #[test]
+    fn snapshot_review_complete_state() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n s");
+        h.assert_snapshot("review_complete_state");
+        h.assert_snapshot_styled("review_complete_state_styled");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            assert!(session.is_complete());
+            let has_badge = ws
+                .badges
+                .find_by_source(crate::badge::BadgeSource::Review)
+                .is_some();
+            assert!(has_badge, "complete review should surface a badge");
+        }
+    }
+
+    #[test]
+    fn review_close_restores_normal_mode() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        assert_eq!(h.stoat.mode, "review");
+        h.type_keys("q");
+        assert_eq!(h.stoat.mode, "normal");
+        assert!(h.stoat.active_workspace().review.is_none());
+    }
+
+    #[test]
+    fn snapshot_review_multi_file_navigation() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+            ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+        ]);
+        h.type_keys("n");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let chunk = session.current().expect("current");
+            assert_eq!(chunk.file_index, 1);
+            assert_eq!(chunk.chunk_index_in_file, 0);
+        }
+        h.assert_snapshot("review_multi_file_navigation");
+        h.assert_snapshot_styled("review_multi_file_navigation_styled");
+    }
+
+    #[test]
+    fn review_via_git_host_builds_session_from_working_tree() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session created by OpenReview");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(
+            session.files[0].path,
+            std::path::PathBuf::from("/work/a.rs")
+        );
+        assert_eq!(session.files[0].base_text.as_str(), REVIEW_TWO_HUNK_BASE);
+        assert_eq!(
+            session.files[0].buffer_text.as_str(),
+            REVIEW_TWO_HUNK_BUFFER
+        );
+        assert_eq!(session.order.len(), 2);
+        assert_eq!(h.stoat.mode, "review");
+    }
+
+    #[test]
+    fn review_via_git_host_no_repo_is_noop() {
+        let mut h = TestHarness::with_size(80, 14);
+        // No repo registered; open_review should bail cleanly.
+        h.stoat.open_review();
+        assert!(h.stoat.active_workspace().review.is_none());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn review_refresh_via_git_carries_status() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let first_chunk_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
+        h.stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .unwrap()
+            .set_status(first_chunk_id, ChunkStatus::Staged);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session still present");
+        assert_eq!(session.order.len(), 2);
+        let statuses: Vec<_> = session
+            .order
+            .iter()
+            .map(|id| session.chunks.get(id).unwrap().status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![ChunkStatus::Staged, ChunkStatus::Pending],
+            "first chunk's Staged decision should survive refresh; second should default to Pending",
+        );
+    }
+
+    #[test]
+    fn review_via_git_host_multi_file() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stage_review_scenario(
+            "/work",
+            &[
+                ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+                ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+            ],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session");
+        assert_eq!(session.files.len(), 2);
+        assert_eq!(session.files[0].rel_path, "a.rs");
+        assert_eq!(session.files[1].rel_path, "b.rs");
+        assert!(session.order.len() >= 2);
+    }
+
+    #[test]
+    fn stage_scenario_with_staged_seeds_both_buckets() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario_with_staged(
+            "/work",
+            &[("a.rs", "v1\n", "v2\n")],
+            &[("b.rs", "staged\n")],
+        );
+        let repo =
+            crate::host::GitHost::discover(&*h.fake_git, std::path::Path::new("/work")).unwrap();
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 2);
+        let mut abs_paths: Vec<_> = changed.iter().map(|f| f.path.clone()).collect();
+        abs_paths.sort();
+        assert_eq!(abs_paths[0], std::path::PathBuf::from("/work/a.rs"));
+        assert_eq!(abs_paths[1], std::path::PathBuf::from("/work/b.rs"));
+    }
+
+    #[test]
+    fn open_agent_edit_review_via_helper_builds_session() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "", "added\n")]);
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("session via helper");
+        assert_eq!(session.files.len(), 2);
+    }
+
+    #[test]
+    fn open_commit_review_via_helper_builds_session() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+        h.open_commit_review("/work", "c2");
+        let session = h.stoat.active_workspace().review.as_ref().unwrap();
+        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+    }
+
+    #[test]
+    fn review_mode_capital_a_triggers_apply() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+        h.set_review_status(0, ChunkStatus::Staged);
+
+        h.type_keys("A");
+
+        let patches = h.fake_git.applied_patches(std::path::Path::new("/work"));
+        assert_eq!(
+            patches.len(),
+            1,
+            "expected one staged patch, got {patches:?}"
+        );
+    }
+
+    #[test]
+    fn review_mode_lowercase_r_triggers_refresh() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+        h.set_review_status(0, ChunkStatus::Staged);
+
+        let before_editor = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .view_editor;
+
+        h.type_keys("r");
+
+        let after_editor = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .view_editor;
+        assert_ne!(
+            before_editor, after_editor,
+            "refresh must rebuild session + editor"
+        );
+
+        let session = h.stoat.active_workspace().review.as_ref().unwrap();
+        assert_eq!(
+            session.chunks[&session.order[0]].status,
+            ChunkStatus::Staged,
+            "refresh must carry staged status"
+        );
+    }
+
+    #[test]
+    fn scan_commit_builds_session_from_commit_vs_parent() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "c2".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for commit");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].base_text.as_str(), "v1\n");
+        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+        match &session.source {
+            crate::review_session::ReviewSource::Commit { sha, .. } => {
+                assert_eq!(sha, "c2")
+            },
+            other => panic!("unexpected source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_commit_root_diffs_against_empty_tree() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("root", &[("a.rs", "initial\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "root".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for root commit");
+        assert_eq!(session.files[0].base_text.as_str(), "");
+        assert_eq!(session.files[0].buffer_text.as_str(), "initial\n");
+    }
+
+    #[test]
+    fn scan_commit_range_spans_multiple_commits() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n"), ("b.rs", "new\n")])
+            .commit_with_parent(
+                "c3",
+                "c2",
+                &[("a.rs", "v3\n"), ("b.rs", "new\n"), ("c.rs", "added\n")],
+            );
+
+        let action = stoat_action::OpenReviewCommitRange {
+            workdir: std::path::PathBuf::from("/work"),
+            from: "c1".into(),
+            to: "c3".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for range");
+        let rels: Vec<_> = session.files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"a.rs"), "a.rs must be in range: {rels:?}");
+        assert!(rels.contains(&"b.rs"), "b.rs must be in range: {rels:?}");
+        assert!(rels.contains(&"c.rs"), "c.rs must be in range: {rels:?}");
+    }
+
+    #[test]
+    fn scan_agent_edits_builds_session_without_repo() {
+        use std::sync::Arc;
+        let mut h = TestHarness::with_size(80, 14);
+        let action = stoat_action::OpenReviewAgentEdits {
+            edits: vec![
+                stoat_action::AgentEdit {
+                    path: std::path::PathBuf::from("/proposed/a.rs"),
+                    base_text: Arc::new("old text\n".to_string()),
+                    proposed_text: Arc::new("new text\n".to_string()),
+                },
+                stoat_action::AgentEdit {
+                    path: std::path::PathBuf::from("/proposed/b.rs"),
+                    base_text: Arc::new("".to_string()),
+                    proposed_text: Arc::new("added\n".to_string()),
+                },
+            ],
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for agent edits");
+        assert_eq!(session.files.len(), 2);
+        assert_eq!(session.files[0].base_text.as_str(), "old text\n");
+        assert_eq!(session.files[0].buffer_text.as_str(), "new text\n");
+        assert_eq!(session.files[1].base_text.as_str(), "");
+        assert_eq!(session.files[1].buffer_text.as_str(), "added\n");
+    }
+
+    #[test]
+    fn review_refresh_recomputes_commit_source() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\nline2\nline3\nline4\nline5\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "VX\nline2\nline3\nline4\nline5\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "c2".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        h.dispatch_review_refresh();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session survives refresh");
+        assert_eq!(
+            session.chunks[&session.order[0]].status,
+            ChunkStatus::Staged
+        );
+    }
+
+    #[test]
+    fn review_apply_emits_patch_per_staged_chunk() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        h.set_review_status(1, ChunkStatus::Staged);
+        h.dispatch_review_apply();
+
+        let by_path = h
+            .fake_git
+            .applied_patches_by_path(std::path::Path::new("/work"));
+        assert_eq!(
+            by_path.len(),
+            2,
+            "two staged chunks must produce two patches: {by_path:#?}"
+        );
+        for (abs, patch) in &by_path {
+            assert_eq!(abs, &std::path::PathBuf::from("/work/a.rs"));
+            assert!(patch.contains("--- a/a.rs"), "unexpected patch: {patch}");
+            assert!(patch.contains("+++ b/a.rs"), "unexpected patch: {patch}");
+            assert!(patch.contains("@@ "), "missing hunk header: {patch}");
+        }
+    }
+
+    #[test]
+    fn review_apply_skips_pending_unstaged_skipped() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        h.set_review_status(0, ChunkStatus::Unstaged);
+        h.set_review_status(1, ChunkStatus::Skipped);
+        h.dispatch_review_apply();
+
+        assert!(
+            h.fake_git
+                .applied_patches(std::path::Path::new("/work"))
+                .is_empty(),
+            "non-staged chunks must not produce patches"
+        );
+    }
+
+    #[test]
+    fn review_apply_with_nothing_staged_is_noop() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        h.dispatch_review_apply();
+        assert!(h
+            .fake_git
+            .applied_patches(std::path::Path::new("/work"))
+            .is_empty());
+
+        let ws = h.stoat.active_workspace();
+        assert!(
+            ws.badges
+                .find_by_source(crate::badge::BadgeSource::Review)
+                .is_none(),
+            "nothing staged must not create a badge"
+        );
+    }
+
+    #[test]
+    fn review_apply_surfaces_failure_badge() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.fake_git
+            .add_repo("/work")
+            .fail_apply_with("simulated backend failure");
+        h.stoat.open_review();
+        h.settle();
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        let chunk0_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
+        h.dispatch_review_apply();
+
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("error badge");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert_eq!(badge.state, crate::badge::BadgeState::Error);
+        assert_eq!(
+            badge.detail.as_deref(),
+            Some("simulated backend failure"),
+            "detail must carry the backend message"
+        );
+
+        // Failed chunk remains Staged; user can retry.
+        let session = ws.review.as_ref().unwrap();
+        assert_eq!(
+            session.chunks[&chunk0_id].status,
+            ChunkStatus::Staged,
+            "failed chunks must not be cleared"
+        );
+    }
+
+    #[test]
+    fn review_apply_auto_refreshes_on_full_success() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        h.set_review_status(1, ChunkStatus::Staged);
+
+        let before_editor = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .view_editor;
+        h.dispatch_review_apply();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session still present");
+        assert_ne!(
+            before_editor, session.view_editor,
+            "auto-refresh must install a fresh editor via review_refresh"
+        );
+
+        let statuses: Vec<_> = session
+            .order
+            .iter()
+            .map(|id| session.chunks[id].status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![ChunkStatus::Staged, ChunkStatus::Staged],
+            "carried statuses must survive auto-refresh"
+        );
+
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("complete badge");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert_eq!(badge.state, crate::badge::BadgeState::Complete);
+        assert!(
+            badge.label.contains("applied 2"),
+            "badge must report count: {}",
+            badge.label
+        );
+        assert_eq!(
+            h.fake_git
+                .applied_patches(std::path::Path::new("/work"))
+                .len(),
+            2,
+            "both staged patches must have reached apply_to_index"
+        );
+    }
+
+    #[test]
+    fn open_file_via_fs_host_reads_from_fake_fs() {
+        let mut h = Stoat::test();
+        h.fake_fs
+            .insert_file("/work/hello.txt", b"greetings from fake fs");
+        h.stoat.open_file(std::path::Path::new("/work/hello.txt"));
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let editor = ws.editors.get(editor_id).unwrap();
+        let buffer = ws.buffers.get(editor.buffer_id).unwrap();
+        let guard = buffer.read().unwrap();
+        assert_eq!(
+            guard.snapshot.visible_text.to_string(),
+            "greetings from fake fs"
         );
     }
 }

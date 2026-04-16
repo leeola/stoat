@@ -1,0 +1,29 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: n
+focused: #1 of 1
+mode: review
+size: 80x20
+---
+┌──────────────────────────────────────────────────────────────────────────────┐
+│a.rs --- 1/1 --- rust                 │                                       │
+│    1 fn a() {}                       │    1 fn a_renamed() {}                │
+│b.rs --- 1/1 --- rust      ┌ review ──────────────────────────────────────────┐
+││   1 let x = 1;           │Esc   close the active review                     │
+││.....                     │  q   close the active review                     │
+│                           │  n   advance to the next review chunk            │
+│                           │  p   step back to the previous review chunk      │
+│                           │  j   advance to the next review chunk            │
+│                           │  k   step back to the previous review chunk      │
+│                           │  s   mark the current chunk as staged            │
+│                           │  u   mark the current chunk as unstaged          │
+│                           │Spc   toggle staged/unstaged for the current chunk│
+│                           │  S   skip the current chunk                      │
+│                           │  A   apply staged chunks                         │
+│                           │  r   rescan the review source                    │
+│                           │  :   open the command palette                    │
+│                           │──────────────────────────────────────────────────│
+│                           │2/2 · 0 staged · 0 unstaged · 2 pending           │
+└───────────────────────────└──────────────────────────────────────────────────┘

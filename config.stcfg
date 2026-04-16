@@ -13,6 +13,22 @@ on key {
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
+        R -> OpenReview();
+    }
+    mode == review {
+        Escape -> CloseReview();
+        q -> CloseReview();
+        n -> ReviewNextChunk();
+        p -> ReviewPrevChunk();
+        j -> ReviewNextChunk();
+        k -> ReviewPrevChunk();
+        s -> ReviewStageChunk();
+        u -> ReviewUnstageChunk();
+        Space -> ReviewToggleStage();
+        S -> ReviewSkipChunk();
+        A -> ReviewApplyStaged();
+        r -> ReviewRefresh();
+        : -> OpenCommandPalette();
     }
     mode == insert {
         Escape -> SetMode(normal);

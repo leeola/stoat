@@ -189,6 +189,8 @@ fn collect_changes(
                     byte_range: run.clone(),
                     kind: *cur_kind,
                     move_metadata: cur_meta.clone(),
+                    pair_id: None,
+                    deletion_rhs_anchor: None,
                 });
                 *cur_kind = kind;
                 *cur_meta = meta;
@@ -203,6 +205,8 @@ fn collect_changes(
             byte_range: run,
             kind,
             move_metadata: meta,
+            pair_id: None,
+            deletion_rhs_anchor: None,
         });
     }
 }
@@ -275,6 +279,8 @@ fn pair_adjacent_replacements(changes: &mut [DiffChange]) {
     for k in 0..pair_count {
         changes[lhs_indices[k]].kind = DiffChangeKind::Replaced;
         changes[rhs_indices[k]].kind = DiffChangeKind::Replaced;
+        changes[lhs_indices[k]].pair_id = Some(k as u32);
+        changes[rhs_indices[k]].pair_id = Some(k as u32);
     }
 }
 

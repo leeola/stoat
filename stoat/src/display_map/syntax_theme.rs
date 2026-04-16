@@ -1,6 +1,6 @@
 use crate::{
     display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
-    git::DiffStatus,
+    host::DiffStatus,
 };
 use ratatui::style::Color;
 use std::sync::Arc;
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn diff_theme_covers_every_status() {
         use super::DiffTheme;
-        use crate::git::DiffStatus;
+        use crate::host::DiffStatus;
         let theme = DiffTheme::default();
         // Unchanged intentionally returns None so the renderer can
         // leave the row unstyled.

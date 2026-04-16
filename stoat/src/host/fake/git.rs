@@ -1,0 +1,619 @@
+use crate::host::{
+    fake::FakeFs,
+    git::{ChangedFile, GitApplyError, GitHost, GitRepo},
+};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+/// In-memory [`GitHost`] for tests.
+///
+/// Populate with repos via [`FakeGit::add_repo`]; each call returns a
+/// [`FakeRepoBuilder`] that mirrors the ergonomics of [`crate::host::FakeClaudeCode`]'s
+/// `push_*` helpers. When a [`FakeFs`] reference is supplied to the
+/// builder, the builder also writes working-tree content into it so the
+/// application code (which reads via `FsHost`) sees consistent state.
+pub struct FakeGit {
+    state: Mutex<FakeGitState>,
+}
+
+struct FakeGitState {
+    repos: HashMap<PathBuf, Arc<FakeGitRepo>>,
+    /// Descendant-path to workdir. Populated when a repo is registered so
+    /// `discover` can walk up from any child path the way
+    /// `git2::Repository::discover` would. Most-specific prefix wins.
+    discover_index: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Default for FakeGit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeGit {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(FakeGitState {
+                repos: HashMap::new(),
+                discover_index: Vec::new(),
+            }),
+        }
+    }
+
+    /// Register a repository rooted at `workdir`. Returns a builder for
+    /// populating HEAD contents and changed-file entries. Calling this
+    /// again with the same workdir returns a builder that appends to the
+    /// existing state.
+    pub fn add_repo(&self, workdir: impl Into<PathBuf>) -> FakeRepoBuilder<'_> {
+        let workdir = workdir.into();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.repos.entry(workdir.clone()).or_insert_with(|| {
+                Arc::new(FakeGitRepo {
+                    workdir: workdir.clone(),
+                    state: Mutex::new(FakeRepoState::default()),
+                })
+            });
+            if !state
+                .discover_index
+                .iter()
+                .any(|(start, _)| start == &workdir)
+            {
+                state
+                    .discover_index
+                    .push((workdir.clone(), workdir.clone()));
+            }
+        }
+        FakeRepoBuilder {
+            host: self,
+            workdir,
+            fs: None,
+        }
+    }
+
+    /// Snapshot the patches applied to a repo via `apply_to_index`. Useful
+    /// for asserting the review-apply flow wrote the expected unified-diff
+    /// patch. Empty when no patches have been applied or the repo is unknown.
+    pub fn applied_patches(&self, workdir: &Path) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().applied_patches.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot applied patches grouped by the target path parsed out of
+    /// their `+++ b/<rel>` header. Returns absolute paths by joining the
+    /// relative target against `workdir`. Patches whose target cannot be
+    /// parsed (or that target `/dev/null`) map to `workdir` itself.
+    pub fn applied_patches_by_path(&self, workdir: &Path) -> Vec<(PathBuf, String)> {
+        self.applied_patches(workdir)
+            .into_iter()
+            .map(|patch| {
+                let rel = parse_patch_target(&patch);
+                let abs = match rel {
+                    Some(r) => workdir.join(r),
+                    None => workdir.to_path_buf(),
+                };
+                (abs, patch)
+            })
+            .collect()
+    }
+}
+
+fn parse_patch_target(patch: &str) -> Option<PathBuf> {
+    let mut buffer_target: Option<PathBuf> = None;
+    let mut base_target: Option<PathBuf> = None;
+    let mut buffer_is_dev_null = false;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            buffer_target = Some(PathBuf::from(rest));
+        } else if line == "+++ /dev/null" {
+            buffer_is_dev_null = true;
+        } else if let Some(rest) = line.strip_prefix("--- a/") {
+            base_target = Some(PathBuf::from(rest));
+        }
+    }
+    if buffer_is_dev_null {
+        base_target
+    } else {
+        buffer_target.or(base_target)
+    }
+}
+
+impl GitHost for FakeGit {
+    fn discover(&self, path: &Path) -> Option<Arc<dyn GitRepo>> {
+        let state = self.state.lock().unwrap();
+        let workdir = state
+            .discover_index
+            .iter()
+            .filter(|(start, _)| path.starts_with(start))
+            .max_by_key(|(start, _)| start.components().count())
+            .map(|(_, wd)| wd.clone())?;
+        state
+            .repos
+            .get(&workdir)
+            .map(|arc| arc.clone() as Arc<dyn GitRepo>)
+    }
+}
+
+/// Builder returned by [`FakeGit::add_repo`]. Method chaining style
+/// mirrors [`crate::host::FakeClaudeCode`]'s `push_*` API: each call
+/// returns `&mut Self` so a test can line up fixtures in a single
+/// statement.
+pub struct FakeRepoBuilder<'a> {
+    host: &'a FakeGit,
+    workdir: PathBuf,
+    fs: Option<&'a FakeFs>,
+}
+
+impl<'a> FakeRepoBuilder<'a> {
+    /// Attach a [`FakeFs`] to this builder. Subsequent calls that accept a
+    /// working-tree content string will also write the file into this
+    /// filesystem so `FsHost::read` sees the same content the application
+    /// code expects.
+    pub fn with_fs(mut self, fs: &'a FakeFs) -> Self {
+        self.fs = Some(fs);
+        self
+    }
+
+    /// Register `rel_path` as present in HEAD with the given content.
+    /// Does not write to any attached [`FakeFs`]; use [`Self::unstaged_file`],
+    /// [`Self::staged_file`], or [`Self::modified`] for working-tree state.
+    pub fn head_file(&mut self, rel_path: impl AsRef<Path>, content: &str) -> &mut Self {
+        self.mutate_repo(|state| {
+            state
+                .head_contents
+                .insert(rel_path.as_ref().to_path_buf(), content.to_string());
+        });
+        self
+    }
+
+    /// Record `rel_path` as modified in the working tree. Writes `working`
+    /// to the attached [`FakeFs`] at the absolute path if one was attached.
+    pub fn unstaged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
+        let rel = rel_path.as_ref().to_path_buf();
+        let abs = self.workdir.join(&rel);
+        self.mutate_repo(|state| {
+            state.changed.retain(|f| f.path != abs);
+            state.changed.push(ChangedFile {
+                path: abs.clone(),
+                staged: false,
+            });
+        });
+        if let Some(fs) = self.fs {
+            fs.insert_file(&abs, working.as_bytes());
+        }
+        self
+    }
+
+    /// Record `rel_path` as staged in the index. Behaves like
+    /// [`Self::unstaged_file`] but marks the entry staged.
+    pub fn staged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
+        let rel = rel_path.as_ref().to_path_buf();
+        let abs = self.workdir.join(&rel);
+        self.mutate_repo(|state| {
+            state.changed.retain(|f| f.path != abs);
+            state.changed.push(ChangedFile {
+                path: abs.clone(),
+                staged: true,
+            });
+        });
+        if let Some(fs) = self.fs {
+            fs.insert_file(&abs, working.as_bytes());
+        }
+        self
+    }
+
+    /// Convenience: the common "modified file" case. Registers HEAD content
+    /// plus an unstaged working-tree version in one call. The two contents
+    /// must differ; equal contents indicate the caller meant
+    /// [`Self::head_file`] and this panics to catch the mistake.
+    pub fn modified(&mut self, rel_path: impl AsRef<Path>, head: &str, working: &str) -> &mut Self {
+        assert_ne!(
+            head, working,
+            "FakeRepoBuilder::modified expects head != working; use head_file() for unchanged files"
+        );
+        let rel = rel_path.as_ref().to_path_buf();
+        self.head_file(&rel, head);
+        self.unstaged_file(&rel, working);
+        self
+    }
+
+    /// Convenience: a newly added file with no HEAD blob.
+    pub fn added(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
+        self.unstaged_file(rel_path, working);
+        self
+    }
+
+    /// Seed a root (no-parent) commit identified by `sha` with the given
+    /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
+    /// are stored as the commit's full tree snapshot.
+    pub fn commit(&mut self, sha: &str, files: &[(&str, &str)]) -> &mut Self {
+        self.commit_with_parent_opt(sha, None, files)
+    }
+
+    /// Seed a commit with a given first-parent. The parent sha does not
+    /// need to exist at the time of this call; the lookup happens only
+    /// when [`GitRepo::parent_sha`] or [`GitRepo::commit_tree`] is
+    /// invoked.
+    pub fn commit_with_parent(
+        &mut self,
+        sha: &str,
+        parent: &str,
+        files: &[(&str, &str)],
+    ) -> &mut Self {
+        self.commit_with_parent_opt(sha, Some(parent.to_string()), files)
+    }
+
+    fn commit_with_parent_opt(
+        &mut self,
+        sha: &str,
+        parent: Option<String>,
+        files: &[(&str, &str)],
+    ) -> &mut Self {
+        let tree: BTreeMap<PathBuf, String> = files
+            .iter()
+            .map(|(p, c)| (PathBuf::from(p), (*c).to_string()))
+            .collect();
+        let commit = FakeCommit { parent, tree };
+        let sha = sha.to_string();
+        self.mutate_repo(|state| {
+            state.commits.insert(sha, commit);
+        });
+        self
+    }
+
+    /// Program the repo to return `Err(GitApplyError::Backend(message))`
+    /// for every subsequent call to [`GitRepo::apply_to_index`] until
+    /// [`Self::clear_apply_failure`] is called. The failing calls still
+    /// record into `applied_patches` so tests can assert what was
+    /// attempted.
+    pub fn fail_apply_with(&mut self, message: &str) -> &mut Self {
+        let msg = message.to_string();
+        self.mutate_repo(|state| state.apply_error = Some(msg));
+        self
+    }
+
+    /// Remove any injected apply failure so subsequent
+    /// [`GitRepo::apply_to_index`] calls succeed again.
+    pub fn clear_apply_failure(&mut self) -> &mut Self {
+        self.mutate_repo(|state| state.apply_error = None);
+        self
+    }
+
+    fn mutate_repo<F: FnOnce(&mut FakeRepoState)>(&self, f: F) {
+        let state = self.host.state.lock().unwrap();
+        let repo = state
+            .repos
+            .get(&self.workdir)
+            .expect("FakeRepoBuilder: repo must be registered");
+        let mut inner = repo.state.lock().unwrap();
+        f(&mut inner);
+    }
+}
+
+pub struct FakeGitRepo {
+    workdir: PathBuf,
+    state: Mutex<FakeRepoState>,
+}
+
+#[derive(Default)]
+struct FakeRepoState {
+    head_contents: HashMap<PathBuf, String>,
+    changed: Vec<ChangedFile>,
+    applied_patches: Vec<String>,
+    /// When `Some`, the next [`GitRepo::apply_to_index`] call returns
+    /// `Err(GitApplyError::Backend(_))` with this message. The failing
+    /// patch is still pushed to `applied_patches`.
+    apply_error: Option<String>,
+    /// Commit objects keyed by opaque sha. Populated via
+    /// [`FakeRepoBuilder::commit`] and
+    /// [`FakeRepoBuilder::commit_with_parent`].
+    commits: HashMap<String, FakeCommit>,
+}
+
+#[derive(Clone, Default)]
+struct FakeCommit {
+    parent: Option<String>,
+    tree: BTreeMap<PathBuf, String>,
+}
+
+impl GitRepo for FakeGitRepo {
+    fn workdir(&self) -> Option<PathBuf> {
+        Some(self.workdir.clone())
+    }
+
+    fn changed_files(&self) -> Vec<ChangedFile> {
+        let state = self.state.lock().unwrap();
+        let mut staged: Vec<ChangedFile> =
+            state.changed.iter().filter(|f| f.staged).cloned().collect();
+        let mut unstaged: Vec<ChangedFile> = state
+            .changed
+            .iter()
+            .filter(|f| !f.staged)
+            .cloned()
+            .collect();
+        staged.sort_by(|a, b| a.path.cmp(&b.path));
+        unstaged.sort_by(|a, b| a.path.cmp(&b.path));
+        staged.extend(unstaged);
+        staged
+    }
+
+    fn head_content(&self, path: &Path) -> Option<String> {
+        let rel = path.strip_prefix(&self.workdir).ok()?;
+        let state = self.state.lock().unwrap();
+        state.head_contents.get(rel).cloned()
+    }
+
+    fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        state.applied_patches.push(patch.to_string());
+        match &state.apply_error {
+            Some(msg) => Err(GitApplyError::Backend(msg.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
+        let state = self.state.lock().unwrap();
+        state.commits.get(sha).map(|c| c.tree.clone())
+    }
+
+    fn parent_sha(&self, sha: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.commits.get(sha).and_then(|c| c.parent.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workdir() -> PathBuf {
+        PathBuf::from("/work")
+    }
+
+    #[test]
+    fn empty_host_discovers_nothing() {
+        let host = FakeGit::new();
+        assert!(host.discover(Path::new("/anywhere")).is_none());
+    }
+
+    #[test]
+    fn discover_from_workdir() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).expect("repo");
+        assert_eq!(repo.workdir().as_deref(), Some(workdir().as_path()));
+    }
+
+    #[test]
+    fn discover_from_nested_path() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host
+            .discover(Path::new("/work/src/a.rs"))
+            .expect("repo via nested path");
+        assert_eq!(repo.workdir().as_deref(), Some(workdir().as_path()));
+    }
+
+    #[test]
+    fn discover_prefers_most_specific_workdir() {
+        let host = FakeGit::new();
+        host.add_repo("/outer");
+        host.add_repo("/outer/inner");
+        let repo = host.discover(Path::new("/outer/inner/sub/a.rs")).unwrap();
+        assert_eq!(repo.workdir().as_deref(), Some(Path::new("/outer/inner")));
+    }
+
+    #[test]
+    fn head_and_modified_round_trip() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "v1")
+            .unstaged_file("a.rs", "v2");
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(
+            repo.head_content(&workdir().join("a.rs")).as_deref(),
+            Some("v1")
+        );
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].path, workdir().join("a.rs"));
+        assert!(!changed[0].staged);
+    }
+
+    #[test]
+    fn modified_helper_writes_head_and_working() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).modified("a.rs", "v1", "v2");
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(
+            repo.head_content(&workdir().join("a.rs")).as_deref(),
+            Some("v1")
+        );
+        assert_eq!(repo.changed_files().len(), 1);
+    }
+
+    #[test]
+    fn with_fs_populates_working_tree() {
+        use crate::host::fs::FsHost;
+
+        let fs = FakeFs::new();
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .with_fs(&fs)
+            .modified("a.rs", "v1", "v2")
+            .modified("b.rs", "B1", "B2");
+
+        let mut buf = Vec::new();
+        fs.read(&workdir().join("a.rs"), &mut buf).unwrap();
+        assert_eq!(buf, b"v2");
+        buf.clear();
+        fs.read(&workdir().join("b.rs"), &mut buf).unwrap();
+        assert_eq!(buf, b"B2");
+    }
+
+    #[test]
+    fn staged_and_unstaged_in_one_repo() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "v1")
+            .staged_file("a.rs", "v2")
+            .head_file("b.rs", "v1")
+            .unstaged_file("b.rs", "v2");
+        let repo = host.discover(&workdir()).unwrap();
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 2);
+        // Staged sorts first, matching LocalGit's ordering.
+        assert!(changed[0].staged);
+        assert!(changed[0].path.ends_with("a.rs"));
+        assert!(!changed[1].staged);
+        assert!(changed[1].path.ends_with("b.rs"));
+    }
+
+    #[test]
+    fn added_file_has_no_head_content() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).added("new.rs", "body");
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.head_content(&workdir().join("new.rs")).is_none());
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 1);
+    }
+
+    #[test]
+    fn apply_to_index_records_patches() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        repo.apply_to_index("--- a\n+++ b\n").unwrap();
+        repo.apply_to_index("--- c\n+++ d\n").unwrap();
+        assert_eq!(
+            host.applied_patches(&workdir()),
+            vec!["--- a\n+++ b\n".to_string(), "--- c\n+++ d\n".to_string()],
+        );
+    }
+
+    #[test]
+    fn applied_patches_empty_for_unknown_repo() {
+        let host = FakeGit::new();
+        assert!(host.applied_patches(Path::new("/none")).is_empty());
+    }
+
+    #[test]
+    fn head_content_outside_workdir_is_none() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).head_file("a.rs", "v1");
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.head_content(Path::new("/elsewhere/a.rs")).is_none());
+    }
+
+    #[test]
+    fn re_adding_file_replaces_entry() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .unstaged_file("a.rs", "v2")
+            .staged_file("a.rs", "v3");
+        let repo = host.discover(&workdir()).unwrap();
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 1, "duplicate path not deduplicated");
+        assert!(changed[0].staged);
+    }
+
+    #[test]
+    fn fail_apply_with_returns_error_and_records_attempt() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).fail_apply_with("disk full");
+        let repo = host.discover(&workdir()).unwrap();
+        let err = repo
+            .apply_to_index("--- a/x\n+++ b/x\n")
+            .expect_err("must error");
+        assert_eq!(err, GitApplyError::Backend("disk full".into()));
+        assert_eq!(
+            host.applied_patches(&workdir()),
+            vec!["--- a/x\n+++ b/x\n".to_string()],
+            "failing patches are still recorded for introspection"
+        );
+    }
+
+    #[test]
+    fn clear_apply_failure_restores_ok() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).fail_apply_with("nope");
+        let repo = host.discover(&workdir()).unwrap();
+        repo.apply_to_index("p1").unwrap_err();
+
+        host.add_repo(workdir()).clear_apply_failure();
+        repo.apply_to_index("p2")
+            .expect("clear restores ok behavior");
+    }
+
+    #[test]
+    fn applied_patches_by_path_keys_on_plus_plus_target() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        repo.apply_to_index("+++ b/a.rs\n").unwrap();
+        repo.apply_to_index("+++ b/sub/b.rs\n").unwrap();
+
+        let by_path = host.applied_patches_by_path(&workdir());
+        assert_eq!(by_path.len(), 2);
+        assert_eq!(by_path[0].0, workdir().join("a.rs"));
+        assert_eq!(by_path[1].0, workdir().join("sub/b.rs"));
+    }
+
+    #[test]
+    fn commit_tree_returns_seeded_entries() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("sha1", &[("a.rs", "A"), ("sub/b.rs", "B")]);
+        let repo = host.discover(&workdir()).unwrap();
+        let tree = repo.commit_tree("sha1").expect("tree");
+        assert_eq!(tree.get(Path::new("a.rs")).map(String::as_str), Some("A"));
+        assert_eq!(
+            tree.get(Path::new("sub/b.rs")).map(String::as_str),
+            Some("B")
+        );
+        assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn commit_tree_unknown_sha_is_none() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.commit_tree("nope").is_none());
+    }
+
+    #[test]
+    fn parent_sha_returns_chain() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "v1")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2")])
+            .commit_with_parent("c3", "c2", &[("a.rs", "v3")]);
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(repo.parent_sha("c3").as_deref(), Some("c2"));
+        assert_eq!(repo.parent_sha("c2").as_deref(), Some("c1"));
+        assert!(repo.parent_sha("c1").is_none());
+        assert!(repo.parent_sha("missing").is_none());
+    }
+
+    #[test]
+    fn applied_patches_by_path_uses_base_for_pure_deletion() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        repo.apply_to_index("--- a/gone.rs\n+++ /dev/null\n")
+            .unwrap();
+        let by_path = host.applied_patches_by_path(&workdir());
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(by_path[0].0, workdir().join("gone.rs"));
+    }
+}

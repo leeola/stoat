@@ -1,6 +1,6 @@
 use crate::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
-    git::DiffStatus,
+    host::DiffStatus,
 };
 use std::{
     cmp::Ordering,
@@ -431,38 +431,44 @@ fn changes_to_hunks(
         }
     }
 
-    let mut i = 0;
-    while i < changes.len() {
-        if consumed[i] {
-            i += 1;
+    // Group Lhs/Rhs Replaced changes by pair_id so interleaved orderings
+    // collapse into one Modified hunk keyed on the stable pair identifier
+    // rather than positional adjacency.
+    let mut by_pair: std::collections::HashMap<u32, (Option<usize>, Option<usize>)> =
+        std::collections::HashMap::new();
+    for (idx, change) in changes.iter().enumerate() {
+        if consumed[idx] {
             continue;
         }
-        let cur = &changes[i];
-        // FIXME: collapses any back-to-back Lhs+Rhs entries into a Modified
-        // hunk. Correct for the line-diff path; the structural-diff
-        // path can produce interleaved ordering that this loop does
-        // not preserve. A real byte-range adjacency check belongs
-        // here once the structural diff emits pairing identifiers.
-        if i + 1 < changes.len()
-            && !consumed[i + 1]
-            && changes[i + 1].side != cur.side
-            && cur.kind != LangChangeKind::Moved
-            && changes[i + 1].kind != LangChangeKind::Moved
-        {
-            let (lhs_change, rhs_change) = match cur.side {
-                Side::Lhs => (cur, &changes[i + 1]),
-                Side::Rhs => (&changes[i + 1], cur),
-            };
-            let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
-            hunks.push(DiffHunk {
-                status: DiffHunkStatus::Modified,
-                buffer_start_line: line_range.start,
-                buffer_line_range: line_range,
-                base_byte_range: lhs_change.byte_range.clone(),
-                anchor_range: None,
-                token_detail: None,
-            });
-            i += 2;
+        if change.kind == LangChangeKind::Moved {
+            continue;
+        }
+        if let Some(pair) = change.pair_id {
+            let slot = by_pair.entry(pair).or_default();
+            match change.side {
+                Side::Lhs => slot.0 = Some(idx),
+                Side::Rhs => slot.1 = Some(idx),
+            }
+        }
+    }
+    for (lhs_idx, rhs_idx) in by_pair.values().filter_map(|p| Some((p.0?, p.1?))) {
+        let lhs_change = &changes[lhs_idx];
+        let rhs_change = &changes[rhs_idx];
+        let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
+        hunks.push(DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: line_range.start,
+            buffer_line_range: line_range,
+            base_byte_range: lhs_change.byte_range.clone(),
+            anchor_range: None,
+            token_detail: None,
+        });
+        consumed[lhs_idx] = true;
+        consumed[rhs_idx] = true;
+    }
+
+    for (idx, cur) in changes.iter().enumerate() {
+        if consumed[idx] {
             continue;
         }
         match cur.side {
@@ -478,25 +484,26 @@ fn changes_to_hunks(
                 });
             },
             Side::Lhs => {
-                // FIXME: structural diff does not emit pairing information
-                // identifying the corresponding rhs insertion point, so
-                // the deleted block displays at the lhs line index rather
-                // than between the surrounding rhs lines.
-                let lhs_line = lhs_text[..cur.byte_range.start.min(lhs_text.len())]
-                    .chars()
-                    .filter(|c| *c == '\n')
-                    .count() as u32;
+                // Prefer the rhs anchor emitted by the structural-diff layer
+                // so deletions display between their surrounding rhs lines.
+                // Fall back to the lhs-line index when the diff producer did
+                // not supply one (e.g. tree-diff path for now).
+                let buffer_line = cur.deletion_rhs_anchor.unwrap_or_else(|| {
+                    lhs_text[..cur.byte_range.start.min(lhs_text.len())]
+                        .chars()
+                        .filter(|c| *c == '\n')
+                        .count() as u32
+                });
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
-                    buffer_start_line: lhs_line,
-                    buffer_line_range: lhs_line..lhs_line,
+                    buffer_start_line: buffer_line,
+                    buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
                     anchor_range: None,
                     token_detail: None,
                 });
             },
         }
-        i += 1;
     }
     hunks.sort_by_key(|h| h.buffer_start_line);
     hunks
@@ -517,7 +524,7 @@ fn byte_range_to_line_range(text: &str, byte_range: &Range<usize>) -> Range<u32>
 #[cfg(test)]
 mod tests {
     use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
-    use crate::git::DiffStatus;
+    use crate::host::DiffStatus;
     use std::sync::Arc;
 
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
@@ -554,6 +561,148 @@ mod tests {
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    #[test]
+    fn interleaved_replacements_group_by_pair_id() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "alpha\nbeta\ngamma\ndelta\n";
+        let rhs_text = "ALPHA\nbeta\nGAMMA\ndelta\n";
+        // Changes emitted in interleaved order: Lhs(alpha), Lhs(gamma),
+        // Rhs(ALPHA), Rhs(GAMMA). Without pair_ids the old pairing pass
+        // would mis-pair Lhs(gamma) with Rhs(ALPHA).
+        let changes = vec![
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 0..5,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+            },
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 11..16,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(1),
+                deletion_rhs_anchor: None,
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 0..5,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 11..16,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(1),
+                deletion_rhs_anchor: None,
+            },
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+        let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..10);
+        let modified_hunks: Vec<&&DiffHunk> = hunks
+            .iter()
+            .filter(|h| h.status == DiffHunkStatus::Modified)
+            .collect();
+        assert_eq!(
+            modified_hunks.len(),
+            2,
+            "two paired replacements must produce two Modified hunks: {hunks:?}"
+        );
+        // Pair 0: ALPHA maps to alpha's byte range.
+        let p0 = modified_hunks
+            .iter()
+            .find(|h| h.buffer_start_line == 0)
+            .expect("pair 0 hunk");
+        assert_eq!(p0.base_byte_range, 0..5);
+        // Pair 1: GAMMA maps to gamma's byte range.
+        let p1 = modified_hunks
+            .iter()
+            .find(|h| h.buffer_start_line == 2)
+            .expect("pair 1 hunk");
+        assert_eq!(p1.base_byte_range, 11..16);
+    }
+
+    #[test]
+    fn deletion_anchors_to_rhs_line() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "keep\nremove me\nkeep2\n";
+        let rhs_text = "keep\nkeep2\n";
+        let changes = vec![DiffChange {
+            side: Side::Lhs,
+            byte_range: 5..15,
+            kind: LangChangeKind::Novel,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: Some(1),
+        }];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+        let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..5);
+        let deleted = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Deleted)
+            .expect("deleted hunk");
+        assert_eq!(
+            deleted.buffer_start_line, 1,
+            "anchor must override default lhs-line positioning: {deleted:?}"
+        );
+    }
+
+    #[test]
+    fn deletion_without_anchor_falls_back_to_lhs_line() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "alpha\nbeta\ngamma\n";
+        let rhs_text = "alpha\n";
+        let changes = vec![DiffChange {
+            side: Side::Lhs,
+            byte_range: 6..16,
+            kind: LangChangeKind::Novel,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+        }];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+        let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..5);
+        let deleted = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Deleted)
+            .expect("deleted hunk");
+        // Falls back to counting newlines before the lhs byte range.
+        assert_eq!(deleted.buffer_start_line, 1);
     }
 
     #[test]
@@ -797,12 +946,16 @@ mod tests {
                 byte_range: 20..39,
                 kind: LangChangeKind::Moved,
                 move_metadata: Some(lhs_meta.clone()),
+                pair_id: None,
+                deletion_rhs_anchor: None,
             },
             DiffChange {
                 side: Side::Rhs,
                 byte_range: 0..18,
                 kind: LangChangeKind::Moved,
                 move_metadata: Some(rhs_meta.clone()),
+                pair_id: None,
+                deletion_rhs_anchor: None,
             },
         ];
         let result = DiffResult {
@@ -858,18 +1011,24 @@ mod tests {
                 byte_range: 19..31,
                 kind: LangChangeKind::Novel,
                 move_metadata: None,
+                pair_id: None,
+                deletion_rhs_anchor: None,
             },
             DiffChange {
                 side: Side::Lhs,
                 byte_range: 0..18,
                 kind: LangChangeKind::Moved,
                 move_metadata: Some(meta.clone()),
+                pair_id: None,
+                deletion_rhs_anchor: None,
             },
             DiffChange {
                 side: Side::Rhs,
                 byte_range: 32..51,
                 kind: LangChangeKind::Moved,
                 move_metadata: Some(meta.clone()),
+                pair_id: None,
+                deletion_rhs_anchor: None,
             },
         ];
         let dm = DiffMap::from_structural_changes(

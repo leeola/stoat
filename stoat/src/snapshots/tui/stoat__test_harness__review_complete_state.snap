@@ -1,0 +1,39 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: s
+focused: #1 of 1
+mode: review
+size: 120x30
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│+   1 a                                                   │+   1 A                                                    │
+│+   2 b                                                   │+   2 b                                                    │
+│+   3 c                                                   │+   3 c                                                    │
+│+   4 d                                                   │+   4 d                                                    │
+│a.txt --- 2/2 ---                                         │                                                           │
+││  17 q                                                   ││  17 q                                                    │
+││  18 r                                                   ││  18 r                                                    │
+││  19 s                                                   ││  19 s                                                    │
+││  20 t                                                   ││  20 T                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                   ┌ review ──────────────────────────────────────────┐
+│                                                                   │Esc   close the active review                     │
+│                                                                   │  q   close the active review                     │
+│                                                                   │  n   advance to the next review chunk            │
+│                                                                   │  p   step back to the previous review chunk      │
+│                                                                   │  j   advance to the next review chunk            │
+│                                                                   │  k   step back to the previous review chunk      │
+│                                                                   │  s   mark the current chunk as staged            │
+│                                                                   │  u   mark the current chunk as unstaged          │
+│                                                                   │Spc   toggle staged/unstaged for the current chunk│
+│                                                                   │  S   skip the current chunk                      │
+│                                                                   │  A   apply staged chunks                         │
+│                                                                   │  r   rescan the review source                    │
+│                                                                   │  :   open the command palette                    │
+│                                                                   │──────────────────────────────────────────────────│
+│                                                                   │all 2 reviewed         │review complete: 2 chunks││
+└───────────────────────────────────────────────────────────────────└──────────────────────────────────────────────────┘

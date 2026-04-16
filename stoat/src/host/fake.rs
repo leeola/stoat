@@ -1,9 +1,11 @@
 mod claude_code;
+mod git;
 mod lsp;
 pub mod terminal;
 
 pub use self::{
     claude_code::{FakeClaudeCode, FakeClaudeCodeHost},
+    git::{FakeGit, FakeGitRepo, FakeRepoBuilder},
     lsp::{
         change_params, completion_params, definition_params, document_highlight_params,
         hover_params, inlay_hint_params, open_params, reference_params, workspace_symbol_params,
@@ -11,7 +13,6 @@ pub use self::{
     },
 };
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
-use async_trait::async_trait;
 use compact_str::CompactString;
 use std::{
     collections::BTreeMap,
@@ -98,9 +99,8 @@ impl FakeFs {
     }
 }
 
-#[async_trait]
 impl FsHost for FakeFs {
-    async fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
+    fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
         let state = self.state.lock().unwrap();
         match state.entries.get(path) {
             Some(FakeEntry::File { content, .. }) => {
@@ -119,7 +119,7 @@ impl FsHost for FakeFs {
         }
     }
 
-    async fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         state.ensure_ancestors(path);
         let mtime = state.tick();
@@ -133,7 +133,7 @@ impl FsHost for FakeFs {
         Ok(())
     }
 
-    async fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
+    fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
         let state = self.state.lock().unwrap();
         Ok(state.entries.get(path).map(|entry| match entry {
             FakeEntry::File { content, mtime } => FsMetadata {
@@ -151,7 +151,7 @@ impl FsHost for FakeFs {
         }))
     }
 
-    async fn list_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
+    fn list_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
         let state = self.state.lock().unwrap();
         match state.entries.get(path) {
             Some(FakeEntry::Dir { .. }) => {},
@@ -173,7 +173,7 @@ impl FsHost for FakeFs {
         let entries = state
             .entries
             .range(path.to_path_buf()..)
-            .skip(1) // skip the directory itself
+            .skip(1)
             .take_while(|(k, _)| k.starts_with(path))
             .filter(|(k, _)| k.components().count() == depth)
             .map(|(k, entry)| {
@@ -192,7 +192,7 @@ impl FsHost for FakeFs {
         Ok(entries)
     }
 
-    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         state.ensure_ancestors(path);
         if !state.entries.contains_key(path) {
@@ -209,111 +209,86 @@ impl FsHost for FakeFs {
 mod tests {
     use super::*;
 
-    fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    }
-
     #[test]
     fn write_read_roundtrip() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.write(Path::new("/a/b.txt"), b"hello").await.unwrap();
-            let mut buf = Vec::new();
-            fs.read(Path::new("/a/b.txt"), &mut buf).await.unwrap();
-            assert_eq!(buf, b"hello");
-        });
+        let fs = FakeFs::new();
+        fs.write(Path::new("/a/b.txt"), b"hello").unwrap();
+        let mut buf = Vec::new();
+        fs.read(Path::new("/a/b.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"hello");
     }
 
     #[test]
     fn read_nonexistent() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            let mut buf = Vec::new();
-            let err = fs.read(Path::new("/nope"), &mut buf).await.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        });
+        let fs = FakeFs::new();
+        let mut buf = Vec::new();
+        let err = fs.read(Path::new("/nope"), &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn write_auto_creates_parents() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.write(Path::new("/a/b/c/d.txt"), b"deep").await.unwrap();
-            assert!(fs.exists(Path::new("/a")).await);
-            assert!(fs.exists(Path::new("/a/b")).await);
-            assert!(fs.exists(Path::new("/a/b/c")).await);
-            assert!(fs.exists(Path::new("/a/b/c/d.txt")).await);
-        });
+        let fs = FakeFs::new();
+        fs.write(Path::new("/a/b/c/d.txt"), b"deep").unwrap();
+        assert!(fs.exists(Path::new("/a")));
+        assert!(fs.exists(Path::new("/a/b")));
+        assert!(fs.exists(Path::new("/a/b/c")));
+        assert!(fs.exists(Path::new("/a/b/c/d.txt")));
     }
 
     #[test]
     fn metadata_existing_file() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.insert_file("/x.txt", "abc");
-            let m = fs.metadata(Path::new("/x.txt")).await.unwrap().unwrap();
-            assert_eq!(m.len, 3);
-            assert!(!m.is_dir);
-            assert!(!m.is_symlink);
-        });
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "abc");
+        let m = fs.metadata(Path::new("/x.txt")).unwrap().unwrap();
+        assert_eq!(m.len, 3);
+        assert!(!m.is_dir);
+        assert!(!m.is_symlink);
     }
 
     #[test]
     fn metadata_nonexistent() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            assert!(fs.metadata(Path::new("/nope")).await.unwrap().is_none());
-        });
+        let fs = FakeFs::new();
+        assert!(fs.metadata(Path::new("/nope")).unwrap().is_none());
     }
 
     #[test]
     fn list_dir_entries() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.insert_dir("/root");
-            fs.insert_file("/root/a.txt", "");
-            fs.insert_dir("/root/sub");
-            fs.insert_file("/root/sub/nested.txt", "");
+        let fs = FakeFs::new();
+        fs.insert_dir("/root");
+        fs.insert_file("/root/a.txt", "");
+        fs.insert_dir("/root/sub");
+        fs.insert_file("/root/sub/nested.txt", "");
 
-            let entries = fs.list_dir(Path::new("/root")).await.unwrap();
-            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            assert_eq!(names, ["a.txt", "sub"]);
-            assert!(!entries[0].is_dir);
-            assert!(entries[1].is_dir);
-        });
+        let entries = fs.list_dir(Path::new("/root")).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "sub"]);
+        assert!(!entries[0].is_dir);
+        assert!(entries[1].is_dir);
     }
 
     #[test]
     fn list_dir_nonexistent() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            let err = fs.list_dir(Path::new("/nope")).await.unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        });
+        let fs = FakeFs::new();
+        let err = fs.list_dir(Path::new("/nope")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
     fn create_dir_all_creates_ancestors() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.create_dir_all(Path::new("/a/b/c")).await.unwrap();
-            for p in ["/a", "/a/b", "/a/b/c"] {
-                let m = fs.metadata(Path::new(p)).await.unwrap().unwrap();
-                assert!(m.is_dir);
-            }
-        });
+        let fs = FakeFs::new();
+        fs.create_dir_all(Path::new("/a/b/c")).unwrap();
+        for p in ["/a", "/a/b", "/a/b/c"] {
+            let m = fs.metadata(Path::new(p)).unwrap().unwrap();
+            assert!(m.is_dir);
+        }
     }
 
     #[test]
     fn exists_true_and_false() {
-        rt().block_on(async {
-            let fs = FakeFs::new();
-            fs.insert_file("/yes", "");
-            assert!(fs.exists(Path::new("/yes")).await);
-            assert!(!fs.exists(Path::new("/no")).await);
-        });
+        let fs = FakeFs::new();
+        fs.insert_file("/yes", "");
+        assert!(fs.exists(Path::new("/yes")));
+        assert!(!fs.exists(Path::new("/no")));
     }
 }

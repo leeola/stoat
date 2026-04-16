@@ -8,6 +8,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
     pane::{DockId, DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, View},
+    review_session::ReviewSession,
     run::{RunId, RunState},
 };
 use ratatui::layout::Rect;
@@ -51,6 +52,10 @@ pub struct Workspace {
     pub(crate) editors: SlotMap<EditorId, EditorState>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     pub(crate) chats: HashMap<ClaudeSessionId, ClaudeChatState>,
+    /// Active review session (if any). Owned at the workspace level because
+    /// a review spans files and can be viewed by multiple panes in future
+    /// multi-pane review flows. Dropped on `CloseReview`.
+    pub(crate) review: Option<ReviewSession>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -81,6 +86,7 @@ impl Workspace {
             editors,
             runs: SlotMap::with_key(),
             chats: HashMap::new(),
+            review: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }

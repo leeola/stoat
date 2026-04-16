@@ -22,8 +22,11 @@ pub use defs::{
         SplitRight,
     },
     review::{
-        JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
-        QueryMoveRelationships,
+        AgentEdit, CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
+        JumpToPrevMoveSource, OpenReview, OpenReviewAgentEdits, OpenReviewCommit,
+        OpenReviewCommitRange, QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk,
+        ReviewPrevChunk, ReviewRefresh, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
+        ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunInterrupt, RunSubmit},
 };
