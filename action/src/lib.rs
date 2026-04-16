@@ -21,7 +21,10 @@ pub use defs::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitRight,
     },
-    review::OpenReview,
+    review::{
+        JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
+        QueryMoveRelationships,
+    },
     run::{OpenRun, Run, RunInterrupt, RunSubmit},
 };
 pub use kind::ActionKind;

@@ -15,7 +15,10 @@ use crate::{
             ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
             SplitRight,
         },
-        review::OpenReview,
+        review::{
+            JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource,
+            OpenReview, QueryMoveRelationships,
+        },
         run::{OpenRun, Run, RunInterrupt, RunSubmit},
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
@@ -51,6 +54,17 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenCommandPalette))
     });
     add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
+    add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
+    add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
+    add(JumpToNextMoveSource::DEF, |_| {
+        Ok(Box::new(JumpToNextMoveSource))
+    });
+    add(JumpToPrevMoveSource::DEF, |_| {
+        Ok(Box::new(JumpToPrevMoveSource))
+    });
+    add(QueryMoveRelationships::DEF, |_| {
+        Ok(Box::new(QueryMoveRelationships))
+    });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
     add(MoveLeft::DEF, |_| Ok(Box::new(MoveLeft)));
     add(MoveRight::DEF, |_| Ok(Box::new(MoveRight)));
@@ -124,6 +138,11 @@ mod tests {
         "ClosePane",
         "OpenCommandPalette",
         "OpenReview",
+        "JumpToMoveSource",
+        "JumpToMoveTarget",
+        "JumpToNextMoveSource",
+        "JumpToPrevMoveSource",
+        "QueryMoveRelationships",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -200,7 +219,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 32);
+        assert_eq!(all().count(), 37);
     }
 
     #[test]

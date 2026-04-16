@@ -15,12 +15,24 @@ use super::{
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
-/// Outcome of a structural-diff search. `ExceededGraphLimit` means
-/// the search saw more vertices than `graph_limit` allowed; the
-/// caller should fall back to a coarser diff (e.g. line diff).
+/// Interval at which [`shortest_path`] polls the cancellation flag. A
+/// power of two so the check is a cheap `& mask` rather than a modulo.
+/// Tuned large enough that the atomic load never dominates the search
+/// cost (a few microseconds of extra work per cancel response) and
+/// small enough that a cancel takes visibly less than a tick (100ms)
+/// even on the biggest graphs we'd run.
+const CANCEL_POLL_INTERVAL: usize = 4096;
+
+/// Outcome of a structural-diff search. `ExceededGraphLimit` covers
+/// both the honest budget-exceeded case and caller-driven cancellation
+/// via the `cancel` parameter; downstream callers handle both by
+/// falling back to a coarser diff (e.g. line diff).
 pub enum SearchOutcome {
     Found(Vec<(Edge, Arc<Vertex>)>),
     ExceededGraphLimit,
@@ -61,6 +73,7 @@ pub fn shortest_path(
     lhs_root: SyntaxId,
     rhs_root: SyntaxId,
     graph_limit: usize,
+    cancel: Option<&AtomicBool>,
 ) -> SearchOutcome {
     let start = Arc::new(start_vertex(lhs_root, rhs_root));
 
@@ -84,10 +97,19 @@ pub fn shortest_path(
     }));
 
     let mut total_variants: usize = 1;
+    let mut expansions: usize = 0;
 
     while let Some(Reverse(HeapEntry { distance, vertex })) = heap.pop() {
         if vertex.is_end() {
             return SearchOutcome::Found(reconstruct_path(&state, &vertex));
+        }
+        expansions += 1;
+        if expansions & (CANCEL_POLL_INTERVAL - 1) == 0 {
+            if let Some(flag) = cancel {
+                if flag.load(Ordering::Relaxed) {
+                    return SearchOutcome::ExceededGraphLimit;
+                }
+            }
         }
         // Stale heap entry from a later, better-distance push? Skip.
         let vertex_signature = vertex.deep_parents_hash();
@@ -310,6 +332,7 @@ mod tests {
             lhs_root,
             rhs_root,
             DEFAULT_GRAPH_LIMIT,
+            None,
         );
         let path = match outcome {
             SearchOutcome::Found(p) => p,
@@ -336,6 +359,7 @@ mod tests {
             lhs_root,
             rhs_root,
             DEFAULT_GRAPH_LIMIT,
+            None,
         );
         let path = match outcome {
             SearchOutcome::Found(p) => p,
@@ -362,6 +386,7 @@ mod tests {
             lhs_root,
             rhs_root,
             DEFAULT_GRAPH_LIMIT,
+            None,
         );
         let path = match outcome {
             SearchOutcome::Found(p) => p,

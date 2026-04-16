@@ -2627,6 +2627,12 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
     let dim_style = Style::default().fg(Color::DarkGray);
     let del_hl = Style::default().fg(Color::Red);
     let add_hl = Style::default().fg(Color::Green);
+    // Moved lines render in cyan, matching the central DiffTheme. Both
+    // sides of a review use the same color so it reads as "relocated"
+    // rather than gain/loss. See stoat::display_map::syntax_theme::DiffTheme.
+    let move_hl = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::ITALIC);
 
     for display_row in editor.scroll_row..end_row {
         let y = inner.y + (display_row - editor.scroll_row) as u16;
@@ -2657,6 +2663,8 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                             fallback_style,
                             &[],
                             fallback_style,
+                            &[],
+                            move_hl,
                         );
                         render_side_num(buf, right_start, y, right.line_num, dim_style);
                         render_side_text(
@@ -2668,6 +2676,8 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                             fallback_style,
                             &[],
                             fallback_style,
+                            &[],
+                            move_hl,
                         );
                     },
                     ReviewRow::Changed { left, right } => {
@@ -2682,6 +2692,8 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                                 fallback_style,
                                 &l.change_spans,
                                 del_hl,
+                                &l.moved_spans,
+                                move_hl,
                             );
                         } else {
                             render_empty_num(buf, inner.x, y, dim_style);
@@ -2697,6 +2709,8 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                                 fallback_style,
                                 &r.change_spans,
                                 add_hl,
+                                &r.moved_spans,
+                                move_hl,
                             );
                         } else {
                             render_empty_num(buf, right_start, y, dim_style);
@@ -2741,8 +2755,15 @@ fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
     }
 }
 
-/// Render text with sub-line change span highlighting. Characters within
-/// any `spans` range get `highlight_style`; the rest get `base_style`.
+/// Render text with sub-line change span highlighting. Characters
+/// within any `spans` range get `highlight_style`; characters within
+/// any `moved_spans` range get the diff theme's move color (cyan)
+/// regardless of which side they live on. The rest get `base_style`.
+///
+/// Move highlighting takes precedence over change highlighting: if a
+/// byte falls in both a change span and a moved span, the move color
+/// wins so users see at a glance that the token relocated rather than
+/// was replaced.
 #[allow(clippy::too_many_arguments)]
 fn render_side_text(
     buf: &mut Buffer,
@@ -2753,6 +2774,8 @@ fn render_side_text(
     base_style: Style,
     spans: &[std::ops::Range<usize>],
     highlight_style: Style,
+    moved_spans: &[std::ops::Range<usize>],
+    moved_style: Style,
 ) {
     for (col, (byte_idx, ch)) in text.char_indices().enumerate() {
         if col >= max_cols {
@@ -2762,10 +2785,19 @@ fn render_side_text(
         if x >= buf.area.x + buf.area.width {
             break;
         }
+        let in_moved = moved_spans
+            .iter()
+            .any(|s| byte_idx >= s.start && byte_idx < s.end);
         let in_span = spans
             .iter()
             .any(|s| byte_idx >= s.start && byte_idx < s.end);
-        let style = if in_span { highlight_style } else { base_style };
+        let style = if in_moved {
+            moved_style
+        } else if in_span {
+            highlight_style
+        } else {
+            base_style
+        };
         buf[(x, y)].set_char(ch).set_style(style);
     }
 }

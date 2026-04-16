@@ -32,4 +32,9 @@ pub enum ActionKind {
     ClaudeToDockRight,
     ToggleDockRight,
     ToggleDockLeft,
+    JumpToMoveSource,
+    JumpToMoveTarget,
+    JumpToNextMoveSource,
+    JumpToPrevMoveSource,
+    QueryMoveRelationships,
 }

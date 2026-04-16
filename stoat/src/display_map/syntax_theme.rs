@@ -1,4 +1,7 @@
-use crate::display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner};
+use crate::{
+    display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
+    git::DiffStatus,
+};
 use ratatui::style::Color;
 use std::sync::Arc;
 use stoat_language::HighlightId;
@@ -87,6 +90,48 @@ impl SyntaxStyles {
             None
         } else {
             self.theme_table.get(id.0 as usize).copied()
+        }
+    }
+}
+
+/// Central theme map for diff gutter / highlight colors. One entry
+/// per [`DiffStatus`] plus a default for unchanged lines. Kept
+/// alongside [`SyntaxStyles`] so all theming lives in one module and
+/// new diff statuses (e.g. [`DiffStatus::Moved`]) have a single place
+/// to wire their color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiffTheme {
+    pub added: Color,
+    pub deleted: Color,
+    pub modified: Color,
+    /// Color for byte-for-byte relocated content. Deliberately distinct
+    /// from added/deleted/modified: moves are not gains or losses, they
+    /// are relocations. Muted cyan reads as "neither green nor red"
+    /// and matches the convention used by difftastic and IDE move
+    /// detectors.
+    pub moved: Color,
+}
+
+impl Default for DiffTheme {
+    fn default() -> Self {
+        Self {
+            added: Color::Green,
+            deleted: Color::Red,
+            modified: Color::Yellow,
+            moved: Color::Cyan,
+        }
+    }
+}
+
+impl DiffTheme {
+    /// Resolve a [`DiffStatus`] to its themed color. Returns `None`
+    /// for unchanged lines so callers can leave them unstyled.
+    pub fn color_for(&self, status: DiffStatus) -> Option<Color> {
+        match status {
+            DiffStatus::Unchanged => None,
+            DiffStatus::Added => Some(self.added),
+            DiffStatus::Modified => Some(self.modified),
+            DiffStatus::Moved => Some(self.moved),
         }
     }
 }
@@ -211,6 +256,31 @@ mod tests {
         assert_ne!(
             styles.interner[kw], styles.interner[st],
             "Keyword and String should produce visually distinct styles"
+        );
+    }
+
+    #[test]
+    fn diff_theme_covers_every_status() {
+        use super::DiffTheme;
+        use crate::git::DiffStatus;
+        let theme = DiffTheme::default();
+        // Unchanged intentionally returns None so the renderer can
+        // leave the row unstyled.
+        assert!(theme.color_for(DiffStatus::Unchanged).is_none());
+        // The three active statuses must produce three visually
+        // distinct colors.
+        let colors = [
+            theme.color_for(DiffStatus::Added).unwrap(),
+            theme.color_for(DiffStatus::Modified).unwrap(),
+            theme.color_for(DiffStatus::Moved).unwrap(),
+        ];
+        assert_eq!(
+            colors
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3,
+            "Added/Modified/Moved must be visually distinct"
         );
     }
 }

@@ -7,6 +7,10 @@ pub enum DiffStatus {
     Unchanged,
     Added,
     Modified,
+    /// Line participates in a [`crate::diff_map::DiffHunkStatus::Moved`]
+    /// hunk: byte-for-byte equal content that relocated to or from
+    /// another position (possibly across files in the same changeset).
+    Moved,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

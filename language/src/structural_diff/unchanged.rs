@@ -31,14 +31,21 @@ use super::arena::{Syntax, SyntaxArena, SyntaxId};
 use std::collections::HashMap;
 
 /// What the preprocessing pass concluded about a node. The diff search
-/// only walks `Pending` nodes.
+/// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
+/// that downstream passes respect as already-paired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
-    /// Bytes are byte-for-byte unchanged on the other side.
+    /// Bytes are byte-for-byte unchanged on the other side, in the same
+    /// relative position. Paired by either the shrink-from-endpoints pass,
+    /// the LCS-over-siblings pass, or the Dijkstra search.
     Unchanged,
     /// Preprocessing was unable to pair this node; the diff algorithm
-    /// must decide.
+    /// (or a later pass like [`super::moves::find_moves`]) must decide.
     Pending,
+    /// Bytes are byte-for-byte equal on the other side but at a different
+    /// relative position. Paired by the post-Dijkstra move pass; the
+    /// provenance metadata lives in a side table owned by that pass.
+    Moved,
 }
 
 /// Side-table mapping [`SyntaxId`] -> [`ChangeKind`]. Built once per

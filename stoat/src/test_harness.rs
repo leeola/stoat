@@ -1403,6 +1403,117 @@ mod tests {
         h.assert_snapshot_styled("review_multi_file");
     }
 
+    /// Straight move: two swapped top-level functions. The LCS pass
+    /// pairs one as Unchanged; the other emerges through the move
+    /// pass and every atom inside it renders with the move theme
+    /// (cyan) rather than added/deleted colors. Paired layout + styled
+    /// snapshot per `CLAUDE.md` so regressions in either positioning
+    /// or color are caught.
+    #[test]
+    fn snapshot_review_move_straight() {
+        let mut h = TestHarness::with_size(100, 20);
+        let base = "\
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+
+fn beta() {
+    let p = 10;
+    let q = 20;
+    let r = 30;
+}
+";
+        let rhs = "\
+fn beta() {
+    let p = 10;
+    let q = 20;
+    let r = 30;
+}
+
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+";
+        h.open_review_from_texts(&[("swap.rs", base, rhs)]);
+        h.assert_snapshot("review_move_straight");
+        h.assert_snapshot_styled("review_move_straight_styled");
+    }
+
+    /// Cross-indentation move: a statement that lived at top level
+    /// (inside `fn outer`) relocates into a different function's body
+    /// (`fn wrapper`). The structural diff's `ContentId` ignores
+    /// whitespace and parent context, so the moved statement is
+    /// detected even though its indentation and containing scope both
+    /// changed.
+    #[test]
+    fn snapshot_review_move_cross_indent() {
+        let mut h = TestHarness::with_size(100, 20);
+        let base = "\
+fn outer() {
+    let relocated = compute(arg1, arg2, arg3);
+}
+
+fn wrapper() {
+    println!(\"hello\");
+}
+";
+        let rhs = "\
+fn outer() {}
+
+fn wrapper() {
+    println!(\"hello\");
+    let relocated = compute(arg1, arg2, arg3);
+}
+";
+        h.open_review_from_texts(&[("nest.rs", base, rhs)]);
+        h.assert_snapshot("review_move_cross_indent");
+        h.assert_snapshot_styled("review_move_cross_indent_styled");
+    }
+
+    /// Ambiguous (N:1) consolidation: the same block appears in two
+    /// LHS functions and gets factored into one shared RHS function.
+    /// Both LHS copies render with the move theme because their
+    /// `ContentId` matched the single RHS target; downstream, the
+    /// move metadata's `sources` list records both candidate source
+    /// locations so `JumpToNextMoveSource` / `JumpToPrevMoveSource`
+    /// can cycle between them.
+    #[test]
+    fn snapshot_review_move_consolidation() {
+        let mut h = TestHarness::with_size(100, 24);
+        let base = "\
+fn first() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+
+fn second() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+";
+        let rhs = "\
+fn shared() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+
+fn first() {
+    shared();
+}
+
+fn second() {
+    shared();
+}
+";
+        h.open_review_from_texts(&[("consolidate.rs", base, rhs)]);
+        h.assert_snapshot("review_move_consolidation");
+        h.assert_snapshot_styled("review_move_consolidation_styled");
+    }
+
     #[test]
     fn snapshot_add_selection_below() {
         let dir = tempfile::tempdir().unwrap();

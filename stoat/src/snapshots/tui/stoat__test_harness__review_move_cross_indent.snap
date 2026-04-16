@@ -1,0 +1,29 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: open_review
+focused: #1 of 1
+mode: normal
+size: 100x20
+---
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│nest.rs --- 1/1 --- rust                        │                                                 │
+│.....                                           │   1 fn outer() {}                               │
+│   1 fn outer() {                               │   2                                             │
+│   2     let relocated = compute(arg1, arg2, arg│.....                                            │
+│   3 }                                          │   3 fn wrapper() {                              │
+│   4                                            │   4     println!("hello");                      │
+│.....                                           │   5     let relocated = compute(arg1, arg2, arg3│
+│   5 fn wrapper() {                             │   6 }                                           │
+│   6     println!("hello");                     │.....                                            │
+│   7 }                                          │.....                                            │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

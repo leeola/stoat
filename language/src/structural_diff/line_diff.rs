@@ -164,6 +164,7 @@ fn collapse_runs_into_changes(
                         side: Side::Lhs,
                         byte_range: range_for_lines(lhs, lhs_start, lhs_count),
                         kind,
+                        move_metadata: None,
                     });
                 }
                 if rhs_count > 0 {
@@ -171,6 +172,7 @@ fn collapse_runs_into_changes(
                         side: Side::Rhs,
                         byte_range: range_for_lines(rhs, rhs_start, rhs_count),
                         kind,
+                        move_metadata: None,
                     });
                 }
                 let _ = run_start;

@@ -21,18 +21,27 @@ pub enum DiffHunkStatus {
     Added,
     Deleted,
     Modified,
+    /// Byte-for-byte equal content that relocated to or from another
+    /// position. Paired with provenance in [`TokenDetail`] and
+    /// [`ChangeSpan::move_metadata`].
+    Moved,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
     Novel,
     Replaced,
+    /// Token participates in a move (the containing hunk may still be
+    /// [`DiffHunkStatus::Modified`] if neighbouring tokens were edited
+    /// rather than moved). The provenance lives on [`ChangeSpan::move_metadata`].
+    Moved,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeSpan {
     pub byte_range: Range<usize>,
     pub kind: ChangeKind,
+    pub move_metadata: Option<Arc<stoat_language::structural_diff::MoveMetadata>>,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +167,7 @@ impl DiffMap {
             Some(hunk) if hunk.buffer_line_range.contains(&line) => match hunk.status {
                 DiffHunkStatus::Added => DiffStatus::Added,
                 DiffHunkStatus::Modified => DiffStatus::Modified,
+                DiffHunkStatus::Moved => DiffStatus::Moved,
                 DiffHunkStatus::Deleted => DiffStatus::Unchanged,
             },
             _ => DiffStatus::Unchanged,
@@ -274,30 +284,171 @@ impl DiffMap {
     }
 }
 
-/// Convert a structural-diff change list into [`DiffHunk`]s. Adjacent
-/// Lhs+Rhs runs (in either order) collapse into one [`DiffHunkStatus::Modified`]
-/// hunk; isolated runs are emitted as Added or Deleted. Hunks are
-/// returned sorted by their buffer start line so they can feed
-/// [`DiffMap::from_hunks`] directly.
+/// Convert a structural-diff change list into [`DiffHunk`]s.
+///
+/// The structural path emits per-atom `DiffChange` entries each with
+/// its own `kind`; this pass groups them back into hunks. Adjacent
+/// Lhs+Rhs Novel/Replaced runs collapse into a [`DiffHunkStatus::Modified`]
+/// hunk; isolated Novel runs become Added or Deleted; `Moved` changes
+/// become [`DiffHunkStatus::Moved`] hunks whose [`TokenDetail`] carries
+/// the per-atom [`ChangeSpan`]s and the shared [`MoveMetadata`] so the
+/// renderer can style the subtree and the action layer can jump to
+/// the counterpart location(s).
+///
+/// Moved DiffChanges with the same `Arc<MoveMetadata>` are coalesced
+/// into one hunk regardless of side: byte-adjacency does not matter
+/// because the metadata Arc identifies the move root. On each side
+/// we emit one [`TokenDetail::buffer_spans`] / `base_spans` entry per
+/// atom so downstream rendering can style each token independently.
 fn changes_to_hunks(
     changes: &[stoat_language::structural_diff::DiffChange],
     lhs_text: &str,
     rhs_text: &str,
 ) -> Vec<DiffHunk> {
-    use stoat_language::structural_diff::Side;
+    use std::collections::HashMap;
+    use stoat_language::structural_diff::{ChangeKind as LangChangeKind, Side};
+
+    // Group Moved changes by their shared MoveMetadata Arc. Each group
+    // becomes one DiffHunk (one per side, since a move has both an
+    // LHS source subtree and an RHS target subtree).
+    let mut move_groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, change) in changes.iter().enumerate() {
+        if let (LangChangeKind::Moved, Some(meta)) = (&change.kind, &change.move_metadata) {
+            let key = Arc::as_ptr(meta) as usize;
+            move_groups.entry(key).or_default().push(idx);
+        }
+    }
+
     let mut hunks = Vec::new();
+    let mut consumed = vec![false; changes.len()];
+
+    // Emit Moved hunks first, one per (Arc identity, side) pair.
+    for indices in move_groups.values() {
+        let mut lhs_indices: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|i| changes[*i].side == Side::Lhs)
+            .collect();
+        let mut rhs_indices: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|i| changes[*i].side == Side::Rhs)
+            .collect();
+        lhs_indices.sort_by_key(|i| changes[*i].byte_range.start);
+        rhs_indices.sort_by_key(|i| changes[*i].byte_range.start);
+
+        let metadata = indices
+            .iter()
+            .filter_map(|i| changes[*i].move_metadata.clone())
+            .next();
+
+        if !rhs_indices.is_empty() {
+            let first = &changes[*rhs_indices.first().unwrap()];
+            let last = &changes[*rhs_indices.last().unwrap()];
+            let full_range = first.byte_range.start..last.byte_range.end;
+            let line_range = byte_range_to_line_range(rhs_text, &full_range);
+            let base_range = if let (Some(&lhs_first), Some(&lhs_last)) =
+                (lhs_indices.first(), lhs_indices.last())
+            {
+                changes[lhs_first].byte_range.start..changes[lhs_last].byte_range.end
+            } else if let Some(meta) = &metadata {
+                // No LHS-side Moved changes in this group? Fall back
+                // to the first metadata source's byte range so the
+                // hunk can still surface the counterpart location.
+                meta.sources
+                    .first()
+                    .map(|s| s.byte_range.clone())
+                    .unwrap_or(0..0)
+            } else {
+                0..0
+            };
+            let buffer_spans = rhs_indices
+                .iter()
+                .map(|i| ChangeSpan {
+                    byte_range: changes[*i].byte_range.clone(),
+                    kind: ChangeKind::Moved,
+                    move_metadata: metadata.clone(),
+                })
+                .collect();
+            let base_spans = lhs_indices
+                .iter()
+                .map(|i| ChangeSpan {
+                    byte_range: changes[*i].byte_range.clone(),
+                    kind: ChangeKind::Moved,
+                    move_metadata: metadata.clone(),
+                })
+                .collect();
+            hunks.push(DiffHunk {
+                status: DiffHunkStatus::Moved,
+                buffer_start_line: line_range.start,
+                buffer_line_range: line_range,
+                base_byte_range: base_range,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans,
+                    base_spans,
+                })),
+            });
+            for i in &rhs_indices {
+                consumed[*i] = true;
+            }
+            for i in &lhs_indices {
+                consumed[*i] = true;
+            }
+        } else if !lhs_indices.is_empty() {
+            // LHS-only move: the source side of a 1:N duplication.
+            // Emit a Deleted-style placeholder at the LHS line so
+            // the source can still be highlighted / jumped to.
+            let first = &changes[*lhs_indices.first().unwrap()];
+            let last = &changes[*lhs_indices.last().unwrap()];
+            let full_range = first.byte_range.start..last.byte_range.end;
+            let lhs_line = lhs_text[..first.byte_range.start.min(lhs_text.len())]
+                .chars()
+                .filter(|c| *c == '\n')
+                .count() as u32;
+            let base_spans = lhs_indices
+                .iter()
+                .map(|i| ChangeSpan {
+                    byte_range: changes[*i].byte_range.clone(),
+                    kind: ChangeKind::Moved,
+                    move_metadata: metadata.clone(),
+                })
+                .collect();
+            hunks.push(DiffHunk {
+                status: DiffHunkStatus::Moved,
+                buffer_start_line: lhs_line,
+                buffer_line_range: lhs_line..lhs_line,
+                base_byte_range: full_range,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans,
+                })),
+            });
+            for i in &lhs_indices {
+                consumed[*i] = true;
+            }
+        }
+    }
+
     let mut i = 0;
     while i < changes.len() {
+        if consumed[i] {
+            i += 1;
+            continue;
+        }
         let cur = &changes[i];
         // FIXME: collapses any back-to-back Lhs+Rhs entries into a Modified
-        // hunk. Correct for the line-diff path (line_diff::collapse_runs_into_changes
-        // emits paired Lhs+Rhs in one iteration), but the structural-diff
-        // path walks each side independently in tree_diff::collect_changes
-        // and can emit [Lhs A, Lhs B, Rhs A, Rhs B], which would collapse
-        // the wrong pairs. A real byte-range adjacency / pairing-id check
-        // is needed before DiffMap::from_structural_changes is called with
-        // diff_with_language results in production.
-        if i + 1 < changes.len() && changes[i + 1].side != cur.side {
+        // hunk. Correct for the line-diff path; the structural-diff
+        // path can produce interleaved ordering that this loop does
+        // not preserve. A real byte-range adjacency check belongs
+        // here once the structural diff emits pairing identifiers.
+        if i + 1 < changes.len()
+            && !consumed[i + 1]
+            && changes[i + 1].side != cur.side
+            && cur.kind != LangChangeKind::Moved
+            && changes[i + 1].kind != LangChangeKind::Moved
+        {
             let (lhs_change, rhs_change) = match cur.side {
                 Side::Lhs => (cur, &changes[i + 1]),
                 Side::Rhs => (&changes[i + 1], cur),
@@ -327,8 +478,6 @@ fn changes_to_hunks(
                 });
             },
             Side::Lhs => {
-                // Deleted-only: map the lhs byte range to a line on the
-                // lhs side and use that as the anchor.
                 // FIXME: structural diff does not emit pairing information
                 // identifying the corresponding rhs insertion point, so
                 // the deleted block displays at the lhs line index rather
@@ -523,6 +672,7 @@ mod tests {
             buffer_spans: vec![ChangeSpan {
                 byte_range: 0..5,
                 kind: ChangeKind::Novel,
+                move_metadata: None,
             }],
             base_spans: vec![],
         });
@@ -607,5 +757,139 @@ mod tests {
         let result = stoat_language::structural_diff::diff(txt, txt);
         let dm = DiffMap::from_structural_changes(result, txt, txt);
         assert!(dm.is_empty());
+    }
+
+    #[test]
+    fn moved_hunk_round_trips_with_metadata() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
+        };
+
+        // Fabricate a minimal DiffResult with a Moved pair so the
+        // hunk conversion does not depend on the full tree-sitter
+        // pipeline. One LHS Moved DiffChange and one RHS Moved
+        // DiffChange share the same Arc<MoveMetadata>.
+        let rhs_text = "fn b() { call(x); }\nfn a() { work(); }\n";
+        let lhs_text = "fn a() { work(); }\nfn b() { call(x); }\n";
+
+        let lhs_source = MoveSource {
+            buffer: None,
+            side: Side::Rhs,
+            byte_range: 0..18,
+            line_range: 0..1,
+        };
+        let rhs_source = MoveSource {
+            buffer: None,
+            side: Side::Lhs,
+            byte_range: 20..39,
+            line_range: 1..2,
+        };
+        let lhs_meta = Arc::new(MoveMetadata {
+            sources: vec![lhs_source.clone()],
+        });
+        let rhs_meta = Arc::new(MoveMetadata {
+            sources: vec![rhs_source.clone()],
+        });
+
+        let changes = vec![
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 20..39,
+                kind: LangChangeKind::Moved,
+                move_metadata: Some(lhs_meta.clone()),
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 0..18,
+                kind: LangChangeKind::Moved,
+                move_metadata: Some(rhs_meta.clone()),
+            },
+        ];
+        let result = DiffResult {
+            changes,
+            fell_back_to_line_diff: false,
+        };
+        let dm = DiffMap::from_structural_changes(result, lhs_text, rhs_text);
+
+        let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..10);
+        assert!(
+            hunks.iter().any(|h| h.status == DiffHunkStatus::Moved),
+            "must emit at least one Moved hunk; got {hunks:?}"
+        );
+
+        let moved = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Moved)
+            .expect("moved hunk");
+        let detail = moved.token_detail.as_ref().expect("token_detail set");
+        // RHS move records emit at least one buffer_span with Moved kind
+        // and the metadata Arc.
+        assert_eq!(detail.buffer_spans.len(), 1);
+        let span = &detail.buffer_spans[0];
+        assert_eq!(span.kind, ChangeKind::Moved);
+        let span_meta = span
+            .move_metadata
+            .as_ref()
+            .expect("span must carry metadata");
+        assert!(Arc::ptr_eq(span_meta, &rhs_meta));
+        assert_eq!(span_meta.sources[0].byte_range, 20..39);
+    }
+
+    #[test]
+    fn mixed_move_and_novel_changes_produce_distinct_hunks() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
+        };
+        // One Moved pair and one Novel-only RHS addition: the
+        // converter must emit both a Moved hunk and an Added hunk.
+        let lhs_text = "fn a() { work(); }\n";
+        let rhs_text = "fn a() { work(); }\nfn new() {}\nfn a2() { work(); }\n";
+        let meta = Arc::new(MoveMetadata {
+            sources: vec![MoveSource {
+                buffer: None,
+                side: Side::Lhs,
+                byte_range: 0..18,
+                line_range: 0..1,
+            }],
+        });
+        let changes = vec![
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 19..31,
+                kind: LangChangeKind::Novel,
+                move_metadata: None,
+            },
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 0..18,
+                kind: LangChangeKind::Moved,
+                move_metadata: Some(meta.clone()),
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 32..51,
+                kind: LangChangeKind::Moved,
+                move_metadata: Some(meta.clone()),
+            },
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+        let statuses: Vec<DiffHunkStatus> =
+            dm.hunks_in_range(0..20).iter().map(|h| h.status).collect();
+        assert!(
+            statuses.contains(&DiffHunkStatus::Moved),
+            "must have Moved hunk"
+        );
+        assert!(
+            statuses.contains(&DiffHunkStatus::Added)
+                || statuses.contains(&DiffHunkStatus::Modified),
+            "must have a non-Moved hunk too; got {statuses:?}"
+        );
     }
 }

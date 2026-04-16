@@ -115,7 +115,149 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ClaudeToDockRight => claude_to_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockRight => toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => toggle_dock(stoat, DockSide::Left),
+        ActionKind::JumpToMoveSource => move_nav(stoat, MoveNavigation::FirstSource),
+        ActionKind::JumpToMoveTarget => move_nav(stoat, MoveNavigation::Target),
+        ActionKind::JumpToNextMoveSource => move_nav(stoat, MoveNavigation::NextSource),
+        ActionKind::JumpToPrevMoveSource => move_nav(stoat, MoveNavigation::PrevSource),
+        ActionKind::QueryMoveRelationships => {
+            // Scriptable surface: observes the move metadata under the
+            // cursor but does not navigate. A future automation hook
+            // will expose this via the action SDK; for now it resolves
+            // and logs the relationship count so the action is
+            // observable from tests.
+            if let Some(summary) = current_move_summary(stoat) {
+                tracing::info!(
+                    sources = summary.source_count,
+                    same_side_target = ?summary.target_line,
+                    "move relationships under cursor"
+                );
+                UpdateEffect::Redraw
+            } else {
+                UpdateEffect::None
+            }
+        },
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum MoveNavigation {
+    FirstSource,
+    NextSource,
+    PrevSource,
+    Target,
+}
+
+/// Resolved move-provenance summary for the hunk under the editor's
+/// cursor. Used by the move-navigation action handlers.
+struct MoveSummary {
+    /// Line the hunk starts on in the buffer.
+    hunk_line: u32,
+    /// Candidate source line numbers, zero or more.
+    source_lines: Vec<u32>,
+    /// If the hunk is the LHS side of a move, the paired RHS target line.
+    target_line: Option<u32>,
+    /// Number of candidate sources (>1 = ambiguous move).
+    source_count: usize,
+}
+
+fn current_move_summary(stoat: &mut Stoat) -> Option<MoveSummary> {
+    let editor = focused_editor_mut(stoat)?;
+    let snapshot = editor.display_map.snapshot();
+    // Derive cursor row via the display snapshot, which already knows
+    // how to convert an Anchor to a buffer point.
+    let anchor = editor.selections.newest_anchor().start;
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let offset = buffer_snapshot.resolve_anchor(&anchor);
+    let cursor_line = buffer_snapshot.rope().offset_to_point(offset).row;
+
+    if snapshot.line_diff_status(cursor_line) != crate::git::DiffStatus::Moved {
+        return None;
+    }
+    let detail = snapshot.token_detail_for_line(cursor_line)?;
+    let metadata = detail
+        .buffer_spans
+        .iter()
+        .chain(detail.base_spans.iter())
+        .find_map(|s| s.move_metadata.clone())?;
+    let source_lines: Vec<u32> = metadata
+        .sources
+        .iter()
+        .map(|s| s.line_range.start)
+        .collect();
+    let target_line = if detail.buffer_spans.is_empty() && !detail.base_spans.is_empty() {
+        metadata.sources.first().map(|s| s.line_range.start)
+    } else {
+        None
+    };
+    Some(MoveSummary {
+        hunk_line: cursor_line,
+        source_count: metadata.sources.len(),
+        source_lines,
+        target_line,
+    })
+}
+
+fn move_nav(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
+    let Some(summary) = current_move_summary(stoat) else {
+        return UpdateEffect::None;
+    };
+    if summary.source_lines.is_empty() && summary.target_line.is_none() {
+        return UpdateEffect::None;
+    }
+
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+
+    let target_row = match nav {
+        MoveNavigation::FirstSource => {
+            editor.move_source_cursor = Some((summary.hunk_line, 0));
+            summary.source_lines.first().copied()
+        },
+        MoveNavigation::NextSource => {
+            let idx = match editor.move_source_cursor {
+                Some((line, i)) if line == summary.hunk_line => {
+                    (i + 1) % summary.source_lines.len().max(1)
+                },
+                _ => 0,
+            };
+            editor.move_source_cursor = Some((summary.hunk_line, idx));
+            summary.source_lines.get(idx).copied()
+        },
+        MoveNavigation::PrevSource => {
+            let len = summary.source_lines.len().max(1);
+            let idx = match editor.move_source_cursor {
+                Some((line, i)) if line == summary.hunk_line => (i + len - 1) % len,
+                _ => len.saturating_sub(1),
+            };
+            editor.move_source_cursor = Some((summary.hunk_line, idx));
+            summary.source_lines.get(idx).copied()
+        },
+        MoveNavigation::Target => summary.target_line,
+    };
+
+    let Some(row) = target_row else {
+        return UpdateEffect::None;
+    };
+    // Move the cursor to the resolved row. Full cross-file navigation
+    // (opening a different buffer when MoveSource.buffer is Some)
+    // lands in Phase 9 alongside the workspace-wide move index.
+    set_cursor_row(editor, row);
+    UpdateEffect::Redraw
+}
+
+fn set_cursor_row(editor: &mut EditorState, row: u32) {
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let point = stoat_text::Point::new(row, 0);
+    let offset = rope.point_to_offset(point);
+    let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
+    editor.selections = crate::selection::SelectionsCollection::new();
+    editor
+        .selections
+        .insert_cursor(anchor, SelectionGoal::None, &buffer_snapshot);
+    editor.scroll_row = row.saturating_sub(2);
 }
 
 #[derive(Copy, Clone, Debug)]

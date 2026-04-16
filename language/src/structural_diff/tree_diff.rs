@@ -24,12 +24,17 @@ use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     dijkstra::{populate_change_map, shortest_path, SearchOutcome, DEFAULT_GRAPH_LIMIT},
     lower::lower_tree,
+    moves::{find_moves, MoveRecord},
     sliders::fix_all_sliders,
     unchanged::{mark_unchanged, ChangeKind, ChangeMap},
-    ChangeKind as DiffChangeKind, DiffChange, DiffResult, Side,
+    ChangeKind as DiffChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
 };
 use crate::{parse, Language};
-use std::{ops::Range, sync::Arc};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 /// Run the full structural-diff pipeline against two source strings.
 ///
@@ -49,23 +54,35 @@ use std::{ops::Range, sync::Arc};
 /// the function returns `None` and the caller falls through to
 /// [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
+    diff_with_language_cancellable(language, lhs, rhs, None)
+}
+
+/// Variant of [`diff_with_language`] that accepts an optional
+/// cancellation flag. The Dijkstra search polls the flag periodically
+/// and returns `ExceededGraphLimit` on cancel, which cleanly drops
+/// through to the preprocessing-only diff. Intended for
+/// cancel-on-edit scheduling: the caller sets the flag when a newer
+/// edit supersedes the in-flight job.
+pub fn diff_with_language_cancellable(
+    language: &Arc<Language>,
+    lhs: &str,
+    rhs: &str,
+    cancel: Option<&AtomicBool>,
+) -> Option<DiffResult> {
     let lhs_tree = parse(language, lhs, None)?;
     let rhs_tree = parse(language, rhs, None)?;
     let (lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
     let (rhs_arena, rhs_root) = lower_tree(&rhs_tree, rhs);
 
-    // Preprocessing pass: mark trivially-unchanged regions.
     let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
-    // Dijkstra search over the remaining edit graph; refines the
-    // ChangeMaps with cost-optimal Unchanged tagging that the
-    // preprocessing's structural-only matching couldn't see.
     match shortest_path(
         &lhs_arena,
         &rhs_arena,
         lhs_root,
         rhs_root,
         DEFAULT_GRAPH_LIMIT,
+        cancel,
     ) {
         SearchOutcome::Found(path) => {
             populate_change_map(
@@ -76,25 +93,44 @@ pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Opt
                 &mut preprocess.rhs_changes,
             );
         },
-        SearchOutcome::ExceededGraphLimit => {
-            // Search bailed; the preprocessing tags are still valid
-            // (just less precise). The output is conservative: every
-            // node the preprocessing left as Pending becomes a Novel
-            // run, even if a deeper search would have found a match.
-        },
+        SearchOutcome::ExceededGraphLimit => {},
     }
 
-    // Slider correction: rewrite ambiguous Pending/Unchanged
-    // boundaries so the visible diff lines up with structural cues.
-    // Operates on each side independently.
     fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
     fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
+
+    let records = find_moves(
+        &lhs_arena,
+        &rhs_arena,
+        &mut preprocess.lhs_changes,
+        &mut preprocess.rhs_changes,
+    );
+
+    let lhs_lines = LineIndex::new(lhs);
+    let rhs_lines = LineIndex::new(rhs);
+    let lhs_meta = build_move_metadata(
+        &lhs_arena,
+        &rhs_arena,
+        &records,
+        Side::Lhs,
+        &lhs_lines,
+        &rhs_lines,
+    );
+    let rhs_meta = build_move_metadata(
+        &lhs_arena,
+        &rhs_arena,
+        &records,
+        Side::Rhs,
+        &lhs_lines,
+        &rhs_lines,
+    );
 
     let mut changes = Vec::new();
     collect_changes(
         &lhs_arena,
         lhs_root,
         &preprocess.lhs_changes,
+        &lhs_meta,
         Side::Lhs,
         &mut changes,
     );
@@ -102,6 +138,7 @@ pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Opt
         &rhs_arena,
         rhs_root,
         &preprocess.rhs_changes,
+        &rhs_meta,
         Side::Rhs,
         &mut changes,
     );
@@ -115,79 +152,95 @@ pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Opt
 }
 
 /// Walk an arena depth-first and emit one [`DiffChange`] per maximal
-/// contiguous run of [`Syntax::Atom`] nodes that the preprocessing pass
-/// left as `Pending`. Lists are descended into; their delimiters are
-/// not emitted as separate atoms because the lowering pass folds
-/// delimiter punctuation into the parent.
+/// contiguous run of [`Syntax::Atom`] nodes with the same classification.
+/// Pending atoms become [`DiffChangeKind::Novel`] runs (later paired
+/// into `Replaced` by [`pair_adjacent_replacements`]); atoms tagged
+/// Moved by [`find_moves`] or sitting inside a moved subtree become
+/// [`DiffChangeKind::Moved`] runs with the shared
+/// [`MoveMetadata`] attached. A Moved run never coalesces with a
+/// Novel run even if byte-adjacent, and two adjacent Moved runs with
+/// different metadata stay separate so downstream callers can offer
+/// per-move jump actions.
 fn collect_changes(
     arena: &SyntaxArena,
     root: SyntaxId,
     changes: &ChangeMap,
+    metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
     side: Side,
     out: &mut Vec<DiffChange>,
 ) {
-    let mut current_run: Option<Range<usize>> = None;
-    walk_pending_atoms(
+    let mut current: Option<(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>)> = None;
+    walk_emit_atoms(
         arena,
         root,
         changes,
-        &mut |byte_range| match &mut current_run {
-            Some(run) if run.end == byte_range.start => {
+        metadata,
+        &mut |kind, meta, byte_range| match &mut current {
+            Some((cur_kind, cur_meta, run))
+                if *cur_kind == kind
+                    && arc_opt_eq(cur_meta, &meta)
+                    && run.end == byte_range.start =>
+            {
                 run.end = byte_range.end;
             },
-            Some(run) => {
+            Some((cur_kind, cur_meta, run)) => {
                 out.push(DiffChange {
                     side,
                     byte_range: run.clone(),
-                    kind: DiffChangeKind::Novel,
+                    kind: *cur_kind,
+                    move_metadata: cur_meta.clone(),
                 });
+                *cur_kind = kind;
+                *cur_meta = meta;
                 *run = byte_range;
             },
-            None => current_run = Some(byte_range),
+            None => current = Some((kind, meta, byte_range)),
         },
     );
-    if let Some(run) = current_run {
+    if let Some((kind, meta, run)) = current {
         out.push(DiffChange {
             side,
             byte_range: run,
-            kind: DiffChangeKind::Novel,
+            kind,
+            move_metadata: meta,
         });
     }
 }
 
-fn walk_pending_atoms(
+fn arc_opt_eq(a: &Option<Arc<MoveMetadata>>, b: &Option<Arc<MoveMetadata>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+fn walk_emit_atoms(
     arena: &SyntaxArena,
     id: SyntaxId,
     changes: &ChangeMap,
-    callback: &mut impl FnMut(Range<usize>),
+    metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
+    callback: &mut impl FnMut(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>),
 ) {
     match arena.get(id) {
         Syntax::Atom(atom) => {
-            // For atoms, the Unchanged tag means "this atom matches
-            // its counterpart" so we skip it. Pending atoms become
-            // diff output.
-            if changes.get(id) == ChangeKind::Unchanged {
+            if atom.byte_range.start >= atom.byte_range.end {
                 return;
             }
-            // Skip empty atoms (e.g. anonymous nodes lowered to empty
-            // ranges) so the diff output stays compact.
-            if atom.byte_range.start < atom.byte_range.end {
-                callback(atom.byte_range.clone());
+            if let Some(meta) = metadata.get(&id) {
+                callback(
+                    DiffChangeKind::Moved,
+                    Some(meta.clone()),
+                    atom.byte_range.clone(),
+                );
+            } else if changes.get(id) == ChangeKind::Pending {
+                callback(DiffChangeKind::Novel, None, atom.byte_range.clone());
             }
+            // Unchanged and Moved-without-metadata-entry atoms drop through.
         },
         Syntax::List(list) => {
-            // For lists, the Unchanged tag means "the delimiters
-            // match" -- the children may still differ. Always recurse
-            // into list children to find Pending atoms inside an
-            // otherwise-unchanged container.
-            //
-            // The deep `mark_subtree` path in
-            // [`super::dijkstra::populate_change_map`] only fires for
-            // `Edge::UnchangedNode` (i.e. `content_id` matched), in
-            // which case every descendant is also marked Unchanged
-            // and the recursion skips them naturally.
             for child in &list.children {
-                walk_pending_atoms(arena, *child, changes, callback);
+                walk_emit_atoms(arena, *child, changes, metadata, callback);
             }
         },
     }
@@ -197,20 +250,20 @@ fn walk_pending_atoms(
 /// is followed (in source order across the two inputs) by an Rhs Novel
 /// run becomes a `Replaced` pair. The line-diff path uses an explicit
 /// op stream to do this; the structural path discovers it post-hoc by
-/// adjacency in `(side, byte_range.start)` order.
+/// adjacency in `(side, byte_range.start)` order. Moved entries are
+/// excluded: their pairing is already resolved in the `move_metadata`
+/// side-table and is independent of Novel/Replaced adjacency.
 fn pair_adjacent_replacements(changes: &mut [DiffChange]) {
-    // Sort by side first so we can pair lhs runs with rhs runs by
-    // index, mirroring how the line-diff pass already handles this.
-    let mut lhs_indices: Vec<usize> = changes
+    let lhs_indices: Vec<usize> = changes
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.side == Side::Lhs)
+        .filter(|(_, c)| c.side == Side::Lhs && c.kind == DiffChangeKind::Novel)
         .map(|(i, _)| i)
         .collect();
-    let mut rhs_indices: Vec<usize> = changes
+    let rhs_indices: Vec<usize> = changes
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.side == Side::Rhs)
+        .filter(|(_, c)| c.side == Side::Rhs && c.kind == DiffChangeKind::Novel)
         .map(|(i, _)| i)
         .collect();
     let pair_count = lhs_indices.len().min(rhs_indices.len());
@@ -218,7 +271,154 @@ fn pair_adjacent_replacements(changes: &mut [DiffChange]) {
         changes[lhs_indices[k]].kind = DiffChangeKind::Replaced;
         changes[rhs_indices[k]].kind = DiffChangeKind::Replaced;
     }
-    let _ = (&mut lhs_indices, &mut rhs_indices); // silence dead-mut warnings
+}
+
+/// Per-arena map of `SyntaxId` to the shared [`MoveMetadata`] for the
+/// subtree it belongs to. Produced by [`build_move_metadata`]; consumed
+/// by [`collect_changes`] to classify each emitted atom.
+type MoveMetadataMap = HashMap<SyntaxId, Arc<MoveMetadata>>;
+
+/// Expand the [`MoveRecord`] list into one per-atom metadata map for
+/// one side of the diff. For each record:
+///
+/// - On the RHS side, the target subtree's descendants all carry metadata listing the LHS sources
+///   (multiple entries = ambiguous).
+/// - On the LHS side, each source subtree carries metadata pointing back at the record's RHS
+///   target. In the 1:N duplication case, a single LHS source appears in multiple records; those
+///   records' RHS targets are accumulated into the source's metadata.sources so the caller can jump
+///   to any of the duplicate targets.
+///
+/// The returned map keys every descendant of the move root, not just
+/// the root itself, because the per-atom walk in [`collect_changes`]
+/// needs O(1) lookup on the leaf.
+fn build_move_metadata(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    records: &[MoveRecord],
+    side: Side,
+    lhs_lines: &LineIndex,
+    rhs_lines: &LineIndex,
+) -> MoveMetadataMap {
+    let mut roots_with_sources: HashMap<SyntaxId, Vec<MoveSource>> = HashMap::new();
+
+    for record in records {
+        match side {
+            Side::Rhs => {
+                let sources: Vec<MoveSource> = record
+                    .lhs_sources
+                    .iter()
+                    .map(|id| move_source_for(lhs_arena, *id, Side::Lhs, lhs_lines))
+                    .collect();
+                roots_with_sources
+                    .entry(record.rhs_target)
+                    .or_insert_with(Vec::new)
+                    .extend(sources);
+            },
+            Side::Lhs => {
+                let target_source =
+                    move_source_for(rhs_arena, record.rhs_target, Side::Rhs, rhs_lines);
+                for src in &record.lhs_sources {
+                    roots_with_sources
+                        .entry(*src)
+                        .or_insert_with(Vec::new)
+                        .push(target_source.clone());
+                }
+            },
+        }
+    }
+
+    let mut out: MoveMetadataMap = HashMap::new();
+    let arena = match side {
+        Side::Lhs => lhs_arena,
+        Side::Rhs => rhs_arena,
+    };
+    for (root, sources) in roots_with_sources {
+        let meta = Arc::new(MoveMetadata { sources });
+        walk_descendants(arena, root, &mut |id| {
+            out.insert(id, meta.clone());
+        });
+    }
+    out
+}
+
+fn walk_descendants(arena: &SyntaxArena, root: SyntaxId, f: &mut impl FnMut(SyntaxId)) {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        f(id);
+        if let Syntax::List(list) = arena.get(id) {
+            stack.extend(list.children.iter().copied());
+        }
+    }
+}
+
+fn move_source_for(arena: &SyntaxArena, id: SyntaxId, side: Side, lines: &LineIndex) -> MoveSource {
+    let byte_range = full_byte_range(arena, id);
+    let line_range = lines.lines_for(&byte_range);
+    MoveSource {
+        buffer: None,
+        side,
+        byte_range,
+        line_range,
+    }
+}
+
+fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
+    match arena.get(id) {
+        Syntax::Atom(a) => a.byte_range.clone(),
+        Syntax::List(l) => {
+            let start = if l.open_byte_range.start < l.open_byte_range.end {
+                l.open_byte_range.start
+            } else {
+                l.children
+                    .first()
+                    .map(|c| full_byte_range(arena, *c).start)
+                    .unwrap_or(0)
+            };
+            let end = if l.close_byte_range.start < l.close_byte_range.end {
+                l.close_byte_range.end
+            } else {
+                l.children
+                    .last()
+                    .map(|c| full_byte_range(arena, *c).end)
+                    .unwrap_or(start)
+            };
+            start..end
+        },
+    }
+}
+
+/// Byte-offset to 0-based line-number index. Precomputed once per side
+/// so every move-metadata lookup is two O(log n) binary searches.
+struct LineIndex {
+    /// Byte offset at the start of each line (line 0 starts at offset 0).
+    line_starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        let mut line_starts = vec![0usize];
+        for (idx, byte) in text.bytes().enumerate() {
+            if byte == b'\n' {
+                line_starts.push(idx + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    fn line_of(&self, offset: usize) -> u32 {
+        let idx = self
+            .line_starts
+            .binary_search(&offset)
+            .unwrap_or_else(|insert| insert.saturating_sub(1));
+        idx as u32
+    }
+
+    fn lines_for(&self, byte_range: &Range<usize>) -> Range<u32> {
+        let start = self.line_of(byte_range.start);
+        let end_byte = byte_range.end.saturating_sub(1).max(byte_range.start);
+        let end_inclusive = self.line_of(end_byte);
+        start..(end_inclusive + 1)
+    }
 }
 
 #[cfg(test)]
@@ -340,5 +540,155 @@ mod tests {
             .find(|c| c.side == Side::Rhs)
             .expect("rhs change");
         assert_eq!(&rhs[rhs_change.byte_range.clone()], "2");
+    }
+
+    #[test]
+    fn straight_move_integration() {
+        // Two swapped functions: one pairs as Unchanged via LCS, the
+        // other emerges as a Moved DiffChange with populated metadata.
+        let lang = rust_lang();
+        let lhs = "fn alpha() { let x = 1; let y = 2; let z = 3; }\n\
+                   fn beta() { let p = 10; let q = 20; let r = 30; }";
+        let rhs = "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
+                   fn alpha() { let x = 1; let y = 2; let z = 3; }";
+        let result = diff_with_language(&lang, lhs, rhs).unwrap();
+        assert!(!result.fell_back_to_line_diff);
+
+        let moved_rhs: Vec<&DiffChange> = result
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Rhs && c.kind == DiffChangeKind::Moved)
+            .collect();
+        assert!(
+            !moved_rhs.is_empty(),
+            "RHS must emit at least one Moved DiffChange"
+        );
+
+        for change in &moved_rhs {
+            let meta = change
+                .move_metadata
+                .as_ref()
+                .expect("Moved DiffChange must carry MoveMetadata");
+            assert!(
+                !meta.sources.is_empty(),
+                "Moved metadata must list >= 1 source"
+            );
+            for src in &meta.sources {
+                assert_eq!(src.side, Side::Lhs, "RHS moves point back to LHS sources");
+                assert!(
+                    src.line_range.end > src.line_range.start,
+                    "line_range non-empty"
+                );
+            }
+        }
+
+        // Multi-atom move emits many per-atom DiffChanges that all
+        // share one Arc<MoveMetadata>; check that at least two
+        // Moved DiffChanges on this side are ptr-eq to prove
+        // subtree-level metadata sharing.
+        let first_meta = moved_rhs[0].move_metadata.as_ref().unwrap().clone();
+        let sharing = moved_rhs
+            .iter()
+            .filter(|c| Arc::ptr_eq(c.move_metadata.as_ref().unwrap(), &first_meta))
+            .count();
+        assert!(
+            sharing >= 2,
+            "multi-atom move must emit multiple DiffChanges sharing one metadata Arc"
+        );
+
+        // A source byte_range must cover the moved function's body
+        // (signature identifier + body are captured by the paired
+        // function_item List; the `fn` keyword itself lives outside
+        // the open_byte_range that `full_byte_range` tracks, so it
+        // may or may not be included depending on lowering).
+        let source_text = &lhs[first_meta.sources[0].byte_range.clone()];
+        let recognizable = source_text.contains("alpha()") || source_text.contains("beta()");
+        assert!(
+            recognizable,
+            "move source must span a moved function's signature-and-body; got {source_text:?}"
+        );
+
+        let moved_lhs: Vec<&DiffChange> = result
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Lhs && c.kind == DiffChangeKind::Moved)
+            .collect();
+        assert!(
+            !moved_lhs.is_empty(),
+            "LHS must emit at least one Moved DiffChange"
+        );
+        for change in &moved_lhs {
+            let meta = change
+                .move_metadata
+                .as_ref()
+                .expect("Moved DiffChange must carry MoveMetadata");
+            for src in &meta.sources {
+                assert_eq!(
+                    src.side,
+                    Side::Rhs,
+                    "LHS moves point forward to RHS targets"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_limit_bailout_still_finds_moves() {
+        // Force the Dijkstra graph cap by diffing a huge pair of
+        // inputs. Even when the search bails to preprocessing-only,
+        // the move pass still runs on whatever Pending nodes remain
+        // and finds the one unambiguous function-level move.
+        let lang = rust_lang();
+
+        let mut lhs = String::new();
+        let mut rhs = String::new();
+        // Many unique functions to force the graph cap.
+        for i in 0..400 {
+            lhs.push_str(&format!(
+                "fn f_{i}(x: u32, y: u32, z: u32) -> u32 {{ x + y + z }}\n"
+            ));
+            rhs.push_str(&format!(
+                "fn f_{i}(x: u32, y: u32, z: u32) -> u32 {{ x + y + z }}\n"
+            ));
+        }
+        // One clean move: the moved function only appears on one side
+        // at one position.
+        lhs.push_str("fn moved_payload(a: u32) -> u32 { a * 2 + a * 3 + a * 5 }\n");
+        rhs.insert_str(
+            0,
+            "fn moved_payload(a: u32) -> u32 { a * 2 + a * 3 + a * 5 }\n",
+        );
+
+        let result = diff_with_language(&lang, &lhs, &rhs).unwrap();
+        // Even if the Dijkstra search bailed, the preprocessing pass
+        // plus the move pass should have tagged the relocated function.
+        let moved_change = result.changes.iter().find(|c| {
+            c.kind == DiffChangeKind::Moved
+                && (lhs[c.byte_range.clone()].contains("moved_payload")
+                    || rhs[c.byte_range.clone()].contains("moved_payload"))
+        });
+        assert!(
+            moved_change.is_some(),
+            "move pass must find the relocated function even under graph cap; got {} changes",
+            result.changes.len()
+        );
+    }
+
+    #[test]
+    fn cancellation_flag_returns_preprocessing_only_result() {
+        // Setting the cancel flag before the first vertex expansion
+        // should not prevent a result; Dijkstra bails on the first poll
+        // and we fall through to preprocessing + moves. The output may
+        // be coarser, but it is still a valid DiffResult.
+        let lang = rust_lang();
+        let cancel = AtomicBool::new(true);
+        let lhs = "fn a() { call(arg1, arg2, arg3); }";
+        let rhs = "fn b() { call(arg1, arg2, arg3); }";
+        let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel))
+            .expect("parse succeeds even on cancel");
+        assert!(!result.fell_back_to_line_diff);
+        // The structural-diff pipeline completed; we got changes even
+        // though Dijkstra bailed immediately.
+        assert!(!result.changes.is_empty());
     }
 }

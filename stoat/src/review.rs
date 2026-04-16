@@ -1,6 +1,6 @@
 use std::{ops::Range, sync::Arc};
 use stoat_language::{
-    structural_diff::{self, DiffChange, Side},
+    structural_diff::{self, ChangeKind as LangChangeKind, DiffChange, Side},
     Language,
 };
 
@@ -8,7 +8,16 @@ use stoat_language::{
 pub(crate) struct ReviewSide {
     pub(crate) text: String,
     pub(crate) line_num: u32,
+    /// Byte ranges (within `text`) that are Novel or Replaced on this
+    /// side. Rendered with the side-specific add/delete highlight.
     pub(crate) change_spans: Vec<Range<usize>>,
+    /// Byte ranges (within `text`) that are tagged as part of a move:
+    /// byte-for-byte equal to content elsewhere, just relocated.
+    /// Rendered with the central [`crate::display_map::syntax_theme::DiffTheme`]
+    /// move color (cyan by default), not red/green, so users see at
+    /// a glance that the change is a relocation rather than a gain or
+    /// loss.
+    pub(crate) moved_spans: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +62,8 @@ pub(crate) fn extract_review_hunks(
 
     let lhs_spans = collect_line_spans(&lhs_lines, &diff_result.changes, Side::Lhs);
     let rhs_spans = collect_line_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
+    let lhs_moved = collect_moved_spans(&lhs_lines, &diff_result.changes, Side::Lhs);
+    let rhs_moved = collect_moved_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
 
     let all_rows = structural_walk(
         &lhs_lines,
@@ -61,6 +72,8 @@ pub(crate) fn extract_review_hunks(
         &rhs_changed,
         &lhs_spans,
         &rhs_spans,
+        &lhs_moved,
+        &rhs_moved,
     );
     extract_hunks_with_context(&all_rows, context)
 }
@@ -108,6 +121,27 @@ fn collect_line_spans(
     changes: &[DiffChange],
     side: Side,
 ) -> Vec<Vec<Range<usize>>> {
+    collect_spans_by(lines, changes, side, |kind| {
+        matches!(kind, LangChangeKind::Novel | LangChangeKind::Replaced)
+    })
+}
+
+fn collect_moved_spans(
+    lines: &[&str],
+    changes: &[DiffChange],
+    side: Side,
+) -> Vec<Vec<Range<usize>>> {
+    collect_spans_by(lines, changes, side, |kind| {
+        matches!(kind, LangChangeKind::Moved)
+    })
+}
+
+fn collect_spans_by(
+    lines: &[&str],
+    changes: &[DiffChange],
+    side: Side,
+    include: impl Fn(&LangChangeKind) -> bool,
+) -> Vec<Vec<Range<usize>>> {
     let mut spans: Vec<Vec<Range<usize>>> = vec![Vec::new(); lines.len()];
     if lines.is_empty() {
         return spans;
@@ -116,7 +150,10 @@ fn collect_line_spans(
     let offsets = line_byte_offsets(lines);
 
     for change in changes {
-        if change.side != side || change.byte_range.start >= change.byte_range.end {
+        if change.side != side
+            || change.byte_range.start >= change.byte_range.end
+            || !include(&change.kind)
+        {
             continue;
         }
         let cr = &change.byte_range;
@@ -156,6 +193,8 @@ fn structural_walk(
     rhs_changed: &[bool],
     lhs_spans: &[Vec<Range<usize>>],
     rhs_spans: &[Vec<Range<usize>>],
+    lhs_moved: &[Vec<Range<usize>>],
+    rhs_moved: &[Vec<Range<usize>>],
 ) -> Vec<ReviewRow> {
     let mut result = Vec::new();
     let mut li = 0usize;
@@ -175,11 +214,13 @@ fn structural_walk(
                     text: lhs_lines[li].to_string(),
                     line_num: old_line,
                     change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
                 },
                 right: ReviewSide {
                     text: rhs_lines[ri].to_string(),
                     line_num: new_line,
                     change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
                 },
             });
             li += 1;
@@ -198,6 +239,7 @@ fn structural_walk(
                 text: lhs_lines[li].to_string(),
                 line_num: old_line,
                 change_spans: lhs_spans[li].clone(),
+                moved_spans: lhs_moved[li].clone(),
             });
             li += 1;
             old_line += 1;
@@ -208,6 +250,7 @@ fn structural_walk(
                 text: rhs_lines[ri].to_string(),
                 line_num: new_line,
                 change_spans: rhs_spans[ri].clone(),
+                moved_spans: rhs_moved[ri].clone(),
             });
             ri += 1;
             new_line += 1;
@@ -222,11 +265,13 @@ fn structural_walk(
                         text: lhs_lines[li].to_string(),
                         line_num: old_line,
                         change_spans: Vec::new(),
+                        moved_spans: Vec::new(),
                     }),
                     right: Some(ReviewSide {
                         text: rhs_lines[ri].to_string(),
                         line_num: new_line,
                         change_spans: Vec::new(),
+                        moved_spans: Vec::new(),
                     }),
                 });
                 li += 1;
@@ -239,6 +284,7 @@ fn structural_walk(
                         text: lhs_lines[li].to_string(),
                         line_num: old_line,
                         change_spans: Vec::new(),
+                        moved_spans: Vec::new(),
                     }),
                     right: None,
                 });
@@ -251,6 +297,7 @@ fn structural_walk(
                         text: rhs_lines[ri].to_string(),
                         line_num: new_line,
                         change_spans: Vec::new(),
+                        moved_spans: Vec::new(),
                     }),
                 });
                 ri += 1;
@@ -477,6 +524,7 @@ mod tests {
             side: Side::Lhs,
             byte_range: 4..7,
             kind: structural_diff::ChangeKind::Novel,
+            move_metadata: None,
         }];
         assert_eq!(
             mark_changed_lines(&lines, &changes, Side::Lhs),
@@ -492,6 +540,7 @@ mod tests {
             side: Side::Rhs,
             byte_range: 6..11,
             kind: structural_diff::ChangeKind::Replaced,
+            move_metadata: None,
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);

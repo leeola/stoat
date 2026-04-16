@@ -16,6 +16,11 @@ pub(crate) struct EditorState {
     pub(crate) scroll_row: u32,
     pub(crate) review_rows: Option<Vec<ReviewRow>>,
     pub(crate) selections: SelectionsCollection,
+    /// Per-editor cursor for cycling through ambiguous move sources.
+    /// `(hunk_line, source_index)` identifies which source the user is
+    /// currently focused on; `None` means no active move navigation.
+    /// Reset whenever the editor's cursor moves off the owning hunk.
+    pub(crate) move_source_cursor: Option<(u32, usize)>,
 }
 
 impl EditorState {
@@ -27,6 +32,7 @@ impl EditorState {
             scroll_row: 0,
             review_rows: None,
             selections: SelectionsCollection::new(),
+            move_source_cursor: None,
         }
     }
 
@@ -42,6 +48,7 @@ impl EditorState {
             scroll_row: 0,
             review_rows: None,
             selections: SelectionsCollection::new(),
+            move_source_cursor: None,
         }
     }
 }

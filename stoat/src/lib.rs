@@ -11,6 +11,7 @@ mod editor_state;
 pub mod git;
 pub mod host;
 pub mod keymap;
+mod move_index;
 pub mod multi_buffer;
 pub mod pane;
 mod review;

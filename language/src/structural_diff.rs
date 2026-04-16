@@ -33,6 +33,7 @@ mod dijkstra;
 mod graph;
 mod line_diff;
 mod lower;
+mod moves;
 mod sliders;
 mod stack;
 mod tree_diff;
@@ -42,7 +43,8 @@ pub use arena::{Atom, List, Syntax, SyntaxArena, SyntaxId};
 pub use content_id::ContentId;
 pub use line_diff::diff_lines;
 pub use lower::lower_tree;
-use std::ops::Range;
+pub use moves::{find_moves, MoveRecord};
+use std::{ops::Range, path::PathBuf, sync::Arc};
 pub use tree_diff::diff_with_language;
 pub use unchanged::{
     mark_unchanged, ChangeKind as PreprocessChangeKind, ChangeMap, PreprocessResult,
@@ -59,24 +61,63 @@ pub enum Side {
 
 /// Reason a region was flagged as changed.
 ///
-/// Mirrors `difftastic::diff::changes::ChangeKind`. The structural-diff
-/// path also distinguishes "moved" subtrees, but the line-diff fallback
-/// only emits these two.
+/// Mirrors `difftastic::diff::changes::ChangeKind` plus a `Moved` variant
+/// that difftastic doesn't model: a syntactic subtree that exists on both
+/// sides with matching [`ContentId`] but at a different relative
+/// position. Detected by the post-Dijkstra move pass in [`find_moves`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
     /// Bytes added on this side that have no counterpart on the other.
     Novel,
     /// Bytes that replaced corresponding bytes on the other side.
     Replaced,
+    /// Bytes that moved from (Lhs) or to (Rhs) an alternate location.
+    /// Paired with a [`MoveMetadata`] on the owning [`DiffChange`] that
+    /// identifies the counterpart location(s).
+    Moved,
 }
 
 /// One contiguous changed region of one side of the diff. Byte offsets are
-/// relative to that side's input rope.
+/// relative to that side's input rope. [`move_metadata`] is `Some` iff
+/// [`kind`] is [`ChangeKind::Moved`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffChange {
     pub side: Side,
     pub byte_range: Range<usize>,
     pub kind: ChangeKind,
+    pub move_metadata: Option<Arc<MoveMetadata>>,
+}
+
+/// Provenance for a [`ChangeKind::Moved`] region. `sources` enumerates the
+/// counterpart location(s) on the other side: length 1 for unambiguous
+/// moves and `> 1` when multiple candidate source locations share the
+/// same [`ContentId`] (consolidation from N places into one, or an
+/// ambiguous N:M pairing).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveMetadata {
+    pub sources: Vec<MoveSource>,
+}
+
+/// One candidate source location for a [`MoveMetadata`]. `buffer` is
+/// `None` for intra-file moves (both sides of the same diff refer to the
+/// same logical file) and `Some` when the move crosses files inside a
+/// changeset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveSource {
+    pub buffer: Option<BufferRef>,
+    pub side: Side,
+    pub byte_range: Range<usize>,
+    pub line_range: Range<u32>,
+}
+
+/// Identifier for the file a cross-file [`MoveSource`] points at.
+/// `fingerprint` is expected to be a blake3 hash of the file's source
+/// text; this crate treats it as an opaque 32-byte key and the stoat
+/// workspace layer computes and owns the actual hashes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferRef {
+    pub path: PathBuf,
+    pub fingerprint: [u8; 32],
 }
 
 /// Result of [`diff`] / [`diff_lines`]. `fell_back_to_line_diff` is `true`
@@ -104,7 +145,7 @@ pub fn diff(lhs: &str, rhs: &str) -> DiffResult {
 /// distinguishes the two paths so the host can surface "diff is
 /// approximate" badging when the parse failed.
 pub fn diff_with_language_or_lines(
-    language: &std::sync::Arc<crate::Language>,
+    language: &Arc<crate::Language>,
     lhs: &str,
     rhs: &str,
 ) -> DiffResult {
