@@ -32,12 +32,6 @@ pub struct Frame {
     pub content: String,
 }
 
-impl Frame {
-    pub fn display(&self) -> String {
-        format_plain(self)
-    }
-}
-
 const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 
@@ -294,24 +288,11 @@ impl TestHarness {
         &self.frames
     }
 
-    /// Snapshot the **layout** view: characters and structure with all
-    /// styling stripped. Asserts positioning, wrapping, and text content.
-    /// Use as the default for most tests; diffs stay readable and the
-    /// snapshot is stable across color/theme tweaks.
+    /// Snapshot the rendered pane: characters plus inline ANSI SGR escapes
+    /// for foreground/background color, modifiers (bold, reverse, etc.),
+    /// and the cursor cell. Asserts positioning, style, and cursor state
+    /// together.
     pub fn assert_snapshot(&mut self, name: &str) {
-        self.capture("snapshot");
-        let text = format_plain(self.frames.last().expect("no frames"));
-        insta::with_settings!({snapshot_path => "snapshots/tui"}, {
-            insta::assert_snapshot!(name, text);
-        });
-    }
-
-    /// Snapshot the **styled** view: characters plus inline ANSI SGR escapes
-    /// for foreground/background color, modifiers (bold, reverse, etc.), and
-    /// the cursor cell. Use when colors, highlights, selection bars, or
-    /// cursor position carry meaning the layout view cannot represent. Pair
-    /// with `assert_snapshot` rather than replacing it.
-    pub fn assert_snapshot_styled(&mut self, name: &str) {
         self.capture("snapshot");
         let frame = self.frames.last().expect("no frames");
         let buf = self.last_buffer.as_ref().expect("no buffer");
@@ -682,11 +663,6 @@ fn format_header(frame: &Frame) -> String {
         .map(|(k, v)| format!("{k}: {v}"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn format_plain(frame: &Frame) -> String {
-    let header = format_header(frame);
-    format!("{header}\n---\n{}", frame.content)
 }
 
 fn format_styled(frame: &Frame, buf: &Buffer) -> String {
@@ -1068,7 +1044,7 @@ mod tests {
     #[test]
     fn snapshot_initial_styled() {
         let mut h = Stoat::test();
-        h.assert_snapshot_styled("initial_styled");
+        h.assert_snapshot("initial");
     }
 
     #[test]
@@ -1305,30 +1281,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_open_rust_file_highlights_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "sample.rs", "fn main() {\n    let x = \"hi\";\n}\n");
-
-        h.open_file(&path);
-        h.assert_snapshot_styled("snapshot_open_rust_file_highlights_styled");
-    }
-
-    #[test]
     fn snapshot_open_json_file_highlights() {
         let mut h = TestHarness::with_size(40, 6);
         let path = write_file(&h, "sample.json", "{\n  \"a\": 1\n}\n");
 
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_json_file_highlights");
-    }
-
-    #[test]
-    fn snapshot_open_json_file_highlights_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "sample.json", "{\n  \"a\": 1\n}\n");
-
-        h.open_file(&path);
-        h.assert_snapshot_styled("snapshot_open_json_file_highlights_styled");
     }
 
     #[test]
@@ -1341,30 +1299,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_open_markdown_file_highlights_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "sample.md", "# Title\n\nbody\n");
-
-        h.open_file(&path);
-        h.assert_snapshot_styled("snapshot_open_markdown_file_highlights_styled");
-    }
-
-    #[test]
     fn snapshot_open_markdown_file_with_bold_inline() {
         let mut h = TestHarness::with_size(40, 6);
         let path = write_file(&h, "bold.md", "# Title\n\n**bold** text\n");
 
         h.open_file(&path);
         h.assert_snapshot("snapshot_open_markdown_file_with_bold_inline");
-    }
-
-    #[test]
-    fn snapshot_open_markdown_file_with_bold_inline_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "bold.md", "# Title\n\n**bold** text\n");
-
-        h.open_file(&path);
-        h.assert_snapshot_styled("snapshot_open_markdown_file_with_bold_inline_styled");
     }
 
     #[test]
@@ -1398,16 +1338,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_open_rust_file_then_edit_highlights_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "edit.rs", "fn a() {}\n");
-
-        h.open_file(&path);
-        h.edit_focused(8..8, " let x = 1; ");
-        h.assert_snapshot_styled("snapshot_open_rust_file_then_edit_highlights_styled");
-    }
-
-    #[test]
     fn snapshot_open_rust_file_with_fold() {
         use stoat_text::Point;
         let mut h = TestHarness::with_size(40, 8);
@@ -1425,30 +1355,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_open_rust_file_with_fold_styled() {
-        use stoat_text::Point;
-        let mut h = TestHarness::with_size(40, 8);
-        let path = write_file(
-            &h,
-            "folded.rs",
-            "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
-        );
-
-        h.open_file(&path);
-        h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
-        h.assert_snapshot_styled("snapshot_open_rust_file_with_fold_styled");
-    }
-
-    #[test]
-    fn snapshot_open_rust_file_nested_captures_styled() {
-        let mut h = TestHarness::with_size(40, 6);
-        let path = write_file(&h, "nested.rs", "fn main() { \"a\\nb\"; }\n");
-
-        h.open_file(&path);
-        h.assert_snapshot_styled("snapshot_open_rust_file_nested_captures_styled");
-    }
-
-    #[test]
     fn snapshot_review_addition() {
         let mut h = TestHarness::with_size(80, 10);
         h.open_review_from_texts(&[(
@@ -1456,7 +1362,7 @@ mod tests {
             "fn a() {}\nfn b() {}\n",
             "fn a() {}\nfn new() {}\nfn b() {}\n",
         )]);
-        h.assert_snapshot_styled("review_addition");
+        h.assert_snapshot("review_addition");
     }
 
     #[test]
@@ -1467,7 +1373,7 @@ mod tests {
             "fn a() {}\nfn old() {}\nfn b() {}\n",
             "fn a() {}\nfn b() {}\n",
         )]);
-        h.assert_snapshot_styled("review_deletion");
+        h.assert_snapshot("review_deletion");
     }
 
     #[test]
@@ -1478,7 +1384,7 @@ mod tests {
             "fn main() {\n    let x = 1;\n}\n",
             "fn main() {\n    let x = 2;\n}\n",
         )]);
-        h.assert_snapshot_styled("review_modification");
+        h.assert_snapshot("review_modification");
     }
 
     #[test]
@@ -1488,7 +1394,7 @@ mod tests {
             ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
             ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
         ]);
-        h.assert_snapshot_styled("review_multi_file");
+        h.assert_snapshot("review_multi_file");
     }
 
     /// Straight move: two swapped top-level functions. The LCS pass
@@ -1528,7 +1434,6 @@ fn alpha() {
 ";
         h.open_review_from_texts(&[("swap.rs", base, rhs)]);
         h.assert_snapshot("review_move_straight");
-        h.assert_snapshot_styled("review_move_straight_styled");
     }
 
     /// Cross-indentation move: a statement that lived at top level
@@ -1559,7 +1464,6 @@ fn wrapper() {
 ";
         h.open_review_from_texts(&[("nest.rs", base, rhs)]);
         h.assert_snapshot("review_move_cross_indent");
-        h.assert_snapshot_styled("review_move_cross_indent_styled");
     }
 
     /// Ambiguous (N:1) consolidation: the same block appears in two
@@ -1599,7 +1503,6 @@ fn second() {
 ";
         h.open_review_from_texts(&[("consolidate.rs", base, rhs)]);
         h.assert_snapshot("review_move_consolidation");
-        h.assert_snapshot_styled("review_move_consolidation_styled");
     }
 
     #[test]
@@ -1613,23 +1516,13 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_add_selection_below_styled() {
-        let mut h = TestHarness::with_size(20, 5);
-        let path = write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
-
-        h.open_file(&path);
-        h.type_keys("C");
-        h.assert_snapshot_styled("add_selection_below_styled");
-    }
-
-    #[test]
     fn snapshot_shift_c_adds_selection_below_styled() {
         let mut h = TestHarness::with_size(20, 5);
         let path = write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
 
         h.open_file(&path);
         h.type_keys("shift-C");
-        h.assert_snapshot_styled("shift_c_adds_selection_below_styled");
+        h.assert_snapshot("shift_c_adds_selection_below");
     }
 
     #[test]
@@ -1642,30 +1535,12 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_move_right_styled() {
-        let mut h = TestHarness::with_size(30, 5);
-        let path = write_file(&h, "s.txt", "hello world\n");
-        h.open_file(&path);
-        h.type_keys("l l l");
-        h.assert_snapshot_styled("snapshot_move_right_styled");
-    }
-
-    #[test]
     fn snapshot_move_down() {
         let mut h = TestHarness::with_size(20, 6);
         let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j");
         h.assert_snapshot("snapshot_move_down");
-    }
-
-    #[test]
-    fn snapshot_move_down_styled() {
-        let mut h = TestHarness::with_size(20, 6);
-        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
-        h.open_file(&path);
-        h.type_keys("j j");
-        h.assert_snapshot_styled("snapshot_move_down_styled");
     }
 
     #[test]
@@ -1678,30 +1553,12 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_word_forward_styled() {
-        let mut h = TestHarness::with_size(30, 5);
-        let path = write_file(&h, "s.txt", "foo bar baz\n");
-        h.open_file(&path);
-        h.type_keys("w");
-        h.assert_snapshot_styled("snapshot_word_forward_styled");
-    }
-
-    #[test]
     fn snapshot_word_end() {
         let mut h = TestHarness::with_size(30, 5);
         let path = write_file(&h, "s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("e");
         h.assert_snapshot("snapshot_word_end");
-    }
-
-    #[test]
-    fn snapshot_word_end_styled() {
-        let mut h = TestHarness::with_size(30, 5);
-        let path = write_file(&h, "s.txt", "foo bar baz\n");
-        h.open_file(&path);
-        h.type_keys("e");
-        h.assert_snapshot_styled("snapshot_word_end_styled");
     }
 
     #[test]
@@ -1715,16 +1572,6 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_word_backward_styled() {
-        let mut h = TestHarness::with_size(30, 5);
-        let path = write_file(&h, "s.txt", "foo bar baz\n");
-        h.open_file(&path);
-        h.type_keys("l l l l l l l");
-        h.type_keys("b");
-        h.assert_snapshot_styled("snapshot_word_backward_styled");
-    }
-
-    #[test]
     fn snapshot_word_forward_repeated() {
         let mut h = TestHarness::with_size(30, 5);
         let path = write_file(&h, "s.txt", "foo bar baz\n");
@@ -1734,30 +1581,12 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_word_forward_repeated_styled() {
-        let mut h = TestHarness::with_size(30, 5);
-        let path = write_file(&h, "s.txt", "foo bar baz\n");
-        h.open_file(&path);
-        h.type_keys("w w");
-        h.assert_snapshot_styled("snapshot_word_forward_repeated_styled");
-    }
-
-    #[test]
     fn snapshot_multi_cursor_move_right() {
         let mut h = TestHarness::with_size(20, 6);
         let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("C l l");
         h.assert_snapshot("snapshot_multi_cursor_move_right");
-    }
-
-    #[test]
-    fn snapshot_multi_cursor_move_right_styled() {
-        let mut h = TestHarness::with_size(20, 6);
-        let path = write_file(&h, "s.txt", "abc\ndef\nghi\n");
-        h.open_file(&path);
-        h.type_keys("C l l");
-        h.assert_snapshot_styled("snapshot_multi_cursor_move_right_styled");
     }
 
     #[test]
@@ -1776,14 +1605,6 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_run_typed_input_styled() {
-        let mut h = TestHarness::with_size(60, 12);
-        h.open_run();
-        h.type_text("echo hello");
-        h.assert_snapshot_styled("run_typed_input_styled");
-    }
-
-    #[test]
     fn snapshot_run_output() {
         let mut h = TestHarness::with_size(60, 12);
         let id = h.open_run();
@@ -1794,23 +1615,13 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_run_output_styled() {
-        let mut h = TestHarness::with_size(60, 12);
-        let id = h.open_run();
-        h.submit_run("echo hello");
-        h.inject_run_output(id, b"hello\n");
-        h.inject_run_done(id, 0);
-        h.assert_snapshot_styled("run_output_styled");
-    }
-
-    #[test]
     fn snapshot_run_colored_output() {
         let mut h = TestHarness::with_size(60, 12);
         let id = h.open_run();
         h.submit_run("ls --color");
         h.inject_run_output(id, b"\x1b[32mgreen\x1b[0m \x1b[31mred\x1b[0m\n");
         h.inject_run_done(id, 0);
-        h.assert_snapshot_styled("run_colored_output");
+        h.assert_snapshot("run_colored_output");
     }
 
     #[test]
@@ -2020,7 +1831,7 @@ fn second() {
         let mut h = TestHarness::with_size(40, 10);
         let id = setup_hidden_claude_session(&mut h);
         h.claude().get_session(id).thinking("work");
-        h.assert_snapshot_styled("badge_active_styled");
+        h.assert_snapshot("badge_active");
     }
 
     #[test]
@@ -2035,7 +1846,7 @@ fn second() {
                 duration_ms: 1000,
                 num_turns: 1,
             });
-        h.assert_snapshot_styled("badge_complete_styled");
+        h.assert_snapshot("badge_complete");
     }
 
     #[test]
@@ -2047,29 +1858,12 @@ fn second() {
     }
 
     #[test]
-    fn snapshot_dock_open_overlay_styled() {
-        let mut h = TestHarness::with_size(60, 10);
-        let _ = h.claude().open();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
-        h.assert_snapshot_styled("dock_open_overlay_styled");
-    }
-
-    #[test]
     fn snapshot_dock_minimized_overlay() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
         h.assert_snapshot("dock_minimized_overlay");
-    }
-
-    #[test]
-    fn snapshot_dock_minimized_overlay_styled() {
-        let mut h = TestHarness::with_size(60, 10);
-        let _ = h.claude().open();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
-        h.assert_snapshot_styled("dock_minimized_overlay_styled");
     }
 
     #[test]
@@ -2313,27 +2107,27 @@ fn second() {
         h.claude()
             .get_session(id)
             .text("\n\nWorking.")
-            .snap_styled("chat_replay_real_session_ls_repo_step_01_turn1_text_working_styled")
+            .snap("chat_replay_real_session_ls_repo_step_01_turn1_text_working")
             .result_with(ResultSpec {
                 cost_usd: 0.0746,
                 duration_ms: 1753,
                 num_turns: 1,
             })
-            .snap_styled("chat_replay_real_session_ls_repo_step_02_turn1_result_styled")
+            .snap("chat_replay_real_session_ls_repo_step_02_turn1_result")
             .thinking("The user wants to see the files in the repo. Let me list them.")
-            .snap_styled("chat_replay_real_session_ls_repo_step_03_turn2_thinking_styled")
+            .snap("chat_replay_real_session_ls_repo_step_03_turn2_thinking")
             .bash("ls /Users/lee/projects/stoat")
-            .snap_styled("chat_replay_real_session_ls_repo_step_04_turn2_tool_use_ls_styled")
+            .snap("chat_replay_real_session_ls_repo_step_04_turn2_tool_use_ls")
             .result(ls_output)
-            .snap_styled("chat_replay_real_session_ls_repo_step_05_turn2_tool_result_styled")
+            .snap("chat_replay_real_session_ls_repo_step_05_turn2_tool_result")
             .text(final_text)
-            .snap_styled("chat_replay_real_session_ls_repo_step_06_turn2_final_text_styled")
+            .snap("chat_replay_real_session_ls_repo_step_06_turn2_final_text")
             .result_with(ResultSpec {
                 cost_usd: 0.1066,
                 duration_ms: 7458,
                 num_turns: 2,
             })
-            .snap_styled("chat_replay_real_session_ls_repo_step_07_turn2_result_styled");
+            .snap("chat_replay_real_session_ls_repo_step_07_turn2_result");
 
         h.assert_snapshot("chat_replay_real_session_ls_repo_final");
     }
@@ -2346,7 +2140,7 @@ fn second() {
         h.claude()
             .get_session(id)
             .text("First paragraph.\n\nSecond paragraph.\n\nThird paragraph.")
-            .snap_styled("chat_replay_multiline_paragraphs_step_01_text_styled");
+            .snap("chat_replay_multiline_paragraphs_step_01_text");
 
         h.assert_snapshot("chat_replay_multiline_paragraphs_final");
     }
@@ -2362,7 +2156,7 @@ fn second() {
         h.claude()
             .get_session(id)
             .text(long)
-            .snap_styled("chat_replay_long_line_wraps_step_01_long_text_styled");
+            .snap("chat_replay_long_line_wraps_step_01_long_text");
 
         h.assert_snapshot("chat_replay_long_line_wraps_final");
     }
@@ -2376,7 +2170,7 @@ fn second() {
         h.claude()
             .get_session(id)
             .text(text)
-            .snap_styled("chat_replay_indented_lines_step_01_indented_text_styled");
+            .snap("chat_replay_indented_lines_step_01_indented_text");
 
         h.assert_snapshot("chat_replay_indented_lines_final");
     }
@@ -2389,9 +2183,9 @@ fn second() {
         h.claude()
             .get_session(id)
             .thinking("line one\nline two\nline three")
-            .snap_styled("chat_replay_thinking_then_text_step_01_thinking_styled")
+            .snap("chat_replay_thinking_then_text_step_01_thinking")
             .text("Done thinking.")
-            .snap_styled("chat_replay_thinking_then_text_step_02_text_styled");
+            .snap("chat_replay_thinking_then_text_step_02_text");
 
         h.assert_snapshot("chat_replay_thinking_then_text_final");
     }
@@ -2404,7 +2198,7 @@ fn second() {
         h.claude()
             .get_session(id)
             .bash("ls")
-            .snap_styled("chat_replay_tool_use_no_result_yet_step_01_tool_use_pending_styled")
+            .snap("chat_replay_tool_use_no_result_yet_step_01_tool_use_pending")
             .pending();
 
         h.assert_snapshot("chat_replay_tool_use_no_result_yet_final");
@@ -2418,13 +2212,13 @@ fn second() {
         h.claude()
             .get_session(id)
             .partial("Hello ")
-            .snap_styled("chat_replay_partial_then_final_text_step_01_partial_chunk_1_styled")
+            .snap("chat_replay_partial_then_final_text_step_01_partial_chunk_1")
             .partial("Hello world ")
-            .snap_styled("chat_replay_partial_then_final_text_step_02_partial_chunk_2_styled")
+            .snap("chat_replay_partial_then_final_text_step_02_partial_chunk_2")
             .partial("Hello world from Claude.")
-            .snap_styled("chat_replay_partial_then_final_text_step_03_partial_chunk_3_styled")
+            .snap("chat_replay_partial_then_final_text_step_03_partial_chunk_3")
             .text("Hello world from Claude.")
-            .snap_styled("chat_replay_partial_then_final_text_step_04_final_text_styled");
+            .snap("chat_replay_partial_then_final_text_step_04_final_text");
 
         h.assert_snapshot("chat_replay_partial_then_final_text_final");
     }
@@ -2437,7 +2231,7 @@ fn second() {
         h.claude()
             .get_session(id)
             .text("Working on it. This reply should wrap several times in a 40-col pane.")
-            .snap_styled("chat_replay_narrow_pane_wrap_step_01_text_styled");
+            .snap("chat_replay_narrow_pane_wrap_step_01_text");
 
         h.assert_snapshot("chat_replay_narrow_pane_wrap_final");
     }
@@ -2460,27 +2254,19 @@ fn second() {
         h.claude()
             .get_session(id)
             .partial(part1)
-            .snap_styled(
-                "chat_replay_streamed_text_then_final_and_result_step_01_partial_chunk_1_styled",
-            )
+            .snap("chat_replay_streamed_text_then_final_and_result_step_01_partial_chunk_1")
             .partial(&part2)
-            .snap_styled(
-                "chat_replay_streamed_text_then_final_and_result_step_02_partial_chunk_2_styled",
-            )
+            .snap("chat_replay_streamed_text_then_final_and_result_step_02_partial_chunk_2")
             .partial(&full_text)
-            .snap_styled(
-                "chat_replay_streamed_text_then_final_and_result_step_03_partial_chunk_3_styled",
-            )
+            .snap("chat_replay_streamed_text_then_final_and_result_step_03_partial_chunk_3")
             .text(&full_text)
-            .snap_styled(
-                "chat_replay_streamed_text_then_final_and_result_step_04_final_text_styled",
-            )
+            .snap("chat_replay_streamed_text_then_final_and_result_step_04_final_text")
             .result_with(ResultSpec {
                 cost_usd: 0.2133,
                 duration_ms: 58335,
                 num_turns: 3,
             })
-            .snap_styled("chat_replay_streamed_text_then_final_and_result_step_05_result_styled");
+            .snap("chat_replay_streamed_text_then_final_and_result_step_05_result");
 
         h.assert_snapshot("chat_replay_streamed_text_then_final_and_result_final");
     }
@@ -2648,7 +2434,7 @@ fn second() {
     fn snapshot_claude_as_pane_styled() {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.claude().open();
-        h.assert_snapshot_styled("claude_as_pane_styled");
+        h.assert_snapshot("claude_as_pane");
     }
 
     // --- ClaudeHarness session-tracking and transport coverage ---
@@ -2845,7 +2631,6 @@ fn second() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.assert_snapshot("review_session_open");
-        h.assert_snapshot_styled("review_session_open_styled");
     }
 
     #[test]
@@ -2854,7 +2639,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("n");
         h.assert_snapshot("review_navigate_next");
-        h.assert_snapshot_styled("review_navigate_next_styled");
     }
 
     #[test]
@@ -2863,7 +2647,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n");
         h.assert_snapshot("review_stage_current_chunk");
-        h.assert_snapshot_styled("review_stage_current_chunk_styled");
     }
 
     #[test]
@@ -2872,7 +2655,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("u n");
         h.assert_snapshot("review_unstage_chunk");
-        h.assert_snapshot_styled("review_unstage_chunk_styled");
     }
 
     #[test]
@@ -2907,7 +2689,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("shift-S n");
         h.assert_snapshot("review_skip_chunk");
-        h.assert_snapshot_styled("review_skip_chunk_styled");
     }
 
     #[test]
@@ -2916,7 +2697,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n");
         h.assert_snapshot("review_progress_footer");
-        h.assert_snapshot_styled("review_progress_footer_styled");
     }
 
     #[test]
@@ -2925,7 +2705,6 @@ fn second() {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n s");
         h.assert_snapshot("review_complete_state");
-        h.assert_snapshot_styled("review_complete_state_styled");
         {
             let ws = h.stoat.active_workspace();
             let session = ws.review.as_ref().expect("session");
@@ -2964,7 +2743,6 @@ fn second() {
             assert_eq!(chunk.chunk_index_in_file, 0);
         }
         h.assert_snapshot("review_multi_file_navigation");
-        h.assert_snapshot_styled("review_multi_file_navigation_styled");
     }
 
     #[test]

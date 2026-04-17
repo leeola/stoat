@@ -7,33 +7,33 @@ focused: #1 of 1
 mode: review
 size: 120x30
 ---
-┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│+   1 a                                                   │+   1 A                                                    │
-│+   2 b                                                   │+   2 b                                                    │
-│+   3 c                                                   │+   3 c                                                    │
-│+   4 d                                                   │+   4 d                                                    │
-│a.txt --- 2/2 ---                                         │                                                           │
-││  17 q                                                   ││  17 q                                                    │
-││  18 r                                                   ││  18 r                                                    │
-││  19 s                                                   ││  19 s                                                    │
-││  20 t                                                   ││  20 T                                                    │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                                                                      │
-│                                                                   ┌ review ──────────────────────────────────────────┐
-│                                                                   │Esc   close the active review                     │
-│                                                                   │  q   close the active review                     │
-│                                                                   │  n   advance to the next review chunk            │
-│                                                                   │  p   step back to the previous review chunk      │
-│                                                                   │  j   advance to the next review chunk            │
-│                                                                   │  k   step back to the previous review chunk      │
-│                                                                   │  s   mark the current chunk as staged            │
-│                                                                   │  u   mark the current chunk as unstaged          │
-│                                                                   │Spc   toggle staged/unstaged for the current chunk│
-│                                                                   │  S   skip the current chunk                      │
-│                                                                   │  A   apply staged chunks                         │
-│                                                                   │  r   rescan the review source                    │
-│                                                                   │  :   open the command palette                    │
-│                                                                   │──────────────────────────────────────────────────│
-│                                                                   │2/2 · 1 staged · 0 unstaged · 1 pending           │
-└───────────────────────────────────────────────────────────────────└──────────────────────────────────────────────────┘
+[0m[36m┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐[0m
+[0m[36m│[0m[32m+[0m[90m   1 [0m[31ma[0m                                                   [0m[90m│[0m[32m+[0m[90m   1 [0m[32mA[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   2 [0m[36mb[0m                                                   [0m[90m│[0m[32m+[0m[90m   2 [0m[36mb[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   3 [0m[36mc[0m                                                   [0m[90m│[0m[32m+[0m[90m   3 [0m[36mc[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[32m+[0m[90m   4 [0m[36md[0m                                                   [0m[90m│[0m[32m+[0m[90m   4 [0m[36md[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[33ma.txt --- 2/2 --- [0m                                        [0m[90m│[0m                                                           [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  17 [0m[36mq[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  17 [0m[36mq[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  18 [0m[36mr[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  18 [0m[36mr[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  19 [0m[36ms[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  19 [0m[36ms[0m                                                    [0m[36m│[0m
+[0m[36m│[0m[1m[36m│[0m[90m  20 [0m[31mt[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  20 [0m[32mT[0m                                                    [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                                                                      [0m[36m│[0m
+[0m[36m│[0m                                                                   [0m[33m┌ review ──────────────────────────────────────────┐[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36mEsc[0m[97m   close the active review[0m                     [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  q[0m[97m   close the active review[0m                     [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  n[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  p[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  j[0m[97m   advance to the next review chunk[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  k[0m[97m   step back to the previous review chunk[0m      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  s[0m[97m   mark the current chunk as staged[0m            [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  u[0m[97m   mark the current chunk as unstaged[0m          [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36mSpc[0m[97m   toggle staged/unstaged for the current chunk[0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  S[0m[97m   skip the current chunk[0m                      [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  A[0m[97m   apply staged chunks[0m                         [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  r[0m[97m   rescan the review source[0m                    [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m                    [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[90m──────────────────────────────────────────────────[0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[97m2/2 · 1 staged · 0 unstaged · 1 pending[0m           [0m[33m│[0m
+[0m[36m└───────────────────────────────────────────────────────────────────[0m[33m└──────────────────────────────────────────────────┘[0m

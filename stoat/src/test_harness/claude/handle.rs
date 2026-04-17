@@ -320,18 +320,6 @@ impl<'a> ClaudeSessionHandle<'a> {
         self
     }
 
-    pub fn snap_styled(&mut self, label: &str) -> &mut Self {
-        self.th.assert_snapshot_styled(label);
-        self
-    }
-
-    pub fn snap_both(&mut self, label: &str) -> &mut Self {
-        self.th.assert_snapshot(label);
-        let styled = format!("{label}_styled");
-        self.th.assert_snapshot_styled(&styled);
-        self
-    }
-
     // ---- Assertions --------------------------------------------------
 
     pub fn sent_messages(&self) -> Vec<String> {
@@ -420,16 +408,11 @@ impl<'h, 'a> ToolUseHandle<'h, 'a> {
         &self.tool_id
     }
 
-    /// Snapshot the current layout without consuming the handle. Useful
-    /// for asserting the "tool_use queued but result not yet arrived"
-    /// state before calling [`Self::result`].
+    /// Snapshot without consuming the handle. Useful for asserting the
+    /// "tool_use queued but result not yet arrived" state before calling
+    /// [`Self::result`].
     pub fn snap(self, label: &str) -> Self {
         self.session.th.assert_snapshot(label);
-        self
-    }
-
-    pub fn snap_styled(self, label: &str) -> Self {
-        self.session.th.assert_snapshot_styled(label);
         self
     }
 
