@@ -222,12 +222,12 @@ fn index_all_candidates(
     leaf_counts: &[usize],
 ) -> HashMap<ContentId, Vec<SyntaxId>> {
     let mut out: HashMap<ContentId, Vec<SyntaxId>> = HashMap::new();
-    for i in 0..arena.len() {
+    for (i, &leaf_count) in leaf_counts.iter().enumerate() {
         let id = SyntaxId(i);
         if is_trivial(arena, id) {
             continue;
         }
-        if leaf_counts[i] < MIN_LEAVES {
+        if leaf_count < MIN_LEAVES {
             continue;
         }
         out.entry(arena.get(id).content_id()).or_default().push(id);
@@ -311,18 +311,18 @@ fn emit_records(
         (n, m) if n <= m => {
             // Proximity-paired greedy N:M, then leftover RHS targets
             // list every LHS source as an ambiguous alternate.
-            for k in 0..n {
-                paired_lhs.insert(lhs_sorted[k]);
-                paired_rhs.insert(rhs_sorted[k]);
+            for (&lhs, &rhs) in lhs_sorted.iter().zip(rhs_sorted.iter()) {
+                paired_lhs.insert(lhs);
+                paired_rhs.insert(rhs);
                 records.push(MoveRecord {
-                    rhs_target: rhs_sorted[k],
-                    lhs_sources: vec![lhs_sorted[k]],
+                    rhs_target: rhs,
+                    lhs_sources: vec![lhs],
                 });
             }
-            for k in n..m {
-                paired_rhs.insert(rhs_sorted[k]);
+            for &target in &rhs_sorted[n..m] {
+                paired_rhs.insert(target);
                 records.push(MoveRecord {
-                    rhs_target: rhs_sorted[k],
+                    rhs_target: target,
                     lhs_sources: lhs_sorted.clone(),
                 });
             }

@@ -581,16 +581,16 @@ pub fn tool_update_from_edit_tool_response(response: &serde_json::Value) -> Tool
     let content = if let Some(serde_json::Value::Array(hunks)) = patch {
         hunks
             .into_iter()
-            .filter_map(|hunk| {
+            .map(|hunk| {
                 let old_lines = hunk.get("oldLines").cloned();
                 let new_lines = hunk.get("newLines").cloned();
                 let old = lines_to_text(old_lines);
                 let new = lines_to_text(new_lines);
-                Some(ToolCallContent::Diff {
+                ToolCallContent::Diff {
                     path: PathBuf::from(&file_path),
                     old_text: Some(old),
                     new_text: new,
-                })
+                }
             })
             .collect()
     } else if let (Some(old), Some(new)) = (

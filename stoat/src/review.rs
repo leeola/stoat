@@ -66,14 +66,18 @@ pub(crate) fn extract_review_hunks(
     let rhs_moved = collect_moved_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
 
     let all_rows = structural_walk(
-        &lhs_lines,
-        &rhs_lines,
-        &lhs_changed,
-        &rhs_changed,
-        &lhs_spans,
-        &rhs_spans,
-        &lhs_moved,
-        &rhs_moved,
+        WalkSide {
+            lines: &lhs_lines,
+            changed: &lhs_changed,
+            spans: &lhs_spans,
+            moved: &lhs_moved,
+        },
+        WalkSide {
+            lines: &rhs_lines,
+            changed: &rhs_changed,
+            spans: &rhs_spans,
+            moved: &rhs_moved,
+        },
     );
     extract_hunks_with_context(&all_rows, context)
 }
@@ -184,40 +188,38 @@ fn line_byte_offsets(lines: &[&str]) -> Vec<(usize, usize)> {
     offsets
 }
 
+struct WalkSide<'a> {
+    lines: &'a [&'a str],
+    changed: &'a [bool],
+    spans: &'a [Vec<Range<usize>>],
+    moved: &'a [Vec<Range<usize>>],
+}
+
 /// Walk both files using unchanged lines as alignment anchors. Changed
 /// regions are collected and paired into side-by-side rows.
-fn structural_walk(
-    lhs_lines: &[&str],
-    rhs_lines: &[&str],
-    lhs_changed: &[bool],
-    rhs_changed: &[bool],
-    lhs_spans: &[Vec<Range<usize>>],
-    rhs_spans: &[Vec<Range<usize>>],
-    lhs_moved: &[Vec<Range<usize>>],
-    rhs_moved: &[Vec<Range<usize>>],
-) -> Vec<ReviewRow> {
+fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
     let mut result = Vec::new();
     let mut li = 0usize;
     let mut ri = 0usize;
     let mut old_line = 1u32;
     let mut new_line = 1u32;
 
-    while li < lhs_lines.len() || ri < rhs_lines.len() {
-        let l_ok = li < lhs_lines.len();
-        let r_ok = ri < rhs_lines.len();
-        let l_unchanged = l_ok && !lhs_changed[li];
-        let r_unchanged = r_ok && !rhs_changed[ri];
+    while li < lhs.lines.len() || ri < rhs.lines.len() {
+        let l_ok = li < lhs.lines.len();
+        let r_ok = ri < rhs.lines.len();
+        let l_unchanged = l_ok && !lhs.changed[li];
+        let r_unchanged = r_ok && !rhs.changed[ri];
 
-        if l_unchanged && r_unchanged && lhs_lines[li] == rhs_lines[ri] {
+        if l_unchanged && r_unchanged && lhs.lines[li] == rhs.lines[ri] {
             result.push(ReviewRow::Context {
                 left: ReviewSide {
-                    text: lhs_lines[li].to_string(),
+                    text: lhs.lines[li].to_string(),
                     line_num: old_line,
                     change_spans: Vec::new(),
                     moved_spans: Vec::new(),
                 },
                 right: ReviewSide {
-                    text: rhs_lines[ri].to_string(),
+                    text: rhs.lines[ri].to_string(),
                     line_num: new_line,
                     change_spans: Vec::new(),
                     moved_spans: Vec::new(),
@@ -234,23 +236,23 @@ fn structural_walk(
         let mut left_run: Vec<ReviewSide> = Vec::new();
         let mut right_run: Vec<ReviewSide> = Vec::new();
 
-        while li < lhs_lines.len() && lhs_changed[li] {
+        while li < lhs.lines.len() && lhs.changed[li] {
             left_run.push(ReviewSide {
-                text: lhs_lines[li].to_string(),
+                text: lhs.lines[li].to_string(),
                 line_num: old_line,
-                change_spans: lhs_spans[li].clone(),
-                moved_spans: lhs_moved[li].clone(),
+                change_spans: lhs.spans[li].clone(),
+                moved_spans: lhs.moved[li].clone(),
             });
             li += 1;
             old_line += 1;
         }
 
-        while ri < rhs_lines.len() && rhs_changed[ri] {
+        while ri < rhs.lines.len() && rhs.changed[ri] {
             right_run.push(ReviewSide {
-                text: rhs_lines[ri].to_string(),
+                text: rhs.lines[ri].to_string(),
                 line_num: new_line,
-                change_spans: rhs_spans[ri].clone(),
-                moved_spans: rhs_moved[ri].clone(),
+                change_spans: rhs.spans[ri].clone(),
+                moved_spans: rhs.moved[ri].clone(),
             });
             ri += 1;
             new_line += 1;
@@ -262,13 +264,13 @@ fn structural_walk(
             if l_ok && r_ok {
                 result.push(ReviewRow::Changed {
                     left: Some(ReviewSide {
-                        text: lhs_lines[li].to_string(),
+                        text: lhs.lines[li].to_string(),
                         line_num: old_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
                     }),
                     right: Some(ReviewSide {
-                        text: rhs_lines[ri].to_string(),
+                        text: rhs.lines[ri].to_string(),
                         line_num: new_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
@@ -281,7 +283,7 @@ fn structural_walk(
             } else if l_ok {
                 result.push(ReviewRow::Changed {
                     left: Some(ReviewSide {
-                        text: lhs_lines[li].to_string(),
+                        text: lhs.lines[li].to_string(),
                         line_num: old_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
@@ -294,7 +296,7 @@ fn structural_walk(
                 result.push(ReviewRow::Changed {
                     left: None,
                     right: Some(ReviewSide {
-                        text: rhs_lines[ri].to_string(),
+                        text: rhs.lines[ri].to_string(),
                         line_num: new_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),

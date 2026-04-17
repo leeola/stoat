@@ -63,16 +63,16 @@ pub fn prompt_to_claude(chunks: &[PromptChunk]) -> serde_json::Value {
                             "data": d,
                         }
                     }));
-                } else if let Some(u) = uri {
-                    if u.starts_with("http") {
-                        content.push(json!({
-                            "type": "image",
-                            "source": {"type": "url", "url": u},
-                        }));
-                    }
-                    // file:// and other URIs are silently skipped:
-                    // the CLI has no generic URI fetcher, so only data
-                    // and http(s) URIs make sense to forward.
+                } else if let Some(u) = uri
+                    && u.starts_with("http")
+                {
+                    // file:// and other URIs are silently skipped: the CLI
+                    // has no generic URI fetcher, so only data and http(s)
+                    // URIs make sense to forward.
+                    content.push(json!({
+                        "type": "image",
+                        "source": {"type": "url", "url": u},
+                    }));
                 }
             },
             PromptChunk::ResourceLink { uri, name } => {

@@ -519,13 +519,13 @@ async fn send_response(response: ControlResponse, deps: &DispatcherDeps) {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     /// Test callback that records each invocation and replies from a
     /// scripted queue of results.
     struct FakeCallback {
         seen: Mutex<Vec<(String, String)>>,
-        responses: Mutex<std::collections::VecDeque<PermissionResult>>,
+        responses: Mutex<VecDeque<PermissionResult>>,
     }
 
     impl FakeCallback {

@@ -32,6 +32,7 @@ use stoat::host::{
 /// can reuse its previous tool-use snapshots (for matching `tool_result`
 /// blocks to the original tool name, Bash terminal-id bookkeeping,
 /// etc.).
+#[derive(Default)]
 pub(crate) struct AdapterState {
     pub tool_use_cache: HashMap<String, ToolUseSnapshot>,
     pub accumulated_usage: TokenUsage,
@@ -57,22 +58,6 @@ pub(crate) struct AdapterState {
     /// live `ClaudeCode` session. Used to drop CLI echoes of our own
     /// user messages when `replay-user-messages` is enabled.
     pub prompt_state: Option<std::sync::Arc<std::sync::Mutex<crate::claude_code::PromptState>>>,
-}
-
-impl Default for AdapterState {
-    fn default() -> Self {
-        Self {
-            tool_use_cache: HashMap::new(),
-            accumulated_usage: TokenUsage::default(),
-            supports_terminal: false,
-            cwd: None,
-            streaming_tool_ids: HashMap::new(),
-            streamed_text_indexes: HashSet::new(),
-            streamed_thinking_indexes: HashSet::new(),
-            streaming_text_buffers: HashMap::new(),
-            prompt_state: None,
-        }
-    }
 }
 
 impl AdapterState {
@@ -1303,8 +1288,10 @@ mod tests {
         let prompt_state = Arc::new(Mutex::new(crate::claude_code::PromptState::default()));
         let uuid = uuid::Uuid::new_v4();
         prompt_state.lock().unwrap().own_uuids.insert(uuid);
-        let mut state = AdapterState::default();
-        state.prompt_state = Some(prompt_state.clone());
+        let mut state = AdapterState {
+            prompt_state: Some(prompt_state.clone()),
+            ..Default::default()
+        };
         let msg = SdkMessage::User {
             message: UserMessage::from_text("our own prompt"),
             session_id: "sess".into(),
@@ -1322,8 +1309,10 @@ mod tests {
     fn user_echo_with_unknown_uuid_is_forwarded() {
         use std::sync::{Arc, Mutex};
         let prompt_state = Arc::new(Mutex::new(crate::claude_code::PromptState::default()));
-        let mut state = AdapterState::default();
-        state.prompt_state = Some(prompt_state);
+        let mut state = AdapterState {
+            prompt_state: Some(prompt_state),
+            ..Default::default()
+        };
         let msg = SdkMessage::User {
             message: UserMessage::from_tool_result("tool_a", "data"),
             session_id: "sess".into(),
@@ -1361,11 +1350,11 @@ mod tests {
             "type": "system",
             "session_id": "sess-sub",
         });
-        if let serde_json::Value::Object(map) = &extras {
-            if let serde_json::Value::Object(base) = &mut val {
-                for (k, v) in map {
-                    base.insert(k.clone(), v.clone());
-                }
+        if let serde_json::Value::Object(map) = &extras
+            && let serde_json::Value::Object(base) = &mut val
+        {
+            for (k, v) in map {
+                base.insert(k.clone(), v.clone());
             }
         }
         match &subtype {
@@ -1397,7 +1386,7 @@ mod tests {
         );
         let out = sdk_message_to_agent_messages(msg);
         match &out[0] {
-            AgentMessage::SessionState(stoat::host::SessionStateEvent::StateChanged { state }) => {
+            AgentMessage::SessionState(SessionStateEvent::StateChanged { state }) => {
                 assert_eq!(state, "idle")
             },
             other => panic!("got {other:?}"),
@@ -1416,7 +1405,7 @@ mod tests {
         );
         let out = sdk_message_to_agent_messages(msg);
         match &out[0] {
-            AgentMessage::SessionState(stoat::host::SessionStateEvent::CompactBoundary {
+            AgentMessage::SessionState(SessionStateEvent::CompactBoundary {
                 trigger,
                 pre_tokens,
                 post_tokens,
@@ -1438,7 +1427,7 @@ mod tests {
         let out = sdk_message_to_agent_messages(msg);
         assert!(matches!(
             &out[0],
-            AgentMessage::SessionState(stoat::host::SessionStateEvent::ApiRetry {
+            AgentMessage::SessionState(SessionStateEvent::ApiRetry {
                 attempt: Some(3),
                 reason: Some(s),
             }) if s == "overloaded"
@@ -1469,7 +1458,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(started)[0],
-            AgentMessage::TaskEvent(stoat::host::TaskEvent::Started { .. })
+            AgentMessage::TaskEvent(TaskEvent::Started { .. })
         ));
         let notif = system_frame(
             SystemSubtype::TaskNotification,
@@ -1477,7 +1466,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(notif)[0],
-            AgentMessage::TaskEvent(stoat::host::TaskEvent::Notification { .. })
+            AgentMessage::TaskEvent(TaskEvent::Notification { .. })
         ));
         let prog = system_frame(
             SystemSubtype::TaskProgress,
@@ -1485,7 +1474,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(prog)[0],
-            AgentMessage::TaskEvent(stoat::host::TaskEvent::Progress { .. })
+            AgentMessage::TaskEvent(TaskEvent::Progress { .. })
         ));
         let upd = system_frame(
             SystemSubtype::TaskUpdated,
@@ -1493,7 +1482,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(upd)[0],
-            AgentMessage::TaskEvent(stoat::host::TaskEvent::Updated { .. })
+            AgentMessage::TaskEvent(TaskEvent::Updated { .. })
         ));
     }
 
@@ -1505,7 +1494,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(started)[0],
-            AgentMessage::Hook(stoat::host::HookLifecycleEvent::Started { .. })
+            AgentMessage::Hook(HookLifecycleEvent::Started { .. })
         ));
         let progress = system_frame(
             SystemSubtype::HookProgress,
@@ -1513,7 +1502,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(progress)[0],
-            AgentMessage::Hook(stoat::host::HookLifecycleEvent::Progress { .. })
+            AgentMessage::Hook(HookLifecycleEvent::Progress { .. })
         ));
         let resp = system_frame(
             SystemSubtype::HookResponse,
@@ -1521,7 +1510,7 @@ mod tests {
         );
         assert!(matches!(
             sdk_message_to_agent_messages(resp)[0],
-            AgentMessage::Hook(stoat::host::HookLifecycleEvent::Response { .. })
+            AgentMessage::Hook(HookLifecycleEvent::Response { .. })
         ));
     }
 
@@ -1533,9 +1522,9 @@ mod tests {
         );
         let out = sdk_message_to_agent_messages(msg);
         match &out[0] {
-            AgentMessage::SessionState(stoat::host::SessionStateEvent::LocalCommandOutput {
-                text,
-            }) => assert_eq!(text, "hello"),
+            AgentMessage::SessionState(SessionStateEvent::LocalCommandOutput { text }) => {
+                assert_eq!(text, "hello")
+            },
             other => panic!("got {other:?}"),
         }
     }

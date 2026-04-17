@@ -3,7 +3,7 @@ mod control;
 pub mod process;
 
 pub use self::builder::ClaudeCodeBuilder;
-use self::process::Process;
+use self::{control::ControlWaiters, process::Process};
 use crate::messages::{PermissionMode, SdkMessage, SettingSource};
 use anyhow::{Context, Result};
 use std::{
@@ -190,7 +190,7 @@ pub struct ClaudeCode {
     /// the dispatcher (when installed) so inbound `control_response`
     /// frames can complete the oneshot registered here when the
     /// corresponding request was sent.
-    pub(crate) control_waiters: crate::claude_code::control::ControlWaiters,
+    pub(crate) control_waiters: ControlWaiters,
 
     /// Prompt-state: tracks UUIDs we stamped on outbound user messages
     /// so the adapter can drop the CLI's echoes when
@@ -209,10 +209,6 @@ pub(crate) struct PromptState {
     /// `replay-user-messages` is active the CLI echoes these back;
     /// matches drop silently.
     pub own_uuids: std::collections::HashSet<uuid::Uuid>,
-    /// Whether a prompt is currently being processed. Future work:
-    /// queue subsequent prompts and hand off when the current turn
-    /// completes.
-    pub running: bool,
 }
 
 impl ClaudeCode {
@@ -240,13 +236,15 @@ impl ClaudeCode {
         process_stdout_rx: mpsc::Receiver<SdkMessage>,
         session_id: uuid::Uuid,
         pending: Arc<StdMutex<VecDeque<AgentMessage>>>,
-        control_waiters: crate::claude_code::control::ControlWaiters,
+        control_waiters: ControlWaiters,
         prompt_state: Arc<StdMutex<PromptState>>,
     ) -> Self {
         info!("ClaudeCode instance created for session: {}", session_id);
 
-        let mut adapter_state = crate::host_adapter::AdapterState::default();
-        adapter_state.prompt_state = Some(prompt_state.clone());
+        let adapter_state = crate::host_adapter::AdapterState {
+            prompt_state: Some(prompt_state.clone()),
+            ..Default::default()
+        };
 
         Self {
             process: StdMutex::new(Some(process)),

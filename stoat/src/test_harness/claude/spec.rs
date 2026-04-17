@@ -6,7 +6,7 @@ use crate::host::ClaudeSessionSummary;
 /// Declarative description of a seeded session. All fields have sensible
 /// defaults so `SessionSpec::default()` works. Convert `&str` or `String`
 /// to `SessionSpec` for terse titled-only specs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionSpec {
     pub session_id: Option<String>,
     pub title: Option<String>,
@@ -16,18 +16,6 @@ pub struct SessionSpec {
     /// session to the active workspace's chat panel. `false` (default)
     /// keeps the session in the slotmap without UI attachment.
     pub visible: bool,
-}
-
-impl Default for SessionSpec {
-    fn default() -> Self {
-        Self {
-            session_id: None,
-            title: None,
-            cwd: None,
-            updated_at: None,
-            visible: false,
-        }
-    }
 }
 
 impl SessionSpec {

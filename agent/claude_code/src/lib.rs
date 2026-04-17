@@ -5,7 +5,6 @@ pub mod launcher;
 pub mod messages;
 pub mod model_prefs;
 pub mod prompt;
-pub mod settings;
 pub mod slash;
 pub mod tools;
 pub mod utils;

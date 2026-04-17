@@ -908,10 +908,7 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("session created by OpenReview");
         assert_eq!(session.files.len(), 1);
-        assert_eq!(
-            session.files[0].path,
-            std::path::PathBuf::from("/work/a.rs")
-        );
+        assert_eq!(session.files[0].path, PathBuf::from("/work/a.rs"));
         assert_eq!(session.files[0].base_text.as_str(), REVIEW_TWO_HUNK_BASE);
         assert_eq!(
             session.files[0].buffer_text.as_str(),
@@ -999,8 +996,8 @@ mod tests {
         assert_eq!(changed.len(), 2);
         let mut abs_paths: Vec<_> = changed.iter().map(|f| f.path.clone()).collect();
         abs_paths.sort();
-        assert_eq!(abs_paths[0], std::path::PathBuf::from("/work/a.rs"));
-        assert_eq!(abs_paths[1], std::path::PathBuf::from("/work/b.rs"));
+        assert_eq!(abs_paths[0], PathBuf::from("/work/a.rs"));
+        assert_eq!(abs_paths[1], PathBuf::from("/work/b.rs"));
     }
 
     #[test]
@@ -1039,7 +1036,7 @@ mod tests {
             .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
 
         let action = stoat_action::OpenReviewCommit {
-            workdir: std::path::PathBuf::from("/work"),
+            workdir: PathBuf::from("/work"),
             sha: "c2".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
@@ -1066,7 +1063,7 @@ mod tests {
             .commit("root", &[("a.rs", "initial\n")]);
 
         let action = stoat_action::OpenReviewCommit {
-            workdir: std::path::PathBuf::from("/work"),
+            workdir: PathBuf::from("/work"),
             sha: "root".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);
@@ -1092,7 +1089,7 @@ mod tests {
             );
 
         let action = stoat_action::OpenReviewCommitRange {
-            workdir: std::path::PathBuf::from("/work"),
+            workdir: PathBuf::from("/work"),
             from: "c1".into(),
             to: "c3".into(),
         };
@@ -1113,12 +1110,12 @@ mod tests {
         let action = stoat_action::OpenReviewAgentEdits {
             edits: vec![
                 stoat_action::AgentEdit {
-                    path: std::path::PathBuf::from("/proposed/a.rs"),
+                    path: PathBuf::from("/proposed/a.rs"),
                     base_text: Arc::new("old text\n".to_string()),
                     proposed_text: Arc::new("new text\n".to_string()),
                 },
                 stoat_action::AgentEdit {
-                    path: std::path::PathBuf::from("/proposed/b.rs"),
+                    path: PathBuf::from("/proposed/b.rs"),
                     base_text: Arc::new("".to_string()),
                     proposed_text: Arc::new("added\n".to_string()),
                 },
@@ -1145,7 +1142,7 @@ mod tests {
             .commit_with_parent("c2", "c1", &[("a.rs", "VX\nline2\nline3\nline4\nline5\n")]);
 
         let action = stoat_action::OpenReviewCommit {
-            workdir: std::path::PathBuf::from("/work"),
+            workdir: PathBuf::from("/work"),
             sha: "c2".into(),
         };
         crate::action_handlers::dispatch(&mut h.stoat, &action);

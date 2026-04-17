@@ -980,10 +980,12 @@ impl Stoat {
             render_pane(
                 pane,
                 is_focused,
-                &mut ws.editors,
-                &ws.buffers,
-                &ws.runs,
-                &ws.chats,
+                PaneCtx {
+                    editors: &mut ws.editors,
+                    buffers: &ws.buffers,
+                    runs: &ws.runs,
+                    chats: &ws.chats,
+                },
                 self.render_tick,
                 &mut buf,
             );
@@ -2320,13 +2322,17 @@ fn compute_throbber_label(
     "Thinking...".to_string()
 }
 
+struct PaneCtx<'a> {
+    editors: &'a mut SlotMap<EditorId, EditorState>,
+    buffers: &'a BufferRegistry,
+    runs: &'a SlotMap<RunId, RunState>,
+    chats: &'a HashMap<ClaudeSessionId, ClaudeChatState>,
+}
+
 fn render_pane(
     pane: &Pane,
     is_focused: bool,
-    editors: &mut SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
-    runs: &SlotMap<RunId, RunState>,
-    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
+    ctx: PaneCtx<'_>,
     render_tick: u64,
     buf: &mut Buffer,
 ) {
@@ -2345,6 +2351,13 @@ fn render_pane(
         .border_style(border_style);
     let inner = block.inner(pane.area);
     block.render(pane.area, buf);
+
+    let PaneCtx {
+        editors,
+        buffers,
+        runs,
+        chats,
+    } = ctx;
 
     match &pane.view {
         View::Label(label) => {

@@ -429,7 +429,10 @@ fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
 
     let carried: HashMap<ChunkIdentity, crate::review_session::ChunkStatus> = {
         let ws = stoat.active_workspace();
-        let old = ws.review.as_ref().unwrap();
+        let old = ws
+            .review
+            .as_ref()
+            .expect("review session still present (early-returned above when absent)");
         old.order
             .iter()
             .filter_map(|id| {
@@ -633,7 +636,7 @@ fn set_cursor_row(editor: &mut EditorState, row: u32) {
     editor.selections = crate::selection::SelectionsCollection::new();
     editor
         .selections
-        .insert_cursor(anchor, SelectionGoal::None, &buffer_snapshot);
+        .insert_cursor(anchor, SelectionGoal::None, buffer_snapshot);
     editor.scroll_row = row.saturating_sub(2);
 }
 
@@ -2053,7 +2056,7 @@ mod tests {
         let mut h = Stoat::test();
         h.fake_fs
             .insert_file("/work/hello.txt", b"greetings from fake fs");
-        h.stoat.open_file(std::path::Path::new("/work/hello.txt"));
+        h.stoat.open_file(Path::new("/work/hello.txt"));
         let ws = h.stoat.active_workspace();
         let focused = ws.panes.focus();
         let editor_id = match ws.panes.pane(focused).view {

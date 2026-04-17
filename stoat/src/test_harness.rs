@@ -43,8 +43,7 @@ pub struct TestHarness {
     pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_git: Arc<crate::host::FakeGit>,
-    pub(crate) claude_fakes:
-        HashMap<crate::host::ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
+    pub(crate) claude_fakes: HashMap<ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
     pub(crate) claude_tool_id_counter: u64,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
@@ -515,10 +514,7 @@ impl TestHarness {
         self.sub_frame += 1;
     }
 
-    pub fn open_claude_with_fake(
-        &mut self,
-        fake: crate::host::FakeClaudeCode,
-    ) -> crate::host::ClaudeSessionId {
+    pub fn open_claude_with_fake(&mut self, fake: crate::host::FakeClaudeCode) -> ClaudeSessionId {
         let arc = self.fake_claude_host.push_session(fake);
         crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenClaude);
         self.settle();
@@ -535,7 +531,7 @@ impl TestHarness {
     pub fn create_background_session(
         &mut self,
         fake: crate::host::FakeClaudeCode,
-    ) -> crate::host::ClaudeSessionId {
+    ) -> ClaudeSessionId {
         let arc = Arc::new(fake);
         let id = self.stoat.claude_sessions_mut().reserve_slot();
         let session: Arc<dyn crate::host::ClaudeCodeSession> = arc.clone();
@@ -554,7 +550,7 @@ impl TestHarness {
         id
     }
 
-    pub fn show_claude_session(&mut self, session_id: crate::host::ClaudeSessionId) {
+    pub fn show_claude_session(&mut self, session_id: ClaudeSessionId) {
         use crate::{
             badge::BadgeSource,
             pane::{DockVisibility, View},
@@ -573,7 +569,7 @@ impl TestHarness {
 
     pub fn claude_badge_state(
         &self,
-        session_id: crate::host::ClaudeSessionId,
+        session_id: ClaudeSessionId,
     ) -> Option<crate::badge::BadgeState> {
         let ws = self.stoat.active_workspace();
         let source = crate::badge::BadgeSource::Claude(session_id);
@@ -583,7 +579,7 @@ impl TestHarness {
             .map(|b| b.state)
     }
 
-    pub fn claude_badge_detail(&self, session_id: crate::host::ClaudeSessionId) -> Option<String> {
+    pub fn claude_badge_detail(&self, session_id: ClaudeSessionId) -> Option<String> {
         let ws = self.stoat.active_workspace();
         let source = crate::badge::BadgeSource::Claude(session_id);
         ws.badges
@@ -1087,8 +1083,6 @@ mod tests {
             assert_eq!(parsed.modifiers, modifiers);
         }
     }
-
-    use crate::test_harness::claude::ResultSpec;
 
     // --- ClaudeHarness session-tracking and transport coverage ---
 

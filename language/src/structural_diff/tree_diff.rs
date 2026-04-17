@@ -322,7 +322,7 @@ fn build_move_metadata(
                     .collect();
                 roots_with_sources
                     .entry(record.rhs_target)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .extend(sources);
             },
             Side::Lhs => {
@@ -331,7 +331,7 @@ fn build_move_metadata(
                 for src in &record.lhs_sources {
                     roots_with_sources
                         .entry(*src)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(target_source.clone());
                 }
             },

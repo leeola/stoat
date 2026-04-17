@@ -97,15 +97,15 @@ impl<'a> ClaudeSessionHandle<'a> {
                 text: format!("```bash\n{cmd}\n```"),
             }]
         };
-        self.push_tool_use(
-            tool_id.clone(),
-            "Bash",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Bash".into(),
             input,
-            ToolKind::Execute,
+            kind: ToolKind::Execute,
             title,
             content,
-            vec![],
-        );
+            locations: vec![],
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Execute)
     }
 
@@ -127,15 +127,15 @@ impl<'a> ClaudeSessionHandle<'a> {
                 line: None,
             }]
         };
-        self.push_tool_use(
-            tool_id.clone(),
-            "Read",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Read".into(),
             input,
-            ToolKind::Read,
+            kind: ToolKind::Read,
             title,
-            vec![],
+            content: vec![],
             locations,
-        );
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Read)
     }
 
@@ -169,15 +169,15 @@ impl<'a> ClaudeSessionHandle<'a> {
                 }],
             )
         };
-        self.push_tool_use(
-            tool_id.clone(),
-            "Write",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Write".into(),
             input,
-            ToolKind::Edit,
+            kind: ToolKind::Edit,
             title,
-            call_content,
+            content: call_content,
             locations,
-        );
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Edit)
     }
 
@@ -218,15 +218,15 @@ impl<'a> ClaudeSessionHandle<'a> {
                 }],
             )
         };
-        self.push_tool_use(
-            tool_id.clone(),
-            "Edit",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Edit".into(),
             input,
-            ToolKind::Edit,
+            kind: ToolKind::Edit,
             title,
-            call_content,
+            content: call_content,
             locations,
-        );
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Edit)
     }
 
@@ -238,15 +238,15 @@ impl<'a> ClaudeSessionHandle<'a> {
         } else {
             truncate_title(format!("Find `{pattern}`"))
         };
-        self.push_tool_use(
-            tool_id.clone(),
-            "Glob",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Glob".into(),
             input,
-            ToolKind::Search,
+            kind: ToolKind::Search,
             title,
-            vec![],
-            vec![],
-        );
+            content: vec![],
+            locations: vec![],
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Search)
     }
 
@@ -254,15 +254,15 @@ impl<'a> ClaudeSessionHandle<'a> {
         let tool_id = self.next_tool_id();
         let input = serde_json::json!({ "pattern": pattern }).to_string();
         let title = truncate_title(format!("grep {pattern}"));
-        self.push_tool_use(
-            tool_id.clone(),
-            "Grep",
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Grep".into(),
             input,
-            ToolKind::Search,
+            kind: ToolKind::Search,
             title,
-            vec![],
-            vec![],
-        );
+            content: vec![],
+            locations: vec![],
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Search)
     }
 
@@ -274,15 +274,15 @@ impl<'a> ClaudeSessionHandle<'a> {
         input_json: impl Into<String>,
     ) -> ToolUseHandle<'_, 'a> {
         let tool_id = self.next_tool_id();
-        self.push_tool_use(
-            tool_id.clone(),
-            name,
-            input_json.into(),
-            ToolKind::Other,
-            name.to_string(),
-            vec![],
-            vec![],
-        );
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: name.into(),
+            input: input_json.into(),
+            kind: ToolKind::Other,
+            title: name.to_string(),
+            content: vec![],
+            locations: vec![],
+        });
         ToolUseHandle::new(self, tool_id, ToolKind::Other)
     }
 
@@ -354,28 +354,6 @@ impl<'a> ClaudeSessionHandle<'a> {
         self.th.settle();
         self.th.capture("claude_message");
         self
-    }
-
-    fn push_tool_use(
-        &mut self,
-        id: String,
-        name: &str,
-        input: String,
-        kind: ToolKind,
-        title: String,
-        content: Vec<ToolCallContent>,
-        locations: Vec<ToolCallLocation>,
-    ) {
-        let msg = AgentMessage::ToolUse {
-            id,
-            name: name.into(),
-            input,
-            kind,
-            title,
-            content,
-            locations,
-        };
-        self.push(|f| f.push_raw(msg));
     }
 
     fn next_tool_id(&mut self) -> String {

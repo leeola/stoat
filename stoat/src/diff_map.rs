@@ -343,8 +343,12 @@ fn changes_to_hunks(
             .next();
 
         if !rhs_indices.is_empty() {
-            let first = &changes[*rhs_indices.first().unwrap()];
-            let last = &changes[*rhs_indices.last().unwrap()];
+            let first = &changes[*rhs_indices
+                .first()
+                .expect("rhs_indices non-empty per enclosing guard")];
+            let last = &changes[*rhs_indices
+                .last()
+                .expect("rhs_indices non-empty per enclosing guard")];
             let full_range = first.byte_range.start..last.byte_range.end;
             let line_range = byte_range_to_line_range(rhs_text, &full_range);
             let base_range = if let (Some(&lhs_first), Some(&lhs_last)) =
@@ -399,8 +403,12 @@ fn changes_to_hunks(
             // LHS-only move: the source side of a 1:N duplication.
             // Emit a Deleted-style placeholder at the LHS line so
             // the source can still be highlighted / jumped to.
-            let first = &changes[*lhs_indices.first().unwrap()];
-            let last = &changes[*lhs_indices.last().unwrap()];
+            let first = &changes[*lhs_indices
+                .first()
+                .expect("lhs_indices non-empty per enclosing else-if guard")];
+            let last = &changes[*lhs_indices
+                .last()
+                .expect("lhs_indices non-empty per enclosing else-if guard")];
             let full_range = first.byte_range.start..last.byte_range.end;
             let lhs_line = lhs_text[..first.byte_range.start.min(lhs_text.len())]
                 .chars()
