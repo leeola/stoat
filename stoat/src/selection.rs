@@ -332,4 +332,88 @@ mod tests {
         );
         assert_eq!(collection.all_anchors().len(), after_first);
     }
+
+    #[test]
+    fn snapshot_add_selection_below() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+
+        h.open_file(&path);
+        h.type_keys("C");
+        h.assert_snapshot("add_selection_below");
+    }
+
+    #[test]
+    fn snapshot_shift_c_adds_selection_below_styled() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+
+        h.open_file(&path);
+        h.type_keys("shift-C");
+        h.assert_snapshot("shift_c_adds_selection_below");
+    }
+
+    #[test]
+    fn snapshot_move_right() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "hello world\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        h.assert_snapshot("snapshot_move_right");
+    }
+
+    #[test]
+    fn snapshot_move_down() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("j j");
+        h.assert_snapshot("snapshot_move_down");
+    }
+
+    #[test]
+    fn snapshot_word_forward() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w");
+        h.assert_snapshot("snapshot_word_forward");
+    }
+
+    #[test]
+    fn snapshot_word_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("e");
+        h.assert_snapshot("snapshot_word_end");
+    }
+
+    #[test]
+    fn snapshot_word_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l");
+        h.type_keys("b");
+        h.assert_snapshot("snapshot_word_backward");
+    }
+
+    #[test]
+    fn snapshot_word_forward_repeated() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w w");
+        h.assert_snapshot("snapshot_word_forward_repeated");
+    }
+
+    #[test]
+    fn snapshot_multi_cursor_move_right() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("C l l");
+        h.assert_snapshot("snapshot_multi_cursor_move_right");
+    }
 }

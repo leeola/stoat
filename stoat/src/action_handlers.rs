@@ -1988,4 +1988,98 @@ mod tests {
             "message should be queued, not dropped"
         );
     }
+
+    #[test]
+    fn type_action_direct() {
+        let mut h = Stoat::test();
+        h.type_action("SetMode(space)");
+        let last = h.frames().last().expect("no frames");
+        assert_eq!(last.mode, "space");
+    }
+
+    #[test]
+    fn open_file_shows_in_focused_pane() {
+        let mut h = Stoat::test();
+        let path = crate::test_harness::write_file(&h, "test.txt", "hello world");
+
+        h.open_file(&path);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
+        h.assert_snapshot("open_file_shows_in_focused_pane");
+    }
+
+    #[test]
+    fn open_file_replaces_focused_pane_does_not_split() {
+        let mut h = Stoat::test();
+        let a = crate::test_harness::write_file(&h, "a.txt", "file A");
+        let b = crate::test_harness::write_file(&h, "b.txt", "file B");
+
+        h.open_file(&a);
+        h.open_file(&b);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
+        h.assert_snapshot("open_file_replaces_focused_pane");
+    }
+
+    #[test]
+    fn split_then_open_creates_multi_pane_layout() {
+        let mut h = Stoat::test();
+        let a = crate::test_harness::write_file(&h, "a.txt", "AAA");
+        let b = crate::test_harness::write_file(&h, "b.txt", "BBB");
+        let c = crate::test_harness::write_file(&h, "c.txt", "CCC");
+
+        h.open_file(&a);
+        h.type_action("SplitRight()");
+        h.open_file(&b);
+        h.type_action("SplitRight()");
+        h.open_file(&c);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 3);
+        h.assert_snapshot("split_then_open_three");
+    }
+
+    #[test]
+    fn open_missing_file_creates_empty_buffer() {
+        let path = std::path::PathBuf::from("/test/does_not_exist.txt");
+
+        let mut h = Stoat::test();
+        h.open_file(&path);
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 1);
+    }
+
+    #[test]
+    fn open_file_via_fs_host_reads_from_fake_fs() {
+        let mut h = Stoat::test();
+        h.fake_fs
+            .insert_file("/work/hello.txt", b"greetings from fake fs");
+        h.stoat.open_file(std::path::Path::new("/work/hello.txt"));
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let editor = ws.editors.get(editor_id).unwrap();
+        let buffer = ws.buffers.get(editor.buffer_id).unwrap();
+        let guard = buffer.read().unwrap();
+        assert_eq!(
+            guard.snapshot.visible_text.to_string(),
+            "greetings from fake fs"
+        );
+    }
+
+    #[test]
+    fn type_action_quit_from_space() {
+        let mut h = Stoat::test();
+        h.type_keys("space");
+        h.type_action("Quit");
+    }
+
+    #[test]
+    #[should_panic(expected = "unreachable")]
+    fn type_action_unreachable_panics() {
+        let mut h = Stoat::test();
+        h.type_action("NonExistentAction");
+    }
 }

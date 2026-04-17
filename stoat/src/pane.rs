@@ -816,4 +816,82 @@ mod tests {
         assert_eq!(pane.placement, Placement::Split);
         assert!(matches!(&pane.view, View::Label(s) if s == "Pane 0"));
     }
+
+    #[test]
+    fn snapshot_split_right() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.assert_snapshot("split_right");
+    }
+
+    #[test]
+    fn snapshot_split_down() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitDown()");
+        h.assert_snapshot("split_down");
+    }
+
+    #[test]
+    fn snapshot_nested_splits() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("SplitDown()");
+        h.assert_snapshot("nested_splits");
+    }
+
+    #[test]
+    fn snapshot_three_columns() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("SplitRight()");
+        h.assert_snapshot("three_columns");
+    }
+
+    #[test]
+    fn snapshot_close_returns_to_single() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("ClosePane()");
+        h.assert_snapshot("close_returns_to_single");
+    }
+
+    #[test]
+    fn snapshot_split_right_focus_left() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("FocusLeft()");
+        h.assert_snapshot("split_right_focus_left");
+    }
+
+    #[test]
+    fn snapshot_dock_open_overlay() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 10);
+        let _ = h.claude().open();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
+        h.assert_snapshot("dock_open_overlay");
+    }
+
+    #[test]
+    fn snapshot_dock_minimized_overlay() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 10);
+        let _ = h.claude().open();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToDockRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        h.assert_snapshot("dock_minimized_overlay");
+    }
+
+    #[test]
+    fn snapshot_dock_overlays_split_panes() {
+        let mut h = crate::test_harness::TestHarness::new_with_settings(
+            80,
+            10,
+            stoat_config::Settings {
+                text_proto_log: None,
+                claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
+            },
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let _ = h.claude().open();
+        h.assert_snapshot("dock_overlays_split_panes");
+    }
 }

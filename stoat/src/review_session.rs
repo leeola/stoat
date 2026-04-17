@@ -779,4 +779,385 @@ mod tests {
 
         assert_ne!(k1, k2);
     }
+
+    use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
+
+    #[test]
+    fn snapshot_review_session_open() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.assert_snapshot("review_session_open");
+    }
+
+    #[test]
+    fn snapshot_review_navigate_next() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("n");
+        h.assert_snapshot("review_navigate_next");
+    }
+
+    #[test]
+    fn snapshot_review_stage_current_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n");
+        h.assert_snapshot("review_stage_current_chunk");
+    }
+
+    #[test]
+    fn snapshot_review_unstage_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("u n");
+        h.assert_snapshot("review_unstage_chunk");
+    }
+
+    #[test]
+    fn snapshot_review_toggle_cycles_binary() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("Space");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let id = session.cursor.current.expect("current chunk");
+            assert_eq!(session.chunk(id).unwrap().status, ChunkStatus::Staged);
+        }
+        h.type_keys("Space");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let id = session.cursor.current.expect("current chunk");
+            assert_eq!(session.chunk(id).unwrap().status, ChunkStatus::Unstaged);
+        }
+    }
+
+    #[test]
+    fn snapshot_review_skip_chunk() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("shift-S n");
+        h.assert_snapshot("review_skip_chunk");
+    }
+
+    #[test]
+    fn snapshot_review_progress_footer() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n");
+        h.assert_snapshot("review_progress_footer");
+    }
+
+    #[test]
+    fn snapshot_review_complete_state() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.type_keys("s n s");
+        h.assert_snapshot("review_complete_state");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            assert!(session.is_complete());
+            let has_badge = ws
+                .badges
+                .find_by_source(crate::badge::BadgeSource::Review)
+                .is_some();
+            assert!(has_badge, "complete review should surface a badge");
+        }
+    }
+
+    #[test]
+    fn review_close_restores_normal_mode() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        assert_eq!(h.stoat.mode, "review");
+        h.type_keys("q");
+        assert_eq!(h.stoat.mode, "normal");
+        assert!(h.stoat.active_workspace().review.is_none());
+    }
+
+    #[test]
+    fn snapshot_review_multi_file_navigation() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+            ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+        ]);
+        h.type_keys("n");
+        {
+            let ws = h.stoat.active_workspace();
+            let session = ws.review.as_ref().expect("session");
+            let chunk = session.current().expect("current");
+            assert_eq!(chunk.file_index, 1);
+            assert_eq!(chunk.chunk_index_in_file, 0);
+        }
+        h.assert_snapshot("review_multi_file_navigation");
+    }
+
+    #[test]
+    fn review_via_git_host_builds_session_from_working_tree() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session created by OpenReview");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(
+            session.files[0].path,
+            std::path::PathBuf::from("/work/a.rs")
+        );
+        assert_eq!(session.files[0].base_text.as_str(), REVIEW_TWO_HUNK_BASE);
+        assert_eq!(
+            session.files[0].buffer_text.as_str(),
+            REVIEW_TWO_HUNK_BUFFER
+        );
+        assert_eq!(session.order.len(), 2);
+        assert_eq!(h.stoat.mode, "review");
+    }
+
+    #[test]
+    fn review_via_git_host_no_repo_is_noop() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.open_review();
+        assert!(h.stoat.active_workspace().review.is_none());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn review_refresh_via_git_carries_status() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let first_chunk_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
+        h.stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .unwrap()
+            .set_status(first_chunk_id, ChunkStatus::Staged);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session still present");
+        assert_eq!(session.order.len(), 2);
+        let statuses: Vec<_> = session
+            .order
+            .iter()
+            .map(|id| session.chunks.get(id).unwrap().status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![ChunkStatus::Staged, ChunkStatus::Pending],
+            "first chunk's Staged decision should survive refresh; second should default to Pending",
+        );
+    }
+
+    #[test]
+    fn review_via_git_host_multi_file() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stage_review_scenario(
+            "/work",
+            &[
+                ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+                ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+            ],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session");
+        assert_eq!(session.files.len(), 2);
+        assert_eq!(session.files[0].rel_path, "a.rs");
+        assert_eq!(session.files[1].rel_path, "b.rs");
+        assert!(session.order.len() >= 2);
+    }
+
+    #[test]
+    fn stage_scenario_with_staged_seeds_both_buckets() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario_with_staged(
+            "/work",
+            &[("a.rs", "v1\n", "v2\n")],
+            &[("b.rs", "staged\n")],
+        );
+        let repo =
+            crate::host::GitHost::discover(&*h.fake_git, std::path::Path::new("/work")).unwrap();
+        let changed = repo.changed_files();
+        assert_eq!(changed.len(), 2);
+        let mut abs_paths: Vec<_> = changed.iter().map(|f| f.path.clone()).collect();
+        abs_paths.sort();
+        assert_eq!(abs_paths[0], std::path::PathBuf::from("/work/a.rs"));
+        assert_eq!(abs_paths[1], std::path::PathBuf::from("/work/b.rs"));
+    }
+
+    #[test]
+    fn open_agent_edit_review_via_helper_builds_session() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_agent_edit_review(&[("a.rs", "old\n", "new\n"), ("b.rs", "", "added\n")]);
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("session via helper");
+        assert_eq!(session.files.len(), 2);
+    }
+
+    #[test]
+    fn open_commit_review_via_helper_builds_session() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+        h.open_commit_review("/work", "c2");
+        let session = h.stoat.active_workspace().review.as_ref().unwrap();
+        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+    }
+
+    #[test]
+    fn scan_commit_builds_session_from_commit_vs_parent() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "c2".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for commit");
+        assert_eq!(session.files.len(), 1);
+        assert_eq!(session.files[0].base_text.as_str(), "v1\n");
+        assert_eq!(session.files[0].buffer_text.as_str(), "v2\n");
+        match &session.source {
+            ReviewSource::Commit { sha, .. } => {
+                assert_eq!(sha, "c2")
+            },
+            other => panic!("unexpected source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_commit_root_diffs_against_empty_tree() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("root", &[("a.rs", "initial\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "root".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for root commit");
+        assert_eq!(session.files[0].base_text.as_str(), "");
+        assert_eq!(session.files[0].buffer_text.as_str(), "initial\n");
+    }
+
+    #[test]
+    fn scan_commit_range_spans_multiple_commits() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n"), ("b.rs", "new\n")])
+            .commit_with_parent(
+                "c3",
+                "c2",
+                &[("a.rs", "v3\n"), ("b.rs", "new\n"), ("c.rs", "added\n")],
+            );
+
+        let action = stoat_action::OpenReviewCommitRange {
+            workdir: std::path::PathBuf::from("/work"),
+            from: "c1".into(),
+            to: "c3".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for range");
+        let rels: Vec<_> = session.files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"a.rs"), "a.rs must be in range: {rels:?}");
+        assert!(rels.contains(&"b.rs"), "b.rs must be in range: {rels:?}");
+        assert!(rels.contains(&"c.rs"), "c.rs must be in range: {rels:?}");
+    }
+
+    #[test]
+    fn scan_agent_edits_builds_session_without_repo() {
+        use std::sync::Arc;
+        let mut h = TestHarness::with_size(80, 14);
+        let action = stoat_action::OpenReviewAgentEdits {
+            edits: vec![
+                stoat_action::AgentEdit {
+                    path: std::path::PathBuf::from("/proposed/a.rs"),
+                    base_text: Arc::new("old text\n".to_string()),
+                    proposed_text: Arc::new("new text\n".to_string()),
+                },
+                stoat_action::AgentEdit {
+                    path: std::path::PathBuf::from("/proposed/b.rs"),
+                    base_text: Arc::new("".to_string()),
+                    proposed_text: Arc::new("added\n".to_string()),
+                },
+            ],
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session for agent edits");
+        assert_eq!(session.files.len(), 2);
+        assert_eq!(session.files[0].base_text.as_str(), "old text\n");
+        assert_eq!(session.files[0].buffer_text.as_str(), "new text\n");
+        assert_eq!(session.files[1].base_text.as_str(), "");
+        assert_eq!(session.files[1].buffer_text.as_str(), "added\n");
+    }
+
+    #[test]
+    fn review_refresh_recomputes_commit_source() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\nline2\nline3\nline4\nline5\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "VX\nline2\nline3\nline4\nline5\n")]);
+
+        let action = stoat_action::OpenReviewCommit {
+            workdir: std::path::PathBuf::from("/work"),
+            sha: "c2".into(),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        h.dispatch_review_refresh();
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session survives refresh");
+        assert_eq!(
+            session.chunks[&session.order[0]].status,
+            ChunkStatus::Staged
+        );
+    }
 }

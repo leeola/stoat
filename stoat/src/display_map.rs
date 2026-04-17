@@ -1307,4 +1307,87 @@ mod tests {
 
         assert_eq!(from_chunks, from_lines);
     }
+
+    #[test]
+    fn snapshot_open_rust_file_highlights() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(
+            &h,
+            "sample.rs",
+            "fn main() {\n    let x = \"hi\";\n}\n",
+        );
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_rust_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_json_file_highlights() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "sample.json", "{\n  \"a\": 1\n}\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_json_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_markdown_file_highlights() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "sample.md", "# Title\n\nbody\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_markdown_file_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_markdown_file_with_bold_inline() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "bold.md", "# Title\n\n**bold** text\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_markdown_file_with_bold_inline");
+    }
+
+    #[test]
+    fn snapshot_open_unknown_extension_no_highlights() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "sample.txt", "fn main() {}\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_unknown_extension_no_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_nested_captures() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "nested.rs", "fn main() { \"a\\nb\"; }\n");
+
+        h.open_file(&path);
+        h.assert_snapshot("snapshot_open_rust_file_nested_captures");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_then_edit_highlights() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = crate::test_harness::write_file(&h, "edit.rs", "fn a() {}\n");
+
+        h.open_file(&path);
+        h.edit_focused(8..8, " let x = 1; ");
+        h.assert_snapshot("snapshot_open_rust_file_then_edit_highlights");
+    }
+
+    #[test]
+    fn snapshot_open_rust_file_with_fold() {
+        use stoat_text::Point;
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let path = crate::test_harness::write_file(
+            &h,
+            "folded.rs",
+            "fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\n",
+        );
+
+        h.open_file(&path);
+        h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
+        h.assert_snapshot("snapshot_open_rust_file_with_fold");
+    }
 }

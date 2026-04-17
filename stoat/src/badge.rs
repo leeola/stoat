@@ -226,4 +226,214 @@ mod tests {
             assert_eq!(tray.tray(anchor).max_visible, 3);
         }
     }
+
+    use crate::{
+        host::{AgentMessage, FakeClaudeCode},
+        test_harness::{claude::ResultSpec, setup_hidden_claude_session, TestHarness},
+    };
+
+    #[test]
+    fn badge_appears_when_not_visible() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        assert!(h.claude_badge_state(id).is_none());
+
+        h.claude().get_session(id).thinking("let me think");
+
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id), Some("thinking".into()));
+    }
+
+    #[test]
+    fn badge_detail_updates_with_tool() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("hmm");
+        assert_eq!(h.claude_badge_detail(id), Some("thinking".into()));
+
+        h.claude()
+            .get_session(id)
+            .read("/tmp/example.txt")
+            .pending();
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id), Some("Read".into()));
+
+        h.claude().get_session(id).text("done reading");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id), None);
+    }
+
+    #[test]
+    fn badge_completes_on_result() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("work");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 1000,
+            num_turns: 1,
+        });
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+        assert_eq!(h.claude_badge_detail(id), None);
+    }
+
+    #[test]
+    fn badge_errors_on_error() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude()
+            .get_session(id)
+            .thinking("work")
+            .error("rate limit");
+
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
+        assert_eq!(h.claude_badge_detail(id), Some("rate limit".into()));
+    }
+
+    #[test]
+    fn badge_removed_when_session_shown() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("work");
+        assert!(h.claude_badge_state(id).is_some());
+
+        h.show_claude_session(id);
+        assert!(h.claude_badge_state(id).is_none());
+    }
+
+    #[test]
+    fn no_badge_when_visible() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.show_claude_session(id);
+
+        h.claude().get_session(id).thinking("work");
+        assert!(h.claude_badge_state(id).is_none());
+    }
+
+    #[test]
+    fn badge_reappears_after_hide() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.show_claude_session(id);
+        h.claude().get_session(id).thinking("work");
+        assert!(h.claude_badge_state(id).is_none());
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+
+        h.claude()
+            .get_session(id)
+            .edit("/tmp/file.txt", "old", "new")
+            .pending();
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id), Some("Edit".into()));
+    }
+
+    #[test]
+    fn init_and_unknown_inert() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).init();
+        assert!(h.claude_badge_state(id).is_none());
+
+        h.claude()
+            .get_session(id)
+            .raw(AgentMessage::Unknown { raw: "{}".into() });
+        assert!(h.claude_badge_state(id).is_none());
+    }
+
+    #[test]
+    fn multiple_sessions_independent() {
+        let mut h = TestHarness::default();
+        let id_a = setup_hidden_claude_session(&mut h);
+        let id_b = h.create_background_session(FakeClaudeCode::new());
+
+        h.claude().get_session(id_a).thinking("a");
+        h.claude().get_session(id_b).bash("echo hi").pending();
+
+        assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id_a), Some("thinking".into()));
+        assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id_b), Some("Bash".into()));
+
+        h.claude().get_session(id_a).result();
+        assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Complete));
+        assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
+    }
+
+    #[test]
+    fn snapshot_badge_active_styled() {
+        let mut h = TestHarness::with_size(40, 10);
+        let id = setup_hidden_claude_session(&mut h);
+        h.claude().get_session(id).thinking("work");
+        h.assert_snapshot("badge_active");
+    }
+
+    #[test]
+    fn snapshot_badge_complete_styled() {
+        let mut h = TestHarness::with_size(40, 10);
+        let id = setup_hidden_claude_session(&mut h);
+        h.claude()
+            .get_session(id)
+            .thinking("work")
+            .result_with(ResultSpec {
+                cost_usd: 0.01,
+                duration_ms: 1000,
+                num_turns: 1,
+            });
+        h.assert_snapshot("badge_complete");
+    }
+
+    #[test]
+    fn result_without_prior_activity_creates_badge() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+    }
+
+    #[test]
+    fn error_without_prior_activity_creates_badge() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).error("failed");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
+        assert_eq!(h.claude_badge_detail(id), Some("failed".into()));
+    }
+
+    #[test]
+    fn visible_session_result_removes_badge() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("work");
+        assert!(h.claude_badge_state(id).is_some());
+
+        h.show_claude_session(id);
+        assert!(h.claude_badge_state(id).is_none());
+
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
+        assert!(h.claude_badge_state(id).is_none());
+    }
 }

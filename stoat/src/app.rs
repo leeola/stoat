@@ -3010,4 +3010,23 @@ mod tests {
         assert!(prior.is_none(), "successful parse must consume the prior");
         assert!(prior_map.is_none());
     }
+
+    #[test]
+    fn snapshot_initial_plain() {
+        let mut h = Stoat::test();
+        h.assert_snapshot("initial_plain");
+    }
+
+    #[test]
+    fn snapshot_initial_styled() {
+        let mut h = Stoat::test();
+        h.assert_snapshot("initial");
+    }
+
+    #[test]
+    fn snapshot_space_mode() {
+        let mut h = Stoat::test();
+        h.type_keys("space");
+        h.assert_snapshot("space_mode");
+    }
 }

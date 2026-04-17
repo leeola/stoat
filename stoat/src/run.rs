@@ -250,4 +250,70 @@ mod tests {
         assert_eq!(parse_sentinel_line("__STOAT_abc123__ 127"), Some(127));
         assert_eq!(parse_sentinel_line("not a sentinel"), None);
     }
+
+    #[test]
+    fn snapshot_run_empty() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.open_run();
+        h.assert_snapshot("run_empty");
+    }
+
+    #[test]
+    fn snapshot_run_typed_input() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.open_run();
+        h.type_text("echo hello");
+        h.assert_snapshot("run_typed_input");
+    }
+
+    #[test]
+    fn snapshot_run_output() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("echo hello");
+        h.inject_run_output(id, b"hello\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot("run_output");
+    }
+
+    #[test]
+    fn snapshot_run_colored_output() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("ls --color");
+        h.inject_run_output(id, b"\x1b[32mgreen\x1b[0m \x1b[31mred\x1b[0m\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot("run_colored_output");
+    }
+
+    #[test]
+    fn snapshot_run_exit_code() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("false");
+        h.inject_run_done(id, 1);
+        h.assert_snapshot("run_exit_code");
+    }
+
+    #[test]
+    fn snapshot_run_alt_screen_error() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let id = h.open_run();
+        h.submit_run("vim");
+        h.inject_run_output(id, b"\x1b[?1049h");
+        h.assert_snapshot("run_alt_screen_error");
+    }
+
+    #[test]
+    fn snapshot_run_multiple_blocks() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 16);
+        let id = h.open_run();
+        h.submit_run("echo one");
+        h.inject_run_output(id, b"one\n");
+        h.inject_run_done(id, 0);
+        h.submit_run("echo two");
+        h.inject_run_output(id, b"two\n");
+        h.inject_run_done(id, 0);
+        h.assert_snapshot("run_multiple_blocks");
+    }
 }

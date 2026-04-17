@@ -549,4 +549,138 @@ mod tests {
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);
     }
+
+    use crate::test_harness::TestHarness;
+
+    #[test]
+    fn snapshot_review_addition() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn a() {}\nfn b() {}\n",
+            "fn a() {}\nfn new() {}\nfn b() {}\n",
+        )]);
+        h.assert_snapshot("review_addition");
+    }
+
+    #[test]
+    fn snapshot_review_deletion() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn a() {}\nfn old() {}\nfn b() {}\n",
+            "fn a() {}\nfn b() {}\n",
+        )]);
+        h.assert_snapshot("review_deletion");
+    }
+
+    #[test]
+    fn snapshot_review_modification() {
+        let mut h = TestHarness::with_size(80, 10);
+        h.open_review_from_texts(&[(
+            "test.rs",
+            "fn main() {\n    let x = 1;\n}\n",
+            "fn main() {\n    let x = 2;\n}\n",
+        )]);
+        h.assert_snapshot("review_modification");
+    }
+
+    #[test]
+    fn snapshot_review_multi_file() {
+        let mut h = TestHarness::with_size(80, 16);
+        h.open_review_from_texts(&[
+            ("a.rs", "fn a() {}\n", "fn a_renamed() {}\n"),
+            ("b.rs", "let x = 1;\n", "let x = 1;\nlet y = 2;\n"),
+        ]);
+        h.assert_snapshot("review_multi_file");
+    }
+
+    #[test]
+    fn snapshot_review_move_straight() {
+        let mut h = TestHarness::with_size(100, 20);
+        let base = "\
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+
+fn beta() {
+    let p = 10;
+    let q = 20;
+    let r = 30;
+}
+";
+        let rhs = "\
+fn beta() {
+    let p = 10;
+    let q = 20;
+    let r = 30;
+}
+
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+";
+        h.open_review_from_texts(&[("swap.rs", base, rhs)]);
+        h.assert_snapshot("review_move_straight");
+    }
+
+    #[test]
+    fn snapshot_review_move_cross_indent() {
+        let mut h = TestHarness::with_size(100, 20);
+        let base = "\
+fn outer() {
+    let relocated = compute(arg1, arg2, arg3);
+}
+
+fn wrapper() {
+    println!(\"hello\");
+}
+";
+        let rhs = "\
+fn outer() {}
+
+fn wrapper() {
+    println!(\"hello\");
+    let relocated = compute(arg1, arg2, arg3);
+}
+";
+        h.open_review_from_texts(&[("nest.rs", base, rhs)]);
+        h.assert_snapshot("review_move_cross_indent");
+    }
+
+    #[test]
+    fn snapshot_review_move_consolidation() {
+        let mut h = TestHarness::with_size(100, 24);
+        let base = "\
+fn first() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+
+fn second() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+";
+        let rhs = "\
+fn shared() {
+    let temp = heavy_computation(a, b, c);
+    save(temp);
+}
+
+fn first() {
+    shared();
+}
+
+fn second() {
+    shared();
+}
+";
+        h.open_review_from_texts(&[("consolidate.rs", base, rhs)]);
+        h.assert_snapshot("review_move_consolidation");
+    }
 }
