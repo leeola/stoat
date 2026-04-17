@@ -359,7 +359,7 @@ mod tests {
     }
 
     fn staged_blob(workdir: &Path, rel: &str) -> Option<String> {
-        let repo = git2::Repository::open(workdir).ok()?;
+        let repo = Repository::open(workdir).ok()?;
         let mut index = repo.index().ok()?;
         index.read(true).ok()?;
         let entry = index.get_path(Path::new(rel), 0)?;

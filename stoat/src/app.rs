@@ -2083,7 +2083,7 @@ fn render_claude_pane(
         |t: &str, style: Style, width: usize, prefix: &str| -> Vec<(Style, String)> {
             let inner = width.saturating_sub(prefix.chars().count());
             let mut block = Vec::new();
-            let mut push_line = |block: &mut Vec<(Style, String)>, body: &str| {
+            let push_line = |block: &mut Vec<(Style, String)>, body: &str| {
                 if body.is_empty() {
                     block.push((style, prefix.trim_end().to_string()));
                 } else {
@@ -2685,8 +2685,6 @@ fn render_editor(
 /// is rendered in the default style so only the structural diff is
 /// visually emphasised (matching difftastic behaviour).
 fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
-    use crate::review_session::ChunkStatus;
-
     let snapshot = editor.display_map.snapshot();
     let view = match editor.review_view.as_ref() {
         Some(v) => v,

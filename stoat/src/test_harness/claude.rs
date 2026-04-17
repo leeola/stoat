@@ -14,8 +14,8 @@ use crate::{
     host::{ClaudeSessionId, FakeClaudeCode},
     test_harness::TestHarness,
 };
-pub use handle::{ClaudeSessionHandle, ToolUseHandle};
-pub use spec::{ResultSpec, SessionSpec, StreamOpts};
+pub use handle::ClaudeSessionHandle;
+pub use spec::{ResultSpec, SessionSpec};
 
 /// Facade returned by [`TestHarness::claude`]. Wraps a borrow of the
 /// parent harness; re-borrowed per call so handles stay short-lived.

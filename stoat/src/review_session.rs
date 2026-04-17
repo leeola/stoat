@@ -55,6 +55,7 @@ pub(crate) enum ReviewSource {
     AgentEdits {
         edits: Arc<Vec<AgentEditProposal>>,
     },
+    #[allow(dead_code)]
     InMemory {
         files: Arc<Vec<InMemoryFile>>,
     },
@@ -70,6 +71,7 @@ pub(crate) struct AgentEditProposal {
     pub proposed_text: Arc<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct InMemoryFile {
     pub path: PathBuf,
@@ -79,6 +81,7 @@ pub(crate) struct InMemoryFile {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ReviewChunk {
+    #[allow(dead_code)]
     pub id: ReviewChunkId,
     pub file_index: usize,
     pub chunk_index_in_file: usize,
@@ -86,9 +89,11 @@ pub(crate) struct ReviewChunk {
     /// 0-based half-open row range in the buffer (RHS) text. Empty for
     /// pure-deletion chunks; callers scrolling to a chunk should fall
     /// back to `base_line_range` in that case.
+    #[allow(dead_code)]
     pub buffer_line_range: Range<u32>,
     /// 0-based half-open row range in the base (LHS) text.
     pub base_line_range: Range<u32>,
+    #[allow(dead_code)]
     pub buffer_byte_range: Range<usize>,
     pub base_byte_range: Range<usize>,
     pub status: ChunkStatus,
@@ -186,15 +191,6 @@ impl ReviewViewState {
         }
         self.current_chunk = session.cursor.current;
         self.session_version = session.version;
-    }
-
-    /// Returns the chunk id owning the given display row, if any. O(log n).
-    pub(crate) fn chunk_at_row(&self, row: u32) -> Option<ReviewChunkId> {
-        let idx = self
-            .chunk_row_starts
-            .partition_point(|(_, start)| *start <= row)
-            .checked_sub(1)?;
-        Some(self.chunk_row_starts[idx].0)
     }
 
     /// Returns the (chunk_id, status) for the given display row, if any.
@@ -304,10 +300,12 @@ impl ReviewSession {
         chunk_ids
     }
 
+    #[allow(dead_code)]
     pub(crate) fn chunk(&self, id: ReviewChunkId) -> Option<&ReviewChunk> {
         self.chunks.get(&id)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn current(&self) -> Option<&ReviewChunk> {
         self.cursor.current.and_then(|id| self.chunks.get(&id))
     }
@@ -750,9 +748,20 @@ mod tests {
         let view = ReviewViewState::from_session(&s);
         let first_chunk_len = s.chunks[&ids[0]].hunk.rows.len() as u32;
 
-        assert_eq!(view.chunk_at_row(0), Some(ids[0]));
-        assert_eq!(view.chunk_at_row(first_chunk_len - 1), Some(ids[0]));
-        assert_eq!(view.chunk_at_row(first_chunk_len), Some(ids[1]));
+        assert_eq!(
+            view.chunk_and_status_at_row(0).map(|(id, _)| id),
+            Some(ids[0])
+        );
+        assert_eq!(
+            view.chunk_and_status_at_row(first_chunk_len - 1)
+                .map(|(id, _)| id),
+            Some(ids[0]),
+        );
+        assert_eq!(
+            view.chunk_and_status_at_row(first_chunk_len)
+                .map(|(id, _)| id),
+            Some(ids[1]),
+        );
 
         assert_eq!(view.row_of_chunk(ids[0]), Some(0));
         assert_eq!(view.row_of_chunk(ids[1]), Some(first_chunk_len));

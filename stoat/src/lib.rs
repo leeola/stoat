@@ -10,7 +10,6 @@ pub mod display_map;
 mod editor_state;
 pub mod host;
 pub mod keymap;
-mod move_index;
 pub mod multi_buffer;
 pub mod pane;
 mod review;

@@ -230,6 +230,24 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Record `rel_path` as deleted in the working tree: present in HEAD,
+    /// absent from the filesystem. Mirrors `git status` reporting a deleted
+    /// path. Does not write to any attached [`FakeFs`]; callers that
+    /// previously seeded the file there should remove it themselves.
+    pub fn deleted(&mut self, rel_path: impl AsRef<Path>, head: &str) -> &mut Self {
+        let rel = rel_path.as_ref().to_path_buf();
+        let abs = self.workdir.join(&rel);
+        self.head_file(&rel, head);
+        self.mutate_repo(|state| {
+            state.changed.retain(|f| f.path != abs);
+            state.changed.push(ChangedFile {
+                path: abs,
+                staged: false,
+            });
+        });
+        self
+    }
+
     /// Seed a root (no-parent) commit identified by `sha` with the given
     /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
     /// are stored as the commit's full tree snapshot.

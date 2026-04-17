@@ -135,7 +135,7 @@ impl TestHarness {
 
     /// Set the status of the chunk at `order_index` in the active review
     /// session. Panics if no session is open or the index is out of range.
-    pub fn set_review_status(
+    pub(crate) fn set_review_status(
         &mut self,
         order_index: usize,
         status: crate::review_session::ChunkStatus,
@@ -1662,6 +1662,7 @@ fn second() {
         host::{AgentMessage, ClaudeSessionId, FakeClaudeCode},
         test_harness::claude::ResultSpec,
     };
+    use stoat_config::ClaudePlacement;
 
     /// Badge tests need a non-visible Claude session: opened, moved into
     /// the right dock, then toggled through Minimized to Hidden. The badge
@@ -1721,10 +1722,7 @@ fn second() {
             duration_ms: 1000,
             num_turns: 1,
         });
-        assert_eq!(
-            h.claude_badge_state(id),
-            Some(crate::badge::BadgeState::Complete)
-        );
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
         assert_eq!(h.claude_badge_detail(id), None);
     }
 
@@ -1738,10 +1736,7 @@ fn second() {
             .thinking("work")
             .error("rate limit");
 
-        assert_eq!(
-            h.claude_badge_state(id),
-            Some(crate::badge::BadgeState::Error)
-        );
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
         assert_eq!(h.claude_badge_detail(id), Some("rate limit".into()));
     }
 
@@ -1819,10 +1814,7 @@ fn second() {
 
         // Complete session A, B stays active.
         h.claude().get_session(id_a).result();
-        assert_eq!(
-            h.claude_badge_state(id_a),
-            Some(crate::badge::BadgeState::Complete)
-        );
+        assert_eq!(h.claude_badge_state(id_a), Some(BadgeState::Complete));
         assert_eq!(h.claude_badge_state(id_b), Some(BadgeState::Active));
     }
 
@@ -1873,7 +1865,7 @@ fn second() {
             10,
             Settings {
                 text_proto_log: None,
-                claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
+                claude_default_placement: Some(ClaudePlacement::DockRight),
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
@@ -1891,10 +1883,7 @@ fn second() {
             duration_ms: 100,
             num_turns: 1,
         });
-        assert_eq!(
-            h.claude_badge_state(id),
-            Some(crate::badge::BadgeState::Complete)
-        );
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
     }
 
     #[test]
@@ -1903,10 +1892,7 @@ fn second() {
         let id = setup_hidden_claude_session(&mut h);
 
         h.claude().get_session(id).error("failed");
-        assert_eq!(
-            h.claude_badge_state(id),
-            Some(crate::badge::BadgeState::Error)
-        );
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
         assert_eq!(h.claude_badge_detail(id), Some("failed".into()));
     }
 
@@ -2277,7 +2263,6 @@ fn second() {
         app::Stoat,
         pane::{DockSide, DockVisibility, View},
     };
-    use stoat_config::ClaudePlacement;
 
     fn claude_panes(stoat: &Stoat) -> Vec<ClaudeSessionId> {
         stoat
@@ -2817,6 +2802,45 @@ fn second() {
     }
 
     #[test]
+    fn review_apply_stages_pure_deletion_from_working_tree() {
+        use crate::review_session::ChunkStatus;
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .with_fs(&h.fake_fs)
+            .deleted("gone.txt", "a\nb\nc\n");
+        h.stoat.open_review();
+        h.settle();
+
+        {
+            let session = h
+                .stoat
+                .active_workspace()
+                .review
+                .as_ref()
+                .expect("session built from deletion");
+            assert_eq!(session.files.len(), 1);
+            assert_eq!(session.files[0].buffer_text.as_str(), "");
+            assert_eq!(session.order.len(), 1);
+            let chunk = &session.chunks[&session.order[0]];
+            assert_eq!(chunk.base_line_range, 0..3);
+            assert!(chunk.buffer_line_range.is_empty());
+        }
+
+        h.set_review_status(0, ChunkStatus::Staged);
+        h.dispatch_review_apply();
+
+        let patches = h.fake_git.applied_patches(std::path::Path::new("/work"));
+        assert_eq!(patches.len(), 1, "exactly one patch applied");
+        assert!(
+            patches[0].contains("+++ /dev/null"),
+            "deletion patch must target /dev/null, got:\n{}",
+            patches[0],
+        );
+    }
+
+    #[test]
     fn review_via_git_host_multi_file() {
         let mut h = TestHarness::with_size(80, 20);
         h.stage_review_scenario(
@@ -3181,7 +3205,7 @@ fn second() {
             .find_by_source(crate::badge::BadgeSource::Review)
             .expect("error badge");
         let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, crate::badge::BadgeState::Error);
+        assert_eq!(badge.state, BadgeState::Error);
         assert_eq!(
             badge.detail.as_deref(),
             Some("simulated backend failure"),
@@ -3243,7 +3267,7 @@ fn second() {
             .find_by_source(crate::badge::BadgeSource::Review)
             .expect("complete badge");
         let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, crate::badge::BadgeState::Complete);
+        assert_eq!(badge.state, BadgeState::Complete);
         assert!(
             badge.label.contains("applied 2"),
             "badge must report count: {}",
@@ -3267,7 +3291,7 @@ fn second() {
         let ws = h.stoat.active_workspace();
         let focused = ws.panes.focus();
         let editor_id = match ws.panes.pane(focused).view {
-            crate::pane::View::Editor(id) => id,
+            View::Editor(id) => id,
             _ => panic!("focused pane is not an editor"),
         };
         let editor = ws.editors.get(editor_id).unwrap();

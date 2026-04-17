@@ -434,8 +434,7 @@ fn changes_to_hunks(
     // Group Lhs/Rhs Replaced changes by pair_id so interleaved orderings
     // collapse into one Modified hunk keyed on the stable pair identifier
     // rather than positional adjacency.
-    let mut by_pair: std::collections::HashMap<u32, (Option<usize>, Option<usize>)> =
-        std::collections::HashMap::new();
+    let mut by_pair: HashMap<u32, (Option<usize>, Option<usize>)> = HashMap::new();
     for (idx, change) in changes.iter().enumerate() {
         if consumed[idx] {
             continue;

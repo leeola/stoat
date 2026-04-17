@@ -912,7 +912,15 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
     for file in &changed {
         let buffer_text = match read_string_via_host(&*stoat.fs_host, &file.path) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                tracing::warn!(
+                    path = %file.path.display(),
+                    error = %e,
+                    "scan_working_tree: skip file",
+                );
+                continue;
+            },
         };
         let base_text = repo.head_content(&file.path).unwrap_or_default();
         let lang = stoat.language_registry.for_path(&file.path);
@@ -1023,7 +1031,7 @@ fn build_session_from_trees(
     base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
     new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
 ) -> Option<ReviewSession> {
-    let mut paths: std::collections::BTreeSet<&std::path::Path> = std::collections::BTreeSet::new();
+    let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
     for p in base_tree.keys() {
         paths.insert(p.as_path());
     }

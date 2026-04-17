@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn recv_awaits_until_pushed() {
         rt().block_on(async {
-            let agent = std::sync::Arc::new(FakeClaudeCode::new());
+            let agent = Arc::new(FakeClaudeCode::new());
             let agent_for_push = agent.clone();
 
             let push_task = tokio::spawn(async move {
