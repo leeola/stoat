@@ -7,7 +7,7 @@
 //! of a file's chunks independently.
 
 use crate::{
-    review::{ReviewRow, ReviewSide},
+    review::{line_count, ReviewRow, ReviewSide},
     review_session::{ReviewChunk, ReviewFile},
 };
 use std::path::Path;
@@ -186,18 +186,6 @@ fn last_row_with_right(rows: &[ReviewRow]) -> Option<usize> {
         .rev()
         .find(|(_, r)| row_right(r).is_some())
         .map(|(i, _)| i)
-}
-
-fn line_count(text: &str) -> u32 {
-    if text.is_empty() {
-        return 0;
-    }
-    let newlines = text.bytes().filter(|&b| b == b'\n').count() as u32;
-    if text.ends_with('\n') {
-        newlines
-    } else {
-        newlines + 1
-    }
 }
 
 fn touches_base_eof(side: &ReviewSide, base_total: u32) -> bool {

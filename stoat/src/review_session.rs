@@ -1,6 +1,6 @@
 use crate::{
     editor_state::EditorId,
-    review::{extract_review_hunks, ReviewHunk, ReviewRow},
+    review::{extract_review_hunks, line_byte_offsets, split_lines, ReviewHunk, ReviewRow},
 };
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -31,27 +31,28 @@ impl ChunkStatus {
     }
 }
 
-/// Provenance of the content under review. Only `WorkingTree` and `InMemory`
-/// resolve today; the other variants are slots reserved for future work
-/// (commit review, commit-range stepping, agent-proposed edits) and are
-/// matched at the resolver layer, which returns `NotImplemented` for them.
+/// Provenance of the content under review.
+///
+/// - [`ReviewSource::WorkingTree`]: git index vs working tree of `workdir`.
+/// - [`ReviewSource::Commit`]: commit tree vs its parent (empty tree for a root commit).
+/// - [`ReviewSource::CommitRange`]: `from..=to`, diff between the trees at the two commits,
+///   inclusive of `to`.
+/// - [`ReviewSource::AgentEdits`]: in-memory edit proposals; no repo required.
+/// - [`ReviewSource::InMemory`]: test-only placeholder; not rescannable.
 #[derive(Clone, Debug)]
 pub(crate) enum ReviewSource {
     WorkingTree {
         workdir: PathBuf,
     },
-    #[allow(dead_code)]
     Commit {
         workdir: PathBuf,
         sha: String,
     },
-    #[allow(dead_code)]
     CommitRange {
         workdir: PathBuf,
         from: String,
         to: String,
     },
-    #[allow(dead_code)]
     AgentEdits {
         edits: Arc<Vec<AgentEditProposal>>,
     },
@@ -255,8 +256,8 @@ impl ReviewSession {
         let hunks = extract_review_hunks(language.as_ref(), &base_text, &buffer_text, 3);
         let file_index = self.files.len();
 
-        let base_offsets = line_byte_offsets(&base_text);
-        let buffer_offsets = line_byte_offsets(&buffer_text);
+        let base_offsets = line_byte_offsets(&split_lines(&base_text));
+        let buffer_offsets = line_byte_offsets(&split_lines(&buffer_text));
 
         let mut chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
         for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
@@ -427,23 +428,6 @@ pub(crate) struct ChunkIdentity {
     pub base_line_start: u32,
     pub base_line_end: u32,
     pub content_hash: u64,
-}
-
-fn line_byte_offsets(text: &str) -> Vec<(usize, usize)> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut offsets = Vec::new();
-    let mut pos = 0usize;
-    for line in text.split('\n') {
-        let end = pos + line.len();
-        offsets.push((pos, end));
-        pos = end + 1;
-    }
-    if text.ends_with('\n') && !offsets.is_empty() {
-        offsets.pop();
-    }
-    offsets
 }
 
 fn lines_to_bytes(offsets: &[(usize, usize)], lines: &Range<u32>) -> Range<usize> {

@@ -82,7 +82,7 @@ pub(crate) fn extract_review_hunks(
     extract_hunks_with_context(&all_rows, context)
 }
 
-fn split_lines(text: &str) -> Vec<&str> {
+pub(crate) fn split_lines(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -91,6 +91,18 @@ fn split_lines(text: &str) -> Vec<&str> {
         lines.pop();
     }
     lines
+}
+
+pub(crate) fn line_count(text: &str) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let newlines = text.bytes().filter(|&b| b == b'\n').count() as u32;
+    if text.ends_with('\n') {
+        newlines
+    } else {
+        newlines + 1
+    }
 }
 
 fn mark_changed_lines(lines: &[&str], changes: &[DiffChange], side: Side) -> Vec<bool> {
@@ -177,7 +189,7 @@ fn collect_spans_by(
     spans
 }
 
-fn line_byte_offsets(lines: &[&str]) -> Vec<(usize, usize)> {
+pub(crate) fn line_byte_offsets(lines: &[&str]) -> Vec<(usize, usize)> {
     let mut offsets = Vec::with_capacity(lines.len());
     let mut pos = 0usize;
     for &line in lines {
