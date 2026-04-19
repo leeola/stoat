@@ -1,11 +1,26 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{Axis, Settings, Stoat};
 use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TestScheduler;
 
+const VERSION_INFO: &str = concat!(
+    env!("STOAT_GIT_HASH"),
+    " (",
+    env!("STOAT_GIT_DIRTY"),
+    ")\n  built: ",
+    env!("STOAT_BUILD_DATE"),
+    "\n  commit: ",
+    env!("STOAT_GIT_TITLE"),
+);
+
 #[derive(Parser)]
-#[command(name = "stoat", about = "A modal text editor")]
+#[command(
+    name = "stoat",
+    about = "A modal text editor",
+    version = VERSION_INFO,
+    disable_version_flag = true,
+)]
 pub struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -17,6 +32,14 @@ pub struct Args {
     /// the stcfg `text_proto_log` setting when set.
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
     pub text_proto_log: Option<bool>,
+
+    #[arg(
+        short = 'v',
+        long = "version",
+        action = ArgAction::Version,
+        help = "Print version info",
+    )]
+    _version: Option<bool>,
 }
 
 #[derive(Subcommand)]
