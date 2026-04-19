@@ -163,7 +163,7 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::Stoat;
+    use crate::{app::Stoat, host::GitHost};
 
     /// Three-commit linear history for the working-directory path
     /// `/repo` with the oldest commit at the bottom, matching git's
@@ -243,6 +243,244 @@ mod tests {
         );
         assert_eq!(state.commits.len(), 3);
         assert!(state.reached_end);
+    }
+
+    #[test]
+    fn snapshot_commits_open_review_readonly() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        seed_history(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("o");
+        h.assert_snapshot("commits_open_review_readonly");
+    }
+
+    #[test]
+    fn close_review_from_commits_returns_to_commits_mode() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        seed_history(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("j"); // select second commit
+        h.type_keys("o"); // open review of it
+        assert_eq!(h.stoat.mode, "review");
+        let session_sha = match h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .map(|s| s.source.clone())
+        {
+            Some(crate::review_session::ReviewSource::Commit { sha, .. }) => sha,
+            other => panic!("expected Commit source, got {other:?}"),
+        };
+        assert_eq!(session_sha, "c1000002");
+        h.type_keys("q"); // close review
+        assert_eq!(h.stoat.mode, "commits");
+        let state = h
+            .stoat
+            .active_workspace()
+            .commits
+            .as_ref()
+            .expect("commits state preserved");
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn review_remove_selected_on_head_amends() {
+        use crate::review_session::ChunkStatus;
+
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("parent", "prev", &[("a.rs", "one\ntwo\nthree\n")])
+            .commit_with_parent_message(
+                "head",
+                "parent",
+                "feat: drop this hunk",
+                &[("a.rs", "one\ntwo_NEW\nthree\n")],
+            );
+        h.open_commits("/repo");
+        h.type_keys("o");
+        assert_eq!(h.stoat.mode, "review");
+
+        // Stage the only chunk then dispatch removal.
+        h.set_review_status(0, ChunkStatus::Staged);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+
+        let amends = h.fake_git().amend_history(std::path::Path::new("/repo"));
+        assert_eq!(amends.len(), 1, "one amend recorded");
+        assert_eq!(amends[0].old_head, "head");
+        assert_eq!(amends[0].new_head, "amended-head-1");
+
+        // The rewritten commit now matches its parent exactly (the only
+        // modification was reverted), so scan_commit produces no
+        // session and `close_review` bounces us back to commits mode.
+        assert!(h.stoat.active_workspace().review.is_none());
+        assert_eq!(h.stoat.mode, "commits");
+    }
+
+    #[test]
+    fn review_remove_selected_on_non_head_rewrites_chain() {
+        use crate::review_session::ChunkStatus;
+
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("c1", "init", &[("a.rs", "line1\n")])
+            .commit_with_parent_message("c2", "c1", "middle", &[("a.rs", "line1\nM\n")])
+            .commit_with_parent_message("c3", "c2", "tip", &[("a.rs", "line1\nM\nN\n")]);
+        h.open_commits("/repo");
+        h.type_keys("j"); // move to "middle"
+        assert_eq!(
+            h.stoat.active_workspace().commits.as_ref().unwrap().commits[1].sha,
+            "c2"
+        );
+        h.type_keys("o");
+        h.set_review_status(0, ChunkStatus::Staged);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+
+        // rewrite_commit produced a new tip (the fake mints deterministic
+        // shas). HEAD should now be a rewritten descendant.
+        let commits_state = h.stoat.active_workspace().commits.as_ref();
+        let top_sha = commits_state.and_then(|s| s.commits.first().map(|c| c.sha.clone()));
+        // After rewrite, commit_list isn't refreshed automatically; the
+        // repo's HEAD sha has changed though.
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        assert_eq!(
+            log.len(),
+            3,
+            "three commits remain (middle rewritten, tip cherry-picked)"
+        );
+        assert!(
+            log[0].sha.starts_with("rewritten-c3"),
+            "tip rewritten: {}",
+            log[0].sha
+        );
+        assert!(
+            log[1].sha.starts_with("rewritten-c2"),
+            "middle rewritten: {}",
+            log[1].sha
+        );
+        assert_eq!(log[2].sha, "c1", "root unchanged");
+        drop(top_sha);
+    }
+
+    #[test]
+    fn review_remove_selected_non_head_conflict_aborts() {
+        use crate::review_session::ChunkStatus;
+
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("c1", "init", &[("a.rs", "line1\n")])
+            .commit_with_parent_message("c2", "c1", "middle", &[("a.rs", "line1\nM\n")])
+            .commit_with_parent_message("c3", "c2", "tip", &[("a.rs", "line1\nM\nN\n")])
+            .simulate_conflict_at("c3");
+
+        h.open_commits("/repo");
+        h.type_keys("j"); // select "c2"
+        h.type_keys("o");
+        h.set_review_status(0, ChunkStatus::Staged);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("error badge");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert_eq!(badge.state, crate::badge::BadgeState::Error);
+        assert!(
+            badge.label.to_lowercase().contains("rewrite"),
+            "badge mentions rewrite: {}",
+            badge.label
+        );
+
+        // Original history intact; no new commits were published.
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        let shas: Vec<_> = log.iter().map(|c| c.sha.clone()).collect();
+        assert_eq!(shas, vec!["c3".to_string(), "c2".into(), "c1".into()]);
+    }
+
+    #[test]
+    fn review_remove_selected_dirty_worktree_refuses() {
+        use crate::review_session::ChunkStatus;
+
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        let workdir = std::path::PathBuf::from("/repo");
+        h.fake_git
+            .add_repo(workdir.clone())
+            .commit_with_message("parent", "prev", &[("a.rs", "base\n")])
+            .commit_with_parent_message("head", "parent", "tip", &[("a.rs", "base\nnew\n")]);
+        // Mark a file dirty so the dirty-worktree guard triggers.
+        h.fake_git
+            .add_repo(workdir.clone())
+            .unstaged_file("a.rs", "something else\n");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+
+        h.open_commits(workdir.clone());
+        h.type_keys("o");
+        h.set_review_status(0, ChunkStatus::Staged);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+
+        let amends = h.fake_git().amend_history(&workdir);
+        assert!(amends.is_empty(), "dirty worktree must refuse the amend");
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("error badge visible");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert_eq!(badge.state, crate::badge::BadgeState::Error);
+        assert!(badge.label.to_lowercase().contains("dirty"));
+    }
+
+    #[test]
+    fn review_remove_selected_nothing_staged_badges_info() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.fake_git
+            .add_repo("/repo")
+            .commit_with_message("head", "only", &[("a.rs", "only\n")]);
+        h.open_commits("/repo");
+        h.type_keys("o");
+        // No status change; dispatch anyway.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
+        assert!(h
+            .fake_git
+            .amend_history(std::path::Path::new("/repo"))
+            .is_empty());
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("info badge visible");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert!(badge.label.contains("nothing"));
+    }
+
+    #[test]
+    fn review_apply_staged_is_noop_for_commit_source() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        seed_history(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("o");
+        assert_eq!(h.stoat.mode, "review");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewApplyStaged);
+        let patches = h.fake_git().applied_patches(std::path::Path::new("/repo"));
+        assert!(
+            patches.is_empty(),
+            "commit-source review must not apply any patches to the index"
+        );
     }
 
     #[test]

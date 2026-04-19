@@ -19,7 +19,6 @@ size: 120x30
 [0m[36m│[0m[1m[36m│[0m[90m  20 [0m[31mt[0m                                                   [0m[90m│[0m[1m[36m│[0m[90m  20 [0m[32mT[0m                                                    [0m[36m│[0m
 [0m[36m│[0m                                                                                                                      [0m[36m│[0m
 [0m[36m│[0m                                                                                                                      [0m[36m│[0m
-[0m[36m│[0m                                                                                                                      [0m[36m│[0m
 [0m[36m│[0m                                                                   [0m[33m┌ review ──────────────────────────────────────────┐[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36mEsc[0m[97m   close the active review[0m                     [0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36m  q[0m[97m   close the active review[0m                     [0m[33m│[0m
@@ -32,6 +31,7 @@ size: 120x30
 [0m[36m│[0m                                                                   [0m[33m│[0m[36mSpc[0m[97m   toggle staged/unstaged for the current chunk[0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36m  S[0m[97m   skip the current chunk[0m                      [0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36m  A[0m[97m   apply staged chunks[0m                         [0m[33m│[0m
+[0m[36m│[0m                                                                   [0m[33m│[0m[36m  D[0m[97m   remove staged hunks from the reviewed commit[0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36m  r[0m[97m   rescan the review source[0m                    [0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m                    [0m[33m│[0m
 [0m[36m│[0m                                                                   [0m[33m│[0m[90m──────────────────────────────────────────────────[0m[33m│[0m

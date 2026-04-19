@@ -26,6 +26,23 @@ on key {
         g -> CommitsFirst();
         G -> CommitsLast();
         r -> CommitsRefresh();
+        o -> CommitsOpenReview();
+        Enter -> CommitsOpenReview();
+        i -> EnterRebase();
+        : -> OpenCommandPalette();
+    }
+    mode == rebase {
+        Escape -> AbortRebase();
+        q -> AbortRebase();
+        j -> RebaseNext();
+        k -> RebasePrev();
+        K -> RebaseMoveUp();
+        J -> RebaseMoveDown();
+        p -> SetRebaseOpPick();
+        s -> SetRebaseOpSquash();
+        f -> SetRebaseOpFixup();
+        d -> SetRebaseOpDrop();
+        Enter -> ExecuteRebase();
         : -> OpenCommandPalette();
     }
     mode == review {
@@ -40,6 +57,7 @@ on key {
         Space -> ReviewToggleStage();
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
+        D -> ReviewRemoveSelected();
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }

@@ -181,6 +181,19 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsFirst => commits_step(stoat, CommitStep::First),
         ActionKind::CommitsLast => commits_step(stoat, CommitStep::Last),
         ActionKind::CommitsRefresh => commits_refresh(stoat),
+        ActionKind::CommitsOpenReview => commits_open_review(stoat),
+        ActionKind::ReviewRemoveSelected => review_remove_selected(stoat),
+        ActionKind::EnterRebase => enter_rebase(stoat),
+        ActionKind::AbortRebase => abort_rebase(stoat),
+        ActionKind::ExecuteRebase => execute_rebase(stoat),
+        ActionKind::RebaseNext => rebase_move(stoat, RebaseMove::Next),
+        ActionKind::RebasePrev => rebase_move(stoat, RebaseMove::Prev),
+        ActionKind::RebaseMoveUp => rebase_move(stoat, RebaseMove::SwapUp),
+        ActionKind::RebaseMoveDown => rebase_move(stoat, RebaseMove::SwapDown),
+        ActionKind::SetRebaseOpPick => rebase_set_op(stoat, crate::host::RebaseTodoOp::Pick),
+        ActionKind::SetRebaseOpSquash => rebase_set_op(stoat, crate::host::RebaseTodoOp::Squash),
+        ActionKind::SetRebaseOpFixup => rebase_set_op(stoat, crate::host::RebaseTodoOp::Fixup),
+        ActionKind::SetRebaseOpDrop => rebase_set_op(stoat, crate::host::RebaseTodoOp::Drop),
     }
 }
 
@@ -189,6 +202,388 @@ fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
         return;
     };
     install_review_session(stoat, session);
+}
+
+#[derive(Copy, Clone, Debug)]
+enum RebaseMove {
+    Next,
+    Prev,
+    SwapUp,
+    SwapDown,
+}
+
+fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::RebaseTodoOp,
+        rebase::{RebaseEntry, RebaseState},
+    };
+
+    let Some(state) = stoat.active_workspace().commits.as_ref() else {
+        return UpdateEffect::None;
+    };
+    if state.commits.is_empty() {
+        return UpdateEffect::None;
+    }
+    let workdir = state.workdir.clone();
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        return UpdateEffect::None;
+    };
+
+    // Seed the todo oldest-first from the loaded commits (which are
+    // newest-first on the left pane). The oldest commit becomes the
+    // `onto` base; the remaining commits (newer than `onto`) form the
+    // editable todo list. Rebasing the root itself requires `--root`
+    // semantics and is out of scope for v1.
+    let mut newest_first = state.commits.clone();
+    let Some(base_commit) = newest_first.pop() else {
+        return UpdateEffect::None;
+    };
+    let onto = base_commit.sha.clone();
+    let ordered: Vec<_> = newest_first.into_iter().rev().collect();
+    if ordered.is_empty() {
+        return UpdateEffect::None;
+    }
+    let entries: Vec<RebaseEntry> = ordered
+        .into_iter()
+        .map(|commit| RebaseEntry {
+            op: RebaseTodoOp::Pick,
+            commit,
+        })
+        .collect();
+
+    let _ = repo;
+    stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
+    stoat.mode = "rebase".to_string();
+    UpdateEffect::Redraw
+}
+
+fn abort_rebase(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    if ws.rebase.take().is_none() {
+        return UpdateEffect::None;
+    }
+    stoat.mode = if stoat.active_workspace().commits.is_some() {
+        "commits".into()
+    } else {
+        "normal".into()
+    };
+    UpdateEffect::Redraw
+}
+
+fn rebase_move(stoat: &mut Stoat, step: RebaseMove) -> UpdateEffect {
+    let Some(state) = stoat.active_workspace_mut().rebase.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let moved = match step {
+        RebaseMove::Next => state.move_down(),
+        RebaseMove::Prev => state.move_up(),
+        RebaseMove::SwapUp => state.swap_up(),
+        RebaseMove::SwapDown => state.swap_down(),
+    };
+    if moved {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+fn rebase_set_op(stoat: &mut Stoat, op: crate::host::RebaseTodoOp) -> UpdateEffect {
+    let Some(state) = stoat.active_workspace_mut().rebase.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if state.set_op(op) {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        badge::{Anchor, Badge, BadgeSource, BadgeState},
+        host::RebaseError,
+    };
+
+    let (workdir, onto, todo) = {
+        let Some(state) = stoat.active_workspace().rebase.as_ref() else {
+            return UpdateEffect::None;
+        };
+        (
+            state.workdir.clone(),
+            state.onto.clone(),
+            state.to_git_todo(),
+        )
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        emit_rebase_error(stoat, "git repo not found", None);
+        return UpdateEffect::Redraw;
+    };
+    if !repo.changed_files().is_empty() {
+        emit_rebase_error(stoat, "working tree dirty: commit or stash first", None);
+        return UpdateEffect::Redraw;
+    }
+
+    let result = repo.run_rebase(&onto, &todo);
+    let ws = stoat.active_workspace_mut();
+    match result {
+        Ok(new_head) => {
+            ws.rebase = None;
+            ws.badges.remove_by_source(BadgeSource::Review);
+            ws.badges.insert(Badge {
+                source: BadgeSource::Review,
+                anchor: Anchor::BottomRight,
+                state: BadgeState::Complete,
+                label: format!(
+                    "rebase complete, HEAD at {}",
+                    &new_head[..new_head.len().min(7)]
+                ),
+                detail: None,
+            });
+            stoat.mode = if stoat.active_workspace().commits.is_some() {
+                "commits".into()
+            } else {
+                "normal".into()
+            };
+            commits_refresh(stoat);
+            UpdateEffect::Redraw
+        },
+        Err(RebaseError::Conflict { at_sha }) => {
+            emit_rebase_error(stoat, "rebase conflict", Some(format!("at {at_sha}")));
+            UpdateEffect::Redraw
+        },
+        Err(RebaseError::DirtyWorktree) => {
+            emit_rebase_error(stoat, "dirty worktree", None);
+            UpdateEffect::Redraw
+        },
+        Err(RebaseError::Backend(msg)) => {
+            emit_rebase_error(stoat, "rebase failed", Some(msg));
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+fn emit_rebase_error(stoat: &mut Stoat, label: &str, detail: Option<String>) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Error,
+        label: label.to_string(),
+        detail,
+    });
+}
+
+fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::GitApplyError,
+        review_apply::remove_chunks_from_buffer,
+        review_session::{ChunkStatus, ReviewSource},
+    };
+
+    let (workdir, sha, staged_groups, full_trees_by_file) = {
+        let Some(session) = stoat.active_workspace().review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let (workdir, sha) = match &session.source {
+            ReviewSource::Commit { workdir, sha } => (workdir.clone(), sha.clone()),
+            _ => {
+                tracing::warn!("ReviewRemoveSelected: only commit-source reviews support removal");
+                emit_review_error_badge(stoat, "remove only valid for commit reviews", None);
+                return UpdateEffect::Redraw;
+            },
+        };
+        let mut groups: std::collections::HashMap<usize, Vec<&crate::review_session::ReviewChunk>> =
+            std::collections::HashMap::new();
+        for id in &session.order {
+            if let Some(chunk) = session.chunks.get(id) {
+                if chunk.status == ChunkStatus::Staged {
+                    groups.entry(chunk.file_index).or_default().push(chunk);
+                }
+            }
+        }
+        let tree_snapshot: Vec<(usize, String, Arc<String>, Arc<String>)> = session
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                (
+                    i,
+                    f.rel_path.clone(),
+                    f.base_text.clone(),
+                    f.buffer_text.clone(),
+                )
+            })
+            .collect();
+        let groups_owned: Vec<(usize, Vec<crate::review_session::ReviewChunk>)> = groups
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().cloned().collect()))
+            .collect();
+        (workdir, sha, groups_owned, tree_snapshot)
+    };
+
+    if staged_groups.is_empty() {
+        emit_review_info_badge(stoat, "nothing staged for removal");
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        emit_review_error_badge(stoat, "git repo not found", None);
+        return UpdateEffect::Redraw;
+    };
+    if !repo.changed_files().is_empty() {
+        emit_review_error_badge(stoat, "working tree dirty: commit or stash first", None);
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(mut new_tree) = repo.commit_tree(&sha) else {
+        emit_review_error_badge(stoat, "commit tree unreadable", None);
+        return UpdateEffect::Redraw;
+    };
+
+    for (file_index, chunks) in &staged_groups {
+        let Some((_, rel_path, base_arc, buffer_arc)) = full_trees_by_file
+            .iter()
+            .find(|(i, _, _, _)| i == file_index)
+        else {
+            continue;
+        };
+        let chunk_refs: Vec<&crate::review_session::ReviewChunk> = chunks.iter().collect();
+        let new_buffer = remove_chunks_from_buffer(base_arc, buffer_arc, &chunk_refs);
+        let rel = std::path::PathBuf::from(rel_path);
+        if new_buffer.is_empty() && base_arc.is_empty() {
+            new_tree.remove(&rel);
+        } else {
+            new_tree.insert(rel, new_buffer);
+        }
+    }
+
+    // Is this commit HEAD?
+    let head_sha = repo.log_commits(None, 1).into_iter().next().map(|c| c.sha);
+    let is_head = head_sha.as_deref() == Some(sha.as_str());
+
+    if is_head {
+        match repo.amend_head(&new_tree, None) {
+            Ok(new_sha) => {
+                emit_review_complete_badge(
+                    stoat,
+                    &format!(
+                        "removed {} hunk(s), HEAD amended",
+                        staged_groups.iter().map(|(_, v)| v.len()).sum::<usize>()
+                    ),
+                );
+                reopen_review_on_commit(stoat, &workdir, &new_sha);
+            },
+            Err(GitApplyError::Backend(msg)) => {
+                emit_review_error_badge(stoat, "amend failed", Some(msg));
+            },
+        }
+    } else {
+        let descendants = repo
+            .log_commits(None, usize::MAX)
+            .into_iter()
+            .map(|c| c.sha)
+            .take_while(|candidate| candidate != &sha)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        match repo.rewrite_commit(&sha, &new_tree, None, &descendants) {
+            Ok(result) => {
+                let new_sha = result.mapping.get(&sha).cloned().unwrap_or(result.new_head);
+                let total: usize = staged_groups.iter().map(|(_, v)| v.len()).sum();
+                emit_review_complete_badge(
+                    stoat,
+                    &format!(
+                        "removed {total} hunk(s), rewrote {} commit(s)",
+                        descendants.len() + 1
+                    ),
+                );
+                reopen_review_on_commit(stoat, &workdir, &new_sha);
+            },
+            Err(GitApplyError::Backend(msg)) => {
+                emit_review_error_badge(stoat, "rewrite failed", Some(msg));
+            },
+        }
+    }
+
+    UpdateEffect::Redraw
+}
+
+fn reopen_review_on_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
+    let origin = stoat
+        .active_workspace()
+        .review
+        .as_ref()
+        .map(|s| s.origin)
+        .unwrap_or_default();
+    if let Some(mut session) = scan_commit(stoat, workdir, sha) {
+        session.origin = origin;
+        install_review_session(stoat, session);
+    } else {
+        // Rewritten commit has no diffs vs. parent. Drop the review;
+        // `close_review` routes back to commits mode if that's where
+        // the user launched from.
+        close_review(stoat);
+    }
+}
+
+fn emit_review_complete_badge(stoat: &mut Stoat, label: &str) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Complete,
+        label: label.to_string(),
+        detail: None,
+    });
+}
+
+fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Active,
+        label: label.to_string(),
+        detail: None,
+    });
+}
+
+fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Option<String>) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Error,
+        label: label.to_string(),
+        detail,
+    });
+}
+
+fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::review_session::ReviewOrigin;
+
+    let Some((workdir, sha)) = stoat.active_workspace().commits.as_ref().and_then(|s| {
+        s.selected_sha()
+            .map(|sha| (s.workdir.clone(), sha.to_string()))
+    }) else {
+        return UpdateEffect::None;
+    };
+    let Some(mut session) = scan_commit(stoat, &workdir, &sha) else {
+        return UpdateEffect::None;
+    };
+    session.origin = ReviewOrigin::FromCommits;
+    install_review_session(stoat, session);
+    UpdateEffect::Redraw
 }
 
 fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
@@ -488,16 +883,21 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
 }
 
 fn close_review(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::badge::BadgeSource;
+    use crate::{badge::BadgeSource, review_session::ReviewOrigin};
 
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.review.take() else {
         return UpdateEffect::None;
     };
+    let origin = session.origin;
     ws.badges.remove_by_source(BadgeSource::Review);
+    let next_mode = match origin {
+        ReviewOrigin::FromCommits if ws.commits.is_some() => "commits",
+        _ => "normal",
+    };
     let Some(review_editor_id) = session.view_editor else {
-        stoat.mode = "normal".to_string();
+        stoat.mode = next_mode.to_string();
         return UpdateEffect::Redraw;
     };
 
@@ -524,7 +924,7 @@ fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         ws.editors.remove(review_editor_id);
     }
 
-    stoat.mode = "normal".to_string();
+    stoat.mode = next_mode.to_string();
     UpdateEffect::Redraw
 }
 

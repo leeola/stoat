@@ -9,6 +9,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
     pane::{DockId, DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, View},
+    rebase::RebaseState,
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
@@ -61,6 +62,10 @@ pub struct Workspace {
     /// populated while the user is in `"commits"` mode and dropped on
     /// `CloseCommits`.
     pub(crate) commits: Option<CommitListState>,
+    /// Active rebase plan (if any). Populated when the user enters
+    /// `"rebase"` mode from the commit list; dropped on abort or after
+    /// successful execution.
+    pub(crate) rebase: Option<RebaseState>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -93,6 +98,7 @@ impl Workspace {
             chats: HashMap::new(),
             review: None,
             commits: None,
+            rebase: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }

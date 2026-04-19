@@ -85,3 +85,16 @@ define_action!(
     "Discard the loaded commits and preview caches and reload the \
      first page from HEAD. Use after external branch changes."
 );
+
+define_action!(
+    CommitsOpenReviewDef,
+    CommitsOpenReview,
+    "CommitsOpenReview",
+    ActionKind::CommitsOpenReview,
+    "open the selected commit in review",
+    "Open a review session over the currently selected commit. The \
+     session is read-only (ReviewApplyStaged is a no-op for commit \
+     sources); use the separate `ReviewRemoveSelected` action to \
+     actually remove staged hunks from the commit. Closing the review \
+     returns to commits mode."
+);

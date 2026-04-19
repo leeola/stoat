@@ -10,10 +10,11 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-        CommitFileChange, CommitFileChangeKind, FsHost, GitHost, LocalFs, LocalGit,
+        CommitFileChange, CommitFileChangeKind, FsHost, GitHost, LocalFs, LocalGit, RebaseTodoOp,
     },
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{DockPanel, DockVisibility, FocusTarget, Pane, View},
+    rebase::RebaseState,
     review::ReviewRow,
     review_session::ReviewSession,
     run::{PtyNotification, RunId, RunState},
@@ -977,17 +978,19 @@ impl Stoat {
         ws.layout(self.size);
 
         let commits_mode = self.mode == "commits";
-        let commits_focused_pane = if commits_mode && ws.commits.is_some() {
-            Some(ws.panes.focus())
-        } else {
-            None
-        };
+        let rebase_mode = self.mode == "rebase";
+        let overlay_pane =
+            if (commits_mode && ws.commits.is_some()) || (rebase_mode && ws.rebase.is_some()) {
+                Some(ws.panes.focus())
+            } else {
+                None
+            };
 
         // Render split panes first so docks overlay on top.
         let split_focused = ws.panes.focus();
         for (id, pane) in ws.panes.split_panes() {
             let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
-            if Some(id) == commits_focused_pane {
+            if Some(id) == overlay_pane {
                 continue;
             }
             render_pane(
@@ -1004,11 +1007,17 @@ impl Stoat {
             );
         }
 
-        if let Some(pane_id) = commits_focused_pane {
+        if let Some(pane_id) = overlay_pane {
             let pane = ws.panes.pane(pane_id);
             let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
-            if let Some(state) = ws.commits.as_mut() {
-                render_commits(pane, is_focused, state, &mut buf);
+            if commits_mode {
+                if let Some(state) = ws.commits.as_mut() {
+                    render_commits(pane, is_focused, state, &mut buf);
+                }
+            } else if rebase_mode {
+                if let Some(state) = ws.rebase.as_ref() {
+                    render_rebase(pane, is_focused, state, &mut buf);
+                }
             }
         }
 
@@ -1280,7 +1289,7 @@ fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
     }
 }
 
-const PRIMARY_MODES: &[&str] = &["normal", "insert", "run", "commits"];
+const PRIMARY_MODES: &[&str] = &["normal", "insert", "run", "commits", "rebase"];
 
 fn action_display_desc(action: &ResolvedAction) -> String {
     if action.name == "SetMode" {
@@ -2718,6 +2727,107 @@ fn render_editor(
 /// Changed tokens within a line are highlighted; the rest of the line
 /// is rendered in the default style so only the structural diff is
 /// visually emphasised (matching difftastic behaviour).
+fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut Buffer) {
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(pane.area);
+    block.render(pane.area, buf);
+
+    if inner.width < 10 || inner.height == 0 {
+        return;
+    }
+
+    let sel_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::REVERSED);
+    let pick_style = Style::default().fg(Color::Green);
+    let squash_style = Style::default().fg(Color::Yellow);
+    let fixup_style = Style::default().fg(Color::Yellow);
+    let drop_style = Style::default().fg(Color::Red);
+    let summary_style = Style::default().fg(Color::White);
+    let sha_style = Style::default().fg(Color::Cyan);
+
+    let help_rows: u16 = 2;
+    let list_height = inner.height.saturating_sub(help_rows);
+
+    for (i, entry) in state.todo.iter().take(list_height as usize).enumerate() {
+        let y = inner.y + i as u16;
+        let is_selected = i == state.selected;
+        if is_selected {
+            for x in inner.x..inner.x + inner.width {
+                buf[(x, y)].set_style(sel_style);
+            }
+        }
+        let (label, op_style) = match entry.op {
+            RebaseTodoOp::Pick => ("pick  ", pick_style),
+            RebaseTodoOp::Squash => ("squash", squash_style),
+            RebaseTodoOp::Fixup => ("fixup ", fixup_style),
+            RebaseTodoOp::Drop => ("drop  ", drop_style),
+        };
+        let row_style = if is_selected {
+            sel_style
+        } else {
+            summary_style
+        };
+        write_str(
+            buf,
+            inner.x,
+            y,
+            label,
+            if is_selected { sel_style } else { op_style },
+        );
+        let sha_x = inner.x + label.len() as u16 + 1;
+        write_str(
+            buf,
+            sha_x,
+            y,
+            &entry.commit.short_sha,
+            if is_selected { sel_style } else { sha_style },
+        );
+        let summary_x = sha_x + entry.commit.short_sha.len() as u16 + 1;
+        let remaining = (inner.x + inner.width).saturating_sub(summary_x);
+        if remaining > 0 {
+            let summary = truncate_to_cols(&entry.commit.summary, remaining as usize);
+            write_str(buf, summary_x, y, &summary, row_style);
+        }
+    }
+
+    if list_height < inner.height {
+        let help_y = inner.y + inner.height - help_rows;
+        let help1 = "j/k move  K/J reorder  p/s/f/d set op  Enter run  q abort";
+        let help2 = format!(
+            "{} entries, onto {}",
+            state.todo.len(),
+            if state.onto.is_empty() {
+                "<root>".to_string()
+            } else {
+                state.onto.chars().take(7).collect::<String>()
+            }
+        );
+        write_str(
+            buf,
+            inner.x,
+            help_y,
+            &truncate_to_cols(help1, inner.width as usize),
+            Style::default().fg(Color::DarkGray),
+        );
+        write_str(
+            buf,
+            inner.x,
+            help_y + 1,
+            &truncate_to_cols(&help2, inner.width as usize),
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+}
+
 fn render_commits(pane: &Pane, is_focused: bool, state: &mut CommitListState, buf: &mut Buffer) {
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)

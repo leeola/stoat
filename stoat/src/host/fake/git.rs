@@ -2,7 +2,7 @@ use crate::host::{
     fake::FakeFs,
     git::{
         ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, GitApplyError, GitHost,
-        GitRepo,
+        GitRepo, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
     },
 };
 use std::{
@@ -75,6 +75,28 @@ impl FakeGit {
             workdir,
             fs: None,
         }
+    }
+
+    /// Snapshot the rebase plans executed against `workdir`, in call
+    /// order. Each entry captures the onto sha, the exact todo list,
+    /// and the new HEAD sha minted by the fake.
+    pub fn applied_rebases(&self, workdir: &Path) -> Vec<RecordedRebase> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().applied_rebases.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the amend-head calls against `workdir`, in call order.
+    pub fn amend_history(&self, workdir: &Path) -> Vec<RecordedAmend> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().amend_history.clone())
+            .unwrap_or_default()
     }
 
     /// Snapshot the patches applied to a repo via `apply_to_index`. Useful
@@ -347,6 +369,21 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Force the next [`GitRepo::rewrite_commit`] or
+    /// [`GitRepo::run_rebase`] to surface a conflict at the given sha.
+    /// The operation aborts atomically without mutating state.
+    pub fn simulate_conflict_at(&mut self, sha: &str) -> &mut Self {
+        let s = sha.to_string();
+        self.mutate_repo(|state| state.conflict_at = Some(s));
+        self
+    }
+
+    /// Clear any previously installed conflict simulation.
+    pub fn clear_conflict_simulation(&mut self) -> &mut Self {
+        self.mutate_repo(|state| state.conflict_at = None);
+        self
+    }
+
     /// Remove any injected apply failure so subsequent
     /// [`GitRepo::apply_to_index`] calls succeed again.
     pub fn clear_apply_failure(&mut self) -> &mut Self {
@@ -385,6 +422,29 @@ struct FakeRepoState {
     /// The tip of the simulated branch. Defaults to the last inserted
     /// commit, overridable via [`FakeRepoBuilder::set_head`].
     head: Option<String>,
+    /// When set, rewrite/rebase calls that touch this sha return a
+    /// conflict error without mutating state. Used by error-path tests.
+    conflict_at: Option<String>,
+    /// Counter used to mint synthetic shas for amend/rewrite/rebase.
+    synth_counter: u64,
+    /// Record of every rebase plan executed against this repo, oldest
+    /// first. Tests assert on this to check plan correctness.
+    applied_rebases: Vec<RecordedRebase>,
+    /// Record of every amend_head invocation, in call order.
+    amend_history: Vec<RecordedAmend>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordedRebase {
+    pub onto: String,
+    pub todo: Vec<RebaseTodo>,
+    pub new_head: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordedAmend {
+    pub old_head: String,
+    pub new_head: String,
 }
 
 #[derive(Clone)]
@@ -456,7 +516,7 @@ impl GitRepo for FakeGitRepo {
             return Vec::new();
         };
 
-        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit);
+        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit.min(4096));
         while out.len() < limit {
             let Some(commit) = state.commits.get(&cursor) else {
                 break;
@@ -478,6 +538,220 @@ impl GitRepo for FakeGitRepo {
             }
         }
         out
+    }
+
+    fn amend_head(
+        &self,
+        tree: &BTreeMap<PathBuf, String>,
+        message: Option<&str>,
+    ) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        let Some(head_sha) = state.head.clone() else {
+            return Err(GitApplyError::Backend("HEAD has no commit".into()));
+        };
+        let Some(head_commit) = state.commits.get(&head_sha).cloned() else {
+            return Err(GitApplyError::Backend("HEAD commit missing".into()));
+        };
+        state.synth_counter += 1;
+        let new_sha = format!(
+            "amended-{}-{}",
+            &head_sha[..head_sha.len().min(6)],
+            state.synth_counter
+        );
+        let new_msg = message
+            .map(str::to_string)
+            .unwrap_or(head_commit.message.clone());
+        let new_commit = FakeCommit {
+            parent: head_commit.parent.clone(),
+            tree: tree.clone(),
+            message: new_msg,
+            author_name: head_commit.author_name.clone(),
+            author_email: head_commit.author_email.clone(),
+            time: head_commit.time,
+        };
+        state.commits.insert(new_sha.clone(), new_commit);
+        state.head = Some(new_sha.clone());
+        state.amend_history.push(RecordedAmend {
+            old_head: head_sha,
+            new_head: new_sha.clone(),
+        });
+        Ok(new_sha)
+    }
+
+    fn rewrite_commit(
+        &self,
+        sha: &str,
+        tree: &BTreeMap<PathBuf, String>,
+        message: Option<&str>,
+        descendants: &[String],
+    ) -> Result<RewriteResult, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(c) = &state.conflict_at {
+            if c == sha || descendants.iter().any(|d| d == c) {
+                return Err(GitApplyError::Backend(format!(
+                    "simulated cherry-pick conflict at {c}"
+                )));
+            }
+        }
+        let Some(target) = state.commits.get(sha).cloned() else {
+            return Err(GitApplyError::Backend(format!("unknown sha: {sha}")));
+        };
+
+        state.synth_counter += 1;
+        let new_target_sha = format!(
+            "rewritten-{}-{}",
+            &sha[..sha.len().min(6)],
+            state.synth_counter
+        );
+        let new_target = FakeCommit {
+            parent: target.parent.clone(),
+            tree: tree.clone(),
+            message: message
+                .map(str::to_string)
+                .unwrap_or(target.message.clone()),
+            author_name: target.author_name.clone(),
+            author_email: target.author_email.clone(),
+            time: target.time,
+        };
+        state.commits.insert(new_target_sha.clone(), new_target);
+
+        let mut mapping: HashMap<String, String> = HashMap::new();
+        mapping.insert(sha.to_string(), new_target_sha.clone());
+        let mut current = new_target_sha.clone();
+
+        for desc_sha in descendants {
+            let Some(desc) = state.commits.get(desc_sha).cloned() else {
+                return Err(GitApplyError::Backend(format!(
+                    "unknown descendant sha: {desc_sha}"
+                )));
+            };
+            state.synth_counter += 1;
+            let new_sha = format!(
+                "rewritten-{}-{}",
+                &desc_sha[..desc_sha.len().min(6)],
+                state.synth_counter
+            );
+            let new_commit = FakeCommit {
+                parent: Some(current.clone()),
+                tree: desc.tree.clone(),
+                message: desc.message.clone(),
+                author_name: desc.author_name.clone(),
+                author_email: desc.author_email.clone(),
+                time: desc.time,
+            };
+            state.commits.insert(new_sha.clone(), new_commit);
+            mapping.insert(desc_sha.clone(), new_sha.clone());
+            current = new_sha;
+        }
+
+        state.head = Some(current.clone());
+        Ok(RewriteResult {
+            new_head: current,
+            mapping,
+        })
+    }
+
+    fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(c) = &state.conflict_at {
+            if todo.iter().any(|t| &t.sha == c) {
+                return Err(RebaseError::Conflict { at_sha: c.clone() });
+            }
+        }
+        if !state.commits.contains_key(onto) && !onto.is_empty() {
+            return Err(RebaseError::Backend(format!("unknown onto sha: {onto}")));
+        }
+
+        let mut current = onto.to_string();
+        let mut last_commit: Option<String> = None;
+        let mut last_message: Option<String> = None;
+
+        for entry in todo {
+            match entry.op {
+                RebaseTodoOp::Drop => continue,
+                RebaseTodoOp::Pick => {
+                    let Some(src) = state.commits.get(&entry.sha).cloned() else {
+                        return Err(RebaseError::Backend(format!(
+                            "unknown sha in rebase: {}",
+                            entry.sha
+                        )));
+                    };
+                    state.synth_counter += 1;
+                    let new_sha = format!(
+                        "rebased-{}-{}",
+                        &entry.sha[..entry.sha.len().min(6)],
+                        state.synth_counter
+                    );
+                    let new_commit = FakeCommit {
+                        parent: Some(current.clone()),
+                        tree: src.tree.clone(),
+                        message: src.message.clone(),
+                        author_name: src.author_name.clone(),
+                        author_email: src.author_email.clone(),
+                        time: src.time,
+                    };
+                    state.commits.insert(new_sha.clone(), new_commit);
+                    last_message = Some(src.message);
+                    current = new_sha.clone();
+                    last_commit = Some(new_sha);
+                },
+                RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
+                    let Some(prev_sha) = last_commit.clone() else {
+                        return Err(RebaseError::Backend(
+                            "squash/fixup without preceding pick".into(),
+                        ));
+                    };
+                    let Some(prev) = state.commits.get(&prev_sha).cloned() else {
+                        return Err(RebaseError::Backend("previous commit missing".into()));
+                    };
+                    let Some(src) = state.commits.get(&entry.sha).cloned() else {
+                        return Err(RebaseError::Backend(format!(
+                            "unknown sha in rebase: {}",
+                            entry.sha
+                        )));
+                    };
+                    let mut merged_tree = prev.tree.clone();
+                    for (path, content) in &src.tree {
+                        merged_tree.insert(path.clone(), content.clone());
+                    }
+                    let combined_message = match entry.op {
+                        RebaseTodoOp::Squash => {
+                            let base = last_message.clone().unwrap_or_default();
+                            format!("{}\n\n{}", base.trim_end(), src.message.trim_end())
+                        },
+                        _ => last_message.clone().unwrap_or(prev.message.clone()),
+                    };
+
+                    state.synth_counter += 1;
+                    let new_sha = format!(
+                        "rebased-{}-{}",
+                        &entry.sha[..entry.sha.len().min(6)],
+                        state.synth_counter
+                    );
+                    let new_commit = FakeCommit {
+                        parent: prev.parent.clone(),
+                        tree: merged_tree,
+                        message: combined_message.clone(),
+                        author_name: prev.author_name.clone(),
+                        author_email: prev.author_email.clone(),
+                        time: prev.time,
+                    };
+                    state.commits.insert(new_sha.clone(), new_commit);
+                    state.commits.remove(&prev_sha);
+                    current = new_sha.clone();
+                    last_commit = Some(new_sha);
+                    last_message = Some(combined_message);
+                },
+            }
+        }
+
+        state.head = Some(current.clone());
+        state.applied_rebases.push(RecordedRebase {
+            onto: onto.to_string(),
+            todo: todo.to_vec(),
+            new_head: current.clone(),
+        });
+        Ok(current)
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {

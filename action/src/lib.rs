@@ -12,8 +12,8 @@ pub use defs::{
         ToggleDockLeft, ToggleDockRight,
     },
     commits::{
-        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsPageDown, CommitsPageUp,
-        CommitsPrev, CommitsRefresh, OpenCommits,
+        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
+        CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
     },
     editor::{
         AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
@@ -25,12 +25,16 @@ pub use defs::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitRight,
     },
+    rebase::{
+        AbortRebase, EnterRebase, ExecuteRebase, RebaseMoveDown, RebaseMoveUp, RebaseNext,
+        RebasePrev, SetRebaseOpDrop, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpSquash,
+    },
     review::{
         AgentEdit, CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
         JumpToPrevMoveSource, OpenReview, OpenReviewAgentEdits, OpenReviewCommit,
         OpenReviewCommitRange, QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk,
-        ReviewPrevChunk, ReviewRefresh, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-        ReviewUnstageChunk,
+        ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
+        ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunInterrupt, RunSubmit},
 };

@@ -6,8 +6,8 @@ use crate::{
             ToggleDockLeft, ToggleDockRight,
         },
         commits::{
-            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsPageDown, CommitsPageUp,
-            CommitsPrev, CommitsRefresh, OpenCommits,
+            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
+            CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
         editor::{
             AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
@@ -19,12 +19,16 @@ use crate::{
             ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
             SplitRight,
         },
+        rebase::{
+            AbortRebase, EnterRebase, ExecuteRebase, RebaseMoveDown, RebaseMoveUp, RebaseNext,
+            RebasePrev, SetRebaseOpDrop, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpSquash,
+        },
         review::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
             QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage,
-            ReviewUnstageChunk,
+            ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunInterrupt, RunSubmit},
     },
@@ -83,6 +87,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
+    add(ReviewRemoveSelected::DEF, |_| {
+        Ok(Box::new(ReviewRemoveSelected))
+    });
     add(OpenReviewCommit::DEF, |params| {
         let workdir = params
             .first()
@@ -176,6 +183,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsFirst::DEF, |_| Ok(Box::new(CommitsFirst)));
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
+    add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
+    add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
+    add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
+    add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
+    add(RebaseNext::DEF, |_| Ok(Box::new(RebaseNext)));
+    add(RebasePrev::DEF, |_| Ok(Box::new(RebasePrev)));
+    add(RebaseMoveUp::DEF, |_| Ok(Box::new(RebaseMoveUp)));
+    add(RebaseMoveDown::DEF, |_| Ok(Box::new(RebaseMoveDown)));
+    add(SetRebaseOpPick::DEF, |_| Ok(Box::new(SetRebaseOpPick)));
+    add(SetRebaseOpSquash::DEF, |_| Ok(Box::new(SetRebaseOpSquash)));
+    add(SetRebaseOpFixup::DEF, |_| Ok(Box::new(SetRebaseOpFixup)));
+    add(SetRebaseOpDrop::DEF, |_| Ok(Box::new(SetRebaseOpDrop)));
     add(Run::DEF, |params| {
         let raw = params
             .first()
@@ -240,6 +259,7 @@ mod tests {
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
+        "ReviewRemoveSelected",
         "OpenCommits",
         "CloseCommits",
         "CommitsNext",
@@ -249,6 +269,18 @@ mod tests {
         "CommitsFirst",
         "CommitsLast",
         "CommitsRefresh",
+        "CommitsOpenReview",
+        "EnterRebase",
+        "AbortRebase",
+        "ExecuteRebase",
+        "RebaseNext",
+        "RebasePrev",
+        "RebaseMoveUp",
+        "RebaseMoveDown",
+        "SetRebaseOpPick",
+        "SetRebaseOpSquash",
+        "SetRebaseOpFixup",
+        "SetRebaseOpDrop",
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
@@ -317,7 +349,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 57);
+        assert_eq!(all().count(), 70);
     }
 
     #[test]

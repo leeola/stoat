@@ -124,4 +124,85 @@ pub trait GitRepo: Send + Sync {
     /// stats while the heavier hunk-level preview loads in the
     /// background. Empty when the sha is unknown.
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
+
+    /// Replace HEAD's tree (and optionally its message) with the given
+    /// values, creating a new commit and updating HEAD to point at it.
+    /// Parents, author, and committer carry over; signatures are
+    /// stripped; hooks are not invoked. Returns the new HEAD sha.
+    ///
+    /// Fails when HEAD is orphan, the commit cannot be built, or the
+    /// backend rejects the write.
+    fn amend_head(
+        &self,
+        tree: &BTreeMap<PathBuf, String>,
+        message: Option<&str>,
+    ) -> Result<String, GitApplyError>;
+
+    /// Replace the commit at `sha` with one carrying `tree` (and
+    /// optionally a new `message`), then cherry-pick each entry in
+    /// `descendants` onto the rewritten commit in order (oldest first,
+    /// newest last). Returns the new HEAD sha plus a mapping from each
+    /// old sha (the target `sha` and every descendant) to its new sha.
+    ///
+    /// Descendants should be the commits strictly between `sha` and
+    /// the current HEAD, oldest first. A cherry-pick conflict at any
+    /// step aborts the operation with `GitApplyError::Backend`; the
+    /// repo is left untouched.
+    fn rewrite_commit(
+        &self,
+        sha: &str,
+        tree: &BTreeMap<PathBuf, String>,
+        message: Option<&str>,
+        descendants: &[String],
+    ) -> Result<RewriteResult, GitApplyError>;
+
+    /// Execute a rebase plan. `onto` is the base commit the plan
+    /// stacks on top of; `todo` is the oldest-first list of operations
+    /// to apply. Returns the new HEAD sha on success.
+    ///
+    /// Implementations must make the whole plan atomic: a conflict at
+    /// any step aborts the rebase with `RebaseError::Conflict { at_sha }`
+    /// and leaves the repo untouched.
+    fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError>;
+}
+
+/// Result of a [`GitRepo::rewrite_commit`] call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewriteResult {
+    /// Sha of the new HEAD after the rewrite + cherry-pick chain.
+    pub new_head: String,
+    /// Map from the original sha (target + each descendant) to the
+    /// new sha it became. Callers that were pointing at an original
+    /// sha (e.g. a review session's `ReviewSource::Commit`) read this
+    /// to relocate.
+    pub mapping: std::collections::HashMap<String, String>,
+}
+
+/// Single entry in a rebase plan, mirroring the commands accepted by
+/// `git rebase -i` (minus reword/edit in v1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RebaseTodo {
+    pub op: RebaseTodoOp,
+    /// Sha of the commit this entry refers to in the pre-rebase
+    /// history.
+    pub sha: String,
+    /// Message from the pre-rebase commit, carried on the entry so
+    /// implementations (and the fake) can synthesize combined messages
+    /// without re-reading the original commit.
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RebaseTodoOp {
+    Pick,
+    Squash,
+    Fixup,
+    Drop,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RebaseError {
+    Backend(String),
+    Conflict { at_sha: String },
+    DirtyWorktree,
 }

@@ -215,6 +215,22 @@ impl ReviewViewState {
     }
 }
 
+/// What surface the review was opened from, used to decide where
+/// `CloseReview` should land the user (normal mode vs. back to the
+/// commit-list view).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ReviewOrigin {
+    /// Opened directly from normal mode (e.g. `OpenReview` or
+    /// `OpenReviewCommit` from the palette). `CloseReview` returns to
+    /// normal mode.
+    #[default]
+    Standalone,
+    /// Opened from a `CommitsOpenReview` dispatch while the user was in
+    /// commits mode. `CloseReview` restores commits mode with the
+    /// previously selected commit still highlighted.
+    FromCommits,
+}
+
 pub(crate) struct ReviewSession {
     pub source: ReviewSource,
     pub files: Vec<ReviewFile>,
@@ -224,6 +240,8 @@ pub(crate) struct ReviewSession {
     pub view_editor: Option<EditorId>,
     /// Bumped on any mutation so editor-level caches can detect staleness.
     pub version: u64,
+    /// Where the user launched this review from; consulted on close.
+    pub origin: ReviewOrigin,
     next_id: u32,
 }
 
@@ -237,6 +255,7 @@ impl ReviewSession {
             cursor: ReviewCursor::default(),
             view_editor: None,
             version: 0,
+            origin: ReviewOrigin::Standalone,
             next_id: 0,
         }
     }

@@ -154,6 +154,19 @@ define_action!(
      `ReviewApplyStaged` first to act on decisions."
 );
 
+define_action!(
+    ReviewRemoveSelectedDef,
+    ReviewRemoveSelected,
+    "ReviewRemoveSelected",
+    ActionKind::ReviewRemoveSelected,
+    "remove staged hunks from the reviewed commit",
+    "Only valid when the review's source is a commit: rewrite that \
+     commit with every Staged chunk spliced back to its parent-side \
+     content. When the reviewed commit is HEAD, amends HEAD directly; \
+     otherwise rewrites and cherry-picks descendants. Refuses with an \
+     error badge if the working tree is dirty."
+);
+
 use crate::{Action, ActionDef, ParamDef, ParamKind};
 use std::{any::Any, path::PathBuf};
 
