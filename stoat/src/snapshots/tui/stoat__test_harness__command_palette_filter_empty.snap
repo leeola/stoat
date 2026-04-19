@@ -19,11 +19,11 @@ size: 80x24
 [0m[36m│[0m [0m[35m│[0m[97m ClaudeToDockLeft   [0m[90mmove claude to left dock[0m[97m                              [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[97m ClaudeToDockRight  [0m[90mmove claude to right dock[0m[97m                             [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[97m ClaudeToPane       [0m[90mmove claude to pane[0m[97m                                   [0m[35m│[0m [0m[36m│[0m
+[0m[36m│[0m [0m[35m│[0m[97m CloseCommits       [0m[90mclose the commit-list view[0m[97m                            [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[97m ClosePane          [0m[90mclose pane[0m[97m                                            [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[97m CloseReview        [0m[90mclose the active review[0m[97m                               [0m[35m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[35m│[0m[97m FocusDown          [0m[90mfocus pane down[0m[97m                                       [0m[35m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[35m│[0m[97m FocusLeft          [0m[90mfocus pane left[0m[97m                                       [0m[35m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[35m│[0m[97m FocusNext          [0m[90mfocus next pane[0m[97m                                       [0m[35m│[0m [0m[36m│[0m
+[0m[36m│[0m [0m[35m│[0m[97m CommitsFirst       [0m[90mjump to HEAD in the commit list[0m[97m                       [0m[35m│[0m [0m[36m│[0m
+[0m[36m│[0m [0m[35m│[0m[97m CommitsLast        [0m[90mjump to the oldest loaded commit[0m[97m                      [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m│[0m[37mAdd a new cursor on the line below the newest cursor.[0m                     [0m[35m│[0m [0m[36m│[0m
 [0m[36m│[0m [0m[35m└──────────────────────────────────────────────────────────────────────────┘[0m [0m[36m│[0m

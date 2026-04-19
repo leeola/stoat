@@ -14,6 +14,19 @@ on key {
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
         R -> OpenReview();
+        L -> OpenCommits();
+    }
+    mode == commits {
+        Escape -> CloseCommits();
+        q -> CloseCommits();
+        j -> CommitsNext();
+        n -> CommitsNext();
+        k -> CommitsPrev();
+        p -> CommitsPrev();
+        g -> CommitsFirst();
+        G -> CommitsLast();
+        r -> CommitsRefresh();
+        : -> OpenCommandPalette();
     }
     mode == review {
         Escape -> CloseReview();

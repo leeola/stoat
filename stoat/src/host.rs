@@ -34,7 +34,10 @@ pub use fake::{
     FakeRepoBuilder,
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
-pub use git::{ChangedFile, DiffStatus, GitApplyError, GitHost, GitRepo};
+pub use git::{
+    ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, DiffStatus, GitApplyError,
+    GitHost, GitRepo,
+};
 pub use local::{LocalFs, LocalGit};
 pub use lsp::{LspHost, LspNotification};
 pub use terminal::TerminalHost;

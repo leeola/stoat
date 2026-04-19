@@ -4,6 +4,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     claude_chat::ClaudeChatState,
+    commit_list::CommitListState,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
@@ -56,6 +57,10 @@ pub struct Workspace {
     /// a review spans files and can be viewed by multiple panes in future
     /// multi-pane review flows. Dropped on `CloseReview`.
     pub(crate) review: Option<ReviewSession>,
+    /// Active commit-listing state (if any). Parallel to [`Self::review`]:
+    /// populated while the user is in `"commits"` mode and dropped on
+    /// `CloseCommits`.
+    pub(crate) commits: Option<CommitListState>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -87,6 +92,7 @@ impl Workspace {
             runs: SlotMap::with_key(),
             chats: HashMap::new(),
             review: None,
+            commits: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }

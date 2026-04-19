@@ -11,6 +11,10 @@ pub use defs::{
         ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
         ToggleDockLeft, ToggleDockRight,
     },
+    commits::{
+        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsPageDown, CommitsPageUp,
+        CommitsPrev, CommitsRefresh, OpenCommits,
+    },
     editor::{
         AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordStart, MoveRight, MoveUp,

@@ -49,4 +49,13 @@ pub enum ActionKind {
     OpenReviewCommit,
     OpenReviewCommitRange,
     OpenReviewAgentEdits,
+    OpenCommits,
+    CloseCommits,
+    CommitsNext,
+    CommitsPrev,
+    CommitsPageDown,
+    CommitsPageUp,
+    CommitsFirst,
+    CommitsLast,
+    CommitsRefresh,
 }

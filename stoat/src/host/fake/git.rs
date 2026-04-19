@@ -1,6 +1,9 @@
 use crate::host::{
     fake::FakeFs,
-    git::{ChangedFile, GitApplyError, GitHost, GitRepo},
+    git::{
+        ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, GitApplyError, GitHost,
+        GitRepo,
+    },
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -252,7 +255,7 @@ impl<'a> FakeRepoBuilder<'a> {
     /// tree. `files` is a slice of `(rel_path, content)` pairs; entries
     /// are stored as the commit's full tree snapshot.
     pub fn commit(&mut self, sha: &str, files: &[(&str, &str)]) -> &mut Self {
-        self.commit_with_parent_opt(sha, None, files)
+        self.commit_full(sha, None, None, files)
     }
 
     /// Seed a commit with a given first-parent. The parent sha does not
@@ -265,24 +268,71 @@ impl<'a> FakeRepoBuilder<'a> {
         parent: &str,
         files: &[(&str, &str)],
     ) -> &mut Self {
-        self.commit_with_parent_opt(sha, Some(parent.to_string()), files)
+        self.commit_full(sha, Some(parent.to_string()), None, files)
     }
 
-    fn commit_with_parent_opt(
+    /// Seed a commit with an explicit message. Writers for commit-list
+    /// tests prefer this over [`Self::commit`] because the summary line
+    /// shows up in the rendered UI.
+    pub fn commit_with_message(
+        &mut self,
+        sha: &str,
+        message: &str,
+        files: &[(&str, &str)],
+    ) -> &mut Self {
+        self.commit_full(sha, None, Some(message.to_string()), files)
+    }
+
+    /// Seed a commit with both a parent and an explicit message.
+    pub fn commit_with_parent_message(
+        &mut self,
+        sha: &str,
+        parent: &str,
+        message: &str,
+        files: &[(&str, &str)],
+    ) -> &mut Self {
+        self.commit_full(
+            sha,
+            Some(parent.to_string()),
+            Some(message.to_string()),
+            files,
+        )
+    }
+
+    fn commit_full(
         &mut self,
         sha: &str,
         parent: Option<String>,
+        message: Option<String>,
         files: &[(&str, &str)],
     ) -> &mut Self {
         let tree: BTreeMap<PathBuf, String> = files
             .iter()
             .map(|(p, c)| (PathBuf::from(p), (*c).to_string()))
             .collect();
-        let commit = FakeCommit { parent, tree };
         let sha = sha.to_string();
         self.mutate_repo(|state| {
-            state.commits.insert(sha, commit);
+            let seq = state.commits.len() as i64;
+            let commit = FakeCommit {
+                parent,
+                tree,
+                message: message.unwrap_or_else(|| format!("commit {sha}")),
+                author_name: "fake".into(),
+                author_email: "fake@example.invalid".into(),
+                time: 1_700_000_000 + seq,
+            };
+            state.commits.insert(sha.clone(), commit);
+            state.head = Some(sha);
         });
+        self
+    }
+
+    /// Point HEAD at `sha` explicitly. Useful when a test seeds several
+    /// independent branches; the last [`Self::commit_full`] invocation
+    /// wins by default, which is the common case.
+    pub fn set_head(&mut self, sha: &str) -> &mut Self {
+        let sha = sha.to_string();
+        self.mutate_repo(|state| state.head = Some(sha));
         self
     }
 
@@ -330,15 +380,21 @@ struct FakeRepoState {
     /// patch is still pushed to `applied_patches`.
     apply_error: Option<String>,
     /// Commit objects keyed by opaque sha. Populated via
-    /// [`FakeRepoBuilder::commit`] and
-    /// [`FakeRepoBuilder::commit_with_parent`].
+    /// [`FakeRepoBuilder::commit`] and friends.
     commits: HashMap<String, FakeCommit>,
+    /// The tip of the simulated branch. Defaults to the last inserted
+    /// commit, overridable via [`FakeRepoBuilder::set_head`].
+    head: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct FakeCommit {
     parent: Option<String>,
     tree: BTreeMap<PathBuf, String>,
+    message: String,
+    author_name: String,
+    author_email: String,
+    time: i64,
 }
 
 impl GitRepo for FakeGitRepo {
@@ -386,6 +442,104 @@ impl GitRepo for FakeGitRepo {
         let state = self.state.lock().unwrap();
         state.commits.get(sha).and_then(|c| c.parent.clone())
     }
+
+    fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+        let start = match after {
+            Some(sha) => state.commits.get(sha).and_then(|c| c.parent.clone()),
+            None => state.head.clone(),
+        };
+        let Some(mut cursor) = start else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit);
+        while out.len() < limit {
+            let Some(commit) = state.commits.get(&cursor) else {
+                break;
+            };
+            let parent_count = commit.parent.as_ref().map(|_| 1).unwrap_or(0);
+            let short_sha = cursor.chars().take(7).collect();
+            out.push(CommitInfo {
+                sha: cursor.clone(),
+                short_sha,
+                summary: commit.message.lines().next().unwrap_or("").to_string(),
+                author_name: commit.author_name.clone(),
+                author_email: commit.author_email.clone(),
+                time: commit.time,
+                parent_count,
+            });
+            match &commit.parent {
+                Some(p) => cursor = p.clone(),
+                None => break,
+            }
+        }
+        out
+    }
+
+    fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
+        let state = self.state.lock().unwrap();
+        let Some(commit) = state.commits.get(sha) else {
+            return Vec::new();
+        };
+        let parent_tree = commit
+            .parent
+            .as_ref()
+            .and_then(|p| state.commits.get(p))
+            .map(|p| p.tree.clone())
+            .unwrap_or_default();
+        let new_tree = &commit.tree;
+
+        let mut paths: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+        for p in parent_tree.keys().chain(new_tree.keys()) {
+            paths.insert(p.clone());
+        }
+
+        let mut out: Vec<CommitFileChange> = Vec::with_capacity(paths.len());
+        for rel_path in paths {
+            let base = parent_tree.get(&rel_path);
+            let new = new_tree.get(&rel_path);
+            let (kind, additions, deletions) = match (base, new) {
+                (None, Some(n)) => {
+                    let adds = n.lines().count() as u32;
+                    (CommitFileChangeKind::Added, adds, 0)
+                },
+                (Some(b), None) => {
+                    let dels = b.lines().count() as u32;
+                    (CommitFileChangeKind::Deleted, 0, dels)
+                },
+                (Some(b), Some(n)) => {
+                    if b == n {
+                        continue;
+                    }
+                    let (adds, dels) = line_delta(b, n);
+                    (CommitFileChangeKind::Modified, adds, dels)
+                },
+                (None, None) => continue,
+            };
+            out.push(CommitFileChange {
+                rel_path,
+                kind,
+                additions,
+                deletions,
+            });
+        }
+        out
+    }
+}
+
+/// Crude add/delete counts for the fake git host: the total distinct
+/// lines on each side. Matches the shape of a unified diff well enough
+/// for UI tests that only care about "something changed".
+fn line_delta(base: &str, new: &str) -> (u32, u32) {
+    let base_lines: std::collections::BTreeSet<&str> = base.lines().collect();
+    let new_lines: std::collections::BTreeSet<&str> = new.lines().collect();
+    let adds = new_lines.difference(&base_lines).count() as u32;
+    let dels = base_lines.difference(&new_lines).count() as u32;
+    (adds, dels)
 }
 
 #[cfg(test)]

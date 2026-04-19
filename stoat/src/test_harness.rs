@@ -215,6 +215,18 @@ impl TestHarness {
         crate::action_handlers::dispatch(&mut self.stoat, &action);
     }
 
+    /// Enter commits mode against `workdir`. Updates the active
+    /// workspace's `git_root` so the handler finds the fake repo, then
+    /// dispatches `OpenCommits` and settles any async page/preview
+    /// loads so the next snapshot sees resolved state.
+    pub fn open_commits(&mut self, workdir: impl Into<std::path::PathBuf>) {
+        let workdir = workdir.into();
+        self.stoat.active_workspace_mut().git_root = workdir;
+        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenCommits);
+        self.settle();
+        self.capture("open_commits");
+    }
+
     pub fn with_size(width: u16, height: u16) -> Self {
         Self::new(width, height)
     }
@@ -266,7 +278,9 @@ impl TestHarness {
     pub fn settle(&mut self) {
         loop {
             self.scheduler.run_until_parked();
-            if !self.stoat.drain_claude_notifications() {
+            let claude = self.stoat.drain_claude_notifications();
+            let commits = crate::action_handlers::pump_commits(&mut self.stoat);
+            if !claude && !commits {
                 break;
             }
         }

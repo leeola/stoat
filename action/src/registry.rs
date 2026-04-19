@@ -5,6 +5,10 @@ use crate::{
             ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
             ToggleDockLeft, ToggleDockRight,
         },
+        commits::{
+            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsPageDown, CommitsPageUp,
+            CommitsPrev, CommitsRefresh, OpenCommits,
+        },
         editor::{
             AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
             MovePrevWordStart, MoveRight, MoveUp,
@@ -163,6 +167,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ClaudeToDockRight::DEF, |_| Ok(Box::new(ClaudeToDockRight)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
+    add(OpenCommits::DEF, |_| Ok(Box::new(OpenCommits)));
+    add(CloseCommits::DEF, |_| Ok(Box::new(CloseCommits)));
+    add(CommitsNext::DEF, |_| Ok(Box::new(CommitsNext)));
+    add(CommitsPrev::DEF, |_| Ok(Box::new(CommitsPrev)));
+    add(CommitsPageDown::DEF, |_| Ok(Box::new(CommitsPageDown)));
+    add(CommitsPageUp::DEF, |_| Ok(Box::new(CommitsPageUp)));
+    add(CommitsFirst::DEF, |_| Ok(Box::new(CommitsFirst)));
+    add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
+    add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(Run::DEF, |params| {
         let raw = params
             .first()
@@ -227,6 +240,15 @@ mod tests {
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
+        "OpenCommits",
+        "CloseCommits",
+        "CommitsNext",
+        "CommitsPrev",
+        "CommitsPageDown",
+        "CommitsPageUp",
+        "CommitsFirst",
+        "CommitsLast",
+        "CommitsRefresh",
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
@@ -295,7 +317,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 48);
+        assert_eq!(all().count(), 57);
     }
 
     #[test]

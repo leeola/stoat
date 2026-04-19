@@ -39,6 +39,45 @@ pub enum GitApplyError {
     Backend(String),
 }
 
+/// Metadata for a single commit, populated by [`GitRepo::log_commits`].
+///
+/// Pre-computed fields (`short_sha`) exist so the UI can paint each row
+/// without reformatting on every redraw; the log view repaints at every
+/// keystroke while the user scrolls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub short_sha: String,
+    /// First line of the commit message, trimmed. May be empty for
+    /// commits without a message (pathological, but observed in the wild).
+    pub summary: String,
+    pub author_name: String,
+    pub author_email: String,
+    /// Author time as unix epoch seconds. Consumers format for display.
+    pub time: i64,
+    pub parent_count: u32,
+}
+
+/// How a single path changed between a commit and its parent, as
+/// surfaced by [`GitRepo::commit_file_changes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitFileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    TypeChange,
+}
+
+/// One path touched by a commit, plus its line-count summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitFileChange {
+    pub rel_path: PathBuf,
+    pub kind: CommitFileChangeKind,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 /// Discovers repositories. Kept separate from [`GitRepo`] so the host
 /// can be a cheap cloneable value (`Arc<dyn GitHost>`) while repository
 /// handles carry per-repo state.
@@ -70,4 +109,19 @@ pub trait GitRepo: Send + Sync {
     /// an unknown sha. Merge commits surface only the first parent;
     /// `CommitRange` review should be used for multi-parent walks.
     fn parent_sha(&self, sha: &str) -> Option<String>;
+
+    /// Walk first-parent history starting immediately after `after`
+    /// (exclusive; `None` starts at HEAD) and return up to `limit`
+    /// commits, newest first. Used to paginate the commit-list view:
+    /// the caller requests just enough rows to fill the viewport plus
+    /// a small prefetch window, then walks on demand as the user
+    /// scrolls. Empty on orphan branches or when `after` is unknown.
+    fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo>;
+
+    /// Per-file summary of what changed between `sha` and its first
+    /// parent (empty tree for a root commit). Lighter than building a
+    /// full review: the left pane of the commit list renders these
+    /// stats while the heavier hunk-level preview loads in the
+    /// background. Empty when the sha is unknown.
+    fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
 }

@@ -5,6 +5,7 @@ pub mod buffer;
 mod buffer_registry;
 pub mod claude_chat;
 pub mod command_palette;
+mod commit_list;
 pub mod diff_map;
 pub mod display_map;
 mod editor_state;

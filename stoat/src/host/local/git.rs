@@ -1,5 +1,8 @@
-use crate::host::git::{ChangedFile, GitApplyError, GitHost, GitRepo};
-use git2::{ApplyLocation, Diff, Repository, Status, StatusOptions};
+use crate::host::git::{
+    ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, GitApplyError, GitHost,
+    GitRepo,
+};
+use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -166,6 +169,130 @@ impl GitRepo for LocalGitRepo {
         let commit = repo.find_commit(oid).ok()?;
         let parent = commit.parents().next()?;
         Some(parent.id().to_string())
+    }
+
+    fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let repo = self.repo.lock().expect("git repo lock");
+        let start_oid = match after {
+            Some(sha) => {
+                let Ok(oid) = git2::Oid::from_str(sha) else {
+                    return Vec::new();
+                };
+                let Ok(commit) = repo.find_commit(oid) else {
+                    return Vec::new();
+                };
+                match commit.parents().next() {
+                    Some(p) => p.id(),
+                    None => return Vec::new(),
+                }
+            },
+            None => match repo.head().and_then(|h| h.peel_to_commit()) {
+                Ok(c) => c.id(),
+                Err(_) => return Vec::new(),
+            },
+        };
+
+        let mut walk = match repo.revwalk() {
+            Ok(w) => w,
+            Err(_) => return Vec::new(),
+        };
+        if walk.set_sorting(Sort::TOPOLOGICAL).is_err() {
+            return Vec::new();
+        }
+        if walk.simplify_first_parent().is_err() {
+            return Vec::new();
+        }
+        if walk.push(start_oid).is_err() {
+            return Vec::new();
+        }
+
+        let mut out: Vec<CommitInfo> = Vec::with_capacity(limit);
+        for oid_res in walk.take(limit) {
+            let Ok(oid) = oid_res else { continue };
+            let Ok(commit) = repo.find_commit(oid) else {
+                continue;
+            };
+            let sha = oid.to_string();
+            let short_sha = sha.chars().take(7).collect();
+            let summary = commit.summary().unwrap_or_default().trim().to_string();
+            let author = commit.author();
+            let author_name = author.name().unwrap_or_default().to_string();
+            let author_email = author.email().unwrap_or_default().to_string();
+            let time = commit.time().seconds();
+            let parent_count = commit.parent_count() as u32;
+            out.push(CommitInfo {
+                sha,
+                short_sha,
+                summary,
+                author_name,
+                author_email,
+                time,
+                parent_count,
+            });
+        }
+        out
+    }
+
+    fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(oid) = git2::Oid::from_str(sha) else {
+            return Vec::new();
+        };
+        let Ok(commit) = repo.find_commit(oid) else {
+            return Vec::new();
+        };
+        let Ok(new_tree) = commit.tree() else {
+            return Vec::new();
+        };
+        let parent_tree = commit.parents().next().and_then(|p| p.tree().ok());
+
+        let mut opts = DiffOptions::new();
+        opts.include_typechange(true);
+        let diff =
+            match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), Some(&mut opts)) {
+                Ok(d) => d,
+                Err(_) => return Vec::new(),
+            };
+
+        let stats = match diff.stats() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let deltas = diff.deltas();
+        let mut out: Vec<CommitFileChange> = Vec::with_capacity(deltas.len());
+        for (i, delta) in deltas.enumerate() {
+            let rel_path = match delta.new_file().path().or_else(|| delta.old_file().path()) {
+                Some(p) => p.to_path_buf(),
+                None => continue,
+            };
+            let kind = match delta.status() {
+                git2::Delta::Added => CommitFileChangeKind::Added,
+                git2::Delta::Deleted => CommitFileChangeKind::Deleted,
+                git2::Delta::Modified => CommitFileChangeKind::Modified,
+                git2::Delta::Renamed => CommitFileChangeKind::Renamed,
+                git2::Delta::Typechange => CommitFileChangeKind::TypeChange,
+                _ => CommitFileChangeKind::Modified,
+            };
+            let patch = git2::Patch::from_diff(&diff, i).ok().flatten();
+            let (additions, deletions) = match patch {
+                Some(p) => match p.line_stats() {
+                    Ok((_ctx, add, del)) => (add as u32, del as u32),
+                    Err(_) => (0, 0),
+                },
+                None => (0, 0),
+            };
+            let _ = &stats;
+            out.push(CommitFileChange {
+                rel_path,
+                kind,
+                additions,
+                deletions,
+            });
+        }
+        out
     }
 }
 
@@ -535,6 +662,89 @@ mod tests {
         let root = tr.head_sha();
         let repo = LocalGit::new().discover(tr.path()).unwrap();
         assert!(repo.parent_sha(&root).is_none());
+    }
+
+    #[test]
+    fn log_commits_walks_first_parent_from_head() {
+        let tr = TestRepo::new();
+        tr.commit_file("a.rs", "v1");
+        tr.commit_file("a.rs", "v2");
+        tr.commit_file("a.rs", "v3");
+
+        let repo = LocalGit::new().discover(tr.path()).unwrap();
+        let log = repo.log_commits(None, 10);
+        assert_eq!(log.len(), 3, "three commits on this branch");
+        assert!(log[0].summary.contains('c') || log[0].summary.is_empty());
+        let shas: Vec<_> = log.iter().map(|c| c.sha.clone()).collect();
+        let unique: std::collections::BTreeSet<_> = shas.iter().collect();
+        assert_eq!(unique.len(), 3, "shas must be distinct");
+    }
+
+    #[test]
+    fn log_commits_respects_limit_and_after() {
+        let tr = TestRepo::new();
+        tr.commit_file("a.rs", "v1");
+        tr.commit_file("a.rs", "v2");
+        tr.commit_file("a.rs", "v3");
+
+        let repo = LocalGit::new().discover(tr.path()).unwrap();
+        let first = repo.log_commits(None, 2);
+        assert_eq!(first.len(), 2);
+
+        let second = repo.log_commits(Some(&first[1].sha), 10);
+        assert_eq!(
+            second.len(),
+            1,
+            "one commit remains after skipping the first two"
+        );
+        assert_ne!(second[0].sha, first[0].sha);
+        assert_ne!(second[0].sha, first[1].sha);
+    }
+
+    #[test]
+    fn log_commits_empty_on_orphan_branch() {
+        let tr = TestRepo::new();
+        let repo = LocalGit::new().discover(tr.path()).unwrap();
+        assert!(repo.log_commits(None, 10).is_empty());
+    }
+
+    #[test]
+    fn commit_file_changes_reports_added_modified_deleted() {
+        let tr = TestRepo::new();
+        tr.commit_file("a.rs", "alpha\n");
+        tr.commit_file("b.rs", "beta\n");
+        let add_sha = tr.head_sha();
+
+        tr.write_and_stage("a.rs", "alpha-v2\n");
+        tr.stage("b.rs");
+        std::fs::remove_file(tr.join("b.rs")).unwrap();
+        let mut index = tr.repo.index().unwrap();
+        index.remove_path(Path::new("b.rs")).unwrap();
+        index.write().unwrap();
+        tr.commit("rewrite");
+        let rewrite_sha = tr.head_sha();
+
+        let repo = LocalGit::new().discover(tr.path()).unwrap();
+        let changes_add = repo.commit_file_changes(&add_sha);
+        assert!(changes_add
+            .iter()
+            .any(|c| c.rel_path == Path::new("b.rs") && c.kind == CommitFileChangeKind::Added));
+
+        let changes_rewrite = repo.commit_file_changes(&rewrite_sha);
+        assert!(changes_rewrite
+            .iter()
+            .any(|c| c.rel_path == Path::new("a.rs") && c.kind == CommitFileChangeKind::Modified));
+        assert!(changes_rewrite
+            .iter()
+            .any(|c| c.rel_path == Path::new("b.rs") && c.kind == CommitFileChangeKind::Deleted));
+    }
+
+    #[test]
+    fn commit_file_changes_unknown_sha_empty() {
+        let tr = TestRepo::new();
+        tr.commit_file("a.rs", "x");
+        let repo = LocalGit::new().discover(tr.path()).unwrap();
+        assert!(repo.commit_file_changes("nope").is_empty());
     }
 
     #[test]
