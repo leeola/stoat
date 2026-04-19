@@ -3,7 +3,7 @@ use crate::{
     buffer::BufferId,
     command_palette::CommandPalette,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, DisplayPoint, RenderBlock},
-    editor_state::EditorState,
+    editor_state::{EditorId, EditorState},
     host::FsHost,
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
     review_session::{ReviewSession, ReviewSource, ReviewViewState},
@@ -198,7 +198,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SetRebaseOpEdit => rebase_set_op(stoat, crate::host::RebaseTodoOp::Edit),
         ActionKind::RewordConfirm => reword_confirm(stoat),
         ActionKind::RewordAbort => reword_abort(stoat),
-        ActionKind::RewordBackspace => reword_backspace(stoat),
         ActionKind::RebaseContinue => rebase_continue(stoat),
         ActionKind::ConflictTakeOurs => conflict_set(stoat, ConflictChoice::Ours),
         ActionKind::ConflictTakeTheirs => conflict_set(stoat, ConflictChoice::Theirs),
@@ -317,27 +316,36 @@ enum ConflictChoice {
     Theirs,
 }
 
-fn reword_backspace(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::rebase::RebasePause;
-    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
-        return UpdateEffect::None;
-    };
-    let Some(RebasePause::Reword { input, cursor, .. }) = active.pause.as_mut() else {
-        return UpdateEffect::None;
-    };
-    if *cursor == 0 {
-        return UpdateEffect::None;
-    }
-    let mut new_cursor = *cursor - 1;
-    while !input.is_char_boundary(new_cursor) {
-        new_cursor -= 1;
-    }
-    input.replace_range(new_cursor..*cursor, "");
-    *cursor = new_cursor;
-    UpdateEffect::Redraw
+/// Release the editor + buffer slots owned by a paused reword. Called
+/// on both confirm and abort so both paths converge on the same teardown.
+fn drop_reword_editor(stoat: &mut Stoat, editor_id: EditorId, _buffer_id: BufferId) {
+    let ws = stoat.active_workspace_mut();
+    ws.editors.remove(editor_id);
+    // Scratch buffers in `BufferRegistry` have no explicit release API
+    // today; they live on in the registry's map until workspace
+    // teardown. That's fine for reword: each pause allocates a fresh
+    // scratch, and scratches are cheap.
 }
 
 fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::rebase::RebasePause;
+    let pause_editor = {
+        let ws = stoat.active_workspace();
+        ws.rebase_active
+            .as_ref()
+            .and_then(|a| a.pause.as_ref())
+            .and_then(|p| match p {
+                RebasePause::Reword {
+                    editor_id,
+                    buffer_id,
+                    ..
+                } => Some((*editor_id, *buffer_id)),
+                _ => None,
+            })
+    };
+    if let Some((editor_id, buffer_id)) = pause_editor {
+        drop_reword_editor(stoat, editor_id, buffer_id);
+    }
     stoat.active_workspace_mut().rebase_active = None;
     emit_rebase_error(
         stoat,
@@ -355,25 +363,52 @@ fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
 fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{host::GitApplyError, rebase::RebasePause};
 
-    let (workdir, picked_sha, new_message, fallback_parent) = {
+    let (workdir, picked_sha, new_message, fallback_parent, editor_id, buffer_id) = {
         let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
             return UpdateEffect::None;
         };
         let Some(RebasePause::Reword {
             cherry_picked_commit,
-            input,
+            editor_id,
+            buffer_id,
             ..
         }) = active.pause.as_ref()
         else {
             return UpdateEffect::None;
         };
+        let buffer_text = stoat
+            .active_workspace()
+            .buffers
+            .get(*buffer_id)
+            .map(|b| b.read().expect("poisoned").rope().to_string())
+            .unwrap_or_default();
         (
             active.workdir.clone(),
             cherry_picked_commit.clone(),
-            input.clone(),
+            buffer_text,
             Some(active.current_head.clone()),
+            *editor_id,
+            *buffer_id,
         )
     };
+
+    // Empty (whitespace-only) message auto-aborts, matching git's
+    // behaviour when the commit message file is emptied by the editor.
+    if new_message.trim().is_empty() {
+        drop_reword_editor(stoat, editor_id, buffer_id);
+        stoat.active_workspace_mut().rebase_active = None;
+        emit_rebase_error(
+            stoat,
+            "rebase aborted: empty commit message",
+            Some("HEAD left at partial rebase state".into()),
+        );
+        stoat.mode = if stoat.active_workspace().commits.is_some() {
+            "commits".into()
+        } else {
+            "normal".into()
+        };
+        return UpdateEffect::Redraw;
+    }
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         emit_rebase_error(stoat, "git repo not found", None);
@@ -384,20 +419,22 @@ fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
     let real_parent = repo.parent_sha(&picked_sha).or(fallback_parent);
+    let trimmed_message = new_message.trim().to_string();
     match repo.create_commit(
         real_parent.as_deref(),
         &tree,
-        &new_message,
+        &trimmed_message,
         "stoat",
         "stoat@example.invalid",
     ) {
         Ok(new_sha) => {
+            drop_reword_editor(stoat, editor_id, buffer_id);
             let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
                 return UpdateEffect::None;
             };
             active.current_head = new_sha.clone();
             active.last_pick_sha = Some(new_sha.clone());
-            active.last_message = Some(new_message);
+            active.last_message = Some(trimmed_message);
             active.pause = None;
             drive_rebase(stoat)
         },
@@ -406,6 +443,51 @@ fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             UpdateEffect::Redraw
         },
     }
+}
+
+/// Create a scratch buffer seeded with `original_message`, wrap it in
+/// an [`EditorState`], place the cursor at end, and install a
+/// [`RebasePause::Reword`] pointing at the new editor + buffer slots.
+/// Caller is responsible for transitioning `stoat.mode` to `"reword"`
+/// after this returns.
+fn install_reword_pause(stoat: &mut Stoat, cherry_picked_commit: String, original_message: String) {
+    use crate::rebase::RebasePause;
+    use stoat_text::SelectionGoal;
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+
+    let (buffer_id, shared_buffer) = ws.buffers.new_scratch();
+    {
+        let mut guard = shared_buffer.write().expect("poisoned");
+        guard.edit(0..0, &original_message);
+    }
+
+    let mut editor_state = EditorState::new(buffer_id, shared_buffer, executor);
+    let end_offset = original_message.len();
+    {
+        let snapshot = editor_state.display_map.snapshot();
+        let buf_snapshot = snapshot.buffer_snapshot();
+        let anchor = buf_snapshot.anchor_at(end_offset, Bias::Right);
+        editor_state.selections.transform(buf_snapshot, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        });
+    }
+    let editor_id = ws.editors.insert(editor_state);
+
+    let Some(active) = ws.rebase_active.as_mut() else {
+        // Safeguard: caller should only invoke this with an active rebase.
+        ws.editors.remove(editor_id);
+        return;
+    };
+    active.pause = Some(RebasePause::Reword {
+        cherry_picked_commit,
+        original_message,
+        editor_id,
+        buffer_id,
+    });
 }
 
 fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
@@ -696,12 +778,7 @@ fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                             match entry.op {
                                 RebaseTodoOp::Pick => continue,
                                 RebaseTodoOp::Reword => {
-                                    active.pause = Some(RebasePause::Reword {
-                                        cherry_picked_commit: new_sha,
-                                        original_message: message.clone(),
-                                        input: message.clone(),
-                                        cursor: message.len(),
-                                    });
+                                    install_reword_pause(stoat, new_sha, message.clone());
                                     stoat.mode = "reword".into();
                                     return UpdateEffect::Redraw;
                                 },
@@ -849,20 +926,6 @@ fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {
         label: label.to_string(),
         detail: None,
     });
-}
-
-/// Insert a typed character into the paused reword buffer. Called
-/// directly from the `reword` mode key handler in app.rs.
-pub(crate) fn reword_insert_char(stoat: &mut Stoat, ch: char) {
-    use crate::rebase::RebasePause;
-    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
-        return;
-    };
-    let Some(RebasePause::Reword { input, cursor, .. }) = active.pause.as_mut() else {
-        return;
-    };
-    input.insert(*cursor, ch);
-    *cursor += ch.len_utf8();
 }
 
 fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
@@ -1225,7 +1288,7 @@ fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
 /// their `&mut ws.review` borrow before invoking.
 fn sync_review_view_and_scroll(
     ws: &mut crate::workspace::Workspace,
-    editor_id: Option<crate::editor_state::EditorId>,
+    editor_id: Option<EditorId>,
     scroll_to_chunk: Option<crate::review_session::ReviewChunkId>,
 ) {
     let Some(editor_id) = editor_id else { return };
@@ -1888,7 +1951,24 @@ enum WordTarget {
 }
 
 fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
+    use crate::rebase::RebasePause;
     let ws = stoat.active_workspace_mut();
+
+    // While a reword pause is active, the "focused" editor for motion
+    // and insertion purposes is the reword scratch editor, regardless
+    // of which pane had focus when rebase started.
+    if let Some(editor_id) = ws
+        .rebase_active
+        .as_ref()
+        .and_then(|a| a.pause.as_ref())
+        .and_then(|p| match p {
+            RebasePause::Reword { editor_id, .. } => Some(*editor_id),
+            _ => None,
+        })
+    {
+        return ws.editors.get_mut(editor_id);
+    }
+
     let view = match ws.focus {
         FocusTarget::SplitPane(_) => {
             let focused = ws.panes.focus();

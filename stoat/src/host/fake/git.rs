@@ -78,6 +78,17 @@ impl FakeGit {
         }
     }
 
+    /// Read the full (possibly multi-line) commit message for `sha`
+    /// in `workdir`, or `None` if the repo or commit is unknown. Used
+    /// by tests that need to verify the complete body, not just the
+    /// first-line summary returned by `log_commits`.
+    pub fn commit_message(&self, workdir: &Path, sha: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let repo = state.repos.get(workdir)?;
+        let repo_state = repo.state.lock().unwrap();
+        repo_state.commits.get(sha).map(|c| c.message.clone())
+    }
+
     /// Snapshot the rebase plans executed against `workdir`, in call
     /// order. Each entry captures the onto sha, the exact todo list,
     /// and the new HEAD sha minted by the fake.

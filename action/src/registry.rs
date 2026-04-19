@@ -23,8 +23,8 @@ use crate::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
             ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, EnterRebase, ExecuteRebase,
             RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
-            RewordBackspace, RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup,
-            SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
+            RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick,
+            SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
@@ -202,7 +202,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SetRebaseOpEdit::DEF, |_| Ok(Box::new(SetRebaseOpEdit)));
     add(RewordConfirm::DEF, |_| Ok(Box::new(RewordConfirm)));
     add(RewordAbort::DEF, |_| Ok(Box::new(RewordAbort)));
-    add(RewordBackspace::DEF, |_| Ok(Box::new(RewordBackspace)));
     add(RebaseContinue::DEF, |_| Ok(Box::new(RebaseContinue)));
     add(ConflictTakeOurs::DEF, |_| Ok(Box::new(ConflictTakeOurs)));
     add(ConflictTakeTheirs::DEF, |_| {
@@ -303,7 +302,6 @@ mod tests {
         "SetRebaseOpEdit",
         "RewordConfirm",
         "RewordAbort",
-        "RewordBackspace",
         "RebaseContinue",
         "ConflictTakeOurs",
         "ConflictTakeTheirs",
@@ -380,10 +378,10 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        // 70 previous + 14 Phase-5 rebase primitives. Excludes
-        // `RewordInsertChar`, which is dispatched from the mode's key
-        // handler rather than the public registry.
-        assert_eq!(all().count(), 83);
+        // 70 previous + 13 Phase-5 rebase primitives. Insert and
+        // Backspace in reword mode are handled by the editor directly,
+        // not via the action registry.
+        assert_eq!(all().count(), 82);
     }
 
     #[test]

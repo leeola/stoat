@@ -324,23 +324,9 @@ impl Stoat {
             }
         }
 
-        if self.mode == "insert" {
+        if self.mode == "insert" || self.mode == "reword_insert" {
             if let Some(effect) = self.handle_insert_key(key) {
                 return effect;
-            }
-        }
-
-        // Reword mode captures printable chars directly into the paused
-        // rebase's message buffer. Named keys (Enter, Escape, Backspace)
-        // fall through to the keymap below.
-        if self.mode == "reword" {
-            if let KeyCode::Char(ch) = key.code {
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    action_handlers::reword_insert_char(self, ch);
-                    return UpdateEffect::Redraw;
-                }
             }
         }
 
@@ -432,7 +418,28 @@ impl Stoat {
     }
 
     fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
+        use crate::rebase::RebasePause;
         let ws = self.active_workspace();
+
+        // While a reword pause is active, the reword scratch editor is
+        // the effective focus target for insert/motion routing. This
+        // mirrors the override in `action_handlers::focused_editor_mut`.
+        if let Some((editor_id, buffer_id)) = ws
+            .rebase_active
+            .as_ref()
+            .and_then(|a| a.pause.as_ref())
+            .and_then(|p| match p {
+                RebasePause::Reword {
+                    editor_id,
+                    buffer_id,
+                    ..
+                } => Some((*editor_id, *buffer_id)),
+                _ => None,
+            })
+        {
+            return Some((editor_id, buffer_id));
+        }
+
         let view = match ws.focus {
             FocusTarget::SplitPane(_) => {
                 let focused = ws.panes.focus();
@@ -993,7 +1000,7 @@ impl Stoat {
 
         let commits_mode = self.mode == "commits";
         let rebase_mode = self.mode == "rebase";
-        let reword_mode = self.mode == "reword";
+        let reword_mode = self.mode == "reword" || self.mode == "reword_insert";
         let conflict_mode = self.mode == "conflict";
         let overlay_pane = if (commits_mode && ws.commits.is_some())
             || (rebase_mode && ws.rebase.is_some())
@@ -1037,8 +1044,27 @@ impl Stoat {
                     render_rebase(pane, is_focused, state, &mut buf);
                 }
             } else if reword_mode {
-                if let Some(active) = ws.rebase_active.as_ref() {
-                    render_reword(pane, is_focused, active, &mut buf);
+                let reword_ctx = ws
+                    .rebase_active
+                    .as_ref()
+                    .and_then(|a| a.pause.as_ref())
+                    .and_then(|p| match p {
+                        RebasePause::Reword {
+                            cherry_picked_commit,
+                            original_message,
+                            editor_id,
+                            ..
+                        } => Some((
+                            cherry_picked_commit.clone(),
+                            original_message.clone(),
+                            *editor_id,
+                        )),
+                        _ => None,
+                    });
+                if let Some((sha, orig, editor_id)) = reword_ctx {
+                    if let Some(editor) = ws.editors.get_mut(editor_id) {
+                        render_reword(pane, is_focused, editor, &sha, &orig, &self.mode, &mut buf);
+                    }
                 }
             } else if conflict_mode {
                 if let Some(active) = ws.rebase_active.as_ref() {
@@ -1316,7 +1342,14 @@ fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
 }
 
 const PRIMARY_MODES: &[&str] = &[
-    "normal", "insert", "run", "commits", "rebase", "reword", "conflict",
+    "normal",
+    "insert",
+    "run",
+    "commits",
+    "rebase",
+    "reword",
+    "reword_insert",
+    "conflict",
 ];
 
 fn action_display_desc(action: &ResolvedAction) -> String {
@@ -2755,7 +2788,23 @@ fn render_editor(
 /// Changed tokens within a line are highlighted; the rest of the line
 /// is rendered in the default style so only the structural diff is
 /// visually emphasised (matching difftastic behaviour).
-fn render_reword(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut Buffer) {
+/// Modal reword editor: bordered frame with a header, an original-message
+/// reference line, and the editable commit message rendered through the
+/// real [`render_editor`] so the user gets full normal/insert modal
+/// editing (motions, multi-line, selections).
+///
+/// `current_mode` is the live `Stoat::mode` string and is shown in the
+/// help footer so users can see whether they're in the normal or insert
+/// sub-mode.
+fn render_reword(
+    pane: &Pane,
+    is_focused: bool,
+    editor: &mut EditorState,
+    cherry_picked_commit: &str,
+    original_message: &str,
+    current_mode: &str,
+    buf: &mut Buffer,
+) {
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
     } else {
@@ -2766,46 +2815,34 @@ fn render_reword(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut
         .border_style(border_style);
     let inner = block.inner(pane.area);
     block.render(pane.area, buf);
-    if inner.width < 10 || inner.height < 2 {
+    if inner.width < 10 || inner.height < 4 {
         return;
     }
-
-    let (cherry_picked_commit, original_message, input, cursor) = match active.pause.as_ref() {
-        Some(RebasePause::Reword {
-            cherry_picked_commit,
-            original_message,
-            input,
-            cursor,
-        }) => (cherry_picked_commit, original_message, input, *cursor),
-        _ => return,
-    };
 
     let header_style = Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
-    let input_style = Style::default().fg(Color::White);
-    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+    let body_style = Style::default().fg(Color::White);
 
     let short = cherry_picked_commit.chars().take(7).collect::<String>();
     write_str(
         buf,
         inner.x,
         inner.y,
-        &format!("reword {short}"),
+        &format!("reword {short} [{current_mode}]"),
         header_style,
     );
+    let help = if current_mode == "reword_insert" {
+        "Escape normal   Ctrl-s save   (empty message aborts)"
+    } else {
+        "i insert   h/j/k/l move   Ctrl-s save   Escape abort"
+    };
+    write_str(buf, inner.x, inner.y + 1, help, dim);
     write_str(
         buf,
         inner.x,
-        inner.y + 1,
-        "Enter confirm   Escape abort   Backspace delete",
-        dim,
-    );
-    write_str(
-        buf,
-        inner.x,
-        inner.y + 3,
+        inner.y + 2,
         &truncate_to_cols(
             &format!(
                 "original: {}",
@@ -2816,34 +2853,20 @@ fn render_reword(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut
         dim,
     );
 
-    // Render the editable input on the next row, with inline cursor.
-    let y = inner.y + 5;
-    if y >= inner.y + inner.height {
+    // Reserve the first four rows for header/help/original/spacer, then
+    // hand the rest of the inner rect to `render_editor` so the editable
+    // message renders with the full editor (cursor, selections, syntax).
+    let editor_top = inner.y + 4;
+    if editor_top >= inner.y + inner.height {
         return;
     }
-    let max_cols = inner.width as usize;
-    let prefix: String = input[..cursor].chars().collect();
-    let suffix: String = input[cursor..].chars().collect();
-    let prefix_trunc = truncate_to_cols(&prefix, max_cols);
-    write_str(buf, inner.x, y, &prefix_trunc, input_style);
-    let cursor_col = prefix_trunc.chars().count() as u16;
-    let cursor_x = inner.x + cursor_col;
-    if cursor_x < inner.x + inner.width {
-        let ch_after = suffix.chars().next().unwrap_or(' ');
-        buf[(cursor_x, y)]
-            .set_char(ch_after)
-            .set_style(cursor_style);
-        let after: String = suffix.chars().skip(1).collect();
-        let after_start = cursor_x + 1;
-        let remaining = inner
-            .x
-            .saturating_add(inner.width)
-            .saturating_sub(after_start) as usize;
-        if remaining > 0 {
-            let after_trunc = truncate_to_cols(&after, remaining);
-            write_str(buf, after_start, y, &after_trunc, input_style);
-        }
-    }
+    let editor_rect = Rect {
+        x: inner.x,
+        y: editor_top,
+        width: inner.width,
+        height: inner.y + inner.height - editor_top,
+    };
+    render_editor(editor, editor_rect, body_style, buf, is_focused);
 }
 
 fn render_conflict(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut Buffer) {

@@ -150,16 +150,6 @@ define_action!(
 );
 
 define_action!(
-    RewordBackspaceDef,
-    RewordBackspace,
-    "RewordBackspace",
-    ActionKind::RewordBackspace,
-    "delete the character before the cursor in the reword buffer",
-    "In reword mode, remove the character immediately before the \
-     cursor from the editable message."
-);
-
-define_action!(
     RebaseContinueDef,
     RebaseContinue,
     "RebaseContinue",

@@ -75,7 +75,6 @@ pub enum ActionKind {
     SetRebaseOpEdit,
     RewordConfirm,
     RewordAbort,
-    RewordBackspace,
     RebaseContinue,
     ConflictTakeOurs,
     ConflictTakeTheirs,

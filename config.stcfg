@@ -49,8 +49,21 @@ on key {
     }
     mode == reword {
         Escape -> RewordAbort();
-        Enter -> RewordConfirm();
-        Backspace -> RewordBackspace();
+        Ctrl-s -> RewordConfirm();
+        i -> SetMode(reword_insert);
+        a -> SetMode(reword_insert);
+        h -> MoveLeft();
+        j -> MoveDown();
+        k -> MoveUp();
+        l -> MoveRight();
+        w -> MoveNextWordStart();
+        e -> MoveNextWordEnd();
+        b -> MovePrevWordStart();
+        : -> OpenCommandPalette();
+    }
+    mode == reword_insert {
+        Escape -> SetMode(reword);
+        Ctrl-s -> RewordConfirm();
     }
     mode == conflict {
         Escape -> ConflictAbort();

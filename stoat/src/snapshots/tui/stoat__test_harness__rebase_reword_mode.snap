@@ -8,12 +8,12 @@ mode: reword
 size: 90x12
 ---
 [0m[36m┌────────────────────────────────────────────────────────────────────────────────────────┐[0m
-[0m[36m│[0m[1m[35mreword commit-[0m                                                                          [0m[36m│[0m
-[0m[36m│[0m[90mEnter confirm   Escape abort   Backspace delete[0m                                         [0m[36m│[0m
-[0m[36m│[0m                                                                                        [0m[36m│[0m
+[0m[36m│[0m[1m[35mreword commit- [reword][0m                                                                 [0m[36m│[0m
+[0m[36m│[0m[90mi insert   h/j/k/l move   Ctrl-s save   Escape abort[0m                                    [0m[36m│[0m
 [0m[36m│[0m[90moriginal: c2: middle[0m                                                                    [0m[36m│[0m
 [0m[36m│[0m                                                                                        [0m[36m│[0m
-[0m[36m│[0m[97mc2: middle[0m[30m[107m [0m                                                                             [0m[36m│[0m
+[0m[36m│[0m[97mc2: middle[0m[7m [0m                                                                             [0m[36m│[0m
+[0m[36m│[0m                                                                                        [0m[36m│[0m
 [0m[36m│[0m                                                                                        [0m[36m│[0m
 [0m[36m│[0m                                                                                        [0m[36m│[0m
 [0m[36m│[0m                                                                                        [0m[36m│[0m
