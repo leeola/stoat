@@ -20,6 +20,12 @@ use stoat_scheduler::Task;
 /// the cursor approaches the tail. Previews are likewise lazy: each
 /// selected sha triggers a background build of a [`ReviewSession`] that
 /// the right pane reuses via `render_review`.
+// FIXME: Commit list selection/scroll not persisted across workspace
+// save/load. `commits: Vec<CommitInfo>` is fetched asynchronously on open, so
+// save/restore must persist the saved selected commit's SHA (not its index),
+// and on load defer scroll restoration until the initial fetch reaches a page
+// containing that SHA. `pending_load` / `pending_preview` are in-flight task
+// handles and are intentionally not restorable.
 pub(crate) struct CommitListState {
     pub workdir: PathBuf,
     pub commits: Vec<CommitInfo>,

@@ -10,3 +10,4 @@ workspace = true
 [dependencies]
 arrayvec.workspace = true
 smallvec.workspace = true
+serde = { workspace = true, features = ["derive"] }

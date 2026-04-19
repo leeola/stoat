@@ -1,3 +1,5 @@
+mod persist;
+
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
     badge::{BadgeSource, BadgeTray},
@@ -13,6 +15,7 @@ use crate::{
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
+pub(crate) use persist::state_path_for;
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 use std::{

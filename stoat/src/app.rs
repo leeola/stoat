@@ -137,7 +137,23 @@ impl Stoat {
         }
 
         let mut workspaces = SlotMap::with_key();
-        let active_workspace = workspaces.insert(Workspace::new(initial_git_root, &executor));
+        let mut workspace = Workspace::new(initial_git_root.clone(), &executor);
+        match crate::workspace::state_path_for(&initial_git_root) {
+            Ok(path) if path.exists() => {
+                if let Err(err) = workspace.restore_state(&path, &executor) {
+                    tracing::warn!(
+                        ?path,
+                        ?err,
+                        "failed to restore workspace state; starting fresh"
+                    );
+                }
+            },
+            Ok(_) => {},
+            Err(err) => {
+                tracing::warn!(?err, "could not resolve workspace state path");
+            },
+        }
+        let active_workspace = workspaces.insert(workspace);
         workspaces[active_workspace].id = active_workspace;
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
@@ -258,11 +274,30 @@ impl Stoat {
                         break;
                     }
                 },
-                UpdateEffect::Quit => break,
+                UpdateEffect::Quit => {
+                    self.save_active_workspace();
+                    break;
+                },
                 UpdateEffect::None => {},
             }
         }
         Ok(())
+    }
+
+    /// Persist the active workspace's state to disk. Failures are logged and
+    /// swallowed so a write error never prevents a clean shutdown.
+    fn save_active_workspace(&self) {
+        let ws = self.active_workspace();
+        let path = match crate::workspace::state_path_for(&ws.git_root) {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::warn!(?err, "could not resolve workspace state path");
+                return;
+            },
+        };
+        if let Err(err) = ws.save_state(&path) {
+            tracing::warn!(?path, ?err, "failed to save workspace state");
+        }
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {

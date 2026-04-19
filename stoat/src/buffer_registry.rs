@@ -1,4 +1,5 @@
 use crate::buffer::{BufferId, SharedBuffer, TextBuffer};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -212,6 +213,68 @@ impl BufferRegistry {
             entry.diff = None;
         }
     }
+
+    // FIXME: Dirty buffer content not persisted; on restore, files reload from
+    // disk and unsaved edits are lost. Plan: write modified buffers to
+    // `<workspace_state_dir>/<workspace_hash>/buffers/<buffer_id>.txt` as a
+    // sidecar, restore content into the buffer, and set `dirty = true`. Open
+    // question: what to do when the on-disk file has changed since save
+    // (3-way merge? prompt the user? keep both?).
+    pub(crate) fn snapshot(&self) -> BufferRegistrySnapshot {
+        let mut entries: Vec<(BufferId, PathBuf)> = self
+            .buffers
+            .iter()
+            .filter_map(|(id, entry)| entry.path.as_ref().map(|p| (*id, p.clone())))
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        BufferRegistrySnapshot {
+            entries,
+            next_id: self.next_id,
+        }
+    }
+
+    /// Rehydrate a registry from a [`BufferRegistrySnapshot`]. Reads each file
+    /// from disk. Entries whose file is unreadable are skipped and logged; the
+    /// restore continues with remaining buffers so startup never fails on a
+    /// missing/moved file.
+    pub(crate) fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
+        self.buffers.clear();
+        self.path_to_id.clear();
+        self.next_id = snap.next_id.max(1);
+
+        for (id, path) in snap.entries {
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(?path, ?err, "failed to restore buffer from disk; skipping");
+                    continue;
+                },
+            };
+            let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, &text)));
+            self.path_to_id.insert(path.clone(), id);
+            self.buffers.insert(
+                id,
+                BufferEntry {
+                    buffer,
+                    path: Some(path),
+                    language: None,
+                    syntax: None,
+                    syntax_map: None,
+                    diff: None,
+                },
+            );
+        }
+    }
+}
+
+/// Serializable view of [`BufferRegistry`]. Captures only `(BufferId, Path)`
+/// pairs plus the id counter so restoration re-reads files from disk; buffer
+/// content, dirty state, syntax, and diff caches are not persisted (see the
+/// FIXME above [`BufferRegistry::snapshot`]).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BufferRegistrySnapshot {
+    pub entries: Vec<(BufferId, PathBuf)>,
+    pub next_id: u64,
 }
 
 /// Compute a blake3-style 32-byte fingerprint of `text` suitable for

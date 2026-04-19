@@ -22,7 +22,7 @@
 pub mod paths;
 pub mod text_proto;
 
-pub use paths::data_dir;
+pub use paths::{data_dir, state_dir, workspace_state_dir};
 use std::{env, fs};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{fmt, EnvFilter};

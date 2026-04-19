@@ -1,6 +1,26 @@
 use crate::{buffer::BufferId, editor_state::EditorId, host::ClaudeSessionId};
 use std::time::Instant;
 
+// FIXME: Claude session state not persisted across workspace save/load. On
+// restore, panes that held a Claude view are rewritten to a placeholder Label
+// by the workspace-persist stale-view sweep.
+//
+// What's already on disk:
+//   - Transcripts at `<stoat_log::log_dir()>/claude-<uuid>.tx.jsonl` and `claude-<uuid>.rx.jsonl`
+//     are byte-faithful protocol logs.
+//   - `agent/claude_code/launcher.rs` accepts `--resume <session-id>` when an existing UUID is
+//     supplied, so session continuation is at least wired on the Claude Code CLI side.
+//
+// Open design questions for full restore:
+//   1. Persist `Vec<ChatMessage>` directly (add serde derives on `ChatMessage`,
+//      `ChatMessageContent`, `ChatRole`) for fast read-only rehydration of the scrollback.
+//   2. Replay transcripts to reconstruct `ChatMessage` history on load.
+//   3. Re-spawn Claude Code with `--resume` to restore a live session; drop `streaming_text` and
+//      flush `pending_sends` on reconnect (both are already designed as recovery state).
+//
+// Suggested v1: do (1) for scrollback restore + start a fresh session on
+// next user input. Layer (3) once `--resume` semantics are validated
+// end-to-end in the agent crate.
 pub struct ClaudeChatState {
     pub session_id: ClaudeSessionId,
     pub input_editor_id: EditorId,

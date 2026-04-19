@@ -47,7 +47,7 @@ compact_str = "0.8"
 arrayvec = "0.7"
 smallvec = { version = "1", features = ["const_generics"] }
 unicode-width = "0.2"
-slotmap = "1"
+slotmap = { version = "1", features = ["serde"] }
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 async-task = "4"

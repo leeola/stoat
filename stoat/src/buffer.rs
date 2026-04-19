@@ -13,6 +13,16 @@ pub struct TextBuffer {
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
+    // FIXME: Undo/edit history not persisted across workspace save/load.
+    // `edit_history: Vec<u64>` and `text::UndoMap` are individually serializable
+    // as plain data, but they index into [`TextBufferSnapshot::fragments`] and
+    // [`TextBufferSnapshot::insertions`], which are Arc-heavy SumTrees with no
+    // serde derives. To persist the full buffer state we either need to
+    // (a) serialize the SumTrees end-to-end (custom impl across Arc-shared
+    // nodes) or (b) persist the edit log (sequence of
+    // [`stoat_text::patch::Patch`] / [`stoat_text::patch::Edit`] operations)
+    // and replay them on load so timestamps, fragments, and undo counts
+    // line up.
     edit_history: Vec<u64>,
 }
 

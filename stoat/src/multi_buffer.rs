@@ -253,6 +253,13 @@ struct LiveExcerpt {
     buffer: SharedBuffer,
 }
 
+// FIXME: MultiBuffer excerpts not persisted across workspace save/load.
+// [`ExcerptId`] is a plain u64 newtype and serializable in isolation, but
+// excerpt ranges are stored as [`stoat_text::Anchor`] positions, which depend
+// on per-buffer fragment trees being reconstructed identically on load.
+// Blocked on the same anchor-stability work as `editor_state.rs::selections`:
+// either persist undo/edit history so anchor timestamps round-trip, or
+// serialize excerpts as byte-offset ranges and resolve to anchors after load.
 pub struct MultiBuffer {
     live_excerpts: Vec<LiveExcerpt>,
     excerpt_tree: SumTree<ExcerptEntry>,

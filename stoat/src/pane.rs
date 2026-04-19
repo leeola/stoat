@@ -1,5 +1,6 @@
 use crate::{editor_state::EditorId, host::ClaudeSessionId, run::RunId};
 use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
 
 new_key_type! {
@@ -8,7 +9,7 @@ new_key_type! {
     struct NodeId;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Children stacked top-to-bottom (horizontal divider line).
     Horizontal,
@@ -16,7 +17,7 @@ pub enum Axis {
     Vertical,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
     Up,
     Down,
@@ -24,7 +25,7 @@ pub enum Direction {
     Right,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum View {
     Label(String),
     Editor(EditorId),
@@ -37,7 +38,7 @@ pub enum View {
 /// Only [`Placement::Split`] is implemented now. The other variants establish
 /// the type structure for future modal, floating status, and docked panes
 /// without requiring a redesign.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Placement {
     /// Managed by the split tree layout.
     Split,
@@ -52,25 +53,26 @@ pub enum Placement {
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockSide {
     Left,
     Right,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockVisibility {
     Open { width: u16 },
     Minimized,
     Hidden,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DockPanel {
     pub view: View,
     pub side: DockSide,
     pub visibility: DockVisibility,
     pub default_width: u16,
+    #[serde(skip)]
     pub area: Rect,
 }
 
@@ -84,46 +86,51 @@ impl DockPanel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FocusTarget {
     SplitPane(PaneId),
     Dock(DockId),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Pane {
     pub view: View,
     pub placement: Placement,
+    #[serde(skip)]
     pub area: Rect,
     pub index: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Split {
     axis: Axis,
     children: Vec<NodeId>,
+    #[serde(skip)]
     area: Rect,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum NodeContent {
     Leaf(PaneId),
     Split(Split),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Node {
     parent: NodeId,
     content: NodeContent,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PaneTree {
     root: NodeId,
     focus: PaneId,
+    #[serde(skip)]
     area: Rect,
     panes: SlotMap<PaneId, Pane>,
     nodes: SlotMap<NodeId, Node>,
     next_index: u32,
+    #[serde(skip)]
     stack: Vec<(NodeId, Rect)>,
 }
 
@@ -344,6 +351,13 @@ impl PaneTree {
             tree: self,
             stack: vec![self.root],
         }
+    }
+
+    /// Collect the ids of every leaf pane. Convenience for iteration that needs
+    /// mutable access to panes (via [`Self::pane_mut`]) without holding a
+    /// borrow of `self` across the loop.
+    pub fn split_pane_ids(&self) -> Vec<PaneId> {
+        self.split_panes().map(|(id, _)| id).collect()
     }
 
     fn split_pane_count(&self) -> usize {
