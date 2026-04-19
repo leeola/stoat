@@ -35,8 +35,9 @@ pub use fake::{
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use git::{
-    ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, DiffStatus, GitApplyError,
-    GitHost, GitRepo, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
+    ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
+    ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
+    RebaseTodoOp, RewriteResult,
 };
 pub use local::{LocalFs, LocalGit};
 pub use lsp::{LspHost, LspNotification};

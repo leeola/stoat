@@ -20,8 +20,11 @@ use crate::{
             SplitRight,
         },
         rebase::{
-            AbortRebase, EnterRebase, ExecuteRebase, RebaseMoveDown, RebaseMoveUp, RebaseNext,
-            RebasePrev, SetRebaseOpDrop, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpSquash,
+            AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
+            ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, EnterRebase, ExecuteRebase,
+            RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
+            RewordBackspace, RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup,
+            SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
@@ -195,6 +198,21 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SetRebaseOpSquash::DEF, |_| Ok(Box::new(SetRebaseOpSquash)));
     add(SetRebaseOpFixup::DEF, |_| Ok(Box::new(SetRebaseOpFixup)));
     add(SetRebaseOpDrop::DEF, |_| Ok(Box::new(SetRebaseOpDrop)));
+    add(SetRebaseOpReword::DEF, |_| Ok(Box::new(SetRebaseOpReword)));
+    add(SetRebaseOpEdit::DEF, |_| Ok(Box::new(SetRebaseOpEdit)));
+    add(RewordConfirm::DEF, |_| Ok(Box::new(RewordConfirm)));
+    add(RewordAbort::DEF, |_| Ok(Box::new(RewordAbort)));
+    add(RewordBackspace::DEF, |_| Ok(Box::new(RewordBackspace)));
+    add(RebaseContinue::DEF, |_| Ok(Box::new(RebaseContinue)));
+    add(ConflictTakeOurs::DEF, |_| Ok(Box::new(ConflictTakeOurs)));
+    add(ConflictTakeTheirs::DEF, |_| {
+        Ok(Box::new(ConflictTakeTheirs))
+    });
+    add(ConflictSkipEntry::DEF, |_| Ok(Box::new(ConflictSkipEntry)));
+    add(ConflictNextFile::DEF, |_| Ok(Box::new(ConflictNextFile)));
+    add(ConflictPrevFile::DEF, |_| Ok(Box::new(ConflictPrevFile)));
+    add(ConflictApply::DEF, |_| Ok(Box::new(ConflictApply)));
+    add(ConflictAbort::DEF, |_| Ok(Box::new(ConflictAbort)));
     add(Run::DEF, |params| {
         let raw = params
             .first()
@@ -281,6 +299,19 @@ mod tests {
         "SetRebaseOpSquash",
         "SetRebaseOpFixup",
         "SetRebaseOpDrop",
+        "SetRebaseOpReword",
+        "SetRebaseOpEdit",
+        "RewordConfirm",
+        "RewordAbort",
+        "RewordBackspace",
+        "RebaseContinue",
+        "ConflictTakeOurs",
+        "ConflictTakeTheirs",
+        "ConflictSkipEntry",
+        "ConflictNextFile",
+        "ConflictPrevFile",
+        "ConflictApply",
+        "ConflictAbort",
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
@@ -349,7 +380,10 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        assert_eq!(all().count(), 70);
+        // 70 previous + 14 Phase-5 rebase primitives. Excludes
+        // `RewordInsertChar`, which is dispatched from the mode's key
+        // handler rather than the public registry.
+        assert_eq!(all().count(), 83);
     }
 
     #[test]

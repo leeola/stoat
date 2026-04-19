@@ -42,7 +42,25 @@ on key {
         s -> SetRebaseOpSquash();
         f -> SetRebaseOpFixup();
         d -> SetRebaseOpDrop();
+        r -> SetRebaseOpReword();
+        e -> SetRebaseOpEdit();
         Enter -> ExecuteRebase();
+        : -> OpenCommandPalette();
+    }
+    mode == reword {
+        Escape -> RewordAbort();
+        Enter -> RewordConfirm();
+        Backspace -> RewordBackspace();
+    }
+    mode == conflict {
+        Escape -> ConflictAbort();
+        a -> ConflictAbort();
+        j -> ConflictNextFile();
+        k -> ConflictPrevFile();
+        o -> ConflictTakeOurs();
+        t -> ConflictTakeTheirs();
+        s -> ConflictSkipEntry();
+        Enter -> ConflictApply();
         : -> OpenCommandPalette();
     }
     mode == review {
@@ -58,6 +76,7 @@ on key {
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
         D -> ReviewRemoveSelected();
+        C -> RebaseContinue();
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }

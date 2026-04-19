@@ -1,5 +1,8 @@
-use crate::host::{CommitInfo, RebaseTodo, RebaseTodoOp};
-use std::path::PathBuf;
+use crate::host::{CommitInfo, ConflictedFile, RebaseTodo, RebaseTodoOp};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+};
 
 /// Editable rebase plan owned by a [`crate::workspace::Workspace`]
 /// while the user is in `"rebase"` mode. Seeded from the commit list
@@ -77,6 +80,11 @@ impl RebaseState {
         true
     }
 
+    /// Exports the plan as the neutral [`RebaseTodo`] shape used by
+    /// the `run_rebase` fast path and by the fake's bookkeeping.
+    /// Unused by the interactive stepper but still the right API for
+    /// external consumers.
+    #[allow(dead_code)]
     pub(crate) fn to_git_todo(&self) -> Vec<RebaseTodo> {
         self.todo
             .iter()
@@ -89,8 +97,86 @@ impl RebaseState {
     }
 }
 
+/// Actively executing rebase: owns state that survives across pauses
+/// (reword input, edit-mode review, conflict resolution). Installed
+/// when `ExecuteRebase` kicks off the plan and consumed when the plan
+/// completes or aborts. Lives on [`crate::workspace::Workspace`] as
+/// `rebase_active`.
+pub(crate) struct ActiveRebase {
+    pub workdir: PathBuf,
+    /// Original base the plan stacks onto; retained for diagnostics
+    /// and potential recovery even though the stepper reads from
+    /// `current_head` after the first entry lands.
+    #[allow(dead_code)]
+    pub onto: String,
+    pub remaining: VecDeque<RebaseEntry>,
+    /// The commit at the tip of the rebase-so-far.
+    pub current_head: String,
+    /// Latest Pick/Reword-produced commit. Squash/Fixup merge into it.
+    pub last_pick_sha: Option<String>,
+    /// Message of `last_pick_sha`, used when building squash messages.
+    pub last_message: Option<String>,
+    pub pause: Option<RebasePause>,
+}
+
+pub(crate) enum RebasePause {
+    /// Waiting for the user to edit a commit message.
+    Reword {
+        /// The sha that was just cherry-picked and committed; will be
+        /// replaced with a new commit carrying the user's message when
+        /// `RewordConfirm` fires.
+        cherry_picked_commit: String,
+        original_message: String,
+        /// User's in-progress edit of the message.
+        input: String,
+        /// Byte-offset cursor within `input`.
+        cursor: usize,
+    },
+    /// Waiting for the user to modify the picked commit (typically via
+    /// review-mode hunk removal). The review's current source sha at
+    /// `RebaseContinue` time becomes the new `current_head`.
+    Edit {
+        #[allow(dead_code)]
+        cherry_picked_commit: String,
+    },
+    /// Waiting for per-file conflict resolutions.
+    Conflict {
+        source_sha: String,
+        files: Vec<ConflictedFile>,
+        selected: usize,
+        resolutions: HashMap<PathBuf, ConflictResolution>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ConflictResolution {
+    TakeOurs,
+    TakeTheirs,
+    /// Skip this entry entirely (treat as Drop for rebase purposes).
+    /// Reserved for a future "skip this file" variant in the resolution
+    /// UI; currently the whole-entry skip path uses `ConflictSkipEntry`
+    /// and bypasses this enum.
+    SkipEntry,
+}
+
+impl ActiveRebase {
+    pub(crate) fn new(state: RebaseState) -> Self {
+        Self {
+            workdir: state.workdir,
+            onto: state.onto.clone(),
+            remaining: state.todo.into(),
+            current_head: state.onto,
+            last_pick_sha: None,
+            last_message: None,
+            pause: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::RebasePause;
     use crate::app::Stoat;
 
     fn seed_three(h: &mut crate::test_harness::TestHarness) {
@@ -112,6 +198,8 @@ mod tests {
         h.resize(90, 12);
         seed_three(&mut h);
         h.open_commits("/repo");
+        // Navigate to oldest commit (c1) so todo = [c2, c3] onto c1.
+        h.type_keys("G");
         h.type_keys("i");
         assert_eq!(h.stoat.mode, "rebase");
         h.assert_snapshot("rebase_open_todo");
@@ -123,6 +211,7 @@ mod tests {
         h.resize(90, 12);
         seed_three(&mut h);
         h.open_commits("/repo");
+        h.type_keys("G");
         h.type_keys("i");
         // Todo is [c2, c3]. Make c2 Squash and c3 Drop.
         h.type_keys("s");
@@ -137,6 +226,7 @@ mod tests {
         h.resize(90, 12);
         seed_three(&mut h);
         h.open_commits("/repo");
+        h.type_keys("G");
         h.type_keys("i");
         // Move first entry (c2) down so order becomes c3, c2.
         h.type_keys("J");
@@ -144,48 +234,257 @@ mod tests {
     }
 
     #[test]
-    fn execute_drop_rewrites_history_via_fake() {
+    fn enter_rebase_at_head_refuses() {
         let mut h = Stoat::test();
         h.resize(90, 12);
         seed_three(&mut h);
         h.open_commits("/repo");
+        // Cursor defaults to selected=0 (HEAD). `i` should refuse.
+        h.type_keys("i");
+        assert_eq!(h.stoat.mode, "commits");
+        assert!(h.stoat.active_workspace().rebase.is_none());
+        let ws = h.stoat.active_workspace();
+        let badge_id = ws
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .expect("info badge about empty todo");
+        let badge = ws.badges.get(badge_id).unwrap();
+        assert!(badge.label.contains("nothing"));
+    }
+
+    #[test]
+    fn enter_rebase_at_middle_commit_uses_cursor_as_onto() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        seed_three(&mut h);
+        h.open_commits("/repo");
+        // Move down once: selected = 1 (c2).
+        h.type_keys("j");
+        h.type_keys("i");
+        assert_eq!(h.stoat.mode, "rebase");
+        let state = h.stoat.active_workspace().rebase.as_ref().unwrap();
+        assert_eq!(state.onto, "c2", "cursor's commit becomes onto");
+        assert_eq!(state.todo.len(), 1, "only c3 above cursor");
+        assert_eq!(state.todo[0].commit.sha, "c3");
+    }
+
+    #[test]
+    fn execute_drop_rewrites_history_via_stepper() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        seed_three(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("G");
         h.type_keys("i");
         // Todo is [c2, c3] (oldest first). Drop the first entry (c2).
         h.type_keys("d");
         h.type_keys("Enter");
 
-        let rebases = h.fake_git.applied_rebases(std::path::Path::new("/repo"));
-        assert_eq!(rebases.len(), 1, "one rebase recorded");
-        let plan = &rebases[0];
-        assert_eq!(plan.onto, "c1", "onto is the oldest loaded commit");
-        assert_eq!(plan.todo.len(), 2);
-        assert_eq!(plan.todo[0].op, crate::host::RebaseTodoOp::Drop);
-        assert_eq!(plan.todo[0].sha, "c2");
-        assert_eq!(plan.todo[1].op, crate::host::RebaseTodoOp::Pick);
-        assert_eq!(plan.todo[1].sha, "c3");
+        // The stepper completes synchronously for all-pick/drop plans.
+        assert!(h.stoat.active_workspace().rebase.is_none());
+        assert!(h.stoat.active_workspace().rebase_active.is_none());
+
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        // Expected: c1 root + one rebased descendant from c3; c2 dropped.
+        assert_eq!(log.len(), 2, "c2 dropped, c3 rebased: {log:#?}");
+        assert_eq!(log.last().unwrap().sha, "c1", "root unchanged");
     }
 
     #[test]
-    fn conflict_on_execute_keeps_rebase_state_and_shows_badge() {
+    fn conflict_on_execute_enters_conflict_mode() {
         let mut h = Stoat::test();
         h.resize(90, 12);
         seed_three(&mut h);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
+        h.type_keys("G");
         h.type_keys("i");
         h.type_keys("Enter");
+        // The stepper paused on conflict and entered conflict mode.
+        assert_eq!(h.stoat.mode, "conflict");
         let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .expect("error badge");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, crate::badge::BadgeState::Error);
-        assert!(badge.label.contains("conflict"));
         assert!(
-            h.stoat.active_workspace().rebase.is_some(),
-            "rebase state retained on conflict"
+            ws.rebase_active.is_some(),
+            "rebase execution state retained for resolution"
         );
+        let active = ws.rebase_active.as_ref().unwrap();
+        assert!(
+            matches!(active.pause, Some(RebasePause::Conflict { .. })),
+            "paused on a conflict"
+        );
+    }
+
+    #[test]
+    fn reword_flow_rewrites_commit_message() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        seed_three(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        // Todo = [c2, c3]. Mark c2 as Reword (first entry, cursor at 0).
+        h.type_keys("r");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "reword", "stepper paused into reword mode");
+
+        // Buffer is preloaded with c2's message "c2: middle". Delete it
+        // and type a new one.
+        for _ in 0.."c2: middle".len() {
+            h.type_keys("Backspace");
+        }
+        h.type_text("reworded!");
+        h.type_keys("Enter");
+        // Stepper resumes and completes.
+        assert_ne!(h.stoat.mode, "reword");
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        // Find the reworded commit: it sits between c1 and the rebased c3.
+        let msgs: Vec<_> = log.iter().map(|c| c.summary.clone()).collect();
+        assert!(
+            msgs.iter().any(|m| m == "reworded!"),
+            "reworded commit in log: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn edit_flow_opens_review_and_continue_resumes() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        seed_three(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        // Mark c2 as Edit (first entry).
+        h.type_keys("e");
+        h.type_keys("Enter");
+        // Stepper paused; opened review of the just-picked commit.
+        assert_eq!(h.stoat.mode, "review");
+        assert!(
+            h.stoat.active_workspace().rebase_active.is_some(),
+            "rebase execution state retained during edit"
+        );
+        let session = h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("edit-mode review installed");
+        assert_eq!(
+            session.origin,
+            crate::review_session::ReviewOrigin::FromRebaseEdit
+        );
+
+        // Resume via RebaseContinue.
+        h.type_keys("C");
+        assert!(
+            h.stoat.active_workspace().rebase_active.is_none(),
+            "rebase execution complete after continue"
+        );
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        // Two rebased commits (from c2 and c3) plus root c1.
+        assert_eq!(log.len(), 3, "full chain rebased: {log:#?}");
+    }
+
+    #[test]
+    fn conflict_take_theirs_and_apply_completes_rebase() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 14);
+        seed_three(&mut h);
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "conflict");
+
+        // Take theirs on the selected file, then apply.
+        h.type_keys("t");
+        h.type_keys("Enter");
+
+        // Stepper resumed past the conflict; rebase_active dropped.
+        assert!(h.stoat.active_workspace().rebase_active.is_none());
+        assert_ne!(h.stoat.mode, "conflict");
+
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        assert!(!log.is_empty(), "history remains readable after resolve");
+    }
+
+    #[test]
+    fn conflict_skip_entry_drops_the_commit() {
+        use crate::host::GitHost;
+
+        let mut h = Stoat::test();
+        h.resize(90, 14);
+        seed_three(&mut h);
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "conflict");
+
+        h.type_keys("s"); // skip the conflicted entry
+        assert!(h.stoat.active_workspace().rebase_active.is_none());
+
+        let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
+        let log = repo.log_commits(None, 10);
+        // c3 was skipped; we should have c1 root + rebased c2.
+        assert_eq!(log.len(), 2, "skipped entry absent from log: {log:#?}");
+    }
+
+    #[test]
+    fn conflict_abort_drops_rebase_state() {
+        let mut h = Stoat::test();
+        h.resize(90, 14);
+        seed_three(&mut h);
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "conflict");
+        h.type_keys("a");
+        assert!(h.stoat.active_workspace().rebase_active.is_none());
+        assert_ne!(h.stoat.mode, "conflict");
+    }
+
+    #[test]
+    fn snapshot_rebase_reword_mode_ui() {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        seed_three(&mut h);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("r");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "reword");
+        h.assert_snapshot("rebase_reword_mode");
+    }
+
+    #[test]
+    fn snapshot_rebase_conflict_mode_ui() {
+        let mut h = Stoat::test();
+        h.resize(100, 18);
+        seed_three(&mut h);
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        h.type_keys("Enter");
+        assert_eq!(h.stoat.mode, "conflict");
+        h.assert_snapshot("rebase_conflict_mode");
     }
 
     #[test]
@@ -194,6 +493,7 @@ mod tests {
         h.resize(90, 12);
         seed_three(&mut h);
         h.open_commits("/repo");
+        h.type_keys("G");
         h.type_keys("i");
         assert_eq!(h.stoat.mode, "rebase");
         h.type_keys("q");

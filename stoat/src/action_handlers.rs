@@ -194,6 +194,19 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SetRebaseOpSquash => rebase_set_op(stoat, crate::host::RebaseTodoOp::Squash),
         ActionKind::SetRebaseOpFixup => rebase_set_op(stoat, crate::host::RebaseTodoOp::Fixup),
         ActionKind::SetRebaseOpDrop => rebase_set_op(stoat, crate::host::RebaseTodoOp::Drop),
+        ActionKind::SetRebaseOpReword => rebase_set_op(stoat, crate::host::RebaseTodoOp::Reword),
+        ActionKind::SetRebaseOpEdit => rebase_set_op(stoat, crate::host::RebaseTodoOp::Edit),
+        ActionKind::RewordConfirm => reword_confirm(stoat),
+        ActionKind::RewordAbort => reword_abort(stoat),
+        ActionKind::RewordBackspace => reword_backspace(stoat),
+        ActionKind::RebaseContinue => rebase_continue(stoat),
+        ActionKind::ConflictTakeOurs => conflict_set(stoat, ConflictChoice::Ours),
+        ActionKind::ConflictTakeTheirs => conflict_set(stoat, ConflictChoice::Theirs),
+        ActionKind::ConflictSkipEntry => conflict_skip_entry(stoat),
+        ActionKind::ConflictNextFile => conflict_step(stoat, true),
+        ActionKind::ConflictPrevFile => conflict_step(stoat, false),
+        ActionKind::ConflictApply => conflict_apply(stoat),
+        ActionKind::ConflictAbort => conflict_abort(stoat),
     }
 }
 
@@ -224,34 +237,34 @@ fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
     if state.commits.is_empty() {
         return UpdateEffect::None;
     }
-    let workdir = state.workdir.clone();
-    let Some(repo) = stoat.git_host.discover(&workdir) else {
-        return UpdateEffect::None;
-    };
 
-    // Seed the todo oldest-first from the loaded commits (which are
-    // newest-first on the left pane). The oldest commit becomes the
-    // `onto` base; the remaining commits (newer than `onto`) form the
-    // editable todo list. Rebasing the root itself requires `--root`
-    // semantics and is out of scope for v1.
-    let mut newest_first = state.commits.clone();
-    let Some(base_commit) = newest_first.pop() else {
-        return UpdateEffect::None;
-    };
-    let onto = base_commit.sha.clone();
-    let ordered: Vec<_> = newest_first.into_iter().rev().collect();
-    if ordered.is_empty() {
-        return UpdateEffect::None;
+    // Cursor position selects the rebase boundary:
+    //   onto = commits[selected]
+    //   todo = commits[0..selected] (newest-first) reversed to oldest-first
+    // So pressing `i` on the 4th entry (HEAD~3) rebases the top 3
+    // commits onto it. Cursor at HEAD leaves nothing to rebase.
+    let selected = state.selected;
+    if selected == 0 || selected >= state.commits.len() {
+        emit_rebase_error(
+            stoat,
+            "nothing to rebase",
+            Some("select an older commit first; commits above it become the rebase plan".into()),
+        );
+        return UpdateEffect::Redraw;
     }
-    let entries: Vec<RebaseEntry> = ordered
-        .into_iter()
+
+    let workdir = state.workdir.clone();
+    let onto = state.commits[selected].sha.clone();
+    let entries: Vec<RebaseEntry> = state.commits[..selected]
+        .iter()
+        .rev()
+        .cloned()
         .map(|commit| RebaseEntry {
             op: RebaseTodoOp::Pick,
             commit,
         })
         .collect();
 
-    let _ = repo;
     stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
     stoat.mode = "rebase".to_string();
     UpdateEffect::Redraw
@@ -298,22 +311,567 @@ fn rebase_set_op(stoat: &mut Stoat, op: crate::host::RebaseTodoOp) -> UpdateEffe
     }
 }
 
-fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{
-        badge::{Anchor, Badge, BadgeSource, BadgeState},
-        host::RebaseError,
-    };
+#[derive(Copy, Clone, Debug)]
+enum ConflictChoice {
+    Ours,
+    Theirs,
+}
 
-    let (workdir, onto, todo) = {
-        let Some(state) = stoat.active_workspace().rebase.as_ref() else {
+fn reword_backspace(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::rebase::RebasePause;
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(RebasePause::Reword { input, cursor, .. }) = active.pause.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if *cursor == 0 {
+        return UpdateEffect::None;
+    }
+    let mut new_cursor = *cursor - 1;
+    while !input.is_char_boundary(new_cursor) {
+        new_cursor -= 1;
+    }
+    input.replace_range(new_cursor..*cursor, "");
+    *cursor = new_cursor;
+    UpdateEffect::Redraw
+}
+
+fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.active_workspace_mut().rebase_active = None;
+    emit_rebase_error(
+        stoat,
+        "rebase aborted during reword",
+        Some("HEAD left at partial rebase state".into()),
+    );
+    stoat.mode = if stoat.active_workspace().commits.is_some() {
+        "commits".into()
+    } else {
+        "normal".into()
+    };
+    UpdateEffect::Redraw
+}
+
+fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{host::GitApplyError, rebase::RebasePause};
+
+    let (workdir, picked_sha, new_message, fallback_parent) = {
+        let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let Some(RebasePause::Reword {
+            cherry_picked_commit,
+            input,
+            ..
+        }) = active.pause.as_ref()
+        else {
             return UpdateEffect::None;
         };
         (
-            state.workdir.clone(),
-            state.onto.clone(),
-            state.to_git_todo(),
+            active.workdir.clone(),
+            cherry_picked_commit.clone(),
+            input.clone(),
+            Some(active.current_head.clone()),
         )
     };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        emit_rebase_error(stoat, "git repo not found", None);
+        return UpdateEffect::Redraw;
+    };
+    let Some(tree) = repo.commit_tree(&picked_sha) else {
+        emit_rebase_error(stoat, "reword: commit tree unreadable", None);
+        return UpdateEffect::Redraw;
+    };
+    let real_parent = repo.parent_sha(&picked_sha).or(fallback_parent);
+    match repo.create_commit(
+        real_parent.as_deref(),
+        &tree,
+        &new_message,
+        "stoat",
+        "stoat@example.invalid",
+    ) {
+        Ok(new_sha) => {
+            let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+                return UpdateEffect::None;
+            };
+            active.current_head = new_sha.clone();
+            active.last_pick_sha = Some(new_sha.clone());
+            active.last_message = Some(new_message);
+            active.pause = None;
+            drive_rebase(stoat)
+        },
+        Err(GitApplyError::Backend(msg)) => {
+            emit_rebase_error(stoat, "reword failed", Some(msg));
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+fn rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        rebase::RebasePause,
+        review_session::{ReviewOrigin, ReviewSource},
+    };
+
+    let maybe_new_head = {
+        let ws = stoat.active_workspace();
+        ws.review
+            .as_ref()
+            .filter(|s| s.origin == ReviewOrigin::FromRebaseEdit)
+            .and_then(|s| match &s.source {
+                ReviewSource::Commit { sha, .. } => Some(sha.clone()),
+                _ => None,
+            })
+    };
+
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if !matches!(active.pause, Some(RebasePause::Edit { .. })) {
+        return UpdateEffect::None;
+    }
+    if let Some(new_head) = maybe_new_head {
+        active.current_head = new_head.clone();
+        active.last_pick_sha = Some(new_head);
+    }
+    active.pause = None;
+
+    if stoat.active_workspace().review.is_some() {
+        close_review(stoat);
+    }
+    drive_rebase(stoat)
+}
+
+fn conflict_step(stoat: &mut Stoat, down: bool) -> UpdateEffect {
+    use crate::rebase::RebasePause;
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(RebasePause::Conflict {
+        files, selected, ..
+    }) = active.pause.as_mut()
+    else {
+        return UpdateEffect::None;
+    };
+    if files.is_empty() {
+        return UpdateEffect::None;
+    }
+    let before = *selected;
+    if down {
+        if *selected + 1 < files.len() {
+            *selected += 1;
+        }
+    } else if *selected > 0 {
+        *selected -= 1;
+    }
+    if *selected != before {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+fn conflict_set(stoat: &mut Stoat, choice: ConflictChoice) -> UpdateEffect {
+    use crate::rebase::{ConflictResolution, RebasePause};
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(RebasePause::Conflict {
+        files,
+        selected,
+        resolutions,
+        ..
+    }) = active.pause.as_mut()
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(file) = files.get(*selected) else {
+        return UpdateEffect::None;
+    };
+    let resolution = match choice {
+        ConflictChoice::Ours => ConflictResolution::TakeOurs,
+        ConflictChoice::Theirs => ConflictResolution::TakeTheirs,
+    };
+    resolutions.insert(file.path.clone(), resolution);
+    UpdateEffect::Redraw
+}
+
+fn conflict_skip_entry(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::rebase::RebasePause;
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if !matches!(active.pause, Some(RebasePause::Conflict { .. })) {
+        return UpdateEffect::None;
+    }
+    active.pause = None;
+    drive_rebase(stoat)
+}
+
+fn conflict_abort(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.active_workspace_mut().rebase_active = None;
+    emit_rebase_error(stoat, "rebase aborted during conflict", None);
+    stoat.mode = if stoat.active_workspace().commits.is_some() {
+        "commits".into()
+    } else {
+        "normal".into()
+    };
+    UpdateEffect::Redraw
+}
+
+fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::GitApplyError,
+        rebase::{ConflictResolution, RebasePause},
+    };
+
+    let (workdir, resolved_tree, author_name, author_email, message, parent) = {
+        let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let Some(RebasePause::Conflict {
+            source_sha,
+            files,
+            resolutions,
+            ..
+        }) = active.pause.as_ref()
+        else {
+            return UpdateEffect::None;
+        };
+
+        let Some(repo) = stoat.git_host.discover(&active.workdir) else {
+            return UpdateEffect::None;
+        };
+        let Some(mut tree) = repo.commit_tree(&active.current_head) else {
+            return UpdateEffect::None;
+        };
+        for file in files {
+            let choice = resolutions
+                .get(&file.path)
+                .copied()
+                .unwrap_or(ConflictResolution::TakeTheirs);
+            match choice {
+                ConflictResolution::TakeOurs => {
+                    if let Some(content) = &file.ours {
+                        tree.insert(file.path.clone(), content.clone());
+                    } else {
+                        tree.remove(&file.path);
+                    }
+                },
+                ConflictResolution::TakeTheirs => {
+                    if let Some(content) = &file.theirs {
+                        tree.insert(file.path.clone(), content.clone());
+                    } else {
+                        tree.remove(&file.path);
+                    }
+                },
+                ConflictResolution::SkipEntry => {},
+            }
+        }
+        let message = format!("conflict-resolved {source_sha}");
+        (
+            active.workdir.clone(),
+            tree,
+            "stoat".to_string(),
+            "stoat@example.invalid".to_string(),
+            message,
+            active.current_head.clone(),
+        )
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        emit_rebase_error(stoat, "git repo not found", None);
+        return UpdateEffect::Redraw;
+    };
+    match repo.create_commit(
+        Some(&parent),
+        &resolved_tree,
+        &message,
+        &author_name,
+        &author_email,
+    ) {
+        Ok(new_sha) => {
+            let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+                return UpdateEffect::None;
+            };
+            active.current_head = new_sha.clone();
+            active.last_pick_sha = Some(new_sha.clone());
+            active.last_message = Some(message);
+            active.pause = None;
+            drive_rebase(stoat)
+        },
+        Err(GitApplyError::Backend(msg)) => {
+            emit_rebase_error(stoat, "conflict commit failed", Some(msg));
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+/// Core rebase stepper. Pops entries from `remaining`, applying each
+/// via `cherry_pick_tree` + `create_commit`. On Reword, Edit, or a
+/// merge conflict it installs a `RebasePause` and returns so the UI
+/// can collect user input before re-entry resumes via `drive_rebase`.
+/// When the queue drains, HEAD is updated and `rebase_active` cleared.
+fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::{CherryPickOutcome, GitApplyError, RebaseTodoOp},
+        rebase::RebasePause,
+        review_session::ReviewOrigin,
+    };
+
+    loop {
+        let entry = {
+            let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+                return UpdateEffect::None;
+            };
+            if active.pause.is_some() {
+                return UpdateEffect::Redraw;
+            }
+            match active.remaining.pop_front() {
+                Some(e) => e,
+                None => {
+                    let final_head = active.current_head.clone();
+                    stoat.active_workspace_mut().rebase_active = None;
+                    let workdir = stoat.active_workspace().git_root.clone();
+                    if let Some(repo) = stoat.git_host.discover(&workdir) {
+                        let _ = repo.update_head(&final_head);
+                    }
+                    emit_rebase_complete(
+                        stoat,
+                        &format!(
+                            "rebase complete, HEAD at {}",
+                            &final_head[..final_head.len().min(7)]
+                        ),
+                    );
+                    stoat.mode = if stoat.active_workspace().commits.is_some() {
+                        "commits".into()
+                    } else {
+                        "normal".into()
+                    };
+                    commits_refresh(stoat);
+                    return UpdateEffect::Redraw;
+                },
+            }
+        };
+
+        match entry.op {
+            RebaseTodoOp::Drop => continue,
+            RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
+                let (workdir, current_head) = {
+                    let active = stoat
+                        .active_workspace()
+                        .rebase_active
+                        .as_ref()
+                        .expect("rebase_active present");
+                    (active.workdir.clone(), active.current_head.clone())
+                };
+                let Some(repo) = stoat.git_host.discover(&workdir) else {
+                    emit_rebase_error(stoat, "git repo not found", None);
+                    return UpdateEffect::Redraw;
+                };
+                match repo.cherry_pick_tree(&entry.commit.sha, &current_head) {
+                    Ok(CherryPickOutcome::Clean {
+                        tree,
+                        message,
+                        author_name,
+                        author_email,
+                        ..
+                    }) => match repo.create_commit(
+                        Some(&current_head),
+                        &tree,
+                        &message,
+                        &author_name,
+                        &author_email,
+                    ) {
+                        Ok(new_sha) => {
+                            let active = stoat
+                                .active_workspace_mut()
+                                .rebase_active
+                                .as_mut()
+                                .expect("rebase_active present");
+                            active.current_head = new_sha.clone();
+                            active.last_pick_sha = Some(new_sha.clone());
+                            active.last_message = Some(message.clone());
+                            match entry.op {
+                                RebaseTodoOp::Pick => continue,
+                                RebaseTodoOp::Reword => {
+                                    active.pause = Some(RebasePause::Reword {
+                                        cherry_picked_commit: new_sha,
+                                        original_message: message.clone(),
+                                        input: message.clone(),
+                                        cursor: message.len(),
+                                    });
+                                    stoat.mode = "reword".into();
+                                    return UpdateEffect::Redraw;
+                                },
+                                RebaseTodoOp::Edit => {
+                                    active.pause = Some(RebasePause::Edit {
+                                        cherry_picked_commit: new_sha.clone(),
+                                    });
+                                    if let Some(mut session) =
+                                        scan_commit(stoat, &workdir, &new_sha)
+                                    {
+                                        session.origin = ReviewOrigin::FromRebaseEdit;
+                                        install_review_session(stoat, session);
+                                    } else {
+                                        stoat.mode = "review".into();
+                                    }
+                                    return UpdateEffect::Redraw;
+                                },
+                                _ => unreachable!(),
+                            }
+                        },
+                        Err(GitApplyError::Backend(msg)) => {
+                            emit_rebase_error(stoat, "create_commit failed", Some(msg));
+                            return UpdateEffect::Redraw;
+                        },
+                    },
+                    Ok(CherryPickOutcome::Conflict { files }) => {
+                        let active = stoat
+                            .active_workspace_mut()
+                            .rebase_active
+                            .as_mut()
+                            .expect("rebase_active present");
+                        active.pause = Some(RebasePause::Conflict {
+                            source_sha: entry.commit.sha.clone(),
+                            files,
+                            selected: 0,
+                            resolutions: std::collections::HashMap::new(),
+                        });
+                        stoat.mode = "conflict".into();
+                        return UpdateEffect::Redraw;
+                    },
+                    Err(GitApplyError::Backend(msg)) => {
+                        emit_rebase_error(stoat, "cherry-pick failed", Some(msg));
+                        return UpdateEffect::Redraw;
+                    },
+                }
+            },
+            RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
+                let (workdir, last_pick, last_message) = {
+                    let active = stoat
+                        .active_workspace()
+                        .rebase_active
+                        .as_ref()
+                        .expect("rebase_active present");
+                    (
+                        active.workdir.clone(),
+                        match active.last_pick_sha.clone() {
+                            Some(s) => s,
+                            None => {
+                                emit_rebase_error(
+                                    stoat,
+                                    "squash/fixup without preceding pick",
+                                    None,
+                                );
+                                return UpdateEffect::Redraw;
+                            },
+                        },
+                        active.last_message.clone().unwrap_or_default(),
+                    )
+                };
+                let Some(repo) = stoat.git_host.discover(&workdir) else {
+                    emit_rebase_error(stoat, "git repo not found", None);
+                    return UpdateEffect::Redraw;
+                };
+                match repo.cherry_pick_tree(&entry.commit.sha, &last_pick) {
+                    Ok(CherryPickOutcome::Clean {
+                        tree,
+                        message: source_msg,
+                        author_name,
+                        author_email,
+                        ..
+                    }) => {
+                        let prev_parent = repo.parent_sha(&last_pick);
+                        let combined = match entry.op {
+                            RebaseTodoOp::Squash => {
+                                format!("{}\n\n{}", last_message.trim_end(), source_msg.trim_end())
+                            },
+                            _ => last_message.clone(),
+                        };
+                        match repo.create_commit(
+                            prev_parent.as_deref(),
+                            &tree,
+                            &combined,
+                            &author_name,
+                            &author_email,
+                        ) {
+                            Ok(new_sha) => {
+                                let active = stoat
+                                    .active_workspace_mut()
+                                    .rebase_active
+                                    .as_mut()
+                                    .expect("rebase_active present");
+                                active.current_head = new_sha.clone();
+                                active.last_pick_sha = Some(new_sha);
+                                active.last_message = Some(combined);
+                            },
+                            Err(GitApplyError::Backend(msg)) => {
+                                emit_rebase_error(stoat, "squash commit failed", Some(msg));
+                                return UpdateEffect::Redraw;
+                            },
+                        }
+                    },
+                    Ok(CherryPickOutcome::Conflict { files }) => {
+                        let active = stoat
+                            .active_workspace_mut()
+                            .rebase_active
+                            .as_mut()
+                            .expect("rebase_active present");
+                        active.pause = Some(RebasePause::Conflict {
+                            source_sha: entry.commit.sha.clone(),
+                            files,
+                            selected: 0,
+                            resolutions: std::collections::HashMap::new(),
+                        });
+                        stoat.mode = "conflict".into();
+                        return UpdateEffect::Redraw;
+                    },
+                    Err(GitApplyError::Backend(msg)) => {
+                        emit_rebase_error(stoat, "squash cherry-pick failed", Some(msg));
+                        return UpdateEffect::Redraw;
+                    },
+                }
+            },
+        }
+    }
+}
+
+fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Complete,
+        label: label.to_string(),
+        detail: None,
+    });
+}
+
+/// Insert a typed character into the paused reword buffer. Called
+/// directly from the `reword` mode key handler in app.rs.
+pub(crate) fn reword_insert_char(stoat: &mut Stoat, ch: char) {
+    use crate::rebase::RebasePause;
+    let Some(active) = stoat.active_workspace_mut().rebase_active.as_mut() else {
+        return;
+    };
+    let Some(RebasePause::Reword { input, cursor, .. }) = active.pause.as_mut() else {
+        return;
+    };
+    input.insert(*cursor, ch);
+    *cursor += ch.len_utf8();
+}
+
+fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::rebase::ActiveRebase;
+
+    let Some(plan) = stoat.active_workspace_mut().rebase.take() else {
+        return UpdateEffect::None;
+    };
+    let workdir = plan.workdir.clone();
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         emit_rebase_error(stoat, "git repo not found", None);
@@ -324,43 +882,8 @@ fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let result = repo.run_rebase(&onto, &todo);
-    let ws = stoat.active_workspace_mut();
-    match result {
-        Ok(new_head) => {
-            ws.rebase = None;
-            ws.badges.remove_by_source(BadgeSource::Review);
-            ws.badges.insert(Badge {
-                source: BadgeSource::Review,
-                anchor: Anchor::BottomRight,
-                state: BadgeState::Complete,
-                label: format!(
-                    "rebase complete, HEAD at {}",
-                    &new_head[..new_head.len().min(7)]
-                ),
-                detail: None,
-            });
-            stoat.mode = if stoat.active_workspace().commits.is_some() {
-                "commits".into()
-            } else {
-                "normal".into()
-            };
-            commits_refresh(stoat);
-            UpdateEffect::Redraw
-        },
-        Err(RebaseError::Conflict { at_sha }) => {
-            emit_rebase_error(stoat, "rebase conflict", Some(format!("at {at_sha}")));
-            UpdateEffect::Redraw
-        },
-        Err(RebaseError::DirtyWorktree) => {
-            emit_rebase_error(stoat, "dirty worktree", None);
-            UpdateEffect::Redraw
-        },
-        Err(RebaseError::Backend(msg)) => {
-            emit_rebase_error(stoat, "rebase failed", Some(msg));
-            UpdateEffect::Redraw
-        },
-    }
+    stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(plan));
+    drive_rebase(stoat)
 }
 
 fn emit_rebase_error(stoat: &mut Stoat, label: &str, detail: Option<String>) {

@@ -26,8 +26,11 @@ pub use defs::{
         SplitRight,
     },
     rebase::{
-        AbortRebase, EnterRebase, ExecuteRebase, RebaseMoveDown, RebaseMoveUp, RebaseNext,
-        RebasePrev, SetRebaseOpDrop, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpSquash,
+        AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
+        ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, EnterRebase, ExecuteRebase,
+        RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
+        RewordBackspace, RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup,
+        SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
     },
     review::{
         AgentEdit, CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,

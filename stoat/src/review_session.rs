@@ -229,6 +229,11 @@ pub(crate) enum ReviewOrigin {
     /// commits mode. `CloseReview` restores commits mode with the
     /// previously selected commit still highlighted.
     FromCommits,
+    /// Opened by the rebase stepper during an `Edit` pause. The
+    /// session's source sha may change as the user invokes
+    /// `ReviewRemoveSelected` to refine the commit; `RebaseContinue`
+    /// picks up whatever sha the session currently points at.
+    FromRebaseEdit,
 }
 
 pub(crate) struct ReviewSession {

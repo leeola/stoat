@@ -14,7 +14,7 @@ use crate::{
     },
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     pane::{DockPanel, DockVisibility, FocusTarget, Pane, View},
-    rebase::RebaseState,
+    rebase::{ActiveRebase, RebasePause, RebaseState},
     review::ReviewRow,
     review_session::ReviewSession,
     run::{PtyNotification, RunId, RunState},
@@ -327,6 +327,20 @@ impl Stoat {
         if self.mode == "insert" {
             if let Some(effect) = self.handle_insert_key(key) {
                 return effect;
+            }
+        }
+
+        // Reword mode captures printable chars directly into the paused
+        // rebase's message buffer. Named keys (Enter, Escape, Backspace)
+        // fall through to the keymap below.
+        if self.mode == "reword" {
+            if let KeyCode::Char(ch) = key.code {
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    action_handlers::reword_insert_char(self, ch);
+                    return UpdateEffect::Redraw;
+                }
             }
         }
 
@@ -979,12 +993,16 @@ impl Stoat {
 
         let commits_mode = self.mode == "commits";
         let rebase_mode = self.mode == "rebase";
-        let overlay_pane =
-            if (commits_mode && ws.commits.is_some()) || (rebase_mode && ws.rebase.is_some()) {
-                Some(ws.panes.focus())
-            } else {
-                None
-            };
+        let reword_mode = self.mode == "reword";
+        let conflict_mode = self.mode == "conflict";
+        let overlay_pane = if (commits_mode && ws.commits.is_some())
+            || (rebase_mode && ws.rebase.is_some())
+            || ((reword_mode || conflict_mode) && ws.rebase_active.is_some())
+        {
+            Some(ws.panes.focus())
+        } else {
+            None
+        };
 
         // Render split panes first so docks overlay on top.
         let split_focused = ws.panes.focus();
@@ -1017,6 +1035,14 @@ impl Stoat {
             } else if rebase_mode {
                 if let Some(state) = ws.rebase.as_ref() {
                     render_rebase(pane, is_focused, state, &mut buf);
+                }
+            } else if reword_mode {
+                if let Some(active) = ws.rebase_active.as_ref() {
+                    render_reword(pane, is_focused, active, &mut buf);
+                }
+            } else if conflict_mode {
+                if let Some(active) = ws.rebase_active.as_ref() {
+                    render_conflict(pane, is_focused, active, &mut buf);
                 }
             }
         }
@@ -1289,7 +1315,9 @@ fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
     }
 }
 
-const PRIMARY_MODES: &[&str] = &["normal", "insert", "run", "commits", "rebase"];
+const PRIMARY_MODES: &[&str] = &[
+    "normal", "insert", "run", "commits", "rebase", "reword", "conflict",
+];
 
 fn action_display_desc(action: &ResolvedAction) -> String {
     if action.name == "SetMode" {
@@ -2727,6 +2755,255 @@ fn render_editor(
 /// Changed tokens within a line are highlighted; the rest of the line
 /// is rendered in the default style so only the structural diff is
 /// visually emphasised (matching difftastic behaviour).
+fn render_reword(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut Buffer) {
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(pane.area);
+    block.render(pane.area, buf);
+    if inner.width < 10 || inner.height < 2 {
+        return;
+    }
+
+    let (cherry_picked_commit, original_message, input, cursor) = match active.pause.as_ref() {
+        Some(RebasePause::Reword {
+            cherry_picked_commit,
+            original_message,
+            input,
+            cursor,
+        }) => (cherry_picked_commit, original_message, input, *cursor),
+        _ => return,
+    };
+
+    let header_style = Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let input_style = Style::default().fg(Color::White);
+    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+
+    let short = cherry_picked_commit.chars().take(7).collect::<String>();
+    write_str(
+        buf,
+        inner.x,
+        inner.y,
+        &format!("reword {short}"),
+        header_style,
+    );
+    write_str(
+        buf,
+        inner.x,
+        inner.y + 1,
+        "Enter confirm   Escape abort   Backspace delete",
+        dim,
+    );
+    write_str(
+        buf,
+        inner.x,
+        inner.y + 3,
+        &truncate_to_cols(
+            &format!(
+                "original: {}",
+                original_message.lines().next().unwrap_or("")
+            ),
+            inner.width as usize,
+        ),
+        dim,
+    );
+
+    // Render the editable input on the next row, with inline cursor.
+    let y = inner.y + 5;
+    if y >= inner.y + inner.height {
+        return;
+    }
+    let max_cols = inner.width as usize;
+    let prefix: String = input[..cursor].chars().collect();
+    let suffix: String = input[cursor..].chars().collect();
+    let prefix_trunc = truncate_to_cols(&prefix, max_cols);
+    write_str(buf, inner.x, y, &prefix_trunc, input_style);
+    let cursor_col = prefix_trunc.chars().count() as u16;
+    let cursor_x = inner.x + cursor_col;
+    if cursor_x < inner.x + inner.width {
+        let ch_after = suffix.chars().next().unwrap_or(' ');
+        buf[(cursor_x, y)]
+            .set_char(ch_after)
+            .set_style(cursor_style);
+        let after: String = suffix.chars().skip(1).collect();
+        let after_start = cursor_x + 1;
+        let remaining = inner
+            .x
+            .saturating_add(inner.width)
+            .saturating_sub(after_start) as usize;
+        if remaining > 0 {
+            let after_trunc = truncate_to_cols(&after, remaining);
+            write_str(buf, after_start, y, &after_trunc, input_style);
+        }
+    }
+}
+
+fn render_conflict(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut Buffer) {
+    use crate::rebase::ConflictResolution;
+
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(pane.area);
+    block.render(pane.area, buf);
+    if inner.width < 20 || inner.height < 4 {
+        return;
+    }
+
+    let (source_sha, files, selected, resolutions) = match active.pause.as_ref() {
+        Some(RebasePause::Conflict {
+            source_sha,
+            files,
+            selected,
+            resolutions,
+        }) => (source_sha, files, *selected, resolutions),
+        _ => return,
+    };
+
+    let left_w = (inner.width / 3).max(20);
+    let left_w = left_w.min(inner.width.saturating_sub(20));
+    let sep_x = inner.x + left_w;
+    let right_x = sep_x + 1;
+    let right_w = inner.width.saturating_sub(left_w + 1);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let header_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+    let sel_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::REVERSED);
+    let ours_style = Style::default().fg(Color::Green);
+    let theirs_style = Style::default().fg(Color::Magenta);
+    let file_style = Style::default().fg(Color::White);
+    let add_hl = Style::default().fg(Color::Green);
+    let del_hl = Style::default().fg(Color::Red);
+
+    // Separator column.
+    for y in inner.y..inner.y + inner.height {
+        buf[(sep_x, y)].set_char('│').set_style(dim);
+    }
+
+    // Header row.
+    let short = source_sha.chars().take(7).collect::<String>();
+    write_str(
+        buf,
+        inner.x,
+        inner.y,
+        &truncate_to_cols(&format!("conflict picking {short}"), inner.width as usize),
+        header_style,
+    );
+    write_str(
+        buf,
+        inner.x,
+        inner.y + 1,
+        &truncate_to_cols(
+            "o take ours  t take theirs  s skip entry  Enter commit  a abort",
+            inner.width as usize,
+        ),
+        dim,
+    );
+
+    // File list on the left.
+    let list_top = inner.y + 3;
+    for (i, file) in files.iter().enumerate() {
+        let y = list_top + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let is_selected = i == selected;
+        let row_style = if is_selected { sel_style } else { file_style };
+        if is_selected {
+            for x in inner.x..inner.x + left_w {
+                buf[(x, y)].set_style(sel_style);
+            }
+        }
+        let marker = match resolutions.get(&file.path).copied() {
+            Some(ConflictResolution::TakeOurs) => 'O',
+            Some(ConflictResolution::TakeTheirs) => 'T',
+            Some(ConflictResolution::SkipEntry) => 'S',
+            None => '?',
+        };
+        let marker_style = match resolutions.get(&file.path).copied() {
+            Some(ConflictResolution::TakeOurs) => ours_style,
+            Some(ConflictResolution::TakeTheirs) => theirs_style,
+            _ => dim,
+        };
+        write_str(
+            buf,
+            inner.x,
+            y,
+            &format!("{marker} "),
+            if is_selected { sel_style } else { marker_style },
+        );
+        let path_x = inner.x + 2;
+        let path_max = (left_w as usize).saturating_sub(2);
+        write_str(
+            buf,
+            path_x,
+            y,
+            &truncate_to_cols(&file.path.display().to_string(), path_max),
+            row_style,
+        );
+    }
+
+    // Right pane: content of the selected file with standard conflict
+    // markers. Unconfigured files show `<<<<<<<`/`=======`/`>>>>>>>`
+    // with ours then theirs (matching git rebase's default output).
+    if let Some(file) = files.get(selected) {
+        let mut y = inner.y + 3;
+        let max_y = inner.y + inner.height;
+        let max_w = right_w as usize;
+
+        let draw_line = |y: &mut u16, text: &str, style: Style, buf: &mut Buffer| {
+            if *y >= max_y {
+                return;
+            }
+            write_str(buf, right_x, *y, &truncate_to_cols(text, max_w), style);
+            *y += 1;
+        };
+
+        let header = match resolutions.get(&file.path).copied() {
+            Some(ConflictResolution::TakeOurs) => ("will take OURS", ours_style),
+            Some(ConflictResolution::TakeTheirs) => ("will take THEIRS", theirs_style),
+            Some(ConflictResolution::SkipEntry) => ("entry skipped", dim),
+            None => ("unresolved (defaults to theirs)", dim),
+        };
+        draw_line(&mut y, header.0, header.1, buf);
+        y += 1;
+
+        // Render OURS block.
+        draw_line(&mut y, "<<<<<<< ours", del_hl, buf);
+        for line in file.ours.as_deref().unwrap_or("").lines() {
+            draw_line(&mut y, line, file_style, buf);
+        }
+        draw_line(&mut y, "=======", dim, buf);
+        for line in file.theirs.as_deref().unwrap_or("").lines() {
+            draw_line(&mut y, line, file_style, buf);
+        }
+        draw_line(&mut y, ">>>>>>> theirs", add_hl, buf);
+        if let Some(ancestor) = &file.ancestor {
+            y += 1;
+            draw_line(&mut y, "--- ancestor ---", dim, buf);
+            for line in ancestor.lines() {
+                draw_line(&mut y, line, dim, buf);
+            }
+        }
+    }
+}
+
 fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut Buffer) {
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan)
@@ -2750,6 +3027,8 @@ fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut B
     let pick_style = Style::default().fg(Color::Green);
     let squash_style = Style::default().fg(Color::Yellow);
     let fixup_style = Style::default().fg(Color::Yellow);
+    let reword_style = Style::default().fg(Color::Magenta);
+    let edit_style = Style::default().fg(Color::Magenta);
     let drop_style = Style::default().fg(Color::Red);
     let summary_style = Style::default().fg(Color::White);
     let sha_style = Style::default().fg(Color::Cyan);
@@ -2770,6 +3049,8 @@ fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut B
             RebaseTodoOp::Squash => ("squash", squash_style),
             RebaseTodoOp::Fixup => ("fixup ", fixup_style),
             RebaseTodoOp::Drop => ("drop  ", drop_style),
+            RebaseTodoOp::Reword => ("reword", reword_style),
+            RebaseTodoOp::Edit => ("edit  ", edit_style),
         };
         let row_style = if is_selected {
             sel_style

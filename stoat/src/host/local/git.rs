@@ -1,6 +1,7 @@
 use crate::host::git::{
-    ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, GitApplyError, GitHost,
-    GitRepo, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
+    ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
+    ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RebaseTodoOp,
+    RewriteResult,
 };
 use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
 use std::{
@@ -334,7 +335,11 @@ impl GitRepo for LocalGitRepo {
         for entry in todo {
             match entry.op {
                 RebaseTodoOp::Drop => continue,
-                RebaseTodoOp::Pick => {
+                RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
+                    // `run_rebase` is the atomic fast path; it cannot
+                    // pause for user input. Reword/Edit degrade to
+                    // Pick here. The stepper in `action_handlers`
+                    // handles true reword/edit interactions.
                     let commit = pick_onto(&repo, &entry.sha, current_id)?;
                     current_id = commit;
                     last_commit = Some(commit);
@@ -387,6 +392,123 @@ impl GitRepo for LocalGitRepo {
         repo.reference("HEAD", current_id, true, "run_rebase")
             .map_err(rebase_backend)?;
         Ok(current_id.to_string())
+    }
+
+    fn cherry_pick_tree(
+        &self,
+        source_sha: &str,
+        onto_sha: &str,
+    ) -> Result<CherryPickOutcome, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let source_oid = git2::Oid::from_str(source_sha).map_err(err_msg)?;
+        let onto_oid = git2::Oid::from_str(onto_sha).map_err(err_msg)?;
+        let source = repo.find_commit(source_oid).map_err(err_msg)?;
+        let onto = repo.find_commit(onto_oid).map_err(err_msg)?;
+
+        let mut index = repo
+            .cherrypick_commit(&source, &onto, 0, None)
+            .map_err(err_msg)?;
+
+        if index.has_conflicts() {
+            let mut by_path: BTreeMap<PathBuf, ConflictedFile> = BTreeMap::new();
+            for conflict in index.conflicts().map_err(err_msg)? {
+                let conflict = conflict.map_err(err_msg)?;
+                let pick_path = conflict
+                    .ancestor
+                    .as_ref()
+                    .map(|e| e.path.clone())
+                    .or_else(|| conflict.our.as_ref().map(|e| e.path.clone()))
+                    .or_else(|| conflict.their.as_ref().map(|e| e.path.clone()))
+                    .unwrap_or_default();
+                let path = PathBuf::from(std::str::from_utf8(&pick_path).unwrap_or(""));
+                let ancestor = conflict
+                    .ancestor
+                    .as_ref()
+                    .and_then(|e| read_blob(&repo, e.id));
+                let ours = conflict.our.as_ref().and_then(|e| read_blob(&repo, e.id));
+                let theirs = conflict.their.as_ref().and_then(|e| read_blob(&repo, e.id));
+                by_path.insert(
+                    path.clone(),
+                    ConflictedFile {
+                        path,
+                        ancestor,
+                        ours,
+                        theirs,
+                    },
+                );
+            }
+            return Ok(CherryPickOutcome::Conflict {
+                files: by_path.into_values().collect(),
+            });
+        }
+
+        let tree_oid = index.write_tree_to(&repo).map_err(err_msg)?;
+        let tree = repo.find_tree(tree_oid).map_err(err_msg)?;
+        let mut out: BTreeMap<PathBuf, String> = BTreeMap::new();
+        tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+            if entry.kind() != Some(git2::ObjectType::Blob) {
+                return git2::TreeWalkResult::Ok;
+            }
+            let name = match entry.name() {
+                Some(n) => n,
+                None => return git2::TreeWalkResult::Ok,
+            };
+            let rel = if dir.is_empty() {
+                PathBuf::from(name)
+            } else {
+                PathBuf::from(dir).join(name)
+            };
+            if let Ok(blob) = entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
+                if let Ok(text) = std::str::from_utf8(blob.content()) {
+                    out.insert(rel, text.to_string());
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .map_err(err_msg)?;
+
+        let author = source.author();
+        Ok(CherryPickOutcome::Clean {
+            tree: out,
+            message: source.message().unwrap_or("").to_string(),
+            author_name: author.name().unwrap_or("").to_string(),
+            author_email: author.email().unwrap_or("").to_string(),
+            author_time: source.time().seconds(),
+        })
+    }
+
+    fn create_commit(
+        &self,
+        parent_sha: Option<&str>,
+        tree: &BTreeMap<PathBuf, String>,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<String, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let tree_oid = build_tree_from_map(&repo, tree).map_err(err_msg)?;
+        let tree = repo.find_tree(tree_oid).map_err(err_msg)?;
+        let sig = git2::Signature::now(author_name, author_email).map_err(err_msg)?;
+        let parent_commit = match parent_sha {
+            Some(sha) => {
+                let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
+                Some(repo.find_commit(oid).map_err(err_msg)?)
+            },
+            None => None,
+        };
+        let parents: Vec<&git2::Commit<'_>> = parent_commit.as_ref().into_iter().collect();
+        let new_id = repo
+            .commit(None, &sig, &sig, message, &tree, &parents)
+            .map_err(err_msg)?;
+        Ok(new_id.to_string())
+    }
+
+    fn update_head(&self, sha: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
+        repo.reference("HEAD", oid, true, "stoat rebase")
+            .map_err(err_msg)?;
+        Ok(())
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
@@ -488,6 +610,13 @@ fn build_tree_from_map(
         index.add(&entry)?;
     }
     index.write_tree_to(repo)
+}
+
+/// Read a blob by oid into a UTF-8 string; returns None on lookup
+/// failure or non-UTF-8 content.
+fn read_blob(repo: &Repository, oid: git2::Oid) -> Option<String> {
+    let blob = repo.find_blob(oid).ok()?;
+    std::str::from_utf8(blob.content()).ok().map(String::from)
 }
 
 /// Cherry-pick `sha` onto `onto`. Returns the new commit's oid.

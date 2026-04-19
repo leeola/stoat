@@ -107,3 +107,134 @@ define_action!(
     "Set the selected todo entry's operation to Drop: skip this commit \
      entirely during execution."
 );
+
+define_action!(
+    SetRebaseOpRewordDef,
+    SetRebaseOpReword,
+    "SetRebaseOpReword",
+    ActionKind::SetRebaseOpReword,
+    "mark selected rebase entry as Reword",
+    "Set the selected todo entry's operation to Reword: apply the \
+     commit, then pause during execution so you can edit its message."
+);
+
+define_action!(
+    SetRebaseOpEditDef,
+    SetRebaseOpEdit,
+    "SetRebaseOpEdit",
+    ActionKind::SetRebaseOpEdit,
+    "mark selected rebase entry as Edit",
+    "Set the selected todo entry's operation to Edit: apply the commit, \
+     then pause during execution so you can modify it (via review-mode \
+     hunk removal, etc.). Resume with `RebaseContinue`."
+);
+
+define_action!(
+    RewordConfirmDef,
+    RewordConfirm,
+    "RewordConfirm",
+    ActionKind::RewordConfirm,
+    "confirm the reworded commit message",
+    "Replace the paused commit with a new one carrying the edited \
+     message and resume the rebase."
+);
+
+define_action!(
+    RewordAbortDef,
+    RewordAbort,
+    "RewordAbort",
+    ActionKind::RewordAbort,
+    "abort the paused rebase during reword",
+    "Discard the in-progress rebase, leaving HEAD where the stepper \
+     had last advanced it."
+);
+
+define_action!(
+    RewordBackspaceDef,
+    RewordBackspace,
+    "RewordBackspace",
+    ActionKind::RewordBackspace,
+    "delete the character before the cursor in the reword buffer",
+    "In reword mode, remove the character immediately before the \
+     cursor from the editable message."
+);
+
+define_action!(
+    RebaseContinueDef,
+    RebaseContinue,
+    "RebaseContinue",
+    ActionKind::RebaseContinue,
+    "resume the paused rebase",
+    "Resume the rebase after an Edit pause. The commit that was \
+     picked (and possibly modified via `ReviewRemoveSelected`) becomes \
+     the new base for subsequent entries."
+);
+
+define_action!(
+    ConflictTakeOursDef,
+    ConflictTakeOurs,
+    "ConflictTakeOurs",
+    ActionKind::ConflictTakeOurs,
+    "resolve conflicted file by taking ours",
+    "Mark the currently selected conflicted file to resolve with the \
+     'ours' side (the rebase-so-far's version) when the plan resumes."
+);
+
+define_action!(
+    ConflictTakeTheirsDef,
+    ConflictTakeTheirs,
+    "ConflictTakeTheirs",
+    ActionKind::ConflictTakeTheirs,
+    "resolve conflicted file by taking theirs",
+    "Mark the currently selected conflicted file to resolve with the \
+     'theirs' side (the commit being applied)."
+);
+
+define_action!(
+    ConflictSkipEntryDef,
+    ConflictSkipEntry,
+    "ConflictSkipEntry",
+    ActionKind::ConflictSkipEntry,
+    "skip the entire conflicted entry",
+    "Abandon the cherry-pick for this entry and continue with the \
+     next one, as if it were marked Drop."
+);
+
+define_action!(
+    ConflictNextFileDef,
+    ConflictNextFile,
+    "ConflictNextFile",
+    ActionKind::ConflictNextFile,
+    "select the next conflicted file",
+    "Move the conflict-mode cursor to the next file in the list."
+);
+
+define_action!(
+    ConflictPrevFileDef,
+    ConflictPrevFile,
+    "ConflictPrevFile",
+    ActionKind::ConflictPrevFile,
+    "select the previous conflicted file",
+    "Move the conflict-mode cursor to the previous file in the list."
+);
+
+define_action!(
+    ConflictApplyDef,
+    ConflictApply,
+    "ConflictApply",
+    ActionKind::ConflictApply,
+    "apply the current conflict resolutions and resume the rebase",
+    "Build the merged tree from each file's TakeOurs/TakeTheirs choice, \
+     create a commit, and continue the rebase. Files without an \
+     explicit choice default to TakeTheirs."
+);
+
+define_action!(
+    ConflictAbortDef,
+    ConflictAbort,
+    "ConflictAbort",
+    ActionKind::ConflictAbort,
+    "abort the rebase from the conflict resolver",
+    "Drop the in-flight rebase execution state and return to commits \
+     mode without making further changes."
+);

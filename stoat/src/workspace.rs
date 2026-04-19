@@ -9,7 +9,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::ClaudeSessionId,
     pane::{DockId, DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, View},
-    rebase::RebaseState,
+    rebase::{ActiveRebase, RebaseState},
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
@@ -66,6 +66,10 @@ pub struct Workspace {
     /// `"rebase"` mode from the commit list; dropped on abort or after
     /// successful execution.
     pub(crate) rebase: Option<RebaseState>,
+    /// In-flight rebase execution state. Present while the stepper is
+    /// paused on reword/edit/conflict and during final execution;
+    /// dropped when the plan completes or aborts.
+    pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -99,6 +103,7 @@ impl Workspace {
             review: None,
             commits: None,
             rebase: None,
+            rebase_active: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }

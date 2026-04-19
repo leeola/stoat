@@ -164,6 +164,35 @@ pub trait GitRepo: Send + Sync {
     /// any step aborts the rebase with `RebaseError::Conflict { at_sha }`
     /// and leaves the repo untouched.
     fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError>;
+
+    /// Attempt to apply the changes introduced by `source_sha` on top
+    /// of `onto_sha`. Returns the resulting tree plus the source's
+    /// metadata on a clean 3-way merge, or a list of conflicted files
+    /// with per-stage content on conflict. Does not create any commits
+    /// or update any refs; the caller is responsible for driving the
+    /// rebase state machine.
+    fn cherry_pick_tree(
+        &self,
+        source_sha: &str,
+        onto_sha: &str,
+    ) -> Result<CherryPickOutcome, GitApplyError>;
+
+    /// Create a commit with the given parent, tree, message, and
+    /// author identity. Committer is set to the configured identity
+    /// (or the same as author when not configured). Returns the new
+    /// commit's sha; does not update HEAD.
+    fn create_commit(
+        &self,
+        parent_sha: Option<&str>,
+        tree: &BTreeMap<PathBuf, String>,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<String, GitApplyError>;
+
+    /// Point HEAD at `sha` (detached update; does not move any branch
+    /// refs). Used by the rebase stepper after the plan completes.
+    fn update_head(&self, sha: &str) -> Result<(), GitApplyError>;
 }
 
 /// Result of a [`GitRepo::rewrite_commit`] call.
@@ -198,6 +227,46 @@ pub enum RebaseTodoOp {
     Squash,
     Fixup,
     Drop,
+    /// Apply the commit, then pause so the user can supply a new
+    /// message. Implementations that cannot pause (fake test paths,
+    /// `run_rebase`) should treat this as `Pick` and the caller is
+    /// responsible for driving a stepper that handles the pause.
+    Reword,
+    /// Apply the commit, then pause so the user can modify the
+    /// resulting commit (via review-mode hunk removal, etc.) before
+    /// continuing.
+    Edit,
+}
+
+/// Result of applying one commit's diff onto another via 3-way merge.
+/// Surfaces either a clean tree ready to be committed, or a set of
+/// conflicted files with each stage's content for the UI to resolve.
+#[derive(Clone, Debug)]
+pub enum CherryPickOutcome {
+    Clean {
+        tree: BTreeMap<PathBuf, String>,
+        /// Commit message carried from the source commit.
+        message: String,
+        author_name: String,
+        author_email: String,
+        author_time: i64,
+    },
+    Conflict {
+        files: Vec<ConflictedFile>,
+    },
+}
+
+/// Per-file 3-way merge state when a cherry-pick produces conflicts.
+#[derive(Clone, Debug)]
+pub struct ConflictedFile {
+    pub path: PathBuf,
+    /// Content at the common ancestor. `None` when the file did not
+    /// exist at that point (pure addition on one side).
+    pub ancestor: Option<String>,
+    /// Content on the "ours" side (the rebase-so-far HEAD).
+    pub ours: Option<String>,
+    /// Content on the "theirs" side (the commit being applied).
+    pub theirs: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

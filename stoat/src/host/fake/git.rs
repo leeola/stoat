@@ -1,8 +1,9 @@
 use crate::host::{
     fake::FakeFs,
     git::{
-        ChangedFile, CommitFileChange, CommitFileChangeKind, CommitInfo, GitApplyError, GitHost,
-        GitRepo, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
+        ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
+        ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RebaseTodoOp,
+        RewriteResult,
     },
 };
 use std::{
@@ -669,7 +670,7 @@ impl GitRepo for FakeGitRepo {
         for entry in todo {
             match entry.op {
                 RebaseTodoOp::Drop => continue,
-                RebaseTodoOp::Pick => {
+                RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
                     let Some(src) = state.commits.get(&entry.sha).cloned() else {
                         return Err(RebaseError::Backend(format!(
                             "unknown sha in rebase: {}",
@@ -752,6 +753,128 @@ impl GitRepo for FakeGitRepo {
             new_head: current.clone(),
         });
         Ok(current)
+    }
+
+    fn cherry_pick_tree(
+        &self,
+        source_sha: &str,
+        onto_sha: &str,
+    ) -> Result<CherryPickOutcome, GitApplyError> {
+        let state = self.state.lock().unwrap();
+        if let Some(conflict_sha) = &state.conflict_at {
+            if conflict_sha == source_sha {
+                let source = state.commits.get(source_sha).cloned();
+                let onto = state.commits.get(onto_sha).cloned();
+                let ancestor_tree = source
+                    .as_ref()
+                    .and_then(|c| c.parent.as_ref())
+                    .and_then(|p| state.commits.get(p))
+                    .map(|c| c.tree.clone())
+                    .unwrap_or_default();
+                // Produce a conflict on every path that differs between
+                // ours and theirs; surface stages from each side.
+                let mut paths: std::collections::BTreeSet<PathBuf> =
+                    std::collections::BTreeSet::new();
+                let ours_tree = onto.as_ref().map(|c| &c.tree);
+                let theirs_tree = source.as_ref().map(|c| &c.tree);
+                if let Some(t) = ours_tree {
+                    paths.extend(t.keys().cloned());
+                }
+                if let Some(t) = theirs_tree {
+                    paths.extend(t.keys().cloned());
+                }
+                let files: Vec<ConflictedFile> = paths
+                    .into_iter()
+                    .map(|p| ConflictedFile {
+                        ancestor: ancestor_tree.get(&p).cloned(),
+                        ours: ours_tree.and_then(|t| t.get(&p).cloned()),
+                        theirs: theirs_tree.and_then(|t| t.get(&p).cloned()),
+                        path: p,
+                    })
+                    .collect();
+                return Ok(CherryPickOutcome::Conflict { files });
+            }
+        }
+        let Some(source) = state.commits.get(source_sha).cloned() else {
+            return Err(GitApplyError::Backend(format!(
+                "unknown source sha: {source_sha}"
+            )));
+        };
+        let Some(onto) = state.commits.get(onto_sha).cloned() else {
+            return Err(GitApplyError::Backend(format!(
+                "unknown onto sha: {onto_sha}"
+            )));
+        };
+        // Deterministic merge: start from onto's tree, then overlay the
+        // diff introduced by source against its parent. Sufficient for
+        // snapshot/regression tests without implementing real 3-way
+        // merge in the fake.
+        let source_parent_tree = source
+            .parent
+            .as_ref()
+            .and_then(|p| state.commits.get(p))
+            .map(|c| c.tree.clone())
+            .unwrap_or_default();
+        let mut tree = onto.tree.clone();
+        for (path, content) in &source.tree {
+            if source_parent_tree.get(path) != Some(content) {
+                tree.insert(path.clone(), content.clone());
+            }
+        }
+        for path in source_parent_tree.keys() {
+            if !source.tree.contains_key(path) {
+                tree.remove(path);
+            }
+        }
+        Ok(CherryPickOutcome::Clean {
+            tree,
+            message: source.message.clone(),
+            author_name: source.author_name.clone(),
+            author_email: source.author_email.clone(),
+            author_time: source.time,
+        })
+    }
+
+    fn create_commit(
+        &self,
+        parent_sha: Option<&str>,
+        tree: &BTreeMap<PathBuf, String>,
+        message: &str,
+        author_name: &str,
+        author_email: &str,
+    ) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(p) = parent_sha {
+            if !state.commits.contains_key(p) {
+                return Err(GitApplyError::Backend(format!("unknown parent sha: {p}")));
+            }
+        }
+        state.synth_counter += 1;
+        let parent_frag = parent_sha.unwrap_or("root");
+        let new_sha = format!(
+            "commit-{}-{}",
+            &parent_frag[..parent_frag.len().min(6)],
+            state.synth_counter
+        );
+        let commit = FakeCommit {
+            parent: parent_sha.map(str::to_string),
+            tree: tree.clone(),
+            message: message.to_string(),
+            author_name: author_name.to_string(),
+            author_email: author_email.to_string(),
+            time: 1_700_000_000 + state.synth_counter as i64,
+        };
+        state.commits.insert(new_sha.clone(), commit);
+        Ok(new_sha)
+    }
+
+    fn update_head(&self, sha: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.commits.contains_key(sha) {
+            return Err(GitApplyError::Backend(format!("unknown sha: {sha}")));
+        }
+        state.head = Some(sha.to_string());
+        Ok(())
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
