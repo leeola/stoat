@@ -8,6 +8,7 @@ pub mod command_palette;
 mod commit_list;
 pub mod diff_map;
 pub mod display_map;
+pub mod dump;
 mod editor_state;
 pub mod host;
 pub mod keymap;

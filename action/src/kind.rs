@@ -83,4 +83,5 @@ pub enum ActionKind {
     ConflictPrevFile,
     ConflictApply,
     ConflictAbort,
+    Dump,
 }

@@ -15,6 +15,7 @@ pub use defs::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
         CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
     },
+    dump::Dump,
     editor::{
         AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordStart, MoveRight, MoveUp,

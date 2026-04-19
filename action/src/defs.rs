@@ -1,6 +1,7 @@
 pub mod app;
 pub mod claude;
 pub mod commits;
+pub mod dump;
 pub mod editor;
 pub mod file;
 pub mod palette;

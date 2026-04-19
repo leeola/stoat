@@ -3,6 +3,7 @@ use crate::{
     editor_state::EditorId,
     host::{CommitInfo, ConflictedFile, RebaseTodo, RebaseTodoOp},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -12,6 +13,7 @@ use std::{
 /// while the user is in `"rebase"` mode. Seeded from the commit list
 /// when the user presses `i` to enter the mode, mutated by todo-list
 /// edits (op changes, reorders), and consumed by `ExecuteRebase`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RebaseState {
     pub workdir: PathBuf,
     pub todo: Vec<RebaseEntry>,
@@ -21,7 +23,7 @@ pub(crate) struct RebaseState {
     pub onto: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RebaseEntry {
     pub op: RebaseTodoOp,
     pub commit: CommitInfo,
@@ -158,7 +160,7 @@ pub(crate) enum RebasePause {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub(crate) enum ConflictResolution {
     TakeOurs,

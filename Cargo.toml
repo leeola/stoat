@@ -58,6 +58,18 @@ lsp-types = "0.97"
 async-trait = "0.1"
 portable-pty = "0.8"
 vte = "0.13"
+tar = "0.4"
+zstd = "0.13"
+ignore = "0.4"
+walkdir = "2"
+tempfile = "3"
+ron = "0.8"
+time = { version = "0.3", features = [
+  "formatting",
+  "parsing",
+  "macros",
+  "serde",
+] }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

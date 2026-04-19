@@ -9,6 +9,7 @@ use crate::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
             CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
         },
+        dump::Dump,
         editor::{
             AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
             MovePrevWordStart, MoveRight, MoveUp,
@@ -225,6 +226,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             command: raw.to_owned(),
         }))
     });
+    add(Dump::DEF, |params| {
+        let raw = params
+            .first()
+            .ok_or(ParamError::Missing("name"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "name",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(Dump {
+            name: raw.to_owned(),
+        }))
+    });
 
     map
 }
@@ -378,10 +392,10 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        // 70 previous + 13 Phase-5 rebase primitives. Insert and
-        // Backspace in reword mode are handled by the editor directly,
-        // not via the action registry.
-        assert_eq!(all().count(), 82);
+        // 70 previous + 13 Phase-5 rebase primitives + 1 Dump.
+        // Insert and Backspace in reword mode are handled by the
+        // editor directly, not via the action registry.
+        assert_eq!(all().count(), 83);
     }
 
     #[test]

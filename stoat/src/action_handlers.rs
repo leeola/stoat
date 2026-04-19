@@ -15,8 +15,8 @@ use ratatui::{
 };
 use std::{path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, OpenFile, OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange,
-    Run,
+    Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
+    OpenReviewCommitRange, Run,
 };
 use stoat_text::{next_word_end, next_word_start, prev_word_start, Bias, Selection, SelectionGoal};
 
@@ -206,6 +206,21 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ConflictPrevFile => conflict_step(stoat, false),
         ActionKind::ConflictApply => conflict_apply(stoat),
         ActionKind::ConflictAbort => conflict_abort(stoat),
+        ActionKind::Dump => {
+            let dump = action
+                .as_any()
+                .downcast_ref::<Dump>()
+                .expect("Dump action downcast");
+            handle_dump(stoat, &dump.name);
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+fn handle_dump(stoat: &Stoat, name: &str) {
+    match crate::dump::save(stoat, name) {
+        Ok(id) => tracing::info!(id = %id, "dump captured"),
+        Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
     }
 }
 

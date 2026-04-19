@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -44,7 +45,7 @@ pub enum GitApplyError {
 /// Pre-computed fields (`short_sha`) exist so the UI can paint each row
 /// without reformatting on every redraw; the log view repaints at every
 /// keystroke while the user scrolls.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub sha: String,
     pub short_sha: String,
@@ -221,7 +222,7 @@ pub struct RebaseTodo {
     pub message: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RebaseTodoOp {
     Pick,
     Squash,
@@ -257,7 +258,7 @@ pub enum CherryPickOutcome {
 }
 
 /// Per-file 3-way merge state when a cherry-pick produces conflicts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConflictedFile {
     pub path: PathBuf,
     /// Content at the common ancestor. `None` when the file did not

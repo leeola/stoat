@@ -46,11 +46,38 @@ pub struct Args {
 enum Command {
     /// Open the first changed file with a diff against HEAD
     Review,
+    /// Manage workspace dumps (captured tarballs of the repo + stoat state).
+    Dump {
+        #[command(subcommand)]
+        sub: crate::commands::dump::DumpCommand,
+    },
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let Args {
+        command,
+        files,
+        text_proto_log,
+        ..
+    } = Args::parse();
 
+    match command {
+        Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
+        Some(Command::Review) => run_tui(text_proto_log, files, TuiStart::Review),
+        None => run_tui(text_proto_log, files, TuiStart::Files),
+    }
+}
+
+enum TuiStart {
+    Review,
+    Files,
+}
+
+fn run_tui(
+    text_proto_log: Option<bool>,
+    files: Vec<PathBuf>,
+    start: TuiStart,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
     // Capacity 1: natural backpressure -- main thread won't render ahead
     // if the UI thread hasn't flushed the previous frame yet
@@ -66,7 +93,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let executor = scheduler.executor();
 
     let cli_settings = Settings {
-        text_proto_log: args.text_proto_log,
+        text_proto_log,
         claude_default_placement: None,
     };
 
@@ -76,16 +103,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
         stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new()));
 
-        match args.command {
-            Some(Command::Review) => stoat.open_review(),
-            None => {
-                for (i, path) in args.files.iter().enumerate() {
+        match start {
+            TuiStart::Review => stoat.open_review(),
+            TuiStart::Files => {
+                for (i, path) in files.iter().enumerate() {
                     if i > 0 {
                         stoat.active_workspace_mut().panes.split(Axis::Vertical);
                     }
                     stoat.open_file(path);
                 }
             },
+        }
+
+        if let Ok(raw) = std::env::var("STOAT_DUMP_LOAD") {
+            let dump_path = PathBuf::from(&raw);
+            if dump_path.exists() {
+                match stoat::dump::hydrate(&mut stoat, &dump_path) {
+                    Ok(()) => {
+                        tracing::info!(path = %raw, "hydrated workspace from dump");
+                    },
+                    Err(e) => {
+                        tracing::error!(error = %e, path = %raw, "failed to hydrate dump");
+                    },
+                }
+            } else {
+                tracing::warn!(path = %raw, "STOAT_DUMP_LOAD points at missing file");
+            }
         }
 
         stoat.run(event_rx, render_tx).await
