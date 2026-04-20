@@ -1,5 +1,6 @@
 use crate::diff_map::DiffMap;
-use std::{collections::HashMap, sync::Arc};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -13,17 +14,32 @@ pub struct TextBuffer {
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
-    // FIXME: Undo/edit history not persisted across workspace save/load.
-    // `edit_history: Vec<u64>` and `text::UndoMap` are individually serializable
-    // as plain data, but they index into [`TextBufferSnapshot::fragments`] and
-    // [`TextBufferSnapshot::insertions`], which are Arc-heavy SumTrees with no
-    // serde derives. To persist the full buffer state we either need to
-    // (a) serialize the SumTrees end-to-end (custom impl across Arc-shared
-    // nodes) or (b) persist the edit log (sequence of
-    // [`stoat_text::patch::Patch`] / [`stoat_text::patch::Edit`] operations)
-    // and replay them on load so timestamps, fragments, and undo counts
-    // line up.
+    /// Stack of edit timestamps eligible to be the target of the next `undo()`.
+    /// Pushed on `edit()`, popped on `undo()`. Independent of [`Self::ops`],
+    /// which records both edits and undos for replay.
     edit_history: Vec<u64>,
+    /// Chronological log of user-driven mutations. Replaying this on a fresh
+    /// [`TextBuffer`] reconstructs an identical fragment tree, anchors, and
+    /// undo map, which is how workspace save/restore preserves selections and
+    /// undo stack across sessions.
+    ops: Vec<BufferOp>,
+}
+
+/// A single replayable mutation on a [`TextBuffer`]. Edits record the `(range,
+/// text)` inputs; undos target the top of the edit history the same way
+/// interactive `u` does.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum BufferOp {
+    Edit { old: Range<usize>, text: String },
+    Undo,
+}
+
+/// Serializable buffer state: the op log plus the `dirty` flag. Replay via
+/// [`TextBuffer::from_history`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BufferHistory {
+    pub ops: Vec<BufferOp>,
+    pub dirty: bool,
 }
 
 #[derive(Clone)]
@@ -70,6 +86,7 @@ impl TextBuffer {
             next_timestamp: 1,
             buffer_id,
             edit_history: Vec::new(),
+            ops: Vec::new(),
         }
     }
 
@@ -82,7 +99,11 @@ impl TextBuffer {
         buf
     }
 
-    pub fn edit(&mut self, range: std::ops::Range<usize>, text: &str) {
+    pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        self.ops.push(BufferOp::Edit {
+            old: range.clone(),
+            text: text.to_owned(),
+        });
         let timestamp = self.next_timestamp;
         self.next_timestamp += 1;
 
@@ -318,6 +339,7 @@ impl TextBuffer {
             return false;
         };
 
+        self.ops.push(BufferOp::Undo);
         let undo_timestamp = self.next_timestamp;
         self.next_timestamp += 1;
 
@@ -416,6 +438,32 @@ impl TextBuffer {
 
     pub fn buffer_id(&self) -> BufferId {
         self.buffer_id
+    }
+
+    /// Snapshot the op log and dirty flag for persistence. Replay the result
+    /// with [`Self::from_history`] to reconstruct an identical buffer.
+    pub fn history(&self) -> BufferHistory {
+        BufferHistory {
+            ops: self.ops.clone(),
+            dirty: self.dirty,
+        }
+    }
+
+    /// Reconstruct a [`TextBuffer`] by replaying `history` on a fresh buffer.
+    /// Sequential timestamp assignment means anchors from the original buffer
+    /// resolve to identical byte offsets in the reconstructed one.
+    pub fn from_history(buffer_id: BufferId, history: &BufferHistory) -> Self {
+        let mut buf = Self::new(buffer_id);
+        for op in &history.ops {
+            match op {
+                BufferOp::Edit { old, text } => buf.edit(old.clone(), text),
+                BufferOp::Undo => {
+                    buf.undo();
+                },
+            }
+        }
+        buf.dirty = history.dirty;
+        buf
     }
 }
 

@@ -2,13 +2,14 @@ use crate::{
     buffer::{BufferId, SharedBuffer, TextBufferSnapshot},
     diff_map::DiffMap,
 };
+use serde::{Deserialize, Serialize};
 use std::{ops::Range, sync::OnceLock};
 use stoat_text::{
     patch::Patch, Anchor, Bias, ContextLessSummary, Dimension, Item, KeyedItem, Locator, Point,
     Rope, SumTree, TextSummary,
 };
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ExcerptId(u64);
 
 impl ExcerptId {
@@ -39,7 +40,7 @@ impl ContextLessSummary for ExcerptId {
 /// to identify which excerpt the position belongs to, and an optional
 /// [`diff_base_anchor`](MultiBufferAnchor::diff_base_anchor) for referencing
 /// positions in the diff base (original) text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MultiBufferAnchor {
     pub excerpt_id: ExcerptId,
     pub text_anchor: Anchor,
@@ -253,13 +254,13 @@ struct LiveExcerpt {
     buffer: SharedBuffer,
 }
 
-// FIXME: MultiBuffer excerpts not persisted across workspace save/load.
-// [`ExcerptId`] is a plain u64 newtype and serializable in isolation, but
-// excerpt ranges are stored as [`stoat_text::Anchor`] positions, which depend
-// on per-buffer fragment trees being reconstructed identically on load.
-// Blocked on the same anchor-stability work as `editor_state.rs::selections`:
-// either persist undo/edit history so anchor timestamps round-trip, or
-// serialize excerpts as byte-offset ranges and resolve to anchors after load.
+// FIXME: Live MultiBuffer excerpt state not persisted across workspace
+// save/load. [`ExcerptId`] and [`MultiBufferAnchor`] already serialize; the
+// anchor-stability blocker (fragment-tree identity across restart) is resolved
+// by the op-log replay in [`crate::buffer::TextBuffer::from_history`]. What
+// remains is plumbing: multi-excerpt mode is only used by `ReviewSession`
+// today, and that session itself is not persisted yet, so wiring live excerpt
+// state into `EditorStateSnapshot` is deferred until review persistence lands.
 pub struct MultiBuffer {
     live_excerpts: Vec<LiveExcerpt>,
     excerpt_tree: SumTree<ExcerptEntry>,

@@ -1,4 +1,5 @@
 use crate::{Bias, ContextLessSummary, Item, KeyedItem, SumTree};
+use serde::{Deserialize, Serialize};
 use std::cmp;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,7 +115,7 @@ impl UndoMap {
 }
 
 /// An undo operation that reverses one or more prior edits.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UndoOperation {
     pub timestamp: u64,
     pub counts: std::collections::HashMap<u64, u32>,

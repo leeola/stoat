@@ -1,13 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
-#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionGoal {
     #[default]
     None,
     Column(u32),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection<T> {
     pub id: usize,
     pub start: T,

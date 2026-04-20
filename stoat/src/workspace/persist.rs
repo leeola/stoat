@@ -5,11 +5,13 @@
 //! the same git root, the file is read back and the workspace is rehydrated
 //! before the first frame renders.
 //!
-//! Coverage is best-effort: see sibling FIXMEs in `editor_state.rs`,
-//! `buffer.rs`, `buffer_registry.rs`, `multi_buffer.rs`, `review_session.rs`,
-//! `commit_list.rs`, and `claude_chat.rs` for the gaps. Anything referencing
-//! a live OS resource (PTY-backed `Run`) is out of scope by design; Claude
-//! sessions are out of scope pending a separate design pass.
+//! Coverage is best-effort: see sibling FIXMEs in `multi_buffer.rs`,
+//! `review_session.rs`, `commit_list.rs`, and `claude_chat.rs` for the
+//! remaining gaps. Buffer history (dirty content, undo stack, anchor-carrying
+//! selections) rehydrates via the op log replay in
+//! [`crate::buffer::TextBuffer::from_history`]. Anything referencing a live OS
+//! resource (PTY-backed `Run`) is out of scope by design; Claude sessions are
+//! out of scope pending a separate design pass.
 
 use crate::{
     buffer_registry::BufferRegistrySnapshot,
@@ -271,7 +273,10 @@ mod tests {
 
         assert_eq!(fresh.git_root, tmp.path());
         assert_eq!(fresh.panes.pane_count(), 2);
-        assert_eq!(fresh.editors.len(), 2);
+        // Three editors: the two file-backed editors we inserted plus the
+        // scratch-buffer editor that `Workspace::new` creates by default. The
+        // scratch editor is preserved because its buffer's op log round-trips.
+        assert_eq!(fresh.editors.len(), 3);
 
         let FocusTarget::SplitPane(focused) = fresh.focus else {
             panic!("focus should be a split pane");
@@ -281,24 +286,19 @@ mod tests {
         };
         assert_eq!(fresh.editors[focused_editor].scroll_row, 3);
 
-        let scrolls: Vec<u32> = fresh.editors.values().map(|e| e.scroll_row).collect();
-        let mut sorted = scrolls.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![3, 7]);
+        let mut scrolls: Vec<u32> = fresh.editors.values().map(|e| e.scroll_row).collect();
+        scrolls.sort();
+        assert_eq!(scrolls, vec![0, 3, 7]);
 
-        let paths: Vec<PathBuf> = fresh
+        let mut path_backed: Vec<PathBuf> = fresh
             .editors
             .values()
-            .map(|e| {
-                fresh
-                    .buffers
-                    .path_for(e.buffer_id)
-                    .expect("buffer path survives restore")
-                    .to_path_buf()
-            })
+            .filter_map(|e| fresh.buffers.path_for(e.buffer_id).map(|p| p.to_path_buf()))
             .collect();
-        assert!(paths.contains(&file_a));
-        assert!(paths.contains(&file_b));
+        path_backed.sort();
+        let mut expected = vec![file_a.clone(), file_b.clone()];
+        expected.sort();
+        assert_eq!(path_backed, expected);
     }
 
     #[test]
@@ -367,5 +367,201 @@ mod tests {
         for id in fresh.panes.split_pane_ids() {
             assert_eq!(fresh.panes.pane(id).placement, Placement::Split);
         }
+    }
+
+    fn buffer_text(ws: &Workspace, id: crate::buffer::BufferId) -> String {
+        let buffer = ws.buffers.get(id).expect("buffer missing");
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.rope().to_string()
+    }
+
+    fn buffer_is_dirty(ws: &Workspace, id: crate::buffer::BufferId) -> bool {
+        let buffer = ws.buffers.get(id).expect("buffer missing");
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.dirty
+    }
+
+    #[test]
+    fn dirty_buffer_content_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let file = write_file(tmp.path(), "scratch.txt", "hello\n");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let (id, buffer) = ws.buffers.open(&file, "hello\n");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(5..5, ", world");
+            guard.edit(12..12, "!");
+        }
+        let expected_text = buffer_text(&ws, id);
+        assert_eq!(expected_text, "hello, world!\n");
+        assert!(buffer_is_dirty(&ws, id));
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        assert_eq!(buffer_text(&fresh, id), expected_text);
+        assert!(buffer_is_dirty(&fresh, id));
+    }
+
+    #[test]
+    fn undo_stack_survives_restart() {
+        let tmp = TempDir::new().unwrap();
+        let file = write_file(tmp.path(), "count.txt", "one\n");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let (id, buffer) = ws.buffers.open(&file, "one\n");
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(3..3, " two");
+            guard.edit(7..7, " three");
+        }
+        assert_eq!(buffer_text(&ws, id), "one two three\n");
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        let restored = fresh.buffers.get(id).expect("buffer missing");
+        let mut guard = restored.write().expect("buffer poisoned");
+        assert!(guard.undo(), "undo should succeed after restart");
+        assert_eq!(guard.rope().to_string(), "one two\n");
+        assert!(guard.undo(), "second undo should also succeed");
+        assert_eq!(guard.rope().to_string(), "one\n");
+    }
+
+    #[test]
+    fn selections_round_trip_through_anchors() {
+        use crate::{multi_buffer::MultiBuffer, selection::SelectionsCollection};
+        use stoat_text::{Bias, SelectionGoal};
+
+        let tmp = TempDir::new().unwrap();
+        let file = write_file(tmp.path(), "code.txt", "abcdefghij\n");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let (id, buffer) = ws.buffers.open(&file, "abcdefghij\n");
+        let editor_id = ws
+            .editors
+            .insert(EditorState::new(id, buffer.clone(), exec.clone()));
+
+        let multi = MultiBuffer::singleton(id, buffer.clone());
+        let multi_snap = multi.snapshot();
+        let mut selections = SelectionsCollection::new();
+        selections.insert_cursor(
+            multi_snap.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &multi_snap,
+        );
+        selections.insert_cursor(
+            multi_snap.anchor_at(7, Bias::Right),
+            SelectionGoal::None,
+            &multi_snap,
+        );
+        ws.editors[editor_id].selections = selections;
+
+        let offsets_before: Vec<usize> = ws.editors[editor_id]
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| multi_snap.resolve_anchor(&s.start))
+            .collect();
+
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Editor(editor_id);
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        let restored_editor_id = fresh
+            .panes
+            .split_pane_ids()
+            .into_iter()
+            .find_map(|pid| match fresh.panes.pane(pid).view {
+                View::Editor(eid) => Some(eid),
+                _ => None,
+            })
+            .expect("pane with editor view");
+        let restored_bid = fresh.editors[restored_editor_id].buffer_id;
+        let restored_buffer = fresh.buffers.get(restored_bid).expect("buffer missing");
+        let restored_multi = MultiBuffer::singleton(restored_bid, restored_buffer);
+        let restored_snap = restored_multi.snapshot();
+        let offsets_after: Vec<usize> = fresh.editors[restored_editor_id]
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| restored_snap.resolve_anchor(&s.start))
+            .collect();
+        assert_eq!(offsets_after, offsets_before);
+    }
+
+    #[test]
+    fn clean_buffer_has_single_insert_op() {
+        use crate::buffer::BufferOp;
+
+        let tmp = TempDir::new().unwrap();
+        let file = write_file(tmp.path(), "untouched.txt", "hello world\n");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let (id, _) = ws.buffers.open(&file, "hello world\n");
+        assert!(!buffer_is_dirty(&ws, id));
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        assert_eq!(buffer_text(&fresh, id), "hello world\n");
+        assert!(!buffer_is_dirty(&fresh, id));
+
+        let buffer = fresh.buffers.get(id).expect("buffer missing");
+        let guard = buffer.read().expect("buffer poisoned");
+        let history = guard.history();
+        assert_eq!(history.ops.len(), 1);
+        match &history.ops[0] {
+            BufferOp::Edit { old, text } => {
+                assert_eq!(*old, 0..0);
+                assert_eq!(text, "hello world\n");
+            },
+            other => panic!("expected single Edit op, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scratch_buffer_history_round_trips() {
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let (scratch_id, scratch_buf) = ws.buffers.new_scratch();
+        {
+            let mut guard = scratch_buf.write().expect("buffer poisoned");
+            guard.edit(0..0, "notes\n");
+            guard.edit(6..6, "more\n");
+        }
+        assert_eq!(buffer_text(&ws, scratch_id), "notes\nmore\n");
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        assert_eq!(buffer_text(&fresh, scratch_id), "notes\nmore\n");
+        let buffer = fresh.buffers.get(scratch_id).expect("scratch lost");
+        let guard = buffer.read().expect("buffer poisoned");
+        assert!(guard.dirty);
     }
 }

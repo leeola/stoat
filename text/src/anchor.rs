@@ -1,4 +1,5 @@
 use crate::{Bias, BufferId};
+use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
 /// A stable reference to a position in a text buffer.
@@ -8,7 +9,7 @@ use std::{cmp::Ordering, ops::Range};
 /// `offset` is the byte position within that insertion. Together they form
 /// an immutable identity that can be resolved to a concrete buffer offset
 /// via the fragment tree in O(log n).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Anchor {
     pub timestamp: u64,
     pub offset: u32,

@@ -20,14 +20,6 @@ pub(crate) struct EditorState {
     /// cache here. The cache is rebuilt by action handlers whenever the
     /// backing session's `version` advances past `review_view.session_version`.
     pub(crate) review_view: Option<ReviewViewState>,
-    // FIXME: Selections not persisted across workspace save/load. `text::Anchor`
-    // is plain data and serializable, but anchors carry an edit-timestamp that
-    // indexes into the buffer's fragment tree. A freshly-loaded buffer rebuilds
-    // its fragment tree from disk (no edit history), so saved anchors won't
-    // resolve. Resolution paths: (a) persist the buffer's undo/edit history
-    // alongside content and replay on load so timestamps line up, or (b) fall
-    // back to byte offsets at save time and resolve to anchors after load
-    // (lossy across external edits). Blocked on buffer-history serialization.
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is
@@ -38,13 +30,17 @@ pub(crate) struct EditorState {
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
 ///
-/// Only the fields that can round-trip without an [`Executor`] and without
-/// fragment-tree stability are captured; see the FIXME on
-/// [`EditorState::selections`] for the anchor-persistence gap.
+/// Anchors in `selections` survive restore because [`crate::buffer::TextBuffer`]
+/// replays its op log on load, reassigning the same sequential timestamps.
+/// `display_map` and `review_view` are omitted: the display map rebuilds from
+/// the restored buffer, and review views depend on a review session (whose
+/// persistence is tracked separately).
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct EditorStateSnapshot {
     pub(crate) buffer_id: BufferId,
     pub(crate) scroll_row: u32,
+    pub(crate) selections: SelectionsCollection,
+    pub(crate) move_source_cursor: Option<(u32, usize)>,
 }
 
 impl EditorState {
@@ -80,6 +76,8 @@ impl EditorState {
         EditorStateSnapshot {
             buffer_id: self.buffer_id,
             scroll_row: self.scroll_row,
+            selections: self.selections.clone(),
+            move_source_cursor: self.move_source_cursor,
         }
     }
 
@@ -90,6 +88,8 @@ impl EditorState {
     ) -> Self {
         let mut state = Self::new(snap.buffer_id, buffer, executor);
         state.scroll_row = snap.scroll_row;
+        state.selections = snap.selections;
+        state.move_source_cursor = snap.move_source_cursor;
         state
     }
 }

@@ -1,6 +1,8 @@
 use crate::multi_buffer::MultiBufferSnapshot;
+use serde::{Deserialize, Serialize};
 use stoat_text::{Anchor, Selection, SelectionGoal};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SelectionsCollection {
     next_selection_id: usize,
     disjoint: Vec<Selection<Anchor>>,

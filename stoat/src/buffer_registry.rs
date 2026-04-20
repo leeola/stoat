@@ -1,4 +1,4 @@
-use crate::buffer::{BufferId, SharedBuffer, TextBuffer};
+use crate::buffer::{BufferHistory, BufferId, SharedBuffer, TextBuffer};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -214,49 +214,55 @@ impl BufferRegistry {
         }
     }
 
-    // FIXME: Dirty buffer content not persisted; on restore, files reload from
-    // disk and unsaved edits are lost. Plan: write modified buffers to
-    // `<workspace_state_dir>/<workspace_hash>/buffers/<buffer_id>.txt` as a
-    // sidecar, restore content into the buffer, and set `dirty = true`. Open
-    // question: what to do when the on-disk file has changed since save
-    // (3-way merge? prompt the user? keep both?).
+    /// Capture the registry state for persistence. Each entry carries its
+    /// full [`BufferHistory`] so replay on restore reconstructs identical
+    /// fragment trees and anchors. Scratch buffers (no path) are included so
+    /// their edit history also round-trips.
     pub(crate) fn snapshot(&self) -> BufferRegistrySnapshot {
-        let mut entries: Vec<(BufferId, PathBuf)> = self
+        let mut entries: Vec<BufferEntrySnap> = self
             .buffers
             .iter()
-            .filter_map(|(id, entry)| entry.path.as_ref().map(|p| (*id, p.clone())))
+            .map(|(id, entry)| BufferEntrySnap {
+                id: *id,
+                path: entry.path.clone(),
+                history: {
+                    let guard = entry.buffer.read().expect("buffer poisoned");
+                    guard.history()
+                },
+            })
             .collect();
-        entries.sort_by_key(|(id, _)| *id);
+        entries.sort_by_key(|e| e.id);
         BufferRegistrySnapshot {
             entries,
             next_id: self.next_id,
         }
     }
 
-    /// Rehydrate a registry from a [`BufferRegistrySnapshot`]. Reads each file
-    /// from disk. Entries whose file is unreadable are skipped and logged; the
-    /// restore continues with remaining buffers so startup never fails on a
-    /// missing/moved file.
+    /// Rehydrate a registry from a [`BufferRegistrySnapshot`]. For each entry
+    /// the saved [`BufferHistory`] is replayed on a fresh buffer, which
+    /// reconstructs the fragment tree, undo stack, and dirty state exactly as
+    /// they were at save time. The on-disk file is not read: if it has drifted
+    /// we'd have to choose between it and the saved edits, and the saved edits
+    /// win unconditionally since persistence represents the user's explicit
+    /// last-known state.
     pub(crate) fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
         self.buffers.clear();
         self.path_to_id.clear();
         self.next_id = snap.next_id.max(1);
 
-        for (id, path) in snap.entries {
-            let text = match std::fs::read_to_string(&path) {
-                Ok(t) => t,
-                Err(err) => {
-                    tracing::warn!(?path, ?err, "failed to restore buffer from disk; skipping");
-                    continue;
-                },
-            };
-            let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, &text)));
-            self.path_to_id.insert(path.clone(), id);
+        for entry in snap.entries {
+            let buffer = Arc::new(RwLock::new(TextBuffer::from_history(
+                entry.id,
+                &entry.history,
+            )));
+            if let Some(path) = entry.path.as_ref() {
+                self.path_to_id.insert(path.clone(), entry.id);
+            }
             self.buffers.insert(
-                id,
+                entry.id,
                 BufferEntry {
                     buffer,
-                    path: Some(path),
+                    path: entry.path,
                     language: None,
                     syntax: None,
                     syntax_map: None,
@@ -267,14 +273,21 @@ impl BufferRegistry {
     }
 }
 
-/// Serializable view of [`BufferRegistry`]. Captures only `(BufferId, Path)`
-/// pairs plus the id counter so restoration re-reads files from disk; buffer
-/// content, dirty state, syntax, and diff caches are not persisted (see the
-/// FIXME above [`BufferRegistry::snapshot`]).
+/// Serializable view of [`BufferRegistry`]. Each entry carries its
+/// [`BufferHistory`] (the replayable op log) so restoration reconstructs the
+/// fragment tree, anchors, undo stack, and dirty state exactly. Syntax and
+/// diff caches are regenerable and deliberately not persisted.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct BufferRegistrySnapshot {
-    pub entries: Vec<(BufferId, PathBuf)>,
+    pub entries: Vec<BufferEntrySnap>,
     pub next_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BufferEntrySnap {
+    pub id: BufferId,
+    pub path: Option<PathBuf>,
+    pub history: BufferHistory,
 }
 
 /// Compute a blake3-style 32-byte fingerprint of `text` suitable for

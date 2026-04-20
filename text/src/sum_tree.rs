@@ -1,4 +1,5 @@
 use arrayvec::ArrayVec;
+use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fmt, marker::PhantomData, mem, sync::Arc};
 
 #[cfg(test)]
@@ -116,7 +117,9 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum Bias {
     #[default]
     Left,
