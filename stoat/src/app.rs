@@ -14,7 +14,7 @@ use crate::{
         CommitFileChange, CommitFileChangeKind, FsHost, GitHost, LocalFs, LocalGit, RebaseTodoOp,
     },
     keymap::{Keymap, KeymapState, ResolvedAction, ResolvedArg, StateValue},
-    pane::{DockPanel, DockVisibility, FocusTarget, Pane, View},
+    pane::{Divider, DividerOrientation, DockPanel, DockVisibility, FocusTarget, Pane, View},
     rebase::{ActiveRebase, RebasePause, RebaseState},
     review::ReviewRow,
     review_session::ReviewSession,
@@ -1211,6 +1211,13 @@ impl Stoat {
             None
         };
 
+        let workspace_name = ws
+            .git_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)")
+            .to_string();
+
         // Render split panes first so docks overlay on top.
         let split_focused = ws.panes.focus();
         for (id, pane) in ws.panes.split_panes() {
@@ -1227,21 +1234,39 @@ impl Stoat {
                     runs: &ws.runs,
                     chats: &ws.chats,
                 },
+                &workspace_name,
+                &self.mode,
                 self.render_tick,
                 &mut buf,
             );
         }
+
+        render_pane_dividers(&ws.panes.dividers(), &mut buf);
 
         if let Some(pane_id) = overlay_pane {
             let pane = ws.panes.pane(pane_id);
             let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
             if commits_mode {
                 if let Some(state) = ws.commits.as_mut() {
-                    render_commits(pane, is_focused, state, &mut buf);
+                    render_commits(
+                        pane,
+                        is_focused,
+                        state,
+                        &workspace_name,
+                        &self.mode,
+                        &mut buf,
+                    );
                 }
             } else if rebase_mode {
                 if let Some(state) = ws.rebase.as_ref() {
-                    render_rebase(pane, is_focused, state, &mut buf);
+                    render_rebase(
+                        pane,
+                        is_focused,
+                        state,
+                        &workspace_name,
+                        &self.mode,
+                        &mut buf,
+                    );
                 }
             } else if reword_mode {
                 let reword_ctx = ws
@@ -1263,12 +1288,28 @@ impl Stoat {
                     });
                 if let Some((sha, orig, editor_id)) = reword_ctx {
                     if let Some(editor) = ws.editors.get_mut(editor_id) {
-                        render_reword(pane, is_focused, editor, &sha, &orig, &self.mode, &mut buf);
+                        render_reword(
+                            pane,
+                            is_focused,
+                            editor,
+                            &sha,
+                            &orig,
+                            &self.mode,
+                            &workspace_name,
+                            &mut buf,
+                        );
                     }
                 }
             } else if conflict_mode {
                 if let Some(active) = ws.rebase_active.as_ref() {
-                    render_conflict(pane, is_focused, active, &mut buf);
+                    render_conflict(
+                        pane,
+                        is_focused,
+                        active,
+                        &workspace_name,
+                        &self.mode,
+                        &mut buf,
+                    );
                 }
             }
         }
@@ -3054,24 +3095,17 @@ fn render_pane(
     pane: &Pane,
     is_focused: bool,
     ctx: PaneCtx<'_>,
+    workspace_name: &str,
+    mode: &str,
     render_tick: u64,
     buf: &mut Buffer,
 ) {
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let text_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(Color::White)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(pane.area);
-    block.render(pane.area, buf);
+    let (content_area, status_area) = split_pane_status(pane.area);
 
     let PaneCtx {
         editors,
@@ -3084,25 +3118,305 @@ fn render_pane(
         View::Label(label) => {
             Paragraph::new(Text::styled(label.clone(), text_style))
                 .centered()
-                .render(inner, buf);
+                .render(content_area, buf);
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, inner, text_style, buf, is_focused);
+                render_editor(editor, content_area, text_style, buf, is_focused);
             }
-            let _ = buffers;
         },
         View::Run(run_id) => {
             if let Some(run_state) = runs.get(*run_id) {
-                render_run_pane(run_state, inner, is_focused, buf);
+                render_run_pane(run_state, content_area, is_focused, buf);
             }
         },
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(chat, editors, buffers, inner, is_focused, render_tick, buf);
+                render_claude_pane(
+                    chat,
+                    editors,
+                    buffers,
+                    content_area,
+                    is_focused,
+                    render_tick,
+                    buf,
+                );
             }
         },
     }
+
+    render_pane_status(
+        &pane.view,
+        is_focused,
+        status_area,
+        workspace_name,
+        mode,
+        editors,
+        buffers,
+        buf,
+    );
+}
+
+/// Minimal status bar for overlay panes (commits/rebase/reword/conflict).
+/// Does not know about editors or buffers; shows only mode + workspace +
+/// a short label identifying the overlay. Matches the visual style of
+/// [`render_pane_status`] for a focused pane.
+fn render_overlay_status(
+    area: Rect,
+    is_focused: bool,
+    workspace_name: &str,
+    mode: &str,
+    label: &str,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (bar_bg, bar_fg) = if is_focused {
+        (Color::DarkGray, Color::White)
+    } else {
+        (Color::Black, Color::DarkGray)
+    };
+    let base_style = Style::default().bg(bar_bg).fg(bar_fg);
+    let y = area.y;
+    let end_x = area.x + area.width;
+    for x in area.x..end_x {
+        buf[(x, y)].set_char(' ').set_style(base_style);
+    }
+
+    let mut cursor = area.x;
+    if is_focused {
+        let (mode_label, mode_bg) = mode_segment(mode);
+        let mode_style = Style::default()
+            .bg(mode_bg)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+        cursor = paint_segment(
+            buf,
+            y,
+            cursor,
+            end_x,
+            &format!(" {mode_label} "),
+            mode_style,
+        );
+        cursor = paint_segment(
+            buf,
+            y,
+            cursor,
+            end_x,
+            &format!(" {workspace_name} "),
+            base_style.add_modifier(Modifier::BOLD),
+        );
+    }
+    let left_pad = if cursor == area.x { " " } else { "" };
+    paint_segment(
+        buf,
+        y,
+        cursor,
+        end_x,
+        &format!("{left_pad}{label} "),
+        base_style,
+    );
+}
+
+fn render_pane_dividers(dividers: &[Divider], buf: &mut Buffer) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let lit = Style::default().fg(Color::Cyan);
+    for d in dividers {
+        let style = if d.touches_focus { lit } else { dim };
+        let buf_end_x = buf.area.x + buf.area.width;
+        let buf_end_y = buf.area.y + buf.area.height;
+        match d.orientation {
+            DividerOrientation::Vertical => {
+                if d.x >= buf_end_x {
+                    continue;
+                }
+                for yy in d.y..d.y.saturating_add(d.len).min(buf_end_y) {
+                    buf[(d.x, yy)].set_char('│').set_style(style);
+                }
+            },
+            DividerOrientation::Horizontal => {
+                if d.y >= buf_end_y {
+                    continue;
+                }
+                for xx in d.x..d.x.saturating_add(d.len).min(buf_end_x) {
+                    buf[(xx, d.y)].set_char('─').set_style(style);
+                }
+            },
+        }
+    }
+}
+
+/// Partition a pane's area into its content region and the 1-row status bar
+/// at the bottom. For panes shorter than 2 rows there is no room for a
+/// status bar, so the full area is returned as content.
+fn split_pane_status(area: Rect) -> (Rect, Rect) {
+    if area.height < 2 {
+        return (
+            area,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 0,
+            },
+        );
+    }
+    let content = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height - 1,
+    };
+    let status = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    (content, status)
+}
+
+fn render_pane_status(
+    view: &View,
+    is_focused: bool,
+    area: Rect,
+    workspace_name: &str,
+    mode: &str,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    buf: &mut Buffer,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let (bar_bg, bar_fg) = if is_focused {
+        (Color::DarkGray, Color::White)
+    } else {
+        (Color::Black, Color::DarkGray)
+    };
+    let base_style = Style::default().bg(bar_bg).fg(bar_fg);
+
+    let y = area.y;
+    let end_x = area.x + area.width;
+    for x in area.x..end_x {
+        buf[(x, y)].set_char(' ').set_style(base_style);
+    }
+
+    let mut cursor = area.x;
+    if is_focused {
+        let (label, mode_bg) = mode_segment(mode);
+        let mode_style = Style::default()
+            .bg(mode_bg)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+        cursor = paint_segment(buf, y, cursor, end_x, &format!(" {label} "), mode_style);
+        let ws_style = base_style.add_modifier(Modifier::BOLD);
+        cursor = paint_segment(
+            buf,
+            y,
+            cursor,
+            end_x,
+            &format!(" {workspace_name} "),
+            ws_style,
+        );
+    }
+
+    let (filename, dirty, cursor_pos) = pane_status_info(view, editors, buffers);
+    if let Some(name) = filename {
+        let left_pad = if cursor == area.x { " " } else { "" };
+        let text = if dirty {
+            format!("{left_pad}{name} [+] ")
+        } else {
+            format!("{left_pad}{name} ")
+        };
+        cursor = paint_segment(buf, y, cursor, end_x, &text, base_style);
+    }
+
+    if let Some((line, col)) = cursor_pos {
+        let text = format!(" {line}:{col} ");
+        let width = text.chars().count() as u16;
+        let start = end_x.saturating_sub(width);
+        if start >= cursor {
+            paint_segment(buf, y, start, end_x, &text, base_style);
+        }
+    }
+    let _ = cursor;
+}
+
+fn paint_segment(
+    buf: &mut Buffer,
+    y: u16,
+    start_x: u16,
+    end_x: u16,
+    text: &str,
+    style: Style,
+) -> u16 {
+    let mut x = start_x;
+    for ch in text.chars() {
+        if x >= end_x {
+            break;
+        }
+        buf[(x, y)].set_char(ch).set_style(style);
+        x += 1;
+    }
+    x
+}
+
+fn mode_segment(mode: &str) -> (&'static str, Color) {
+    match mode {
+        "normal" => ("NOR", Color::Blue),
+        "insert" => ("INS", Color::Green),
+        "run" => ("RUN", Color::Magenta),
+        "commits" => ("COM", Color::Yellow),
+        "rebase" => ("REB", Color::Red),
+        "reword" | "reword_insert" => ("RWD", Color::Red),
+        "conflict" => ("CNF", Color::LightRed),
+        "review" => ("REV", Color::Cyan),
+        _ => ("---", Color::Gray),
+    }
+}
+
+fn pane_status_info(
+    view: &View,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+) -> (Option<String>, bool, Option<(u32, u32)>) {
+    match view {
+        View::Editor(editor_id) => {
+            let Some(editor) = editors.get_mut(*editor_id) else {
+                return (None, false, None);
+            };
+            let buffer_id = editor.buffer_id;
+            let path = buffers.path_for(buffer_id);
+            let filename = path
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+                .or_else(|| Some("[scratch]".to_string()));
+            let dirty = buffers
+                .get(buffer_id)
+                .and_then(|b| b.read().ok().map(|g| g.dirty))
+                .unwrap_or(false);
+            let cursor_pos = editor_cursor_position(editor);
+            (filename, dirty, cursor_pos)
+        },
+        View::Run(_) => (Some("[run]".to_string()), false, None),
+        View::Claude(_) => (Some("[claude]".to_string()), false, None),
+        View::Label(label) => (Some(label.clone()), false, None),
+    }
+}
+
+fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u32)> {
+    if editor.review_view.is_some() {
+        return None;
+    }
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let sel = editor.selections.newest_anchor();
+    let point = buffer_snapshot.point_for_anchor(&sel.head());
+    Some((point.row + 1, point.column + 1))
 }
 
 fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut Buffer) {
@@ -3433,18 +3747,18 @@ fn render_reword(
     cherry_picked_commit: &str,
     original_message: &str,
     current_mode: &str,
+    workspace_name: &str,
     buf: &mut Buffer,
 ) {
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(pane.area);
-    block.render(pane.area, buf);
+    let (inner, status_area) = split_pane_status(pane.area);
+    render_overlay_status(
+        status_area,
+        is_focused,
+        workspace_name,
+        current_mode,
+        "reword",
+        buf,
+    );
     if inner.width < 10 || inner.height < 4 {
         return;
     }
@@ -3499,19 +3813,25 @@ fn render_reword(
     render_editor(editor, editor_rect, body_style, buf, is_focused);
 }
 
-fn render_conflict(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &mut Buffer) {
+fn render_conflict(
+    pane: &Pane,
+    is_focused: bool,
+    active: &ActiveRebase,
+    workspace_name: &str,
+    mode: &str,
+    buf: &mut Buffer,
+) {
     use crate::rebase::ConflictResolution;
 
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(pane.area);
-    block.render(pane.area, buf);
+    let (inner, status_area) = split_pane_status(pane.area);
+    render_overlay_status(
+        status_area,
+        is_focused,
+        workspace_name,
+        mode,
+        "conflict",
+        buf,
+    );
     if inner.width < 20 || inner.height < 4 {
         return;
     }
@@ -3657,17 +3977,16 @@ fn render_conflict(pane: &Pane, is_focused: bool, active: &ActiveRebase, buf: &m
     }
 }
 
-fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut Buffer) {
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(pane.area);
-    block.render(pane.area, buf);
+fn render_rebase(
+    pane: &Pane,
+    is_focused: bool,
+    state: &RebaseState,
+    workspace_name: &str,
+    mode: &str,
+    buf: &mut Buffer,
+) {
+    let (inner, status_area) = split_pane_status(pane.area);
+    render_overlay_status(status_area, is_focused, workspace_name, mode, "rebase", buf);
 
     if inner.width < 10 || inner.height == 0 {
         return;
@@ -3762,17 +4081,23 @@ fn render_rebase(pane: &Pane, is_focused: bool, state: &RebaseState, buf: &mut B
     }
 }
 
-fn render_commits(pane: &Pane, is_focused: bool, state: &mut CommitListState, buf: &mut Buffer) {
-    let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style);
-    let inner = block.inner(pane.area);
-    block.render(pane.area, buf);
+fn render_commits(
+    pane: &Pane,
+    is_focused: bool,
+    state: &mut CommitListState,
+    workspace_name: &str,
+    mode: &str,
+    buf: &mut Buffer,
+) {
+    let (inner, status_area) = split_pane_status(pane.area);
+    render_overlay_status(
+        status_area,
+        is_focused,
+        workspace_name,
+        mode,
+        "commits",
+        buf,
+    );
 
     if inner.width < 10 || inner.height == 0 {
         return;

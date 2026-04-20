@@ -25,6 +25,27 @@ pub enum Direction {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DividerOrientation {
+    Vertical,
+    Horizontal,
+}
+
+/// A single-line segment painted in the 1-cell gap between two adjacent
+/// children of a [`Split`]. `(x, y)` is the top-left; for a
+/// [`DividerOrientation::Vertical`] segment the line extends downward for
+/// `len` rows, for [`DividerOrientation::Horizontal`] it extends rightward
+/// for `len` columns. `touches_focus` is true when the focused pane lives
+/// on either side of this gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divider {
+    pub orientation: DividerOrientation,
+    pub x: u16,
+    pub y: u16,
+    pub len: u16,
+    pub touches_focus: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum View {
     Label(String),
@@ -358,6 +379,67 @@ impl PaneTree {
     /// borrow of `self` across the loop.
     pub fn split_pane_ids(&self) -> Vec<PaneId> {
         self.split_panes().map(|(id, _)| id).collect()
+    }
+
+    /// Enumerate the 1-cell gap segments that sit between adjacent children
+    /// of every [`Split`] in the tree. [`PaneTree::recalculate`] already
+    /// reserves these gaps; this walk emits the line segment that should be
+    /// painted in each one. `touches_focus` is set when either of the
+    /// subtrees flanking the gap contains the currently focused leaf.
+    pub fn dividers(&self) -> Vec<Divider> {
+        let focus = self.focus;
+        let mut out = Vec::new();
+        let mut stack = vec![self.root];
+        while let Some(nid) = stack.pop() {
+            if let NodeContent::Split(split) = &self.nodes[nid].content {
+                stack.extend(split.children.iter().copied());
+                let children: Vec<(NodeId, Rect)> = split
+                    .children
+                    .iter()
+                    .map(|&c| (c, self.node_area(c)))
+                    .collect();
+                for pair in children.windows(2) {
+                    let (left_id, left_rect) = pair[0];
+                    let (right_id, _right_rect) = pair[1];
+                    let touches_focus = self.subtree_contains(left_id, focus)
+                        || self.subtree_contains(right_id, focus);
+                    match split.axis {
+                        Axis::Vertical => out.push(Divider {
+                            orientation: DividerOrientation::Vertical,
+                            x: left_rect.x + left_rect.width,
+                            y: split.area.y,
+                            len: split.area.height,
+                            touches_focus,
+                        }),
+                        Axis::Horizontal => out.push(Divider {
+                            orientation: DividerOrientation::Horizontal,
+                            x: split.area.x,
+                            y: left_rect.y + left_rect.height,
+                            len: split.area.width,
+                            touches_focus,
+                        }),
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn subtree_contains(&self, node: NodeId, target: PaneId) -> bool {
+        match &self.nodes[node].content {
+            NodeContent::Leaf(pid) => *pid == target,
+            NodeContent::Split(split) => split
+                .children
+                .iter()
+                .any(|&c| self.subtree_contains(c, target)),
+        }
+    }
+
+    fn node_area(&self, node: NodeId) -> Rect {
+        match &self.nodes[node].content {
+            NodeContent::Leaf(pid) => self.panes[*pid].area,
+            NodeContent::Split(split) => split.area,
+        }
     }
 
     fn split_pane_count(&self) -> usize {

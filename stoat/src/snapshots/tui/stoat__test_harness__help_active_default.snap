@@ -7,27 +7,27 @@ focused: #1 of 1
 mode: normal
 size: 80x24
 ---
-[0m[36m┌──────────────────────────────────────────────────────────────────────────────┐[0m
-[0m[36m│[0m[7m [0m                                                                             [0m[36m│[0m
-[0m[36m│[0m [0m[36m┌ help: active (normal) ───────────────────────────────────────────────────┐[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[33m> [0m[30m[107m [0m                                                               [0m[90m[insert][0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[30m[46m   :  OpenCommandPalette  open [0m[90m│[0m [0m[1m[33mOpenCommandPalette[0m                       [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m [0m[36mbound: :[0m                                 [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  C[0m[97m  AddSelectionBelow  [0m[90madd cu│[0m [0m[97mopen the command palette[0m                 [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36mEsc[0m[97m  Quit  [0m[90mexit stoat[0m[97m         [0m[90m│[0m                                          [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  L[0m[97m  OpenCommits  [0m[90mbrowse commi│[0m [0m[97mOpen an interactive list of every visible[0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  R[0m[97m  OpenReview  [0m[90mreview change│[0m [0m[97maction. Type to filter, Up/Down to[0m       [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36mSpc[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[97mnavigate, Enter to invoke, Escape to[0m     [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m [0m[97mcancel.[0m                                  [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m                                          [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[90m  OpenCommandPalette()[0m                   [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  j[0m[97m  MoveDown  [0m[90mmove cursor dow│[0m                                          [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m                                          [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m                                          [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m│[0m[90mEnter dispatch | Esc normal | Shift-Tab scope | C-u/d scroll | Bksp[0m       [0m[36m│[0m [0m[36m│[0m
-[0m[36m│[0m [0m[36m└──────────────────────────────────────────────────────────────────────────┘[0m [0m[36m│[0m
-[0m[36m│[0m                                                                              [0m[36m│[0m
-[0m[36m└──────────────────────────────────────────────────────────────────────────────┘[0m
+[0m[7m [0m
+
+  [0m[36m┌ help: active (normal) ───────────────────────────────────────────────────┐[0m
+  [0m[36m│[0m[33m> [0m[30m[107m [0m                                                               [0m[90m[insert][0m[36m│[0m
+  [0m[36m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[36m│[0m
+  [0m[36m│[0m[30m[46m   :  OpenCommandPalette  open [0m[90m│[0m [0m[1m[33mOpenCommandPalette[0m                       [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m [0m[36mbound: :[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  C[0m[97m  AddSelectionBelow  [0m[90madd cu│[0m [0m[97mopen the command palette[0m                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mEsc[0m[97m  Quit  [0m[90mexit stoat[0m[97m         [0m[90m│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  L[0m[97m  OpenCommits  [0m[90mbrowse commi│[0m [0m[97mOpen an interactive list of every visible[0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  R[0m[97m  OpenReview  [0m[90mreview change│[0m [0m[97maction. Type to filter, Up/Down to[0m       [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mSpc[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[97mnavigate, Enter to invoke, Escape to[0m     [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m [0m[97mcancel.[0m                                  [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[90m  OpenCommandPalette()[0m                   [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  j[0m[97m  MoveDown  [0m[90mmove cursor dow│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[36m│[0m
+  [0m[36m│[0m[90mEnter dispatch | Esc normal | Shift-Tab scope | C-u/d scroll | Bksp[0m       [0m[36m│[0m
+  [0m[36m└──────────────────────────────────────────────────────────────────────────┘[0m
+
+[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
