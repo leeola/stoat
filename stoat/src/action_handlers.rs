@@ -21,7 +21,7 @@ use stoat_action::{
 use stoat_text::{next_word_end, next_word_start, prev_word_start, Bias, Selection, SelectionGoal};
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
-    match action.kind() {
+    let effect = match action.kind() {
         ActionKind::Quit => UpdateEffect::Quit,
         ActionKind::SplitRight => split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => split_pane(stoat, Axis::Horizontal),
@@ -214,7 +214,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             handle_dump(stoat, &dump.name);
             UpdateEffect::Redraw
         },
-    }
+    };
+    stoat.sync_claude_badges();
+    effect
 }
 
 fn handle_dump(stoat: &Stoat, name: &str) {

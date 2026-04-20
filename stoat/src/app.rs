@@ -237,6 +237,38 @@ impl Stoat {
         self.workspaces[wid].is_claude_visible(id)
     }
 
+    /// Badge label for a Claude session. Derived from the basename of the
+    /// owning workspace's git root so multiple concurrent sessions remain
+    /// distinguishable in the stacked tray. Falls back to `"claude"` when
+    /// the git root has no basename (notably for test workspaces built
+    /// from [`std::path::PathBuf::new`]).
+    pub(crate) fn claude_badge_label(&self, id: ClaudeSessionId) -> String {
+        self.workspace_owning_session(id)
+            .and_then(|wid| self.workspaces[wid].git_root.file_name())
+            .and_then(|name| name.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "claude".to_string())
+    }
+
+    /// Drop Claude badges whose sessions are currently visible. Runs after
+    /// every action dispatch so opening a session (via pane placement, dock
+    /// unhide, or any future show path) immediately dismisses a lingering
+    /// badge. The passive visibility check in [`Self::handle_claude_message`]
+    /// only fires on protocol events, so a `Complete` badge can otherwise
+    /// outlive its session view indefinitely.
+    pub(crate) fn sync_claude_badges(&mut self) {
+        let ids: Vec<ClaudeSessionId> = self
+            .workspaces
+            .iter()
+            .flat_map(|(_, ws)| ws.chats.keys().copied())
+            .collect();
+        for id in ids {
+            if self.is_claude_visible(id) {
+                self.badges.remove_by_source(BadgeSource::Claude(id));
+            }
+        }
+    }
+
     pub fn set_claude_code_host(&mut self, host: Arc<dyn ClaudeCodeHost>) {
         self.claude_host = Some(host);
     }
@@ -946,6 +978,7 @@ impl Stoat {
         }
 
         let source = BadgeSource::Claude(session_id);
+        let label = self.claude_badge_label(session_id);
         let tray = &mut self.badges;
 
         match message {
@@ -971,7 +1004,7 @@ impl Stoat {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Active,
-                                label: "claude".into(),
+                                label: label.clone(),
                                 detail: detail_for_message(message),
                             });
                         },
@@ -995,7 +1028,7 @@ impl Stoat {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Complete,
-                                label: "claude".into(),
+                                label: label.clone(),
                                 detail: None,
                             });
                         },
@@ -1019,8 +1052,32 @@ impl Stoat {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Error,
-                                label: "claude".into(),
+                                label: label.clone(),
                                 detail: Some(msg.clone()),
+                            });
+                        },
+                    }
+                }
+                UpdateEffect::Redraw
+            },
+            AgentMessage::AuthRequired { reason } => {
+                if visible {
+                    tray.remove_by_source(source);
+                } else {
+                    match tray.find_by_source(source) {
+                        Some(id) => {
+                            if let Some(badge) = tray.get_mut(id) {
+                                badge.state = BadgeState::Error;
+                                badge.detail = Some(reason.clone());
+                            }
+                        },
+                        None => {
+                            tray.insert(Badge {
+                                source,
+                                anchor: Anchor::TopCenter,
+                                state: BadgeState::Error,
+                                label: label.clone(),
+                                detail: Some(reason.clone()),
                             });
                         },
                     }
@@ -1037,7 +1094,6 @@ impl Stoat {
             | AgentMessage::ModelChanged { .. }
             | AgentMessage::FilesPersisted { .. }
             | AgentMessage::ElicitationComplete { .. }
-            | AgentMessage::AuthRequired { .. }
             | AgentMessage::SessionState(_)
             | AgentMessage::TaskEvent(_)
             | AgentMessage::Hook(_) => UpdateEffect::None,

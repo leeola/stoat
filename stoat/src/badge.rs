@@ -540,4 +540,63 @@ mod tests {
 
         h.assert_snapshot("badge_workspace_and_global_stacked");
     }
+
+    fn claude_badge_label(h: &TestHarness, id: ClaudeSessionId) -> Option<String> {
+        let bid = h.stoat.badges.find_by_source(BadgeSource::Claude(id))?;
+        Some(h.stoat.badges.get(bid)?.label.clone())
+    }
+
+    #[test]
+    fn badge_label_is_workspace_basename() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/tmp/myproject");
+
+        h.claude().get_session(id).thinking("x");
+
+        assert_eq!(claude_badge_label(&h, id), Some("myproject".into()));
+    }
+
+    #[test]
+    fn badge_label_falls_back_without_basename() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("x");
+
+        assert_eq!(claude_badge_label(&h, id), Some("claude".into()));
+    }
+
+    #[test]
+    fn auth_required_produces_error_badge() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).raw(AgentMessage::AuthRequired {
+            reason: "subscription expired".into(),
+        });
+
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Error));
+        assert_eq!(
+            h.claude_badge_detail(id),
+            Some("subscription expired".into())
+        );
+    }
+
+    #[test]
+    fn opening_session_clears_lingering_badge() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleDockRight);
+
+        assert!(h.claude_badge_state(id).is_none());
+    }
 }
