@@ -4,6 +4,7 @@ pub mod commits;
 pub mod dump;
 pub mod editor;
 pub mod file;
+pub mod help;
 pub mod palette;
 pub mod pane;
 pub mod rebase;

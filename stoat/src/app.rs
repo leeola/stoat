@@ -8,6 +8,7 @@ use crate::{
     commit_list::CommitListState,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles, BlockRowKind},
     editor_state::{EditorId, EditorState},
+    help::{Help, HelpOutcome},
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
         CommitFileChange, CommitFileChangeKind, FsHost, GitHost, LocalFs, LocalGit, RebaseTodoOp,
@@ -58,6 +59,7 @@ pub struct Stoat {
     keymap: Keymap,
     pub settings: Settings,
     pub(crate) command_palette: Option<CommandPalette>,
+    pub(crate) help: Option<Help>,
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
@@ -110,6 +112,15 @@ impl Stoat {
     ) -> Vec<(&crate::keymap::CompiledKey, &[ResolvedAction])> {
         let state = StoatKeymapState::new(mode);
         self.keymap.active_keys(&state)
+    }
+
+    pub(crate) fn active_bindings_for_current_mode(&self) -> Vec<(String, Vec<ResolvedAction>)> {
+        let state = StoatKeymapState::new(&self.mode);
+        self.keymap
+            .active_bindings(&state)
+            .into_iter()
+            .map(|(label, actions)| (label, actions.to_vec()))
+            .collect()
     }
 
     pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
@@ -171,6 +182,7 @@ impl Stoat {
             keymap,
             settings,
             command_palette: None,
+            help: None,
             language_registry,
             syntax_styles,
             workspaces,
@@ -391,6 +403,14 @@ impl Stoat {
                 }
                 return UpdateEffect::Redraw;
             }
+            if self.help.is_some() {
+                self.help = None;
+                return UpdateEffect::Redraw;
+            }
+            if self.command_palette.is_some() {
+                self.command_palette = None;
+                return UpdateEffect::Redraw;
+            }
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
@@ -411,6 +431,10 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             return UpdateEffect::None;
+        }
+
+        if self.help.is_some() {
+            return self.dispatch_help_key(key);
         }
 
         if self.command_palette.is_some() {
@@ -1235,6 +1259,8 @@ impl Stoat {
             if let Some(run_state) = ws.runs.get(run_id) {
                 render_modal_run(run_state, self.size, &mut buf);
             }
+        } else if let Some(help) = &self.help {
+            render_help(help, self.size, &mut buf);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(palette, self.size, &mut buf);
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
@@ -1265,12 +1291,12 @@ impl Stoat {
                     } else {
                         Style::default().fg(Color::White)
                     };
-                    MiniHelpFooter { text, style }
+                    HintsFooter { text, style }
                 })
             } else {
                 None
             };
-            render_mini_help(&self.mode, &bindings, footer.as_ref(), self.size, &mut buf);
+            render_hints(&self.mode, &bindings, footer.as_ref(), self.size, &mut buf);
         }
         buf
     }
@@ -1292,6 +1318,30 @@ impl Stoat {
                     Ok(action) => action_handlers::dispatch(self, &*action),
                     Err(e) => {
                         tracing::warn!("palette dispatch `{}`: {e}", entry.def.name());
+                        UpdateEffect::Redraw
+                    },
+                }
+            },
+        }
+    }
+
+    fn dispatch_help_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        let outcome = match self.help.as_mut() {
+            Some(help) => help.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            HelpOutcome::None => UpdateEffect::Redraw,
+            HelpOutcome::Close => {
+                self.help = None;
+                UpdateEffect::Redraw
+            },
+            HelpOutcome::Dispatch(entry, params) => {
+                self.help = None;
+                match (entry.create)(&params) {
+                    Ok(action) => action_handlers::dispatch(self, &*action),
+                    Err(e) => {
+                        tracing::warn!("help dispatch `{}`: {e}", entry.def.name());
                         UpdateEffect::Redraw
                     },
                 }
@@ -1520,10 +1570,10 @@ fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
     }
 }
 
-fn render_mini_help(
+fn render_hints(
     mode: &str,
     bindings: &[(&str, String)],
-    footer: Option<&MiniHelpFooter>,
+    footer: Option<&HintsFooter>,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1607,7 +1657,7 @@ fn render_mini_help(
     }
 }
 
-struct MiniHelpFooter {
+struct HintsFooter {
     text: String,
     style: Style,
 }
@@ -1870,6 +1920,280 @@ fn format_param_value(v: &stoat_action::ParamValue) -> String {
         stoat_action::ParamValue::Number(n) => n.to_string(),
         stoat_action::ParamValue::Bool(b) => b.to_string(),
     }
+}
+
+fn render_help(help: &Help, area: Rect, buf: &mut Buffer) {
+    use crate::help::{HelpInput, HelpScope};
+
+    if area.width < 40 || area.height < 12 {
+        return;
+    }
+
+    let box_width = 120u16.min(area.width.saturating_sub(4));
+    let box_height = 36u16.min(area.height.saturating_sub(4));
+    if box_width < 40 || box_height < 12 {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let help_area = Rect::new(x, y, box_width, box_height);
+
+    let title = match help.scope() {
+        HelpScope::Active => format!(" help: active ({}) ", help.snapshot_mode()),
+        HelpScope::All => " help: all actions ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title)
+        .title_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(help_area);
+    block.render(help_area, buf);
+
+    let prompt_style = Style::default().fg(Color::Yellow);
+    let input_style = Style::default().fg(Color::White);
+    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+    let row_style = Style::default().fg(Color::White);
+    let muted = Style::default().fg(Color::DarkGray);
+    let key_style = Style::default().fg(Color::Cyan);
+    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let heading = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let search_row = inner.y;
+    let prompt = match help.input_mode() {
+        HelpInput::Insert => "> ",
+        HelpInput::Normal => ": ",
+    };
+    write_str(buf, inner.x, search_row, prompt, prompt_style);
+    write_str(buf, inner.x + 2, search_row, help.input(), input_style);
+    if matches!(help.input_mode(), HelpInput::Insert) {
+        let cursor_col = inner.x + 2 + help.input_cursor_column() as u16;
+        if cursor_col < inner.x + inner.width {
+            buf[(cursor_col, search_row)]
+                .set_char(' ')
+                .set_style(cursor_style);
+        }
+    }
+    let mode_hint = match help.input_mode() {
+        HelpInput::Insert => "[insert]",
+        HelpInput::Normal => "[normal]",
+    };
+    let hint_col = inner.x + inner.width.saturating_sub(mode_hint.chars().count() as u16);
+    write_str(buf, hint_col, search_row, mode_hint, muted);
+
+    let sep_top = search_row + 1;
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, sep_top)].set_char('─').set_style(muted);
+    }
+
+    let footer_row = inner.y + inner.height.saturating_sub(1);
+    let sep_bottom = footer_row.saturating_sub(1);
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, sep_bottom)].set_char('─').set_style(muted);
+    }
+    let footer_text = match help.input_mode() {
+        HelpInput::Insert => "Enter dispatch | Esc normal | Shift-Tab scope | C-u/d scroll | Bksp",
+        HelpInput::Normal => "i insert | j/k select | g/G top/end | C-u/d scroll | Esc close",
+    };
+    write_str(buf, inner.x, footer_row, footer_text, muted);
+
+    let body_top = sep_top + 1;
+    let body_height = sep_bottom.saturating_sub(body_top);
+    if body_height == 0 {
+        return;
+    }
+
+    let body_width = inner.width;
+    let list_width = (body_width * 42 / 100).max(20);
+    let detail_width = body_width.saturating_sub(list_width + 1);
+    let list_rect = Rect::new(inner.x, body_top, list_width, body_height);
+    let detail_rect = Rect::new(
+        inner.x + list_width + 1,
+        body_top,
+        detail_width,
+        body_height,
+    );
+
+    for row in list_rect.y..list_rect.y + list_rect.height {
+        buf[(list_rect.x + list_rect.width, row)]
+            .set_char('│')
+            .set_style(muted);
+    }
+
+    render_help_list(
+        help,
+        list_rect,
+        buf,
+        row_style,
+        selected_style,
+        key_style,
+        muted,
+    );
+    render_help_detail(help, detail_rect, buf, heading, row_style, muted, key_style);
+}
+
+fn render_help_list(
+    help: &Help,
+    area: Rect,
+    buf: &mut Buffer,
+    row_style: Style,
+    selected_style: Style,
+    key_style: Style,
+    muted: Style,
+) {
+    let filtered = help.filtered();
+    let entries = help.entries();
+    let selected = help.selected();
+    let rows = area.height as usize;
+    if rows == 0 {
+        return;
+    }
+    let scroll = selected.saturating_sub(rows.saturating_sub(1));
+
+    let key_col_width: usize = filtered
+        .iter()
+        .skip(scroll)
+        .take(rows)
+        .map(|&i| {
+            entries[i]
+                .key_label
+                .as_deref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+        .min(10);
+
+    let row_end = area.x + area.width;
+    for (row_idx, &entry_idx) in filtered.iter().skip(scroll).take(rows).enumerate() {
+        let row = area.y + row_idx as u16;
+        let entry = &entries[entry_idx];
+        let is_selected = entry_idx == *filtered.get(selected).unwrap_or(&usize::MAX);
+        let base = if is_selected {
+            selected_style
+        } else {
+            row_style
+        };
+
+        for col in area.x..row_end {
+            buf[(col, row)].set_char(' ').set_style(base);
+        }
+
+        let key_text = entry.key_label.as_deref().unwrap_or("");
+        let padded = format!("{key_text:>width$}", width = key_col_width);
+        let key_display_style = if is_selected { base } else { key_style };
+        write_str_clipped(buf, area.x + 1, row, &padded, key_display_style, row_end);
+        let name_col = area.x + 1 + key_col_width as u16 + 2;
+        if name_col < row_end {
+            write_str_clipped(buf, name_col, row, entry.def.name(), base, row_end);
+        }
+        let name_w = entry.def.name().chars().count() as u16;
+        let desc_col = name_col + name_w + 2;
+        if desc_col < row_end {
+            let desc_style = if is_selected { base } else { muted };
+            write_str_clipped(
+                buf,
+                desc_col,
+                row,
+                entry.def.short_desc(),
+                desc_style,
+                row_end,
+            );
+        }
+    }
+}
+
+fn write_str_clipped(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, end_x: u16) {
+    for (i, ch) in s.chars().enumerate() {
+        let col = x + i as u16;
+        if col >= end_x || col >= buf.area.x + buf.area.width {
+            break;
+        }
+        if y >= buf.area.y + buf.area.height {
+            break;
+        }
+        buf[(col, y)].set_char(ch).set_style(style);
+    }
+}
+
+fn render_help_detail(
+    help: &Help,
+    area: Rect,
+    buf: &mut Buffer,
+    heading: Style,
+    body_style: Style,
+    muted: Style,
+    key_style: Style,
+) {
+    let Some(entry) = help.selected_entry() else {
+        return;
+    };
+    let width = area.width.saturating_sub(1) as usize;
+    if width == 0 || area.height == 0 {
+        return;
+    }
+
+    let mut lines: Vec<(String, Style)> = Vec::new();
+    lines.push((entry.def.name().to_string(), heading));
+    if let Some(label) = entry.key_label.as_deref() {
+        lines.push((format!("bound: {label}"), key_style));
+    } else {
+        lines.push(("(unbound)".to_string(), muted));
+    }
+    lines.push((entry.def.short_desc().to_string(), body_style));
+    lines.push((String::new(), body_style));
+
+    for wrapped in wrap_text(entry.def.long_desc(), width) {
+        lines.push((wrapped, body_style));
+    }
+
+    let params = entry.def.params();
+    if !params.is_empty() {
+        lines.push((String::new(), body_style));
+        lines.push(("Parameters:".to_string(), heading));
+        for p in params {
+            let required = if p.required { "*" } else { "" };
+            let head = format!("  {}{}: {}: {}", p.name, required, p.kind, p.description);
+            for wrapped in wrap_text(&head, width) {
+                lines.push((wrapped, body_style));
+            }
+        }
+    }
+
+    lines.push((String::new(), body_style));
+    lines.push(("Example:".to_string(), heading));
+    let example = format_example(entry);
+    lines.push((format!("  {example}"), muted));
+
+    let scroll = help.detail_scroll() as usize;
+    let rows = area.height as usize;
+    let end_x = area.x + area.width;
+    for (row_idx, (text, style)) in lines.iter().skip(scroll).take(rows).enumerate() {
+        let row = area.y + row_idx as u16;
+        write_str_clipped(buf, area.x + 1, row, text, *style, end_x);
+    }
+}
+
+fn format_example(entry: &crate::help::HelpEntry) -> String {
+    let name = entry.def.name();
+    let params = entry.def.params();
+    if params.is_empty() {
+        return format!("{name}()");
+    }
+    if !entry.bound_args.is_empty() {
+        let args: Vec<String> = entry
+            .bound_args
+            .iter()
+            .filter_map(crate::help::format_arg)
+            .collect();
+        return format!("{name}({})", args.join(", "));
+    }
+    let placeholders: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
+    format!("{name}({})", placeholders.join(", "))
 }
 
 fn write_cell(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {

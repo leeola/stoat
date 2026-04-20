@@ -4,6 +4,7 @@ use crate::{
     command_palette::CommandPalette,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, DisplayPoint, RenderBlock},
     editor_state::{EditorId, EditorState},
+    help::Help,
     host::FsHost,
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
     review_session::{ReviewSession, ReviewSource, ReviewViewState},
@@ -87,6 +88,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::OpenCommandPalette => {
             stoat.command_palette = Some(CommandPalette::new());
+            UpdateEffect::Redraw
+        },
+        ActionKind::OpenHelp => {
+            let active = stoat.active_bindings_for_current_mode();
+            let mode = stoat.mode.clone();
+            stoat.help = Some(Help::new(&mode, active));
             UpdateEffect::Redraw
         },
         ActionKind::OpenReview => {

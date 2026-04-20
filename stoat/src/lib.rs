@@ -10,6 +10,7 @@ pub mod diff_map;
 pub mod display_map;
 pub mod dump;
 mod editor_state;
+pub mod help;
 pub mod host;
 pub mod keymap;
 pub mod multi_buffer;

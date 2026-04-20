@@ -21,6 +21,7 @@ pub use defs::{
         MovePrevWordStart, MoveRight, MoveUp,
     },
     file::OpenFile,
+    help::OpenHelp,
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,

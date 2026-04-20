@@ -1,4 +1,5 @@
 on key {
+    ? -> OpenHelp();
     mode == normal {
         q -> Quit();
         Escape -> Quit();
