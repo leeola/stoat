@@ -34,6 +34,11 @@ pub struct ClaudeChatState {
     /// Set when the user submits a message; cleared when the turn
     /// completes (Result) or errors. Drives the activity throbber.
     pub active_since: Option<Instant>,
+    /// Protocol-level session UUID delivered by `AgentMessage::Init`. `None`
+    /// until the first Init arrives from the Claude Code process. Persisted
+    /// as part of workspace state so a future launch can pass it to
+    /// `ClaudeCodeHost::resume_session`.
+    pub protocol_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

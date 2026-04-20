@@ -10,8 +10,10 @@
 //! remaining gaps. Buffer history (dirty content, undo stack, anchor-carrying
 //! selections) rehydrates via the op log replay in
 //! [`crate::buffer::TextBuffer::from_history`]. Anything referencing a live OS
-//! resource (PTY-backed `Run`) is out of scope by design; Claude sessions are
-//! out of scope pending a separate design pass.
+//! resource (PTY-backed `Run`) is out of scope by design. For Claude, the
+//! primary session's protocol UUID round-trips (stored for future
+//! resume-on-load wiring); live session rehydration itself is still out of
+//! scope pending a separate design pass.
 
 use crate::{
     buffer_registry::BufferRegistrySnapshot,
@@ -45,6 +47,12 @@ pub(crate) struct WorkspaceStateV1 {
     pub buffers: BufferRegistrySnapshot,
     pub rebase: Option<RebaseState>,
     pub rebase_active: Option<ActiveRebaseSnap>,
+    /// Protocol-level UUID of the workspace's primary Claude session, if one
+    /// existed and had received `AgentMessage::Init` at save time. `None`
+    /// when no Claude session was active. `#[serde(default)]` keeps
+    /// pre-field on-disk files readable.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
 }
 
 /// Resolve the on-disk state file path for a given git root.
@@ -75,6 +83,11 @@ impl Workspace {
             .as_ref()
             .map(|active| ActiveRebaseSnap::from_active(active).snap);
 
+        let claude_session_id = self
+            .claude_chat
+            .and_then(|id| self.chats.get(&id))
+            .and_then(|chat| chat.protocol_session_id.clone());
+
         WorkspaceStateV1 {
             git_root: self.git_root.clone(),
             panes: clone_pane_tree(&self.panes),
@@ -84,6 +97,7 @@ impl Workspace {
             buffers: self.buffers.snapshot(),
             rebase: self.rebase.clone(),
             rebase_active,
+            claude_session_id,
         }
     }
 
@@ -152,6 +166,7 @@ impl Workspace {
         self.git_root = state.git_root;
         self.rebase = state.rebase;
         self.rebase_active = state.rebase_active.map(ActiveRebaseSnap::into_active);
+        self.restored_claude_session_id = state.claude_session_id;
     }
 }
 
@@ -367,6 +382,59 @@ mod tests {
         for id in fresh.panes.split_pane_ids() {
             assert_eq!(fresh.panes.pane(id).placement, Placement::Split);
         }
+    }
+
+    #[test]
+    fn round_trip_preserves_claude_session_id() {
+        use crate::{claude_chat::ClaudeChatState, editor_state::EditorId, host::ClaudeSessionId};
+        use stoat_text::BufferId;
+
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let chat_id = ClaudeSessionId::default();
+        ws.claude_chat = Some(chat_id);
+        ws.chats.insert(
+            chat_id,
+            ClaudeChatState {
+                session_id: chat_id,
+                input_editor_id: EditorId::default(),
+                input_buffer_id: BufferId::new(0),
+                messages: Vec::new(),
+                streaming_text: None,
+                scroll_offset: 0,
+                pending_sends: Vec::new(),
+                active_since: None,
+                protocol_session_id: Some("00000000-0000-4000-8000-000000000abc".into()),
+            },
+        );
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        assert_eq!(
+            fresh.restored_claude_session_id,
+            Some("00000000-0000-4000-8000-000000000abc".into()),
+        );
+    }
+
+    #[test]
+    fn round_trip_claude_session_id_absent_when_no_chat() {
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        fresh.restore_state(&state_path, &exec).unwrap();
+
+        assert_eq!(fresh.restored_claude_session_id, None);
     }
 
     fn buffer_text(ws: &Workspace, id: crate::buffer::BufferId) -> String {

@@ -2732,6 +2732,7 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             scroll_offset: 0,
             pending_sends: Vec::new(),
             active_since: None,
+            protocol_session_id: None,
         },
     );
 

@@ -881,8 +881,13 @@ impl Stoat {
                         content: ChatMessageContent::Error(msg.clone()),
                     });
                 },
-                AgentMessage::Init { .. }
-                | AgentMessage::Unknown { .. }
+                AgentMessage::Init {
+                    session_id: proto_id,
+                    ..
+                } => {
+                    chat.protocol_session_id = Some(proto_id.clone());
+                },
+                AgentMessage::Unknown { .. }
                 | AgentMessage::ServerToolUse { .. }
                 | AgentMessage::ServerToolResult { .. }
                 | AgentMessage::ToolUpdate { .. }

@@ -50,6 +50,12 @@ pub struct Workspace {
     pub id: WorkspaceId,
     pub git_root: PathBuf,
     pub claude_chat: Option<ClaudeSessionId>,
+    /// Protocol session UUID recovered from the persisted workspace state.
+    /// Populated by [`crate::workspace::persist`] on restore when the prior
+    /// session had received `AgentMessage::Init`. Reserved for future
+    /// resume-on-load wiring; `None` in freshly constructed workspaces.
+    #[allow(dead_code)]
+    pub(crate) restored_claude_session_id: Option<String>,
     pub panes: PaneTree,
     pub(crate) docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
@@ -96,6 +102,7 @@ impl Workspace {
             id: WorkspaceId::default(),
             git_root,
             claude_chat: None,
+            restored_claude_session_id: None,
             panes,
             docks: SlotMap::with_key(),
             focus: FocusTarget::SplitPane(initial_focus),
