@@ -2,7 +2,7 @@ mod persist;
 
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
-    badge::{BadgeSource, BadgeTray},
+    badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     claude_chat::ClaudeChatState,
@@ -275,7 +275,5 @@ impl Workspace {
     #[allow(dead_code)]
     pub(crate) fn show_claude_session(&mut self, pane_id: PaneId, session_id: ClaudeSessionId) {
         self.panes.pane_mut(pane_id).view = View::Claude(session_id);
-        self.badges
-            .remove_by_source(BadgeSource::Claude(session_id));
     }
 }

@@ -436,4 +436,108 @@ mod tests {
         });
         assert!(h.claude_badge_state(id).is_none());
     }
+
+    #[test]
+    fn badge_survives_workspace_switch() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("work");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+        assert_eq!(h.claude_badge_detail(id), Some("thinking".into()));
+    }
+
+    #[test]
+    fn badge_updates_from_inactive_workspace() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+
+        h.claude().get_session(id).thinking("work");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+
+        h.claude().get_session(id).result_with(ResultSpec {
+            cost_usd: 0.01,
+            duration_ms: 100,
+            num_turns: 1,
+        });
+
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Complete));
+        assert_eq!(h.claude_badge_detail(id), None);
+    }
+
+    #[test]
+    fn chat_state_routes_to_owning_workspace() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+        let owner = h.stoat.active_workspace;
+
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+
+        h.claude().get_session(id).text("hello from A");
+
+        let owner_ws = &h.stoat.workspaces[owner];
+        let owner_chat = owner_ws
+            .chats
+            .get(&id)
+            .expect("owning workspace must retain the chat state");
+        assert!(
+            owner_chat.messages.iter().any(|m| matches!(
+                &m.content,
+                crate::claude_chat::ChatMessageContent::Text(t) if t == "hello from A"
+            )),
+            "assistant message must land in the owning workspace's chat"
+        );
+
+        let other_ws = &h.stoat.workspaces[other];
+        assert!(
+            !other_ws.chats.contains_key(&id),
+            "non-owning workspace must not receive the chat"
+        );
+    }
+
+    #[test]
+    fn badge_cleared_when_session_shown_from_owning_workspace() {
+        let mut h = TestHarness::default();
+        let id = setup_hidden_claude_session(&mut h);
+        let owner = h.stoat.active_workspace;
+
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+
+        h.claude().get_session(id).thinking("work");
+        assert_eq!(h.claude_badge_state(id), Some(BadgeState::Active));
+
+        h.set_active_workspace(owner);
+        h.show_claude_session(id);
+
+        assert!(h.claude_badge_state(id).is_none());
+    }
+
+    #[test]
+    fn snapshot_workspace_and_global_badges_stacked() {
+        let mut h = TestHarness::with_size(40, 10);
+        let id = setup_hidden_claude_session(&mut h);
+
+        let ws = h.stoat.active_workspace_mut();
+        ws.badges.insert(Badge {
+            source: BadgeSource::Run(test_run_id()),
+            anchor: Anchor::TopCenter,
+            state: BadgeState::Active,
+            label: "run".into(),
+            detail: None,
+        });
+
+        h.claude().get_session(id).thinking("work");
+
+        h.assert_snapshot("badge_workspace_and_global_stacked");
+    }
 }

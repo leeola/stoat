@@ -62,6 +62,11 @@ pub struct Stoat {
     pub(crate) syntax_styles: SyntaxStyles,
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
     pub(crate) active_workspace: WorkspaceId,
+    /// App-level badge tray for cross-workspace notifications. Badges here
+    /// render regardless of which workspace is active, complementing each
+    /// workspace's own [`Workspace::badges`]. The tray the badge lives in
+    /// is the source of truth for its scope.
+    pub(crate) badges: BadgeTray,
     claude_host: Option<Arc<dyn ClaudeCodeHost>>,
     claude_sessions: ClaudeCodeSessions,
     pub(crate) claude_tx: Sender<ClaudeNotification>,
@@ -170,6 +175,7 @@ impl Stoat {
             syntax_styles,
             workspaces,
             active_workspace,
+            badges: BadgeTray::new(),
             claude_host: None,
             claude_sessions: ClaudeCodeSessions::default(),
             claude_tx,
@@ -203,6 +209,32 @@ impl Stoat {
 
     pub fn active_workspace_mut(&mut self) -> &mut Workspace {
         &mut self.workspaces[self.active_workspace]
+    }
+
+    /// Find the workspace that owns a Claude session, by searching for the
+    /// session id in each workspace's [`Workspace::chats`] map. A session
+    /// always belongs to the workspace where it was created; this lookup
+    /// keeps chat-state updates routed correctly when messages arrive while
+    /// a different workspace is active.
+    pub(crate) fn workspace_owning_session(&self, id: ClaudeSessionId) -> Option<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .find(|(_, ws)| ws.chats.contains_key(&id))
+            .map(|(wid, _)| wid)
+    }
+
+    /// Whether a Claude session is currently visible in its owning
+    /// workspace's panes. A session with no owning workspace is never
+    /// visible; a session owned by a non-active workspace is never visible
+    /// from the user's perspective (they're looking at a different workspace).
+    pub(crate) fn is_claude_visible(&self, id: ClaudeSessionId) -> bool {
+        let Some(wid) = self.workspace_owning_session(id) else {
+            return false;
+        };
+        if wid != self.active_workspace {
+            return false;
+        }
+        self.workspaces[wid].is_claude_visible(id)
     }
 
     pub fn set_claude_code_host(&mut self, host: Arc<dyn ClaudeCodeHost>) {
@@ -813,105 +845,108 @@ impl Stoat {
     ) -> UpdateEffect {
         use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
 
-        let ws = self.active_workspace_mut();
+        let visible = self.is_claude_visible(session_id);
+        let owning = self.workspace_owning_session(session_id);
 
-        // Populate chat state.
-        if let Some(chat) = ws.chats.get_mut(&session_id) {
-            match message {
-                AgentMessage::Text { text } => {
-                    chat.streaming_text = None;
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
+        if let Some(wid) = owning {
+            let chat_ws = &mut self.workspaces[wid];
+            if let Some(chat) = chat_ws.chats.get_mut(&session_id) {
+                match message {
+                    AgentMessage::Text { text } => {
+                        chat.streaming_text = None;
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            chat.messages.push(ChatMessage {
+                                role: ChatRole::Assistant,
+                                content: ChatMessageContent::Text(trimmed.to_string()),
+                            });
+                        }
+                    },
+                    AgentMessage::PartialText { text } => {
+                        chat.streaming_text = Some(text.clone());
+                    },
+                    AgentMessage::Thinking { text, .. } => {
+                        chat.streaming_text = None;
                         chat.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
-                            content: ChatMessageContent::Text(trimmed.to_string()),
+                            content: ChatMessageContent::Thinking { text: text.clone() },
                         });
-                    }
-                },
-                AgentMessage::PartialText { text } => {
-                    chat.streaming_text = Some(text.clone());
-                },
-                AgentMessage::Thinking { text, .. } => {
-                    chat.streaming_text = None;
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::Thinking { text: text.clone() },
-                    });
-                },
-                AgentMessage::ToolUse {
-                    id, name, input, ..
-                } => {
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        },
-                    });
-                },
-                AgentMessage::ToolResult { id, content, .. } => {
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::ToolResult {
-                            id: id.clone(),
-                            content: content.clone(),
-                        },
-                    });
-                },
-                AgentMessage::Result {
-                    cost_usd,
-                    duration_ms,
-                    num_turns,
-                } => {
-                    chat.active_since = None;
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::TurnComplete {
-                            cost_usd: *cost_usd,
-                            duration_ms: *duration_ms,
-                            num_turns: *num_turns,
-                        },
-                    });
-                },
-                AgentMessage::Error { message: msg } => {
-                    chat.active_since = None;
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::Error(msg.clone()),
-                    });
-                },
-                AgentMessage::Init {
-                    session_id: proto_id,
-                    ..
-                } => {
-                    chat.protocol_session_id = Some(proto_id.clone());
-                },
-                AgentMessage::Unknown { .. }
-                | AgentMessage::ServerToolUse { .. }
-                | AgentMessage::ServerToolResult { .. }
-                | AgentMessage::ToolUpdate { .. }
-                | AgentMessage::PartialToolInput { .. }
-                | AgentMessage::Plan { .. }
-                | AgentMessage::Usage { .. }
-                | AgentMessage::ModeChanged { .. }
-                | AgentMessage::ModelChanged { .. }
-                | AgentMessage::FilesPersisted { .. }
-                | AgentMessage::ElicitationComplete { .. }
-                | AgentMessage::AuthRequired { .. }
-                | AgentMessage::SessionState(_)
-                | AgentMessage::TaskEvent(_)
-                | AgentMessage::Hook(_) => {
-                    // Phase 3 lands these variants structurally. UI
-                    // integration (diff rendering, plan widget, usage
-                    // meter, etc.) is a follow-up; for now the chat
-                    // state model ignores them.
-                },
+                    },
+                    AgentMessage::ToolUse {
+                        id, name, input, ..
+                    } => {
+                        chat.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: ChatMessageContent::ToolUse {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input: input.clone(),
+                            },
+                        });
+                    },
+                    AgentMessage::ToolResult { id, content, .. } => {
+                        chat.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: ChatMessageContent::ToolResult {
+                                id: id.clone(),
+                                content: content.clone(),
+                            },
+                        });
+                    },
+                    AgentMessage::Result {
+                        cost_usd,
+                        duration_ms,
+                        num_turns,
+                    } => {
+                        chat.active_since = None;
+                        chat.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: ChatMessageContent::TurnComplete {
+                                cost_usd: *cost_usd,
+                                duration_ms: *duration_ms,
+                                num_turns: *num_turns,
+                            },
+                        });
+                    },
+                    AgentMessage::Error { message: msg } => {
+                        chat.active_since = None;
+                        chat.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: ChatMessageContent::Error(msg.clone()),
+                        });
+                    },
+                    AgentMessage::Init {
+                        session_id: proto_id,
+                        ..
+                    } => {
+                        chat.protocol_session_id = Some(proto_id.clone());
+                    },
+                    AgentMessage::Unknown { .. }
+                    | AgentMessage::ServerToolUse { .. }
+                    | AgentMessage::ServerToolResult { .. }
+                    | AgentMessage::ToolUpdate { .. }
+                    | AgentMessage::PartialToolInput { .. }
+                    | AgentMessage::Plan { .. }
+                    | AgentMessage::Usage { .. }
+                    | AgentMessage::ModeChanged { .. }
+                    | AgentMessage::ModelChanged { .. }
+                    | AgentMessage::FilesPersisted { .. }
+                    | AgentMessage::ElicitationComplete { .. }
+                    | AgentMessage::AuthRequired { .. }
+                    | AgentMessage::SessionState(_)
+                    | AgentMessage::TaskEvent(_)
+                    | AgentMessage::Hook(_) => {
+                        // Phase 3 lands these variants structurally. UI
+                        // integration (diff rendering, plan widget, usage
+                        // meter, etc.) is a follow-up; for now the chat
+                        // state model ignores them.
+                    },
+                }
             }
         }
 
         let source = BadgeSource::Claude(session_id);
-        let visible = ws.is_claude_visible(session_id);
+        let tray = &mut self.badges;
 
         match message {
             AgentMessage::Thinking { .. }
@@ -922,17 +957,17 @@ impl Stoat {
             | AgentMessage::ServerToolUse { .. }
             | AgentMessage::ServerToolResult { .. } => {
                 if visible {
-                    ws.badges.remove_by_source(source);
+                    tray.remove_by_source(source);
                 } else {
-                    match ws.badges.find_by_source(source) {
+                    match tray.find_by_source(source) {
                         Some(id) => {
-                            if let Some(badge) = ws.badges.get_mut(id) {
+                            if let Some(badge) = tray.get_mut(id) {
                                 badge.state = BadgeState::Active;
                                 badge.detail = detail_for_message(message);
                             }
                         },
                         None => {
-                            ws.badges.insert(Badge {
+                            tray.insert(Badge {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Active,
@@ -946,17 +981,17 @@ impl Stoat {
             },
             AgentMessage::Result { .. } => {
                 if visible {
-                    ws.badges.remove_by_source(source);
+                    tray.remove_by_source(source);
                 } else {
-                    match ws.badges.find_by_source(source) {
+                    match tray.find_by_source(source) {
                         Some(id) => {
-                            if let Some(badge) = ws.badges.get_mut(id) {
+                            if let Some(badge) = tray.get_mut(id) {
                                 badge.state = BadgeState::Complete;
                                 badge.detail = None;
                             }
                         },
                         None => {
-                            ws.badges.insert(Badge {
+                            tray.insert(Badge {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Complete,
@@ -970,17 +1005,17 @@ impl Stoat {
             },
             AgentMessage::Error { message: msg } => {
                 if visible {
-                    ws.badges.remove_by_source(source);
+                    tray.remove_by_source(source);
                 } else {
-                    match ws.badges.find_by_source(source) {
+                    match tray.find_by_source(source) {
                         Some(id) => {
-                            if let Some(badge) = ws.badges.get_mut(id) {
+                            if let Some(badge) = tray.get_mut(id) {
                                 badge.state = BadgeState::Error;
                                 badge.detail = Some(msg.clone());
                             }
                         },
                         None => {
-                            ws.badges.insert(Badge {
+                            tray.insert(Badge {
                                 source,
                                 anchor: Anchor::TopCenter,
                                 state: BadgeState::Error,
@@ -1133,7 +1168,13 @@ impl Stoat {
                 );
             }
         }
-        render_badges(&ws.badges, self.size, self.render_tick, &mut buf);
+        render_badges(
+            &ws.badges,
+            &self.badges,
+            self.size,
+            self.render_tick,
+            &mut buf,
+        );
         if let Some(run_id) = self.modal_run {
             if let Some(run_state) = ws.runs.get(run_id) {
                 render_modal_run(run_state, self.size, &mut buf);
@@ -1947,22 +1988,30 @@ fn render_single_badge(badge: &Badge, x: u16, y: u16, render_tick: u64, buf: &mu
     write_str(buf, x + 1, y + 1, &badge.label, content_style);
 }
 
-fn render_badges(badges: &BadgeTray, area: Rect, render_tick: u64, buf: &mut Buffer) {
-    if badges.is_empty() {
+fn render_badges(
+    workspace: &BadgeTray,
+    global: &BadgeTray,
+    area: Rect,
+    render_tick: u64,
+    buf: &mut Buffer,
+) {
+    if workspace.is_empty() && global.is_empty() {
         return;
     }
 
     for anchor in Anchor::ALL {
-        let tray = badges.tray(anchor);
-        let visible: Vec<_> = badges
+        let tray = workspace.tray(anchor);
+        let visible: Vec<&Badge> = workspace
             .at_anchor(anchor)
+            .chain(global.at_anchor(anchor))
+            .map(|(_, b)| b)
             .take(tray.max_visible as usize)
             .collect();
         if visible.is_empty() {
             continue;
         }
 
-        let sizes: Vec<(u16, u16)> = visible.iter().map(|(_, b)| badge_size(b)).collect();
+        let sizes: Vec<(u16, u16)> = visible.iter().map(|b| badge_size(b)).collect();
         let (origin_x, origin_y) = anchor_origin(anchor, area);
         let grows_left = matches!(
             anchor,
@@ -1982,7 +2031,7 @@ fn render_badges(badges: &BadgeTray, area: Rect, render_tick: u64, buf: &mut Buf
             cx = origin_x.saturating_sub(total_w / 2);
         }
 
-        for (i, (_, badge)) in visible.iter().enumerate() {
+        for (i, badge) in visible.iter().enumerate() {
             let (bw, bh) = sizes[i];
 
             let draw_x = if grows_left {

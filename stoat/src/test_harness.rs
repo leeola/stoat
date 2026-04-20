@@ -577,7 +577,9 @@ impl TestHarness {
                 };
             }
         }
-        ws.badges.remove_by_source(BadgeSource::Claude(session_id));
+        self.stoat
+            .badges
+            .remove_by_source(BadgeSource::Claude(session_id));
         self.capture("show_claude_session");
     }
 
@@ -585,21 +587,35 @@ impl TestHarness {
         &self,
         session_id: ClaudeSessionId,
     ) -> Option<crate::badge::BadgeState> {
-        let ws = self.stoat.active_workspace();
         let source = crate::badge::BadgeSource::Claude(session_id);
-        ws.badges
+        self.stoat
+            .badges
             .find_by_source(source)
-            .and_then(|id| ws.badges.get(id))
+            .and_then(|id| self.stoat.badges.get(id))
             .map(|b| b.state)
     }
 
     pub fn claude_badge_detail(&self, session_id: ClaudeSessionId) -> Option<String> {
-        let ws = self.stoat.active_workspace();
         let source = crate::badge::BadgeSource::Claude(session_id);
-        ws.badges
+        self.stoat
+            .badges
             .find_by_source(source)
-            .and_then(|id| ws.badges.get(id))
+            .and_then(|id| self.stoat.badges.get(id))
             .and_then(|b| b.detail.clone())
+    }
+
+    /// Insert a fresh workspace into the app's slot map and return its id.
+    /// The new workspace is not automatically made active; call
+    /// [`Self::set_active_workspace`] to switch.
+    pub(crate) fn create_workspace(&mut self) -> crate::workspace::WorkspaceId {
+        let ws = crate::workspace::Workspace::new(std::path::PathBuf::new(), &self.stoat.executor);
+        let id = self.stoat.workspaces.insert(ws);
+        self.stoat.workspaces[id].id = id;
+        id
+    }
+
+    pub(crate) fn set_active_workspace(&mut self, id: crate::workspace::WorkspaceId) {
+        self.stoat.active_workspace = id;
     }
 
     /// Sub-harness for driving Claude Code sessions in tests. Returned by
