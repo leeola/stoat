@@ -36,6 +36,7 @@ use crate::{
             ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunInterrupt, RunSubmit},
+        workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, SwitchWorkspace},
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
@@ -241,6 +242,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             name: raw.to_owned(),
         }))
     });
+    add(NewWorkspace::DEF, |_| Ok(Box::new(NewWorkspace)));
+    add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
+    add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
+    add(CloseWorkspace::DEF, |_| Ok(Box::new(CloseWorkspace)));
 
     map
 }
@@ -337,6 +342,10 @@ mod tests {
         "ClaudeToDockRight",
         "ToggleDockRight",
         "ToggleDockLeft",
+        "NewWorkspace",
+        "CopyWorkspace",
+        "SwitchWorkspace",
+        "CloseWorkspace",
     ];
 
     #[test]
@@ -395,10 +404,11 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp.
+        // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
+        // + 4 workspace actions.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 84);
+        assert_eq!(all().count(), 88);
     }
 
     #[test]

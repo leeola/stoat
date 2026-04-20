@@ -23,6 +23,7 @@ pub mod run;
 mod selection;
 pub mod ui;
 pub mod workspace;
+pub mod workspace_picker;
 
 pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]

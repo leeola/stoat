@@ -1,9 +1,11 @@
 //! Per-workspace session state persistence.
 //!
-//! On quit, the active workspace is serialized to
-//! `<stoat_log::workspace_state_dir()>/<git_root_hash>.ron`. On next launch at
-//! the same git root, the file is read back and the workspace is rehydrated
-//! before the first frame renders.
+//! Each workspace serializes to
+//! `<stoat_log::workspace_state_dir()>/<git_root_hash>/<uid>.ron`. On launch
+//! at a given git root, the directory is scanned and the most recently
+//! modified workspace file is rehydrated before the first frame renders.
+//! Multiple workspaces per git root coexist as sibling files in the same
+//! directory.
 //!
 //! Coverage is best-effort: see sibling FIXMEs in `multi_buffer.rs`,
 //! `review_session.rs`, `commit_list.rs`, and `claude_chat.rs` for the
@@ -21,7 +23,7 @@ use crate::{
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     pane::{DockId, DockPanel, FocusTarget, PaneTree, View},
     rebase::RebaseState,
-    workspace::Workspace,
+    workspace::{Workspace, WorkspaceUid},
 };
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
@@ -36,6 +38,12 @@ use stoat_scheduler::Executor;
 /// by this struct are regenerated from defaults on load.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WorkspaceStateV1 {
+    /// Stable workspace identifier preserved across saves; doubles as the
+    /// on-disk filename. Defaults to zero for pre-field on-disk files; the
+    /// loader will treat that as a legacy file (still readable, but its
+    /// filename will change the next time it's saved under the new scheme).
+    #[serde(default)]
+    pub uid: WorkspaceUid,
     pub git_root: PathBuf,
     pub panes: PaneTree,
     pub docks: SlotMap<DockId, DockPanel>,
@@ -55,17 +63,61 @@ pub(crate) struct WorkspaceStateV1 {
     pub claude_session_id: Option<String>,
 }
 
-/// Resolve the on-disk state file path for a given git root.
-/// The canonical form of `git_root` is hashed with the stdlib's
-/// [`DefaultHasher`] (stable within a Rust release; acceptable here because
-/// a hash mismatch just falls back to a fresh session).
-pub(crate) fn state_path_for(git_root: &Path) -> io::Result<PathBuf> {
+impl Default for WorkspaceUid {
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+/// Resolve the per-git-root directory that holds every workspace persisted
+/// against that root. One file per workspace sits in this directory, named
+/// by the workspace's [`WorkspaceUid`]. Canonical form of `git_root` is
+/// hashed with the stdlib's [`DefaultHasher`] (stable within a Rust release;
+/// acceptable here because a hash mismatch just falls back to a fresh session).
+pub(crate) fn workspace_dir_for(git_root: &Path) -> io::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
     let canon = fs::canonicalize(git_root).unwrap_or_else(|_| git_root.to_path_buf());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut hasher);
-    let name = format!("{:016x}.ron", hasher.finish());
+    let name = format!("{:016x}", hasher.finish());
     Ok(stoat_log::workspace_state_dir()?.join(name))
+}
+
+/// Resolve the on-disk state file path for a specific workspace.
+pub(crate) fn state_path_for(git_root: &Path, uid: WorkspaceUid) -> io::Result<PathBuf> {
+    Ok(workspace_dir_for(git_root)?.join(format!("{uid}.ron")))
+}
+
+/// List every persisted workspace file for a git root, newest first by
+/// filesystem mtime. Returns an empty vec (not an error) if the directory
+/// does not exist.
+pub(crate) fn list_workspace_files(git_root: &Path) -> io::Result<Vec<PathBuf>> {
+    list_ron_files_by_mtime_desc(&workspace_dir_for(git_root)?)
+}
+
+/// Underlying directory scan for [`list_workspace_files`]. Factored so tests
+/// can exercise it against a tempdir without touching the real XDG path.
+/// Entries whose metadata cannot be read are treated as unix-epoch-old so
+/// they sort to the bottom rather than dropping out silently.
+fn list_ron_files_by_mtime_desc(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("ron") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        entries.push((path, mtime));
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(entries.into_iter().map(|(p, _)| p).collect())
 }
 
 impl Workspace {
@@ -89,6 +141,7 @@ impl Workspace {
             .and_then(|chat| chat.protocol_session_id.clone());
 
         WorkspaceStateV1 {
+            uid: self.uid,
             git_root: self.git_root.clone(),
             panes: clone_pane_tree(&self.panes),
             docks: clone_docks(&self.docks),
@@ -127,7 +180,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn apply_state(&mut self, state: WorkspaceStateV1, executor: &Executor) {
+    pub(crate) fn apply_state(&mut self, state: WorkspaceStateV1, executor: &Executor) {
         self.buffers.restore_from(state.buffers);
 
         let mut editors: SlotMap<EditorId, EditorState> = SlotMap::with_key();
@@ -163,6 +216,7 @@ impl Workspace {
         self.docks = docks;
         self.focus = focus;
         self.editors = editors;
+        self.uid = state.uid;
         self.git_root = state.git_root;
         self.rebase = state.rebase;
         self.rebase_active = state.rebase_active.map(ActiveRebaseSnap::into_active);
@@ -631,5 +685,100 @@ mod tests {
         let buffer = fresh.buffers.get(scratch_id).expect("scratch lost");
         let guard = buffer.read().expect("buffer poisoned");
         assert!(guard.dirty);
+    }
+
+    #[test]
+    fn list_ron_files_sorts_newest_first() {
+        use std::time::{Duration, SystemTime};
+
+        let tmp = TempDir::new().unwrap();
+        let older = tmp.path().join("aaaa.ron");
+        let newer = tmp.path().join("bbbb.ron");
+        fs::write(&older, "old").unwrap();
+        fs::write(&newer, "new").unwrap();
+
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&older)
+            .unwrap()
+            .set_modified(base)
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&newer)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(3600))
+            .unwrap();
+
+        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        assert_eq!(listed, vec![newer, older]);
+    }
+
+    #[test]
+    fn list_ron_files_ignores_non_ron_entries() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("ok.ron"), "").unwrap();
+        fs::write(tmp.path().join("skip.txt"), "").unwrap();
+        fs::create_dir(tmp.path().join("subdir")).unwrap();
+
+        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        assert_eq!(listed, vec![tmp.path().join("ok.ron")]);
+    }
+
+    #[test]
+    fn list_ron_files_missing_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("nope");
+        assert!(list_ron_files_by_mtime_desc(&missing).unwrap().is_empty());
+    }
+
+    #[test]
+    fn uid_round_trips_through_save_and_restore() {
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let original_uid = ws.uid;
+
+        let state_path = tmp.path().join("state.ron");
+        ws.save_state(&state_path).unwrap();
+
+        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
+        fresh.restore_state(&state_path, &exec).unwrap();
+        assert_eq!(fresh.uid, original_uid);
+    }
+
+    #[test]
+    fn multiple_saves_with_same_uid_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let path = tmp.path().join(format!("{}.ron", ws.uid));
+        ws.save_state(&path).unwrap();
+        ws.save_state(&path).unwrap();
+
+        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        assert_eq!(listed, vec![path]);
+    }
+
+    #[test]
+    fn different_uids_sit_side_by_side() {
+        let tmp = TempDir::new().unwrap();
+        let exec = executor();
+
+        let ws_a = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let ws_b = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        assert_ne!(ws_a.uid, ws_b.uid);
+
+        let path_a = tmp.path().join(format!("{}.ron", ws_a.uid));
+        let path_b = tmp.path().join(format!("{}.ron", ws_b.uid));
+        ws_a.save_state(&path_a).unwrap();
+        ws_b.save_state(&path_b).unwrap();
+
+        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        assert_eq!(listed.len(), 2);
     }
 }

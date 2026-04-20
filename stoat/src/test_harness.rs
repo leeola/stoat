@@ -63,6 +63,7 @@ impl TestHarness {
         let fake_fs = Arc::new(crate::host::FakeFs::new());
         let fake_git = Arc::new(crate::host::FakeGit::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
+        stoat.persistence_disabled = true;
         stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.set_fs_host(fake_fs.clone());
         stoat.set_git_host(fake_git.clone());

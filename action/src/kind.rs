@@ -85,4 +85,8 @@ pub enum ActionKind {
     ConflictApply,
     ConflictAbort,
     Dump,
+    NewWorkspace,
+    CopyWorkspace,
+    SwitchWorkspace,
+    CloseWorkspace,
 }

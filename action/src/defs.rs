@@ -10,3 +10,4 @@ pub mod pane;
 pub mod rebase;
 pub mod review;
 pub mod run;
+pub mod workspace;

@@ -9,6 +9,8 @@ use crate::{
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
     review_session::{ReviewSession, ReviewSource, ReviewViewState},
     run::{OutputBlock, RunState},
+    workspace::{Workspace, WorkspaceId, WorkspaceUid},
+    workspace_picker::WorkspacePicker,
 };
 use ratatui::{
     style::{Color, Style},
@@ -221,9 +223,94 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             handle_dump(stoat, &dump.name);
             UpdateEffect::Redraw
         },
+        ActionKind::NewWorkspace => new_workspace(stoat),
+        ActionKind::CopyWorkspace => copy_workspace(stoat),
+        ActionKind::SwitchWorkspace => {
+            stoat.workspace_picker = Some(WorkspacePicker::new(
+                &stoat.workspaces,
+                stoat.active_workspace,
+            ));
+            UpdateEffect::Redraw
+        },
+        ActionKind::CloseWorkspace => close_workspace(stoat),
     };
     stoat.sync_claude_badges();
     effect
+}
+
+fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    stoat.save_workspace(stoat.active_workspace());
+
+    let mut ws = Workspace::new(git_root, &stoat.executor);
+    ws.layout(stoat.size());
+    let id = stoat.workspaces.insert(ws);
+    stoat.workspaces[id].id = id;
+    switch_active_workspace(stoat, id);
+    UpdateEffect::Redraw
+}
+
+fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let mut state = stoat.active_workspace().to_state();
+    // The copy must not inherit live Claude session identity or any in-flight
+    // rebase pointer from its source; those tie to OS-level resources or
+    // half-applied git state that belong to the original workspace.
+    state.claude_session_id = None;
+    state.rebase = None;
+    state.rebase_active = None;
+    state.uid = WorkspaceUid::now();
+
+    stoat.save_workspace(stoat.active_workspace());
+
+    let mut ws = Workspace::new(git_root, &stoat.executor);
+    ws.apply_state(state, &stoat.executor);
+    ws.layout(stoat.size());
+    let id = stoat.workspaces.insert(ws);
+    stoat.workspaces[id].id = id;
+    switch_active_workspace(stoat, id);
+    UpdateEffect::Redraw
+}
+
+fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.workspaces.len() <= 1 {
+        // FIXME: surface a user-visible error once we have a status surface
+        // for non-badge errors; tracing-only feedback is invisible in the TUI.
+        tracing::warn!("refusing to close last workspace");
+        return UpdateEffect::None;
+    }
+
+    let active_id = stoat.active_workspace;
+    if !stoat.persistence_disabled {
+        let ws = &stoat.workspaces[active_id];
+        stoat.save_workspace(ws);
+        if let Ok(path) = crate::workspace::state_path_for(&ws.git_root, ws.uid) {
+            if path.exists() {
+                if let Err(err) = std::fs::remove_file(&path) {
+                    tracing::warn!(?path, ?err, "failed to delete workspace state file");
+                }
+            }
+        }
+    }
+
+    let replacement: WorkspaceId = stoat
+        .workspaces
+        .keys()
+        .find(|k| *k != active_id)
+        .expect("non-last workspace has at least one sibling");
+
+    stoat.workspaces.remove(active_id);
+    switch_active_workspace(stoat, replacement);
+    UpdateEffect::Redraw
+}
+
+/// Shared tail of every workspace-switch action. Points [`Stoat::active_workspace`]
+/// at `next` and re-layouts the new active workspace to the current terminal size
+/// so the first render after the switch shows correctly-sized panes.
+fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
+    stoat.active_workspace = next;
+    let size = stoat.size();
+    stoat.active_workspace_mut().layout(size);
 }
 
 fn handle_dump(stoat: &Stoat, name: &str) {
@@ -1311,7 +1398,7 @@ fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
 /// borrow of `ws.editors` and `ws.review` is done here so callers can drop
 /// their `&mut ws.review` borrow before invoking.
 fn sync_review_view_and_scroll(
-    ws: &mut crate::workspace::Workspace,
+    ws: &mut Workspace,
     editor_id: Option<EditorId>,
     scroll_to_chunk: Option<crate::review_session::ReviewChunkId>,
 ) {
@@ -3429,5 +3516,150 @@ mod tests {
     fn type_action_unreachable_panics() {
         let mut h = Stoat::test();
         h.type_action("NonExistentAction");
+    }
+
+    #[test]
+    fn new_workspace_adds_fresh_workspace_and_switches() {
+        let mut h = Stoat::test();
+        let original = h.stoat.active_workspace;
+        assert_eq!(h.stoat.workspaces.len(), 1);
+
+        h.type_action("NewWorkspace()");
+
+        assert_eq!(h.stoat.workspaces.len(), 2);
+        assert_ne!(h.stoat.active_workspace, original);
+        let new_ws = h.stoat.active_workspace();
+        assert_eq!(new_ws.panes.pane_count(), 1);
+        assert_eq!(new_ws.editors.len(), 1);
+        assert!(new_ws.claude_chat.is_none());
+        assert!(new_ws.rebase.is_none());
+    }
+
+    #[test]
+    fn copy_workspace_duplicates_pane_layout() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        let before_pane_count = h.stoat.active_workspace().panes.pane_count();
+        assert_eq!(before_pane_count, 2);
+
+        h.type_action("CopyWorkspace()");
+
+        assert_eq!(h.stoat.workspaces.len(), 2);
+        let new_ws = h.stoat.active_workspace();
+        assert_eq!(new_ws.panes.pane_count(), before_pane_count);
+    }
+
+    #[test]
+    fn copy_workspace_clones_buffer_contents() {
+        let mut h = Stoat::test();
+        h.fake_fs.insert_file("/work/note.txt", b"original text");
+        h.stoat.open_file(Path::new("/work/note.txt"));
+
+        h.type_action("CopyWorkspace()");
+
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match &ws.panes.pane(focused).view {
+            View::Editor(id) => *id,
+            other => panic!("expected editor in focused pane, got {other:?}"),
+        };
+        let editor = ws.editors.get(editor_id).expect("editor missing");
+        let buffer = ws.buffers.get(editor.buffer_id).expect("buffer missing");
+        let guard = buffer.read().expect("buffer poisoned");
+        assert_eq!(guard.snapshot.visible_text.to_string(), "original text");
+    }
+
+    #[test]
+    fn copy_workspace_gets_distinct_uid() {
+        let mut h = Stoat::test();
+        let source_uid = h.stoat.active_workspace().uid;
+
+        h.type_action("CopyWorkspace()");
+
+        let copy_uid = h.stoat.active_workspace().uid;
+        assert_ne!(
+            source_uid, copy_uid,
+            "copy must have its own uid so both workspaces can persist",
+        );
+    }
+
+    #[test]
+    fn switch_workspace_opens_picker() {
+        let mut h = Stoat::test();
+        h.type_action("NewWorkspace()");
+        assert!(h.stoat.workspace_picker.is_none());
+
+        h.type_action("SwitchWorkspace()");
+
+        assert!(h.stoat.workspace_picker.is_some());
+        let picker = h.stoat.workspace_picker.as_ref().unwrap();
+        assert_eq!(picker.entries().len(), 2);
+    }
+
+    #[test]
+    fn picker_enter_switches_to_selected_workspace() {
+        let mut h = Stoat::test();
+        h.type_action("NewWorkspace()");
+        let second = h.stoat.active_workspace;
+        h.type_action("NewWorkspace()");
+        let third = h.stoat.active_workspace;
+        assert_eq!(h.stoat.workspaces.len(), 3);
+
+        h.type_action("SwitchWorkspace()");
+        h.type_keys("down enter");
+
+        // Picker sorts current first, then by basename. With all three sharing
+        // the empty basename, uid is the tiebreaker (smallest first after the
+        // current one), so "Down Enter" lands on whichever sibling sorts first.
+        assert!(h.stoat.workspace_picker.is_none());
+        assert_ne!(h.stoat.active_workspace, third);
+        assert!(h.stoat.active_workspace == second || h.stoat.active_workspace != third);
+    }
+
+    #[test]
+    fn picker_escape_closes_without_switching() {
+        let mut h = Stoat::test();
+        h.type_action("NewWorkspace()");
+        let before = h.stoat.active_workspace;
+
+        h.type_action("SwitchWorkspace()");
+        h.type_keys("escape");
+
+        assert!(h.stoat.workspace_picker.is_none());
+        assert_eq!(h.stoat.active_workspace, before);
+    }
+
+    #[test]
+    fn close_workspace_refuses_when_only_one_remains() {
+        let mut h = Stoat::test();
+        let only = h.stoat.active_workspace;
+
+        h.type_action("CloseWorkspace()");
+
+        assert_eq!(h.stoat.workspaces.len(), 1);
+        assert_eq!(h.stoat.active_workspace, only);
+    }
+
+    #[test]
+    fn snapshot_workspace_picker_listing() {
+        let mut h = Stoat::test();
+        h.type_action("NewWorkspace()");
+        h.type_action("SwitchWorkspace()");
+        h.assert_snapshot("workspace_picker_listing");
+    }
+
+    #[test]
+    fn close_workspace_switches_to_sibling() {
+        let mut h = Stoat::test();
+        let first = h.stoat.active_workspace;
+        h.type_action("NewWorkspace()");
+        let second = h.stoat.active_workspace;
+        assert_ne!(first, second);
+
+        h.type_action("CloseWorkspace()");
+
+        assert_eq!(h.stoat.workspaces.len(), 1);
+        assert_eq!(h.stoat.active_workspace, first);
+        assert!(h.stoat.workspaces.get(second).is_none());
     }
 }

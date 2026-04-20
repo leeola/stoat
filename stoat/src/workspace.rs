@@ -15,8 +15,9 @@ use crate::{
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
-pub(crate) use persist::state_path_for;
+pub(crate) use persist::{list_workspace_files, state_path_for};
 use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
 use std::{
     collections::HashMap,
@@ -24,11 +25,38 @@ use std::{
     path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use stoat_scheduler::{Executor, Task};
 
 new_key_type! {
     pub struct WorkspaceId;
+}
+
+/// Stable-across-restart workspace identifier. [`WorkspaceId`] is a SlotMap
+/// key whose generation is recycled each run, so it can't serve as an on-disk
+/// filename. [`WorkspaceUid`] is assigned once at construction time from the
+/// wall clock and serialized with the workspace's persisted state, so a
+/// workspace keeps the same filename across sessions. The nanosecond timestamp
+/// also gives a natural creation-order sort that complements mtime-based
+/// "most recent" selection on load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceUid(pub u64);
+
+impl WorkspaceUid {
+    pub(crate) fn now() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Self(nanos)
+    }
+}
+
+impl std::fmt::Display for WorkspaceUid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
 }
 
 /// A self-contained editing context: its own buffers, editors, pane layout, git
@@ -48,6 +76,10 @@ pub struct Workspace {
     /// Patched by [`crate::app::Stoat`] immediately after slotmap insertion.
     /// Reads between [`Workspace::new`] and that patch see [`WorkspaceId::default`].
     pub id: WorkspaceId,
+    /// Stable identifier for this workspace across restarts. Assigned once in
+    /// [`Workspace::new`] and preserved by [`crate::workspace::persist`] on
+    /// save/load. Doubles as the on-disk filename.
+    pub(crate) uid: WorkspaceUid,
     pub git_root: PathBuf,
     pub claude_chat: Option<ClaudeSessionId>,
     /// Protocol session UUID recovered from the persisted workspace state.
@@ -100,6 +132,7 @@ impl Workspace {
 
         Self {
             id: WorkspaceId::default(),
+            uid: WorkspaceUid::now(),
             git_root,
             claude_chat: None,
             restored_claude_session_id: None,

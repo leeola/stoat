@@ -104,10 +104,19 @@ on key {
         s -> SetMode(space_split);
         t -> [OpenRun(), SetMode(run)];
         c -> SetMode(claude);
+        w -> SetMode(space_workspace);
         h -> [FocusLeft(), SetMode(normal)];
         j -> [FocusDown(), SetMode(normal)];
         k -> [FocusUp(), SetMode(normal)];
         l -> [FocusRight(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == space_workspace {
+        Escape -> SetMode(normal);
+        n -> [NewWorkspace(), SetMode(normal)];
+        c -> [CopyWorkspace(), SetMode(normal)];
+        s -> [SwitchWorkspace(), SetMode(normal)];
+        x -> [CloseWorkspace(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {

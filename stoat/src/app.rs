@@ -20,6 +20,7 @@ use crate::{
     review_session::ReviewSession,
     run::{PtyNotification, RunId, RunState},
     workspace::{Workspace, WorkspaceId},
+    workspace_picker::{PickerOutcome, WorkspacePicker},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -60,6 +61,11 @@ pub struct Stoat {
     pub settings: Settings,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
+    pub(crate) workspace_picker: Option<WorkspacePicker>,
+    /// When true, [`Self::save_workspace`] and the startup load path become
+    /// no-ops. Set by the test harness so test runs can't read or write the
+    /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
+    pub(crate) persistence_disabled: bool,
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
@@ -153,22 +159,7 @@ impl Stoat {
         }
 
         let mut workspaces = SlotMap::with_key();
-        let mut workspace = Workspace::new(initial_git_root.clone(), &executor);
-        match crate::workspace::state_path_for(&initial_git_root) {
-            Ok(path) if path.exists() => {
-                if let Err(err) = workspace.restore_state(&path, &executor) {
-                    tracing::warn!(
-                        ?path,
-                        ?err,
-                        "failed to restore workspace state; starting fresh"
-                    );
-                }
-            },
-            Ok(_) => {},
-            Err(err) => {
-                tracing::warn!(?err, "could not resolve workspace state path");
-            },
-        }
+        let workspace = Workspace::new(initial_git_root.clone(), &executor);
         let active_workspace = workspaces.insert(workspace);
         workspaces[active_workspace].id = active_workspace;
 
@@ -183,6 +174,8 @@ impl Stoat {
             settings,
             command_palette: None,
             help: None,
+            workspace_picker: None,
+            persistence_disabled: false,
             language_registry,
             syntax_styles,
             workspaces,
@@ -221,6 +214,10 @@ impl Stoat {
 
     pub fn active_workspace_mut(&mut self) -> &mut Workspace {
         &mut self.workspaces[self.active_workspace]
+    }
+
+    pub(crate) fn size(&self) -> Rect {
+        self.size
     }
 
     /// Find the workspace that owns a Claude session, by searching for the
@@ -351,7 +348,7 @@ impl Stoat {
                     }
                 },
                 UpdateEffect::Quit => {
-                    self.save_active_workspace();
+                    self.save_all_workspaces();
                     break;
                 },
                 UpdateEffect::None => {},
@@ -360,11 +357,43 @@ impl Stoat {
         Ok(())
     }
 
-    /// Persist the active workspace's state to disk. Failures are logged and
-    /// swallowed so a write error never prevents a clean shutdown.
-    fn save_active_workspace(&self) {
-        let ws = self.active_workspace();
-        let path = match crate::workspace::state_path_for(&ws.git_root) {
+    /// Rehydrate the active workspace from its most-recently-modified
+    /// persisted file under `$XDG_STATE_HOME/stoat/workspaces/<hash>/`. Call
+    /// this once after [`Self::new`] in the main binary so an existing
+    /// workspace at `initial_git_root` is restored before the first frame.
+    /// Tests intentionally skip this to stay isolated from the real state
+    /// directory.
+    pub fn load_active_workspace_state(&mut self) {
+        let git_root = self.active_workspace().git_root.clone();
+        let files = match crate::workspace::list_workspace_files(&git_root) {
+            Ok(files) => files,
+            Err(err) => {
+                tracing::warn!(?err, "could not resolve workspace state directory");
+                return;
+            },
+        };
+        let Some(path) = files.into_iter().next() else {
+            return;
+        };
+        let executor = self.executor.clone();
+        if let Err(err) = self.active_workspace_mut().restore_state(&path, &executor) {
+            tracing::warn!(
+                ?path,
+                ?err,
+                "failed to restore workspace state; starting fresh"
+            );
+        }
+    }
+
+    /// Persist a workspace's state to disk. Failures are logged and swallowed
+    /// so a write error never prevents a clean shutdown or workspace switch.
+    /// No-op when [`Self::persistence_disabled`] is set (used by the test
+    /// harness to keep the real `$XDG_STATE_HOME` pristine).
+    pub(crate) fn save_workspace(&self, ws: &Workspace) {
+        if self.persistence_disabled {
+            return;
+        }
+        let path = match crate::workspace::state_path_for(&ws.git_root, ws.uid) {
             Ok(p) => p,
             Err(err) => {
                 tracing::warn!(?err, "could not resolve workspace state path");
@@ -373,6 +402,14 @@ impl Stoat {
         };
         if let Err(err) = ws.save_state(&path) {
             tracing::warn!(?path, ?err, "failed to save workspace state");
+        }
+    }
+
+    /// Persist every open workspace. Invoked on quit so workspaces that were
+    /// left in the background get their latest state written out.
+    fn save_all_workspaces(&self) {
+        for ws in self.workspaces.values() {
+            self.save_workspace(ws);
         }
     }
 
@@ -411,6 +448,10 @@ impl Stoat {
                 self.command_palette = None;
                 return UpdateEffect::Redraw;
             }
+            if self.workspace_picker.is_some() {
+                self.workspace_picker = None;
+                return UpdateEffect::Redraw;
+            }
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
@@ -439,6 +480,10 @@ impl Stoat {
 
         if self.command_palette.is_some() {
             return self.dispatch_palette_key(key);
+        }
+
+        if self.workspace_picker.is_some() {
+            return self.dispatch_workspace_picker_key(key);
         }
 
         if self.mode == "run" {
@@ -1263,6 +1308,8 @@ impl Stoat {
             render_help(help, self.size, &mut buf);
         } else if let Some(palette) = &self.command_palette {
             render_command_palette(palette, self.size, &mut buf);
+        } else if let Some(picker) = &self.workspace_picker {
+            render_workspace_picker(picker, self.size, &mut buf);
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
             let raw = self.keymap.active_bindings(&state);
@@ -1321,6 +1368,31 @@ impl Stoat {
                         UpdateEffect::Redraw
                     },
                 }
+            },
+        }
+    }
+
+    fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        let outcome = match self.workspace_picker.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                self.workspace_picker = None;
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(id) => {
+                self.workspace_picker = None;
+                if id == self.active_workspace {
+                    return UpdateEffect::Redraw;
+                }
+                self.save_workspace(self.active_workspace());
+                self.active_workspace = id;
+                let size = self.size;
+                self.active_workspace_mut().layout(size);
+                UpdateEffect::Redraw
             },
         }
     }
@@ -1660,6 +1732,95 @@ fn render_hints(
 struct HintsFooter {
     text: String,
     style: Style,
+}
+
+fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffer) {
+    if area.width < 40 || area.height < 8 {
+        return;
+    }
+
+    let entries = picker.entries();
+    if entries.is_empty() {
+        return;
+    }
+    let max_rows = 10u16;
+    let row_count = (entries.len() as u16).min(max_rows);
+
+    let box_width = 70u16.min(area.width.saturating_sub(4));
+    if box_width < 30 {
+        return;
+    }
+    let box_height = 1 + row_count + 1 + 1 + 1;
+    if box_height > area.height {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
+    let picker_area = Rect::new(x, y, box_width, box_height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" workspaces ")
+        .title_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(picker_area);
+    block.render(picker_area, buf);
+
+    let row_style = Style::default().fg(Color::White);
+    let current_style = Style::default().fg(Color::Yellow);
+    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let dim_style = Style::default().fg(Color::DarkGray);
+
+    let list_top = inner.y;
+    let selected = picker.selected();
+    let inner_width = inner.width as usize;
+
+    for (i, entry) in entries.iter().take(max_rows as usize).enumerate() {
+        let row = list_top + i as u16;
+        let is_selected = i == selected;
+        let base_style = if is_selected {
+            selected_style
+        } else if entry.is_current {
+            current_style
+        } else {
+            row_style
+        };
+
+        for col in inner.x..inner.x + inner.width {
+            buf[(col, row)].set_char(' ').set_style(base_style);
+        }
+
+        let marker = if entry.is_current { "*" } else { " " };
+        let path = entry.git_root.display().to_string();
+        let line = if path.is_empty() {
+            format!("{marker} {basename}", basename = entry.basename)
+        } else {
+            format!(
+                "{marker} {basename}  {path}",
+                basename = entry.basename,
+                path = path
+            )
+        };
+        let trimmed: String = line.chars().take(inner_width).collect();
+        write_str(buf, inner.x + 1, row, &trimmed, base_style);
+    }
+
+    let separator_row = list_top + row_count;
+    for col in inner.x..inner.x + inner.width {
+        buf[(col, separator_row)]
+            .set_char('─')
+            .set_style(Style::default().fg(Color::DarkGray));
+    }
+
+    let footer_row = separator_row + 1;
+    write_str(
+        buf,
+        inner.x + 1,
+        footer_row,
+        "Enter select  Esc cancel  Ctrl-P/N navigate",
+        dim_style,
+    );
 }
 
 fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer) {

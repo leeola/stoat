@@ -101,6 +101,7 @@ fn run_tui(
 
     rt.block_on(async {
         let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
+        stoat.load_active_workspace_state();
         stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new()));
 
         match start {
