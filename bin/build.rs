@@ -8,14 +8,10 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
 
     let hash = capture("git", &["rev-parse", "--short", "HEAD"]);
-    let title = capture("git", &["log", "-1", "--pretty=%s"]);
-    let dirty = capture_dirty();
-    let date = capture("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]);
+    let dirty_suffix = if is_dirty() { "-dirty" } else { "" };
+    let date = capture("date", &["-u", "+%Y-%m-%d"]);
 
-    println!("cargo:rustc-env=STOAT_GIT_HASH={hash}");
-    println!("cargo:rustc-env=STOAT_GIT_TITLE={title}");
-    println!("cargo:rustc-env=STOAT_GIT_DIRTY={dirty}");
-    println!("cargo:rustc-env=STOAT_BUILD_DATE={date}");
+    println!("cargo:rustc-env=STOAT_BUILD_INFO={hash}{dirty_suffix} {date}");
 }
 
 fn capture(cmd: &str, args: &[&str]) -> String {
@@ -27,15 +23,9 @@ fn capture(cmd: &str, args: &[&str]) -> String {
     }
 }
 
-fn capture_dirty() -> &'static str {
+fn is_dirty() -> bool {
     match Command::new("git").args(["status", "--porcelain"]).output() {
-        Ok(output) if output.status.success() => {
-            if output.stdout.is_empty() {
-                "clean"
-            } else {
-                "dirty"
-            }
-        },
-        _ => "unknown",
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        _ => false,
     }
 }

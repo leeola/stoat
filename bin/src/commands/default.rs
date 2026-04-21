@@ -5,13 +5,10 @@ use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TestScheduler;
 
 const VERSION_INFO: &str = concat!(
-    env!("STOAT_GIT_HASH"),
+    env!("CARGO_PKG_VERSION"),
     " (",
-    env!("STOAT_GIT_DIRTY"),
-    ")\n  built: ",
-    env!("STOAT_BUILD_DATE"),
-    "\n  commit: ",
-    env!("STOAT_GIT_TITLE"),
+    env!("STOAT_BUILD_INFO"),
+    ")",
 );
 
 #[derive(Parser)]
