@@ -1,7 +1,9 @@
+mod rebase;
+mod tree;
+
 use crate::host::git::{
     ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
-    ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RebaseTodoOp,
-    RewriteResult,
+    GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
 };
 use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
 use std::{
@@ -250,7 +252,7 @@ impl GitRepo for LocalGitRepo {
             .head()
             .and_then(|h| h.peel_to_commit())
             .map_err(err_msg)?;
-        let tree_oid = build_tree_from_map(&repo, tree).map_err(err_msg)?;
+        let tree_oid = tree::build_tree_from_map(&repo, tree).map_err(err_msg)?;
         let new_tree = repo.find_tree(tree_oid).map_err(err_msg)?;
         let new_id = head
             .amend(Some("HEAD"), None, None, None, message, Some(&new_tree))
@@ -269,7 +271,7 @@ impl GitRepo for LocalGitRepo {
         let target_oid = git2::Oid::from_str(sha).map_err(err_msg)?;
         let target = repo.find_commit(target_oid).map_err(err_msg)?;
 
-        let new_tree_oid = build_tree_from_map(&repo, tree).map_err(err_msg)?;
+        let new_tree_oid = tree::build_tree_from_map(&repo, tree).map_err(err_msg)?;
         let new_tree = repo.find_tree(new_tree_oid).map_err(err_msg)?;
 
         let parents: Vec<_> = target.parents().collect();
@@ -326,72 +328,7 @@ impl GitRepo for LocalGitRepo {
 
     fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let onto_oid =
-            git2::Oid::from_str(onto).map_err(|e| RebaseError::Backend(e.message().to_string()))?;
-        let mut current_id = onto_oid;
-
-        let mut last_commit: Option<git2::Oid> = None;
-
-        for entry in todo {
-            match entry.op {
-                RebaseTodoOp::Drop => continue,
-                RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
-                    // `run_rebase` is the atomic fast path; it cannot
-                    // pause for user input. Reword/Edit degrade to
-                    // Pick here. The stepper in `action_handlers`
-                    // handles true reword/edit interactions.
-                    let commit = pick_onto(&repo, &entry.sha, current_id)?;
-                    current_id = commit;
-                    last_commit = Some(commit);
-                },
-                RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
-                    let prev = last_commit.ok_or_else(|| {
-                        RebaseError::Backend("squash/fixup without a preceding pick".into())
-                    })?;
-                    let prev_commit = repo.find_commit(prev).map_err(rebase_backend)?;
-                    let entry_oid = git2::Oid::from_str(&entry.sha).map_err(rebase_backend)?;
-                    let entry_commit = repo.find_commit(entry_oid).map_err(rebase_backend)?;
-
-                    let mut index = repo
-                        .cherrypick_commit(&entry_commit, &prev_commit, 0, None)
-                        .map_err(rebase_backend)?;
-                    if index.has_conflicts() {
-                        return Err(RebaseError::Conflict {
-                            at_sha: entry.sha.clone(),
-                        });
-                    }
-                    let merged_tree_id = index.write_tree_to(&repo).map_err(rebase_backend)?;
-                    let merged_tree = repo.find_tree(merged_tree_id).map_err(rebase_backend)?;
-
-                    let prev_parents: Vec<_> = prev_commit.parents().collect();
-                    let prev_parent_refs: Vec<_> = prev_parents.iter().collect();
-                    let combined_message = match entry.op {
-                        RebaseTodoOp::Squash => format!(
-                            "{}\n\n{}",
-                            prev_commit.message().unwrap_or("").trim_end(),
-                            entry.message.trim_end()
-                        ),
-                        _ => prev_commit.message().unwrap_or("").to_string(),
-                    };
-                    let folded = repo
-                        .commit(
-                            None,
-                            &prev_commit.author(),
-                            &prev_commit.committer(),
-                            &combined_message,
-                            &merged_tree,
-                            &prev_parent_refs,
-                        )
-                        .map_err(rebase_backend)?;
-                    current_id = folded;
-                    last_commit = Some(folded);
-                },
-            }
-        }
-
-        repo.reference("HEAD", current_id, true, "run_rebase")
-            .map_err(rebase_backend)?;
-        Ok(current_id.to_string())
+        rebase::run_rebase(&repo, onto, todo)
     }
 
     fn cherry_pick_tree(
@@ -400,81 +337,7 @@ impl GitRepo for LocalGitRepo {
         onto_sha: &str,
     ) -> Result<CherryPickOutcome, GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let source_oid = git2::Oid::from_str(source_sha).map_err(err_msg)?;
-        let onto_oid = git2::Oid::from_str(onto_sha).map_err(err_msg)?;
-        let source = repo.find_commit(source_oid).map_err(err_msg)?;
-        let onto = repo.find_commit(onto_oid).map_err(err_msg)?;
-
-        let mut index = repo
-            .cherrypick_commit(&source, &onto, 0, None)
-            .map_err(err_msg)?;
-
-        if index.has_conflicts() {
-            let mut by_path: BTreeMap<PathBuf, ConflictedFile> = BTreeMap::new();
-            for conflict in index.conflicts().map_err(err_msg)? {
-                let conflict = conflict.map_err(err_msg)?;
-                let pick_path = conflict
-                    .ancestor
-                    .as_ref()
-                    .map(|e| e.path.clone())
-                    .or_else(|| conflict.our.as_ref().map(|e| e.path.clone()))
-                    .or_else(|| conflict.their.as_ref().map(|e| e.path.clone()))
-                    .unwrap_or_default();
-                let path = PathBuf::from(std::str::from_utf8(&pick_path).unwrap_or(""));
-                let ancestor = conflict
-                    .ancestor
-                    .as_ref()
-                    .and_then(|e| read_blob(&repo, e.id));
-                let ours = conflict.our.as_ref().and_then(|e| read_blob(&repo, e.id));
-                let theirs = conflict.their.as_ref().and_then(|e| read_blob(&repo, e.id));
-                by_path.insert(
-                    path.clone(),
-                    ConflictedFile {
-                        path,
-                        ancestor,
-                        ours,
-                        theirs,
-                    },
-                );
-            }
-            return Ok(CherryPickOutcome::Conflict {
-                files: by_path.into_values().collect(),
-            });
-        }
-
-        let tree_oid = index.write_tree_to(&repo).map_err(err_msg)?;
-        let tree = repo.find_tree(tree_oid).map_err(err_msg)?;
-        let mut out: BTreeMap<PathBuf, String> = BTreeMap::new();
-        tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-            if entry.kind() != Some(git2::ObjectType::Blob) {
-                return git2::TreeWalkResult::Ok;
-            }
-            let name = match entry.name() {
-                Some(n) => n,
-                None => return git2::TreeWalkResult::Ok,
-            };
-            let rel = if dir.is_empty() {
-                PathBuf::from(name)
-            } else {
-                PathBuf::from(dir).join(name)
-            };
-            if let Ok(blob) = entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
-                if let Ok(text) = std::str::from_utf8(blob.content()) {
-                    out.insert(rel, text.to_string());
-                }
-            }
-            git2::TreeWalkResult::Ok
-        })
-        .map_err(err_msg)?;
-
-        let author = source.author();
-        Ok(CherryPickOutcome::Clean {
-            tree: out,
-            message: source.message().unwrap_or("").to_string(),
-            author_name: author.name().unwrap_or("").to_string(),
-            author_email: author.email().unwrap_or("").to_string(),
-            author_time: source.time().seconds(),
-        })
+        rebase::cherry_pick_tree(&repo, source_sha, onto_sha)
     }
 
     fn create_commit(
@@ -486,7 +349,7 @@ impl GitRepo for LocalGitRepo {
         author_email: &str,
     ) -> Result<String, GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let tree_oid = build_tree_from_map(&repo, tree).map_err(err_msg)?;
+        let tree_oid = tree::build_tree_from_map(&repo, tree).map_err(err_msg)?;
         let tree = repo.find_tree(tree_oid).map_err(err_msg)?;
         let sig = git2::Signature::now(author_name, author_email).map_err(err_msg)?;
         let parent_commit = match parent_sha {
@@ -573,73 +436,6 @@ impl GitRepo for LocalGitRepo {
 
 fn err_msg(e: git2::Error) -> GitApplyError {
     GitApplyError::Backend(e.message().to_string())
-}
-
-fn rebase_backend(e: git2::Error) -> RebaseError {
-    RebaseError::Backend(e.message().to_string())
-}
-
-/// Materialize `tree` as a git tree object and return its oid. Handles
-/// nested paths (`sub/b.rs`) by constructing a staging index and
-/// writing it out; libgit2 builds the intermediate trees automatically.
-fn build_tree_from_map(
-    repo: &Repository,
-    tree: &BTreeMap<PathBuf, String>,
-) -> Result<git2::Oid, git2::Error> {
-    // `Index::new()` produces a bare index that `add_frombuffer`
-    // refuses because it cannot create the backing blob. Write each
-    // blob explicitly via the repo, then point each index entry at
-    // its oid.
-    let mut index = git2::Index::new()?;
-    for (path, content) in tree {
-        let blob_oid = repo.blob(content.as_bytes())?;
-        let entry = git2::IndexEntry {
-            ctime: git2::IndexTime::new(0, 0),
-            mtime: git2::IndexTime::new(0, 0),
-            dev: 0,
-            ino: 0,
-            mode: 0o100644,
-            uid: 0,
-            gid: 0,
-            file_size: content.len() as u32,
-            id: blob_oid,
-            flags: 0,
-            flags_extended: 0,
-            path: path.to_string_lossy().as_bytes().to_vec(),
-        };
-        index.add(&entry)?;
-    }
-    index.write_tree_to(repo)
-}
-
-/// Read a blob by oid into a UTF-8 string; returns None on lookup
-/// failure or non-UTF-8 content.
-fn read_blob(repo: &Repository, oid: git2::Oid) -> Option<String> {
-    let blob = repo.find_blob(oid).ok()?;
-    std::str::from_utf8(blob.content()).ok().map(String::from)
-}
-
-/// Cherry-pick `sha` onto `onto`. Returns the new commit's oid.
-fn pick_onto(repo: &Repository, sha: &str, onto: git2::Oid) -> Result<git2::Oid, RebaseError> {
-    let entry_oid = git2::Oid::from_str(sha).map_err(rebase_backend)?;
-    let entry_commit = repo.find_commit(entry_oid).map_err(rebase_backend)?;
-    let onto_commit = repo.find_commit(onto).map_err(rebase_backend)?;
-
-    let mut index = repo
-        .cherrypick_commit(&entry_commit, &onto_commit, 0, None)
-        .map_err(rebase_backend)?;
-    if index.has_conflicts() {
-        return Err(RebaseError::Conflict {
-            at_sha: sha.to_string(),
-        });
-    }
-    let tree_id = index.write_tree_to(repo).map_err(rebase_backend)?;
-    let tree = repo.find_tree(tree_id).map_err(rebase_backend)?;
-    let author = entry_commit.author();
-    let committer = entry_commit.committer();
-    let msg = entry_commit.message().unwrap_or("").to_string();
-    repo.commit(None, &author, &committer, &msg, &tree, &[&onto_commit])
-        .map_err(rebase_backend)
 }
 
 #[cfg(test)]
@@ -1151,7 +947,7 @@ mod tests {
 
     #[test]
     fn run_rebase_drop_skips_entry() {
-        use super::super::git::{RebaseTodo, RebaseTodoOp};
+        use crate::host::git::{RebaseTodo, RebaseTodoOp};
 
         let tr = TestRepo::new();
         tr.commit_file("a.rs", "v1\n");

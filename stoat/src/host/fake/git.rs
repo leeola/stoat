@@ -1,9 +1,10 @@
+mod rebase;
+
 use crate::host::{
     fake::FakeFs,
     git::{
         ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
-        ConflictedFile, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RebaseTodoOp,
-        RewriteResult,
+        GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
     },
 };
 use std::{
@@ -598,172 +599,12 @@ impl GitRepo for FakeGitRepo {
         descendants: &[String],
     ) -> Result<RewriteResult, GitApplyError> {
         let mut state = self.state.lock().unwrap();
-        if let Some(c) = &state.conflict_at {
-            if c == sha || descendants.iter().any(|d| d == c) {
-                return Err(GitApplyError::Backend(format!(
-                    "simulated cherry-pick conflict at {c}"
-                )));
-            }
-        }
-        let Some(target) = state.commits.get(sha).cloned() else {
-            return Err(GitApplyError::Backend(format!("unknown sha: {sha}")));
-        };
-
-        state.synth_counter += 1;
-        let new_target_sha = format!(
-            "rewritten-{}-{}",
-            &sha[..sha.len().min(6)],
-            state.synth_counter
-        );
-        let new_target = FakeCommit {
-            parent: target.parent.clone(),
-            tree: tree.clone(),
-            message: message
-                .map(str::to_string)
-                .unwrap_or(target.message.clone()),
-            author_name: target.author_name.clone(),
-            author_email: target.author_email.clone(),
-            time: target.time,
-        };
-        state.commits.insert(new_target_sha.clone(), new_target);
-
-        let mut mapping: HashMap<String, String> = HashMap::new();
-        mapping.insert(sha.to_string(), new_target_sha.clone());
-        let mut current = new_target_sha.clone();
-
-        for desc_sha in descendants {
-            let Some(desc) = state.commits.get(desc_sha).cloned() else {
-                return Err(GitApplyError::Backend(format!(
-                    "unknown descendant sha: {desc_sha}"
-                )));
-            };
-            state.synth_counter += 1;
-            let new_sha = format!(
-                "rewritten-{}-{}",
-                &desc_sha[..desc_sha.len().min(6)],
-                state.synth_counter
-            );
-            let new_commit = FakeCommit {
-                parent: Some(current.clone()),
-                tree: desc.tree.clone(),
-                message: desc.message.clone(),
-                author_name: desc.author_name.clone(),
-                author_email: desc.author_email.clone(),
-                time: desc.time,
-            };
-            state.commits.insert(new_sha.clone(), new_commit);
-            mapping.insert(desc_sha.clone(), new_sha.clone());
-            current = new_sha;
-        }
-
-        state.head = Some(current.clone());
-        Ok(RewriteResult {
-            new_head: current,
-            mapping,
-        })
+        rebase::rewrite_commit(&mut state, sha, tree, message, descendants)
     }
 
     fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError> {
         let mut state = self.state.lock().unwrap();
-        if let Some(c) = &state.conflict_at {
-            if todo.iter().any(|t| &t.sha == c) {
-                return Err(RebaseError::Conflict { at_sha: c.clone() });
-            }
-        }
-        if !state.commits.contains_key(onto) && !onto.is_empty() {
-            return Err(RebaseError::Backend(format!("unknown onto sha: {onto}")));
-        }
-
-        let mut current = onto.to_string();
-        let mut last_commit: Option<String> = None;
-        let mut last_message: Option<String> = None;
-
-        for entry in todo {
-            match entry.op {
-                RebaseTodoOp::Drop => continue,
-                RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
-                    let Some(src) = state.commits.get(&entry.sha).cloned() else {
-                        return Err(RebaseError::Backend(format!(
-                            "unknown sha in rebase: {}",
-                            entry.sha
-                        )));
-                    };
-                    state.synth_counter += 1;
-                    let new_sha = format!(
-                        "rebased-{}-{}",
-                        &entry.sha[..entry.sha.len().min(6)],
-                        state.synth_counter
-                    );
-                    let new_commit = FakeCommit {
-                        parent: Some(current.clone()),
-                        tree: src.tree.clone(),
-                        message: src.message.clone(),
-                        author_name: src.author_name.clone(),
-                        author_email: src.author_email.clone(),
-                        time: src.time,
-                    };
-                    state.commits.insert(new_sha.clone(), new_commit);
-                    last_message = Some(src.message);
-                    current = new_sha.clone();
-                    last_commit = Some(new_sha);
-                },
-                RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
-                    let Some(prev_sha) = last_commit.clone() else {
-                        return Err(RebaseError::Backend(
-                            "squash/fixup without preceding pick".into(),
-                        ));
-                    };
-                    let Some(prev) = state.commits.get(&prev_sha).cloned() else {
-                        return Err(RebaseError::Backend("previous commit missing".into()));
-                    };
-                    let Some(src) = state.commits.get(&entry.sha).cloned() else {
-                        return Err(RebaseError::Backend(format!(
-                            "unknown sha in rebase: {}",
-                            entry.sha
-                        )));
-                    };
-                    let mut merged_tree = prev.tree.clone();
-                    for (path, content) in &src.tree {
-                        merged_tree.insert(path.clone(), content.clone());
-                    }
-                    let combined_message = match entry.op {
-                        RebaseTodoOp::Squash => {
-                            let base = last_message.clone().unwrap_or_default();
-                            format!("{}\n\n{}", base.trim_end(), src.message.trim_end())
-                        },
-                        _ => last_message.clone().unwrap_or(prev.message.clone()),
-                    };
-
-                    state.synth_counter += 1;
-                    let new_sha = format!(
-                        "rebased-{}-{}",
-                        &entry.sha[..entry.sha.len().min(6)],
-                        state.synth_counter
-                    );
-                    let new_commit = FakeCommit {
-                        parent: prev.parent.clone(),
-                        tree: merged_tree,
-                        message: combined_message.clone(),
-                        author_name: prev.author_name.clone(),
-                        author_email: prev.author_email.clone(),
-                        time: prev.time,
-                    };
-                    state.commits.insert(new_sha.clone(), new_commit);
-                    state.commits.remove(&prev_sha);
-                    current = new_sha.clone();
-                    last_commit = Some(new_sha);
-                    last_message = Some(combined_message);
-                },
-            }
-        }
-
-        state.head = Some(current.clone());
-        state.applied_rebases.push(RecordedRebase {
-            onto: onto.to_string(),
-            todo: todo.to_vec(),
-            new_head: current.clone(),
-        });
-        Ok(current)
+        rebase::run_rebase(&mut state, onto, todo)
     }
 
     fn cherry_pick_tree(
@@ -772,78 +613,7 @@ impl GitRepo for FakeGitRepo {
         onto_sha: &str,
     ) -> Result<CherryPickOutcome, GitApplyError> {
         let state = self.state.lock().unwrap();
-        if let Some(conflict_sha) = &state.conflict_at {
-            if conflict_sha == source_sha {
-                let source = state.commits.get(source_sha).cloned();
-                let onto = state.commits.get(onto_sha).cloned();
-                let ancestor_tree = source
-                    .as_ref()
-                    .and_then(|c| c.parent.as_ref())
-                    .and_then(|p| state.commits.get(p))
-                    .map(|c| c.tree.clone())
-                    .unwrap_or_default();
-                // Produce a conflict on every path that differs between
-                // ours and theirs; surface stages from each side.
-                let mut paths: std::collections::BTreeSet<PathBuf> =
-                    std::collections::BTreeSet::new();
-                let ours_tree = onto.as_ref().map(|c| &c.tree);
-                let theirs_tree = source.as_ref().map(|c| &c.tree);
-                if let Some(t) = ours_tree {
-                    paths.extend(t.keys().cloned());
-                }
-                if let Some(t) = theirs_tree {
-                    paths.extend(t.keys().cloned());
-                }
-                let files: Vec<ConflictedFile> = paths
-                    .into_iter()
-                    .map(|p| ConflictedFile {
-                        ancestor: ancestor_tree.get(&p).cloned(),
-                        ours: ours_tree.and_then(|t| t.get(&p).cloned()),
-                        theirs: theirs_tree.and_then(|t| t.get(&p).cloned()),
-                        path: p,
-                    })
-                    .collect();
-                return Ok(CherryPickOutcome::Conflict { files });
-            }
-        }
-        let Some(source) = state.commits.get(source_sha).cloned() else {
-            return Err(GitApplyError::Backend(format!(
-                "unknown source sha: {source_sha}"
-            )));
-        };
-        let Some(onto) = state.commits.get(onto_sha).cloned() else {
-            return Err(GitApplyError::Backend(format!(
-                "unknown onto sha: {onto_sha}"
-            )));
-        };
-        // Deterministic merge: start from onto's tree, then overlay the
-        // diff introduced by source against its parent. Sufficient for
-        // snapshot/regression tests without implementing real 3-way
-        // merge in the fake.
-        let source_parent_tree = source
-            .parent
-            .as_ref()
-            .and_then(|p| state.commits.get(p))
-            .map(|c| c.tree.clone())
-            .unwrap_or_default();
-        let mut tree = onto.tree.clone();
-        for (path, content) in &source.tree {
-            if source_parent_tree.get(path) != Some(content) {
-                tree.insert(path.clone(), content.clone());
-            }
-        }
-        for path in source_parent_tree.keys() {
-            if !source.tree.contains_key(path) {
-                tree.remove(path);
-            }
-        }
-        Ok(CherryPickOutcome::Clean {
-            tree,
-            message: source.message.clone(),
-            author_name: source.author_name.clone(),
-            author_email: source.author_email.clone(),
-            author_time: source.time,
-        })
+        rebase::cherry_pick_tree(&state, source_sha, onto_sha)
     }
 
     fn create_commit(
