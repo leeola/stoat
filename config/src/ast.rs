@@ -17,11 +17,18 @@ impl<T> Spanned<T> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub blocks: Vec<Spanned<EventBlock>>,
+    pub themes: Vec<Spanned<ThemeBlock>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventBlock {
     pub event: EventType,
+    pub statements: Vec<Spanned<Statement>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeBlock {
+    pub name: Spanned<String>,
     pub statements: Vec<Spanned<Statement>>,
 }
 
@@ -137,5 +144,6 @@ pub enum Value {
     Ident(String),
     Enum { ty: String, variant: String },
     Array(Vec<Spanned<Value>>),
+    Map(Vec<(Spanned<String>, Spanned<Value>)>),
     StateRef(String),
 }

@@ -59,6 +59,7 @@ pub struct Stoat {
     pub executor: Executor,
     keymap: Keymap,
     pub settings: Settings,
+    pub theme: crate::theme::Theme,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) workspace_picker: Option<WorkspacePicker>,
@@ -142,11 +143,26 @@ impl Stoat {
             .map(Settings::from_config)
             .unwrap_or_default()
             .merge(cli_settings);
-        let keymap = config
-            .map(|c| Keymap::compile(&c))
-            .unwrap_or_else(|| Keymap::compile(&stoat_config::Config { blocks: vec![] }));
 
-        let syntax_styles = SyntaxStyles::standard();
+        let theme = {
+            let name = settings.theme.as_deref().unwrap_or("default_dark");
+            match config.as_ref() {
+                Some(c) => crate::theme::Theme::from_config(c, name).unwrap_or_else(|e| {
+                    tracing::error!("theme '{name}' load failed: {e}");
+                    crate::theme::Theme::empty()
+                }),
+                None => crate::theme::Theme::empty(),
+            }
+        };
+
+        let keymap = config.map(|c| Keymap::compile(&c)).unwrap_or_else(|| {
+            Keymap::compile(&stoat_config::Config {
+                blocks: vec![],
+                themes: vec![],
+            })
+        });
+
+        let syntax_styles = SyntaxStyles::from_theme(&theme);
         let language_registry = Arc::new(LanguageRegistry::standard());
         // Install a theme-driven HighlightMap on every loaded language.
         // Done at registry-init time because adding new languages later
@@ -172,6 +188,7 @@ impl Stoat {
             executor,
             keymap,
             settings,
+            theme,
             command_palette: None,
             help: None,
             workspace_picker: None,
@@ -1237,11 +1254,12 @@ impl Stoat {
                 &workspace_name,
                 &self.mode,
                 self.render_tick,
+                &self.theme,
                 &mut buf,
             );
         }
 
-        render_pane_dividers(&ws.panes.dividers(), &mut buf);
+        render_pane_dividers(&ws.panes.dividers(), &self.theme, &mut buf);
 
         if let Some(pane_id) = overlay_pane {
             let pane = ws.panes.pane(pane_id);
@@ -1254,6 +1272,7 @@ impl Stoat {
                         state,
                         &workspace_name,
                         &self.mode,
+                        &self.theme,
                         &mut buf,
                     );
                 }
@@ -1265,6 +1284,7 @@ impl Stoat {
                         state,
                         &workspace_name,
                         &self.mode,
+                        &self.theme,
                         &mut buf,
                     );
                 }
@@ -1296,6 +1316,7 @@ impl Stoat {
                             &orig,
                             &self.mode,
                             &workspace_name,
+                            &self.theme,
                             &mut buf,
                         );
                     }
@@ -1308,6 +1329,7 @@ impl Stoat {
                         active,
                         &workspace_name,
                         &self.mode,
+                        &self.theme,
                         &mut buf,
                     );
                 }
@@ -1321,7 +1343,7 @@ impl Stoat {
             }
             let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
             if matches!(dock.visibility, DockVisibility::Minimized) {
-                render_dock_minimized(dock, is_focused, &mut buf);
+                render_dock_minimized(dock, is_focused, &self.theme, &mut buf);
             } else {
                 render_dock_open(
                     dock,
@@ -1330,6 +1352,7 @@ impl Stoat {
                     &ws.buffers,
                     &ws.chats,
                     self.render_tick,
+                    &self.theme,
                     &mut buf,
                 );
             }
@@ -1339,20 +1362,21 @@ impl Stoat {
             &self.badges,
             self.size,
             self.render_tick,
+            &self.theme,
             &mut buf,
         );
         if let Some(run_id) = self.modal_run {
             if let Some(run_state) = ws.runs.get(run_id) {
-                render_modal_run(run_state, self.size, &mut buf);
+                render_modal_run(run_state, &self.theme, self.size, &mut buf);
             }
         } else if let Some(help) = &self.help {
-            render_help(help, self.size, &mut buf);
+            render_help(help, &self.theme, self.size, &mut buf);
         } else if let Some(palette) = &self.command_palette {
-            render_command_palette(palette, self.size, &mut buf);
+            render_command_palette(palette, &self.theme, self.size, &mut buf);
         } else if let Some(picker) = &self.workspace_picker {
-            render_workspace_picker(picker, self.size, &mut buf);
+            render_workspace_picker(picker, &self.theme, self.size, &mut buf);
             let bindings = picker.hint_bindings();
-            render_hints("picker", &bindings, None, self.size, &mut buf);
+            render_hints("picker", &bindings, None, &self.theme, self.size, &mut buf);
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
             let raw = self.keymap.active_bindings(&state);
@@ -1377,16 +1401,23 @@ impl Stoat {
                         )
                     };
                     let style = if complete {
-                        Style::default().fg(Color::Green)
+                        self.theme.get(crate::theme::scope::UI_BADGE_COMPLETE)
                     } else {
-                        Style::default().fg(Color::White)
+                        self.theme.get(crate::theme::scope::UI_TEXT)
                     };
                     HintsFooter { text, style }
                 })
             } else {
                 None
             };
-            render_hints(&self.mode, &bindings, footer.as_ref(), self.size, &mut buf);
+            render_hints(
+                &self.mode,
+                &bindings,
+                footer.as_ref(),
+                &self.theme,
+                self.size,
+                &mut buf,
+            );
         }
         buf
     }
@@ -1689,6 +1720,7 @@ fn render_hints(
     mode: &str,
     bindings: &[(&str, String)],
     footer: Option<&HintsFooter>,
+    theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1716,16 +1748,17 @@ fn render_hints(
     let y = area.y + area.height.saturating_sub(box_height);
     let help_area = Rect::new(x, y, box_width, box_height);
 
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(modal_style)
         .title(format!(" {mode} "))
-        .title_style(Style::default().fg(Color::Yellow));
+        .title_style(modal_style);
     let inner = block.inner(help_area);
     block.render(help_area, buf);
 
-    let key_style = Style::default().fg(Color::Cyan);
-    let action_style = Style::default().fg(Color::White);
+    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let action_style = theme.get(crate::theme::scope::UI_TEXT);
 
     for (i, (key, action)) in bindings.iter().enumerate() {
         let row = inner.y + i as u16;
@@ -1753,11 +1786,10 @@ fn render_hints(
         let sep_row = inner.y + bindings.len() as u16;
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
+            let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
             for col_offset in 0..inner.width {
                 let col = inner.x + col_offset;
-                buf[(col, sep_row)]
-                    .set_char('─')
-                    .set_style(Style::default().fg(Color::DarkGray));
+                buf[(col, sep_row)].set_char('─').set_style(sep_style);
             }
         }
         if text_row < inner.y + inner.height {
@@ -1777,7 +1809,12 @@ struct HintsFooter {
     style: Style,
 }
 
-fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffer) {
+fn render_workspace_picker(
+    picker: &WorkspacePicker,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     if area.width < 60 || area.height < 8 {
         return;
     }
@@ -1802,11 +1839,12 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
     let picker_area = Rect::new(x, y, box_width, box_height);
 
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(modal_style)
         .title(" workspaces ")
-        .title_style(Style::default().fg(Color::Magenta));
+        .title_style(modal_style);
     let inner = block.inner(picker_area);
     block.render(picker_area, buf);
 
@@ -1827,10 +1865,10 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
 
     let right_pad = |label: &str, width: u16| format!("{:>w$}", label, w = width as usize);
 
-    let row_style = Style::default().fg(Color::White);
-    let current_style = Style::default().fg(Color::Yellow);
-    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let header_style = Style::default().fg(Color::DarkGray);
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let current_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 
     let header_row = inner.y;
     write_str(buf, name_x, header_row, "name", header_style);
@@ -1920,13 +1958,18 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
     }
 }
 
-fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer) {
+fn render_command_palette(
+    palette: &CommandPalette,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     match palette.phase() {
         crate::command_palette::PalettePhase::Filter {
             input,
             filtered,
             selected,
-        } => render_palette_filter(input, filtered, *selected, area, buf),
+        } => render_palette_filter(input, filtered, *selected, theme, area, buf),
         crate::command_palette::PalettePhase::CollectArgs {
             entry,
             collected,
@@ -1939,6 +1982,7 @@ fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer
             *current,
             input,
             error.as_deref(),
+            theme,
             area,
             buf,
         ),
@@ -1949,6 +1993,7 @@ fn render_palette_filter(
     input: &str,
     filtered: &[&'static stoat_action::registry::RegistryEntry],
     selected: usize,
+    theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1980,20 +2025,21 @@ fn render_palette_filter(
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
     let palette_area = Rect::new(x, y, box_width, box_height);
 
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(modal_style)
         .title(" command palette ")
-        .title_style(Style::default().fg(Color::Magenta));
+        .title_style(modal_style);
     let inner = block.inner(palette_area);
     block.render(palette_area, buf);
 
-    let prompt_style = Style::default().fg(Color::Yellow);
-    let input_style = Style::default().fg(Color::White);
-    let row_style = Style::default().fg(Color::White);
-    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let desc_style = Style::default().fg(Color::DarkGray);
-    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let input_style = theme.get(crate::theme::scope::UI_TEXT);
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let desc_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ":", prompt_style);
@@ -2006,10 +2052,11 @@ fn render_palette_filter(
     }
 
     let separator_row = inner.y + 1;
+    let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     for col in inner.x..inner.x + inner.width {
         buf[(col, separator_row)]
             .set_char('─')
-            .set_style(Style::default().fg(Color::DarkGray));
+            .set_style(separator_style);
     }
 
     let list_top = inner.y + 2;
@@ -2047,17 +2094,12 @@ fn render_palette_filter(
         for col in inner.x..inner.x + inner.width {
             buf[(col, doc_separator_row)]
                 .set_char('─')
-                .set_style(Style::default().fg(Color::DarkGray));
+                .set_style(separator_style);
         }
         let doc_top = doc_separator_row + 1;
+        let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
         for (i, line) in doc_lines.iter().enumerate() {
-            write_str(
-                buf,
-                inner.x,
-                doc_top + i as u16,
-                line,
-                Style::default().fg(Color::Gray),
-            );
+            write_str(buf, inner.x, doc_top + i as u16, line, doc_style);
         }
     }
 }
@@ -2068,6 +2110,7 @@ fn render_palette_collect_args(
     current: usize,
     input: &str,
     error: Option<&str>,
+    theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -2100,20 +2143,21 @@ fn render_palette_collect_args(
     let y = area.y + (area.height.saturating_sub(box_height)) / 2;
     let palette_area = Rect::new(x, y, box_width, box_height);
 
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     let title = format!(" {} ", entry.def.name());
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(modal_style)
         .title(title)
-        .title_style(Style::default().fg(Color::Magenta));
+        .title_style(modal_style);
     let inner = block.inner(palette_area);
     block.render(palette_area, buf);
 
-    let label_style = Style::default().fg(Color::Yellow);
-    let value_style = Style::default().fg(Color::White);
-    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
-    let error_style = Style::default().fg(Color::Red);
-    let muted_style = Style::default().fg(Color::DarkGray);
+    let label_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let value_style = theme.get(crate::theme::scope::UI_TEXT);
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
+    let error_style = theme.get(crate::theme::scope::UI_ERROR);
+    let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 
     let mut row = inner.y;
 
@@ -2161,14 +2205,9 @@ fn render_palette_collect_args(
     write_str(buf, inner.x, doc_top, &header, muted_style);
 
     let body_top = doc_top + 1;
+    let body_body_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
     for (i, line) in body_lines.iter().enumerate() {
-        write_str(
-            buf,
-            inner.x,
-            body_top + i as u16,
-            line,
-            Style::default().fg(Color::Gray),
-        );
+        write_str(buf, inner.x, body_top + i as u16, line, body_body_style);
     }
 }
 
@@ -2180,7 +2219,7 @@ fn format_param_value(v: &stoat_action::ParamValue) -> String {
     }
 }
 
-fn render_help(help: &Help, area: Rect, buf: &mut Buffer) {
+fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, buf: &mut Buffer) {
     use crate::help::{HelpInput, HelpScope};
 
     if area.width < 40 || area.height < 12 {
@@ -2201,24 +2240,23 @@ fn render_help(help: &Help, area: Rect, buf: &mut Buffer) {
         HelpScope::Active => format!(" help: active ({}) ", help.snapshot_mode()),
         HelpScope::All => " help: all actions ".to_string(),
     };
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(modal_style)
         .title(title)
-        .title_style(Style::default().fg(Color::Cyan));
+        .title_style(modal_style);
     let inner = block.inner(help_area);
     block.render(help_area, buf);
 
-    let prompt_style = Style::default().fg(Color::Yellow);
-    let input_style = Style::default().fg(Color::White);
-    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
-    let row_style = Style::default().fg(Color::White);
-    let muted = Style::default().fg(Color::DarkGray);
-    let key_style = Style::default().fg(Color::Cyan);
-    let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let heading = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
+    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
+    let input_style = theme.get(crate::theme::scope::UI_TEXT);
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let heading = theme.get(crate::theme::scope::UI_HEADING);
 
     let search_row = inner.y;
     let prompt = match help.input_mode() {
@@ -2582,9 +2620,16 @@ fn perimeter_position(index: usize, w: u16, h: u16) -> (u16, u16) {
     }
 }
 
-fn render_single_badge(badge: &Badge, x: u16, y: u16, render_tick: u64, buf: &mut Buffer) {
+fn render_single_badge(
+    badge: &Badge,
+    x: u16,
+    y: u16,
+    render_tick: u64,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let (w, h) = badge_size(badge);
-    let border_style = badge_border_style(badge.state);
+    let border_style = badge_border_style(badge.state, theme);
 
     let perimeter_len = 2 * (w as usize) + 2 * (h as usize) - 4;
     let spinner_pos = if badge.state == BadgeState::Active {
@@ -2622,7 +2667,7 @@ fn render_single_badge(badge: &Badge, x: u16, y: u16, render_tick: u64, buf: &mu
         write_cell(buf, x + sc, y + sr, ch, border_style);
     }
 
-    let content_style = Style::default().fg(Color::White);
+    let content_style = theme.get(crate::theme::scope::UI_TEXT);
     write_str(buf, x + 1, y + 1, &badge.label, content_style);
 }
 
@@ -2631,6 +2676,7 @@ fn render_badges(
     global: &BadgeTray,
     area: Rect,
     render_tick: u64,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     if workspace.is_empty() && global.is_empty() {
@@ -2685,7 +2731,7 @@ fn render_badges(
                 cy
             };
 
-            render_single_badge(badge, draw_x, draw_y, render_tick, buf);
+            render_single_badge(badge, draw_x, draw_y, render_tick, theme, buf);
 
             match tray.stack {
                 StackDirection::Horizontal => {
@@ -2725,11 +2771,12 @@ fn anchor_origin(anchor: Anchor, area: Rect) -> (u16, u16) {
     (x, y)
 }
 
-fn badge_border_style(state: BadgeState) -> Style {
+fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
+    use crate::theme::scope;
     match state {
-        BadgeState::Active => Style::default().fg(Color::Yellow),
-        BadgeState::Complete => Style::default().fg(Color::Green),
-        BadgeState::Error => Style::default().fg(Color::Red),
+        BadgeState::Active => theme.get(scope::UI_BADGE_ACTIVE),
+        BadgeState::Complete => theme.get(scope::UI_BADGE_COMPLETE),
+        BadgeState::Error => theme.get(scope::UI_BADGE_ERROR),
     }
 }
 
@@ -2760,15 +2807,20 @@ fn detail_for_message(message: &AgentMessage) -> Option<String> {
     }
 }
 
-fn render_dock_minimized(dock: &DockPanel, is_focused: bool, buf: &mut Buffer) {
+fn render_dock_minimized(
+    dock: &DockPanel,
+    is_focused: bool,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
         return;
     }
     let style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        theme.get(crate::theme::scope::UI_BORDER_FOCUSED)
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
     for y in area.y..area.y + area.height {
         if let Some(cell) = buf.cell_mut((area.x, y)) {
@@ -2784,6 +2836,7 @@ fn render_dock_open(
     buffers: &BufferRegistry,
     chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
     render_tick: u64,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     let area = dock.area;
@@ -2791,9 +2844,9 @@ fn render_dock_open(
         return;
     }
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan)
+        theme.get(crate::theme::scope::UI_BORDER_FOCUSED)
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
 
     Clear.render(area, buf);
@@ -2807,12 +2860,21 @@ fn render_dock_open(
     match &dock.view {
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(chat, editors, buffers, inner, is_focused, render_tick, buf);
+                render_claude_pane(
+                    chat,
+                    editors,
+                    buffers,
+                    inner,
+                    is_focused,
+                    render_tick,
+                    theme,
+                    buf,
+                );
             }
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, inner, border_style, buf, is_focused);
+                render_editor(editor, inner, border_style, theme, buf, is_focused);
             }
         },
         _ => {},
@@ -2826,6 +2888,7 @@ fn render_claude_pane(
     area: Rect,
     is_focused: bool,
     render_tick: u64,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     use crate::{
@@ -2850,13 +2913,14 @@ fn render_claude_pane(
     let msg_area = Rect::new(area.x, area.y, area.width, separator_y - area.y);
     let input_area = Rect::new(area.x, separator_y + 1, area.width, input_height);
 
-    let sep_style = Style::default().fg(Color::DarkGray);
+    use crate::theme::scope as s;
+    let sep_style = theme.get(s::CHAT_SEPARATOR);
     for x in area.x..area.x + area.width {
         write_cell(buf, x, separator_y, '-', sep_style);
     }
 
-    let meta_style = Style::default().fg(Color::DarkGray);
-    let time_style = Style::default().fg(Color::Gray);
+    let meta_style = theme.get(s::CHAT_META);
+    let time_style = theme.get(s::CHAT_TIME);
     write_str(buf, msg_area.x, msg_area.y, "Claude", meta_style);
 
     let body_area = Rect::new(
@@ -2869,18 +2933,14 @@ fn render_claude_pane(
         return;
     }
 
-    let user_style = Style::default().fg(Color::Green);
-    let text_style = Style::default().fg(Color::White);
-    let thinking_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
-    let tool_header_style = Style::default().fg(Color::Blue);
-    let tool_body_style = Style::default().fg(Color::DarkGray);
-    let error_style = Style::default().fg(Color::Red);
-    let turn_sep_style = Style::default().fg(Color::DarkGray);
-    let throbber_style = Style::default()
-        .fg(Color::Magenta)
-        .add_modifier(Modifier::BOLD);
+    let user_style = theme.get(s::CHAT_USER);
+    let text_style = theme.get(s::CHAT_TEXT);
+    let thinking_style = theme.get(s::CHAT_THINKING);
+    let tool_header_style = theme.get(s::CHAT_TOOL_HEADER);
+    let tool_body_style = theme.get(s::CHAT_TOOL_BODY);
+    let error_style = theme.get(s::CHAT_ERROR);
+    let turn_sep_style = theme.get(s::CHAT_SEPARATOR);
+    let throbber_style = theme.get(s::CHAT_THROBBER);
 
     const TOOL_MARK: &str = "\u{23fa}";
     const TOOL_RESULT_ELBOW: &str = "\u{2514}\u{2500}";
@@ -3009,11 +3069,11 @@ fn render_claude_pane(
 
     if let Some(editor) = editors.get_mut(chat.input_editor_id) {
         let input_style = if is_focused {
-            Style::default().fg(Color::White)
+            theme.get(crate::theme::scope::UI_TEXT)
         } else {
-            Style::default().fg(Color::DarkGray)
+            theme.get(crate::theme::scope::UI_TEXT_MUTED)
         };
-        render_editor(editor, input_area, input_style, buf, is_focused);
+        render_editor(editor, input_area, input_style, theme, buf, is_focused);
     }
 }
 
@@ -3154,12 +3214,13 @@ fn render_pane(
     workspace_name: &str,
     mode: &str,
     render_tick: u64,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     let text_style = if is_focused {
-        Style::default().fg(Color::White)
+        theme.get(crate::theme::scope::UI_TEXT)
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme.get(crate::theme::scope::UI_TEXT_MUTED)
     };
     let (content_area, status_area) = split_pane_status(pane.area);
 
@@ -3178,12 +3239,12 @@ fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, content_area, text_style, buf, is_focused);
+                render_editor(editor, content_area, text_style, theme, buf, is_focused);
             }
         },
         View::Run(run_id) => {
             if let Some(run_state) = runs.get(*run_id) {
-                render_run_pane(run_state, content_area, is_focused, buf);
+                render_run_pane(run_state, theme, content_area, is_focused, buf);
             }
         },
         View::Claude(session_id) => {
@@ -3195,6 +3256,7 @@ fn render_pane(
                     content_area,
                     is_focused,
                     render_tick,
+                    theme,
                     buf,
                 );
             }
@@ -3209,6 +3271,7 @@ fn render_pane(
         mode,
         editors,
         buffers,
+        theme,
         buf,
     );
 }
@@ -3223,17 +3286,17 @@ fn render_overlay_status(
     workspace_name: &str,
     mode: &str,
     label: &str,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (bar_bg, bar_fg) = if is_focused {
-        (Color::DarkGray, Color::White)
+    let base_style = if is_focused {
+        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
     } else {
-        (Color::Black, Color::DarkGray)
+        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
-    let base_style = Style::default().bg(bar_bg).fg(bar_fg);
     let y = area.y;
     let end_x = area.x + area.width;
     for x in area.x..end_x {
@@ -3242,11 +3305,8 @@ fn render_overlay_status(
 
     let mut cursor = area.x;
     if is_focused {
-        let (mode_label, mode_bg) = mode_segment(mode);
-        let mode_style = Style::default()
-            .bg(mode_bg)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD);
+        let (mode_label, mode_bg) = mode_segment(mode, theme);
+        let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         cursor = paint_segment(
             buf,
             y,
@@ -3275,9 +3335,9 @@ fn render_overlay_status(
     );
 }
 
-fn render_pane_dividers(dividers: &[Divider], buf: &mut Buffer) {
-    let dim = Style::default().fg(Color::DarkGray);
-    let lit = Style::default().fg(Color::Cyan);
+fn render_pane_dividers(dividers: &[Divider], theme: &crate::theme::Theme, buf: &mut Buffer) {
+    let dim = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
+    let lit = theme.get(crate::theme::scope::UI_BORDER_FOCUSED);
     for d in dividers {
         let style = if d.touches_focus { lit } else { dim };
         let buf_end_x = buf.area.x + buf.area.width;
@@ -3341,18 +3401,18 @@ fn render_pane_status(
     mode: &str,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let (bar_bg, bar_fg) = if is_focused {
-        (Color::DarkGray, Color::White)
+    let base_style = if is_focused {
+        theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
     } else {
-        (Color::Black, Color::DarkGray)
+        theme.get(crate::theme::scope::UI_STATUSBAR_UNFOCUSED)
     };
-    let base_style = Style::default().bg(bar_bg).fg(bar_fg);
 
     let y = area.y;
     let end_x = area.x + area.width;
@@ -3362,11 +3422,8 @@ fn render_pane_status(
 
     let mut cursor = area.x;
     if is_focused {
-        let (label, mode_bg) = mode_segment(mode);
-        let mode_style = Style::default()
-            .bg(mode_bg)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD);
+        let (label, mode_bg) = mode_segment(mode, theme);
+        let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         cursor = paint_segment(buf, y, cursor, end_x, &format!(" {label} "), mode_style);
         let ws_style = base_style.add_modifier(Modifier::BOLD);
         cursor = paint_segment(
@@ -3420,18 +3477,21 @@ fn paint_segment(
     x
 }
 
-fn mode_segment(mode: &str) -> (&'static str, Color) {
-    match mode {
-        "normal" => ("NOR", Color::Blue),
-        "insert" => ("INS", Color::Green),
-        "run" => ("RUN", Color::Magenta),
-        "commits" => ("COM", Color::Yellow),
-        "rebase" => ("REB", Color::Red),
-        "reword" | "reword_insert" => ("RWD", Color::Red),
-        "conflict" => ("CNF", Color::LightRed),
-        "review" => ("REV", Color::Cyan),
-        _ => ("---", Color::Gray),
-    }
+fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static str, Color) {
+    use crate::theme::scope;
+    let (label, default, scope_name) = match mode {
+        "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
+        "insert" => ("INS", Color::Green, scope::UI_STATUSLINE_INSERT),
+        "run" => ("RUN", Color::Magenta, scope::UI_STATUSLINE_RUN),
+        "commits" => ("COM", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
+        "rebase" => ("REB", Color::Red, scope::UI_STATUSLINE_REBASE),
+        "reword" | "reword_insert" => ("RWD", Color::Red, scope::UI_STATUSLINE_REWORD),
+        "conflict" => ("CNF", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
+        "review" => ("REV", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        _ => ("---", Color::Gray, scope::UI_STATUSLINE_DEFAULT),
+    };
+    let color = theme.get(scope_name).fg.unwrap_or(default);
+    (label, color)
 }
 
 fn pane_status_info(
@@ -3475,7 +3535,13 @@ fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u32)> {
     Some((point.row + 1, point.column + 1))
 }
 
-fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut Buffer) {
+fn render_run_pane(
+    run_state: &RunState,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    is_focused: bool,
+    buf: &mut Buffer,
+) {
     if area.height < 2 || area.width < 4 {
         return;
     }
@@ -3508,16 +3574,11 @@ fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut
         let y = area.y + i as u16;
         match line {
             OutputLine::CommandHeader(cmd) => {
-                write_str(buf, area.x, y, "$ ", Style::default().fg(Color::Green));
+                let cmd_style = theme.get(crate::theme::scope::UI_BADGE_COMPLETE);
+                write_str(buf, area.x, y, "$ ", cmd_style);
                 let max_w = (area.width as usize).saturating_sub(2);
                 let display: String = cmd.chars().take(max_w).collect();
-                write_str(
-                    buf,
-                    area.x + 2,
-                    y,
-                    &display,
-                    Style::default().fg(Color::Green),
-                );
+                write_str(buf, area.x + 2, y, &display, cmd_style);
             },
             OutputLine::GridRow(grid, row_idx) => {
                 let row = grid.row(*row_idx);
@@ -3547,7 +3608,13 @@ fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut
             OutputLine::Error(msg) => {
                 let max_w = area.width as usize;
                 let display: String = msg.chars().take(max_w).collect();
-                write_str(buf, area.x, y, &display, Style::default().fg(Color::Red));
+                write_str(
+                    buf,
+                    area.x,
+                    y,
+                    &display,
+                    theme.get(crate::theme::scope::UI_ERROR),
+                );
             },
             OutputLine::Status(code) => {
                 let label = if *code == 0 {
@@ -3556,17 +3623,22 @@ fn render_run_pane(run_state: &RunState, area: Rect, is_focused: bool, buf: &mut
                     format!("[exit {}]", code)
                 };
                 if !label.is_empty() {
-                    write_str(buf, area.x, y, &label, Style::default().fg(Color::DarkGray));
+                    write_str(
+                        buf,
+                        area.x,
+                        y,
+                        &label,
+                        theme.get(crate::theme::scope::UI_TEXT_MUTED),
+                    );
                 }
             },
             OutputLine::Blank => {},
         }
     }
 
-    // Render input line
-    let prompt_style = Style::default().fg(Color::Cyan);
-    let input_style = Style::default().fg(Color::White);
-    let cursor_style = Style::default().fg(Color::Black).bg(Color::White);
+    let prompt_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let input_style = theme.get(crate::theme::scope::UI_TEXT);
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
 
     write_str(buf, area.x, input_row, "$ ", prompt_style);
     let input_text = run_state.input.as_str();
@@ -3591,7 +3663,12 @@ enum OutputLine<'a> {
     Blank,
 }
 
-fn render_modal_run(run_state: &RunState, area: Rect, buf: &mut Buffer) {
+fn render_modal_run(
+    run_state: &RunState,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     if area.width < 20 || area.height < 8 {
         return;
     }
@@ -3612,11 +3689,12 @@ fn render_modal_run(run_state: &RunState, area: Rect, buf: &mut Buffer) {
         let display: String = raw.chars().take(max).collect();
         format!(" {display} ")
     };
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_RUN);
     let border = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(modal_style)
         .title(title)
-        .title_style(Style::default().fg(Color::Yellow));
+        .title_style(modal_style);
     let inner = border.inner(modal_area);
     border.render(modal_area, buf);
 
@@ -3665,9 +3743,9 @@ fn render_modal_run(run_state: &RunState, area: Rect, buf: &mut Buffer) {
         "running...".to_owned()
     };
     let status_style = if active.finished {
-        Style::default().fg(Color::DarkGray)
+        theme.get(crate::theme::scope::UI_TEXT_MUTED)
     } else {
-        Style::default().fg(Color::Yellow)
+        theme.get(crate::theme::scope::UI_BADGE_ACTIVE)
     };
     write_str(buf, inner.x, status_row, &status, status_style);
 }
@@ -3676,11 +3754,12 @@ fn render_editor(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
 ) {
     if editor.review_view.is_some() {
-        render_review(editor, inner, fallback_style, buf);
+        render_review(editor, inner, fallback_style, theme, buf);
         return;
     }
 
@@ -3727,8 +3806,8 @@ fn render_editor(
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
-    let selection_style = Style::default().bg(Color::DarkGray);
-    let cursor_style = Style::default().add_modifier(Modifier::REVERSED);
+    let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
+    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
         let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
@@ -3804,6 +3883,7 @@ fn render_reword(
     original_message: &str,
     current_mode: &str,
     workspace_name: &str,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     let (inner, status_area) = split_pane_status(pane.area);
@@ -3813,17 +3893,18 @@ fn render_reword(
         workspace_name,
         current_mode,
         "reword",
+        theme,
         buf,
     );
     if inner.width < 10 || inner.height < 4 {
         return;
     }
 
-    let header_style = Style::default()
-        .fg(Color::Magenta)
+    let header_style = theme
+        .get(crate::theme::scope::VCS_REBASE_REWORD)
         .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray);
-    let body_style = Style::default().fg(Color::White);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let body_style = theme.get(crate::theme::scope::UI_TEXT);
 
     let short = cherry_picked_commit.chars().take(7).collect::<String>();
     write_str(
@@ -3866,7 +3947,7 @@ fn render_reword(
         width: inner.width,
         height: inner.y + inner.height - editor_top,
     };
-    render_editor(editor, editor_rect, body_style, buf, is_focused);
+    render_editor(editor, editor_rect, body_style, theme, buf, is_focused);
 }
 
 fn render_conflict(
@@ -3875,6 +3956,7 @@ fn render_conflict(
     active: &ActiveRebase,
     workspace_name: &str,
     mode: &str,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     use crate::rebase::ConflictResolution;
@@ -3886,6 +3968,7 @@ fn render_conflict(
         workspace_name,
         mode,
         "conflict",
+        theme,
         buf,
     );
     if inner.width < 20 || inner.height < 4 {
@@ -3908,17 +3991,15 @@ fn render_conflict(
     let right_x = sep_x + 1;
     let right_w = inner.width.saturating_sub(left_w + 1);
 
-    let dim = Style::default().fg(Color::DarkGray);
-    let header_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let sel_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::White)
-        .add_modifier(Modifier::REVERSED);
-    let ours_style = Style::default().fg(Color::Green);
-    let theirs_style = Style::default().fg(Color::Magenta);
-    let file_style = Style::default().fg(Color::White);
-    let add_hl = Style::default().fg(Color::Green);
-    let del_hl = Style::default().fg(Color::Red);
+    use crate::theme::scope as s;
+    let dim = theme.get(s::UI_TEXT_MUTED);
+    let header_style = theme.get(s::VCS_CONFLICT_HEADER);
+    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let ours_style = theme.get(s::VCS_CONFLICT_OURS);
+    let theirs_style = theme.get(s::VCS_CONFLICT_THEIRS);
+    let file_style = theme.get(s::UI_TEXT);
+    let add_hl = theme.get(s::DIFF_ADDED);
+    let del_hl = theme.get(s::DIFF_DELETED);
 
     // Separator column.
     for y in inner.y..inner.y + inner.height {
@@ -4039,27 +4120,34 @@ fn render_rebase(
     state: &RebaseState,
     workspace_name: &str,
     mode: &str,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(status_area, is_focused, workspace_name, mode, "rebase", buf);
+    render_overlay_status(
+        status_area,
+        is_focused,
+        workspace_name,
+        mode,
+        "rebase",
+        theme,
+        buf,
+    );
 
     if inner.width < 10 || inner.height == 0 {
         return;
     }
 
-    let sel_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::White)
-        .add_modifier(Modifier::REVERSED);
-    let pick_style = Style::default().fg(Color::Green);
-    let squash_style = Style::default().fg(Color::Yellow);
-    let fixup_style = Style::default().fg(Color::Yellow);
-    let reword_style = Style::default().fg(Color::Magenta);
-    let edit_style = Style::default().fg(Color::Magenta);
-    let drop_style = Style::default().fg(Color::Red);
-    let summary_style = Style::default().fg(Color::White);
-    let sha_style = Style::default().fg(Color::Cyan);
+    use crate::theme::scope as s;
+    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let pick_style = theme.get(s::VCS_REBASE_PICK);
+    let squash_style = theme.get(s::VCS_REBASE_SQUASH);
+    let fixup_style = theme.get(s::VCS_REBASE_FIXUP);
+    let reword_style = theme.get(s::VCS_REBASE_REWORD);
+    let edit_style = theme.get(s::VCS_REBASE_EDIT);
+    let drop_style = theme.get(s::VCS_REBASE_DROP);
+    let summary_style = theme.get(s::UI_TEXT);
+    let sha_style = theme.get(s::UI_KEY_LABEL);
 
     let help_rows: u16 = 2;
     let list_height = inner.height.saturating_sub(help_rows);
@@ -4120,19 +4208,20 @@ fn render_rebase(
                 state.onto.chars().take(7).collect::<String>()
             }
         );
+        let help_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
         write_str(
             buf,
             inner.x,
             help_y,
             &truncate_to_cols(help1, inner.width as usize),
-            Style::default().fg(Color::DarkGray),
+            help_style,
         );
         write_str(
             buf,
             inner.x,
             help_y + 1,
             &truncate_to_cols(&help2, inner.width as usize),
-            Style::default().fg(Color::DarkGray),
+            help_style,
         );
     }
 }
@@ -4143,6 +4232,7 @@ fn render_commits(
     state: &mut CommitListState,
     workspace_name: &str,
     mode: &str,
+    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     let (inner, status_area) = split_pane_status(pane.area);
@@ -4152,6 +4242,7 @@ fn render_commits(
         workspace_name,
         mode,
         "commits",
+        theme,
         buf,
     );
 
@@ -4164,20 +4255,19 @@ fn render_commits(
     let right_x = sep_x + 1;
     let right_w = inner.width.saturating_sub(left_w + 1);
 
+    let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     for y in inner.y..inner.y + inner.height {
-        buf[(sep_x, y)]
-            .set_char('│')
-            .set_style(Style::default().fg(Color::DarkGray));
+        buf[(sep_x, y)].set_char('│').set_style(sep_style);
     }
 
     let left_area = Rect::new(inner.x, inner.y, left_w, inner.height);
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
-    render_commit_list_pane(state, left_area, buf);
+    render_commit_list_pane(state, theme, left_area, buf);
 
     if right_w > 0 {
         let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
-        render_commit_detail_pane(state, right_area, buf);
+        render_commit_detail_pane(state, theme, right_area, buf);
     }
 }
 
@@ -4186,8 +4276,14 @@ fn commit_list_width(total: u16) -> u16 {
     target.clamp(22, 48).min(total.saturating_sub(12))
 }
 
-fn render_commit_list_pane(state: &CommitListState, area: Rect, buf: &mut Buffer) {
-    let dim = Style::default().fg(Color::DarkGray);
+fn render_commit_list_pane(
+    state: &CommitListState,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    use crate::theme::scope as s;
+    let dim = theme.get(s::VCS_COMMIT_METADATA);
     if state.commits.is_empty() {
         let msg = if state.pending_load.is_some() {
             "loading commits..."
@@ -4198,12 +4294,9 @@ fn render_commit_list_pane(state: &CommitListState, area: Rect, buf: &mut Buffer
         return;
     }
 
-    let sel_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::White)
-        .add_modifier(Modifier::REVERSED);
-    let sha_style = Style::default().fg(Color::Yellow);
-    let summary_style = Style::default().fg(Color::White);
+    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let sha_style = theme.get(s::VCS_COMMIT_SHA);
+    let summary_style = theme.get(s::VCS_COMMIT_SUMMARY);
 
     let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
     let rows_visible = area.height as usize;
@@ -4252,15 +4345,20 @@ fn render_commit_list_pane(state: &CommitListState, area: Rect, buf: &mut Buffer
     }
 }
 
-fn render_commit_detail_pane(state: &CommitListState, area: Rect, buf: &mut Buffer) {
-    let dim = Style::default().fg(Color::DarkGray);
+fn render_commit_detail_pane(
+    state: &CommitListState,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
     let Some(sha) = state.selected_sha() else {
         write_str(buf, area.x, area.y, "no selection", dim);
         return;
     };
 
     let summary_rows = match state.summaries.get(sha) {
-        Some(changes) => render_commit_summary(changes, area, buf),
+        Some(changes) => render_commit_summary(changes, theme, area, buf),
         None => {
             write_str(buf, area.x, area.y, "loading summary...", dim);
             1
@@ -4278,7 +4376,7 @@ fn render_commit_detail_pane(state: &CommitListState, area: Rect, buf: &mut Buff
         area.y + area.height - preview_y,
     );
     match state.preview_sessions.get(sha) {
-        Some(session) => render_commit_preview(session, preview_area, buf),
+        Some(session) => render_commit_preview(session, theme, preview_area, buf),
         None => {
             if preview_area.height > 0 {
                 write_str(
@@ -4293,13 +4391,17 @@ fn render_commit_detail_pane(state: &CommitListState, area: Rect, buf: &mut Buff
     }
 }
 
-fn render_commit_summary(changes: &[CommitFileChange], area: Rect, buf: &mut Buffer) -> usize {
-    let header_style = Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD);
-    let path_style = Style::default().fg(Color::White);
-    let add_style = Style::default().fg(Color::Green);
-    let del_style = Style::default().fg(Color::Red);
+fn render_commit_summary(
+    changes: &[CommitFileChange],
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) -> usize {
+    use crate::theme::scope as s;
+    let header_style = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
+    let path_style = theme.get(s::UI_TEXT);
+    let add_style = theme.get(s::DIFF_ADDED);
+    let del_style = theme.get(s::DIFF_DELETED);
 
     let total_add: u32 = changes.iter().map(|c| c.additions).sum();
     let total_del: u32 = changes.iter().map(|c| c.deletions).sum();
@@ -4341,17 +4443,21 @@ fn render_commit_summary(changes: &[CommitFileChange], area: Rect, buf: &mut Buf
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
 /// within `area`. Does not rely on editor machinery; used by the
 /// commits view's right pane.
-fn render_commit_preview(session: &ReviewSession, area: Rect, buf: &mut Buffer) {
+fn render_commit_preview(
+    session: &ReviewSession,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let dim = Style::default().fg(Color::DarkGray);
-    let header_style = Style::default().fg(Color::Yellow);
-    let del_hl = Style::default().fg(Color::Red);
-    let add_hl = Style::default().fg(Color::Green);
-    let move_hl = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::ITALIC);
+    use crate::theme::scope as s;
+    let dim = theme.get(s::UI_TEXT_MUTED);
+    let header_style = theme.get(s::VCS_COMMIT_SHA);
+    let del_hl = theme.get(s::DIFF_DELETED);
+    let add_hl = theme.get(s::DIFF_ADDED);
+    let move_hl = theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC);
     let fallback_style = Style::default();
 
     let full_w = area.width as usize;
@@ -4493,7 +4599,13 @@ fn truncate_to_cols(text: &str, max_cols: usize) -> String {
     out
 }
 
-fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, buf: &mut Buffer) {
+fn render_review(
+    editor: &mut EditorState,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
     let snapshot = editor.display_map.snapshot();
     let view = match editor.review_view.as_ref() {
         Some(v) => v,
@@ -4519,18 +4631,15 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
     let right_start = inner.x + half_w as u16 + sep as u16;
     let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
 
-    let dim_style = Style::default().fg(Color::DarkGray);
-    let del_hl = Style::default().fg(Color::Red);
-    let add_hl = Style::default().fg(Color::Green);
-    // Moved lines render in cyan, matching the central DiffTheme. Both
-    // sides of a review use the same color so it reads as "relocated"
-    // rather than gain/loss. See stoat::display_map::syntax_theme::DiffTheme.
-    let move_hl = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::ITALIC);
-    let current_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    use crate::theme::scope as s;
+    let dim_style = theme.get(s::DIFF_CONTEXT);
+    let del_hl = theme.get(s::DIFF_DELETED);
+    let add_hl = theme.get(s::DIFF_ADDED);
+    // Moved lines render in the theme's diff.moved color. Both sides of
+    // a review use the same style so it reads as "relocated" rather than
+    // gain/loss. See stoat::display_map::syntax_theme::DiffTheme.
+    let move_hl = theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC);
+    let current_style = theme.get(s::DIFF_CURRENT_HUNK);
 
     for display_row in editor.scroll_row..end_row {
         let y = inner.y + (display_row - editor.scroll_row) as u16;
@@ -4551,8 +4660,16 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
                 };
                 if let Some((chunk_id, status)) = view.chunk_and_status_at_row(buffer_row) {
                     let is_current = Some(chunk_id) == view.current_chunk;
-                    paint_status_gutter(buf, inner.x, y, status, is_current, current_style);
-                    paint_status_gutter(buf, right_start, y, status, is_current, current_style);
+                    paint_status_gutter(buf, inner.x, y, status, is_current, current_style, theme);
+                    paint_status_gutter(
+                        buf,
+                        right_start,
+                        y,
+                        status,
+                        is_current,
+                        current_style,
+                        theme,
+                    );
                 }
                 let left_num_x = inner.x + status_w as u16;
                 let right_num_x = right_start + status_w as u16;
@@ -4627,14 +4744,13 @@ fn render_review(editor: &mut EditorState, inner: Rect, fallback_style: Style, b
             },
             BlockRowKind::Block { block, line_index } => {
                 let line = block.get_line(line_index);
+                let block_style = theme.get(crate::theme::scope::UI_PROMPT);
                 for (i, ch) in line.chars().enumerate() {
                     let x = inner.x + i as u16;
                     if x >= inner.x + inner.width {
                         break;
                     }
-                    buf[(x, y)]
-                        .set_char(ch)
-                        .set_style(Style::default().fg(Color::Yellow));
+                    buf[(x, y)].set_char(ch).set_style(block_style);
                 }
             },
         }
@@ -4659,8 +4775,9 @@ fn paint_status_gutter(
     status: crate::review_session::ChunkStatus,
     is_current: bool,
     current_style: Style,
+    theme: &crate::theme::Theme,
 ) {
-    use crate::review_session::ChunkStatus;
+    use crate::{review_session::ChunkStatus, theme::scope as s};
 
     if x >= buf.area.x + buf.area.width {
         return;
@@ -4670,10 +4787,10 @@ fn paint_status_gutter(
         return;
     }
     let (ch, style) = match status {
-        ChunkStatus::Pending => (' ', Style::default().fg(Color::DarkGray)),
-        ChunkStatus::Staged => ('+', Style::default().fg(Color::Green)),
-        ChunkStatus::Unstaged => ('-', Style::default().fg(Color::Red)),
-        ChunkStatus::Skipped => ('~', Style::default().fg(Color::DarkGray)),
+        ChunkStatus::Pending => (' ', theme.get(s::UI_TEXT_MUTED)),
+        ChunkStatus::Staged => ('+', theme.get(s::DIFF_ADDED)),
+        ChunkStatus::Unstaged => ('-', theme.get(s::DIFF_DELETED)),
+        ChunkStatus::Skipped => ('~', theme.get(s::UI_TEXT_MUTED)),
     };
     buf[(x, y)].set_char(ch).set_style(style);
 }
@@ -4749,7 +4866,7 @@ mod tests {
         let lang = LanguageRegistry::standard()
             .for_path(Path::new("a.rs"))
             .unwrap();
-        let styles = SyntaxStyles::standard();
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let buffer_id = BufferId::new(1);
 
         // Large enough that tree-sitter's progress callback fires at least

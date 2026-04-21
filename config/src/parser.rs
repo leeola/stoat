@@ -1,7 +1,8 @@
 use crate::{
     ast::{
         Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key,
-        KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Spanned, Statement, Value,
+        KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Spanned, Statement, ThemeBlock,
+        Value,
     },
     error::ParseError,
 };
@@ -78,46 +79,53 @@ fn enum_value() -> impl Parser<char, Value, Error = Simple<char>> + Clone {
         .map(|(ty, variant)| Value::Enum { ty, variant })
 }
 
-fn array_value() -> impl Parser<char, Value, Error = Simple<char>> + Clone {
-    recursive(|arr| {
-        let inner_value = string_literal()
-            .map(Value::String)
-            .or(number().map(Value::Number))
-            .or(arr)
-            .or(ident().map(|s| match s.as_str() {
-                "true" => Value::Bool(true),
-                "false" => Value::Bool(false),
-                _ => Value::Ident(s),
-            }));
+fn value() -> impl Parser<char, Value, Error = Simple<char>> + Clone {
+    recursive(|value| {
+        let state_ref = just('$').ignore_then(ident()).map(Value::StateRef);
 
-        just('[')
+        let array = just('[')
             .ignore_then(ws())
             .ignore_then(
-                inner_value
+                value
+                    .clone()
                     .map_with_span(Spanned::new)
                     .separated_by(just(',').padded_by(ws()))
                     .allow_trailing(),
             )
             .then_ignore(ws())
             .then_ignore(just(']'))
-            .map(Value::Array)
+            .map(Value::Array);
+
+        let map_entry = spanned_ident()
+            .then_ignore(ws())
+            .then_ignore(just(':'))
+            .then_ignore(ws())
+            .then(value.clone().map_with_span(Spanned::new));
+
+        let map = just('{')
+            .ignore_then(ws())
+            .ignore_then(
+                map_entry
+                    .separated_by(just(',').padded_by(ws()))
+                    .allow_trailing(),
+            )
+            .then_ignore(ws())
+            .then_ignore(just('}'))
+            .map(Value::Map);
+
+        string_literal()
+            .map(Value::String)
+            .or(enum_value())
+            .or(number().map(Value::Number))
+            .or(array)
+            .or(map)
+            .or(state_ref)
+            .or(ident().map(|s| match s.as_str() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                _ => Value::Ident(s),
+            }))
     })
-}
-
-fn value() -> impl Parser<char, Value, Error = Simple<char>> + Clone {
-    let state_ref = just('$').ignore_then(ident()).map(Value::StateRef);
-
-    string_literal()
-        .map(Value::String)
-        .or(enum_value())
-        .or(number().map(Value::Number))
-        .or(array_value())
-        .or(state_ref)
-        .or(ident().map(|s| match s.as_str() {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
-            _ => Value::Ident(s),
-        }))
 }
 
 fn spanned_value() -> impl Parser<char, Spanned<Value>, Error = Simple<char>> + Clone {
@@ -468,10 +476,43 @@ fn event_block() -> impl Parser<char, Spanned<EventBlock>, Error = Simple<char>>
         .map_with_span(Spanned::new)
 }
 
+fn theme_block() -> impl Parser<char, Spanned<ThemeBlock>, Error = Simple<char>> + Clone {
+    just("theme")
+        .ignore_then(required_ws())
+        .ignore_then(spanned_ident())
+        .then_ignore(ws())
+        .then_ignore(just('{'))
+        .then_ignore(ws())
+        .then(statement().repeated())
+        .then_ignore(ws())
+        .then_ignore(just('}'))
+        .map(|(name, statements)| ThemeBlock { name, statements })
+        .map_with_span(Spanned::new)
+}
+
+enum TopLevel {
+    Event(Spanned<EventBlock>),
+    Theme(Spanned<ThemeBlock>),
+}
+
 fn config() -> impl Parser<char, Config, Error = Simple<char>> {
-    ws().ignore_then(event_block().padded_by(ws()).repeated())
+    let item = theme_block()
+        .map(TopLevel::Theme)
+        .or(event_block().map(TopLevel::Event));
+
+    ws().ignore_then(item.padded_by(ws()).repeated())
         .then_ignore(end())
-        .map(|blocks| Config { blocks })
+        .map(|items| {
+            let mut blocks = Vec::new();
+            let mut themes = Vec::new();
+            for item in items {
+                match item {
+                    TopLevel::Event(b) => blocks.push(b),
+                    TopLevel::Theme(t) => themes.push(t),
+                }
+            }
+            Config { blocks, themes }
+        })
 }
 
 pub fn parser() -> impl Parser<char, Config, Error = Simple<char>> {

@@ -5,7 +5,7 @@ mod settings;
 
 pub use ast::{
     Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart,
-    LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, Value,
+    LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, ThemeBlock, Value,
 };
 pub use error::{format_errors, ParseError};
 pub use settings::{ClaudePlacement, Settings};
@@ -760,5 +760,193 @@ mod tests {
         let config = parse_ok("on key { F1 -> Help(); }");
         let binding = assert_binding(&config.blocks[0].node.statements[0]);
         assert_eq!(binding.key.node.keys, vec![key_named("F1")]);
+    }
+
+    #[test]
+    fn theme_block_empty() {
+        let config = parse_ok("theme default_dark { }");
+        assert_eq!(config.blocks.len(), 0);
+        assert_eq!(config.themes.len(), 1);
+        assert_eq!(config.themes[0].node.name.node, "default_dark");
+        assert_eq!(config.themes[0].node.statements.len(), 0);
+    }
+
+    #[test]
+    fn theme_block_with_palette_lets() {
+        let config = parse_ok(
+            r##"theme default_dark {
+                let bg = "#1e1e2e";
+                let accent = "#89b4fa";
+            }"##,
+        );
+        let theme = &config.themes[0].node;
+        assert_eq!(theme.name.node, "default_dark");
+        let bg = assert_let(&theme.statements[0]);
+        assert_eq!(bg.name.node, "bg");
+        match &bg.value.node {
+            Expr::Value(Value::String(s)) => assert_eq!(s, "#1e1e2e"),
+            _ => panic!("expected string value"),
+        }
+        let accent = assert_let(&theme.statements[1]);
+        assert_eq!(accent.name.node, "accent");
+    }
+
+    #[test]
+    fn theme_block_with_dotted_path_settings() {
+        let config = parse_ok(
+            r#"theme default_dark {
+                ui.border.focused.fg = accent;
+            }"#,
+        );
+        let theme = &config.themes[0].node;
+        let setting = assert_setting(&theme.statements[0]);
+        assert_eq!(
+            setting
+                .path
+                .iter()
+                .map(|p| p.node.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ui", "border", "focused", "fg"]
+        );
+        assert_eq!(setting.value.node, Value::Ident("accent".to_string()));
+    }
+
+    #[test]
+    fn map_value_basic() {
+        let config = parse_ok(
+            r#"theme default_dark {
+                ui.cursor = { fg: bg, bg: accent };
+            }"#,
+        );
+        let theme = &config.themes[0].node;
+        let setting = assert_setting(&theme.statements[0]);
+        match &setting.value.node {
+            Value::Map(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].0.node, "fg");
+                assert_eq!(entries[0].1.node, Value::Ident("bg".to_string()));
+                assert_eq!(entries[1].0.node, "bg");
+                assert_eq!(entries[1].1.node, Value::Ident("accent".to_string()));
+            },
+            _ => panic!("expected map value"),
+        }
+    }
+
+    #[test]
+    fn map_value_with_modifiers_array() {
+        let config = parse_ok(
+            r#"theme default_dark {
+                syntax.keyword = { fg: blue, modifiers: [bold, italic] };
+            }"#,
+        );
+        let theme = &config.themes[0].node;
+        let setting = assert_setting(&theme.statements[0]);
+        match &setting.value.node {
+            Value::Map(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[1].0.node, "modifiers");
+                match &entries[1].1.node {
+                    Value::Array(items) => {
+                        assert_eq!(items.len(), 2);
+                        assert_eq!(items[0].node, Value::Ident("bold".to_string()));
+                        assert_eq!(items[1].node, Value::Ident("italic".to_string()));
+                    },
+                    _ => panic!("expected array for modifiers"),
+                }
+            },
+            _ => panic!("expected map value"),
+        }
+    }
+
+    #[test]
+    fn map_value_with_hex_string() {
+        let config = parse_ok(
+            r##"theme default_dark {
+                ui.selection = { bg: "#45475a" };
+            }"##,
+        );
+        let theme = &config.themes[0].node;
+        let setting = assert_setting(&theme.statements[0]);
+        match &setting.value.node {
+            Value::Map(entries) => {
+                assert_eq!(entries[0].0.node, "bg");
+                assert_eq!(entries[0].1.node, Value::String("#45475a".to_string()));
+            },
+            _ => panic!("expected map value"),
+        }
+    }
+
+    #[test]
+    fn map_value_empty() {
+        let config = parse_ok("theme t { ui.x = { }; }");
+        let setting = assert_setting(&config.themes[0].node.statements[0]);
+        assert_eq!(setting.value.node, Value::Map(vec![]));
+    }
+
+    #[test]
+    fn map_value_trailing_comma() {
+        let config = parse_ok(r#"theme t { ui.x = { fg: bg, bg: accent, }; }"#);
+        let setting = assert_setting(&config.themes[0].node.statements[0]);
+        match &setting.value.node {
+            Value::Map(entries) => assert_eq!(entries.len(), 2),
+            _ => panic!("expected map"),
+        }
+    }
+
+    #[test]
+    fn theme_blocks_and_event_blocks_coexist() {
+        let config = parse_ok(
+            r#"
+            theme default_dark {
+                ui.cursor.bg = accent;
+            }
+            on init {
+                theme = default_dark;
+            }
+            on key {
+                q -> Quit();
+            }
+            "#,
+        );
+        assert_eq!(config.themes.len(), 1);
+        assert_eq!(config.themes[0].node.name.node, "default_dark");
+        assert_eq!(config.blocks.len(), 2);
+        assert_eq!(config.blocks[0].node.event, EventType::Init);
+        assert_eq!(config.blocks[1].node.event, EventType::Key);
+    }
+
+    #[test]
+    fn multiple_theme_blocks_same_name() {
+        let config = parse_ok(
+            r##"
+            theme default_dark {
+                ui.cursor.bg = "#89b4fa";
+            }
+            theme default_dark {
+                ui.cursor.bg = "#ff0000";
+            }
+            "##,
+        );
+        assert_eq!(config.themes.len(), 2);
+        assert_eq!(config.themes[0].node.name.node, "default_dark");
+        assert_eq!(config.themes[1].node.name.node, "default_dark");
+    }
+
+    #[test]
+    fn theme_block_mixed_forms() {
+        let config = parse_ok(
+            r##"theme t {
+                let accent = "#89b4fa";
+                ui.cursor = { fg: "black", bg: accent };
+                ui.border.focused.fg = accent;
+                syntax.comment = { fg: "#6c7086", modifiers: [italic] };
+            }"##,
+        );
+        let theme = &config.themes[0].node;
+        assert_eq!(theme.statements.len(), 4);
+        assert_let(&theme.statements[0]);
+        assert_setting(&theme.statements[1]);
+        assert_setting(&theme.statements[2]);
+        assert_setting(&theme.statements[3]);
     }
 }

@@ -23,6 +23,9 @@ pub struct Settings {
     pub text_proto_log: Option<bool>,
     /// Default placement of `OpenClaude`. `None` means "pane".
     pub claude_default_placement: Option<ClaudePlacement>,
+    /// Name of the active theme block. Resolves against `theme NAME { ... }`
+    /// blocks in the config. `None` means "use the compiled-in default".
+    pub theme: Option<String>,
 }
 
 impl Settings {
@@ -52,6 +55,7 @@ impl Settings {
             claude_default_placement: other
                 .claude_default_placement
                 .or(self.claude_default_placement),
+            theme: other.theme.or(self.theme),
         }
     }
 
@@ -78,6 +82,11 @@ impl Settings {
                     self.claude_default_placement = Some(p);
                 }
             },
+            ["theme"] => {
+                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
+                    self.theme = Some(s.clone());
+                }
+            },
             _ => {},
         }
     }
@@ -102,6 +111,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
+                theme: None,
             }
         );
     }
@@ -114,6 +124,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(false),
                 claude_default_placement: None,
+                theme: None,
             }
         );
     }
@@ -126,6 +137,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
+                theme: None,
             }
         );
     }
@@ -147,16 +159,19 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(false),
             claude_default_placement: None,
+            theme: None,
         };
         let right = Settings {
             text_proto_log: Some(true),
             claude_default_placement: None,
+            theme: None,
         };
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
+                theme: None,
             }
         );
     }
@@ -166,6 +181,7 @@ mod tests {
         let left = Settings {
             text_proto_log: Some(true),
             claude_default_placement: None,
+            theme: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -173,6 +189,7 @@ mod tests {
             Settings {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
+                theme: None,
             }
         );
     }
@@ -193,6 +210,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::Pane),
+                theme: None,
             }
         );
     }
@@ -205,6 +223,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
+                theme: None,
             }
         );
     }
@@ -217,6 +236,7 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
+                theme: None,
             }
         );
     }
@@ -238,6 +258,7 @@ mod tests {
         let left = Settings {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
+            theme: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -245,8 +266,50 @@ mod tests {
             Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
+                theme: None,
             }
         );
+    }
+
+    #[test]
+    fn from_config_extracts_theme_ident() {
+        let config = parse_ok("on init { theme = default_dark; }");
+        assert_eq!(
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: None,
+                theme: Some("default_dark".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_theme_string() {
+        let config = parse_ok(r#"on init { theme = "default_dark"; }"#);
+        assert_eq!(
+            Settings::from_config(&config),
+            Settings {
+                text_proto_log: None,
+                claude_default_placement: None,
+                theme: Some("default_dark".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_right_overrides_theme() {
+        let left = Settings {
+            text_proto_log: None,
+            claude_default_placement: None,
+            theme: Some("a".into()),
+        };
+        let right = Settings {
+            text_proto_log: None,
+            claude_default_placement: None,
+            theme: Some("b".into()),
+        };
+        assert_eq!(left.merge(right).theme, Some("b".into()));
     }
 
     #[test]
@@ -254,16 +317,19 @@ mod tests {
         let left = Settings {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::Pane),
+            theme: None,
         };
         let right = Settings {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockLeft),
+            theme: None,
         };
         assert_eq!(
             left.merge(right),
             Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
+                theme: None,
             }
         );
     }

@@ -95,6 +95,7 @@ fn run_tui(
     let cli_settings = Settings {
         text_proto_log,
         claude_default_placement: None,
+        theme: None,
     };
 
     let initial_git_root = std::env::current_dir().unwrap_or_default();

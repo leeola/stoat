@@ -1,3 +1,118 @@
+theme default_dark {
+    let accent  = cyan;
+    let primary = blue;
+    let success = green;
+    let warning = yellow;
+    let danger  = red;
+    let info    = cyan;
+    let special = magenta;
+    let muted   = dark_gray;
+    let dim     = gray;
+    let text    = white;
+
+    ui.cursor = { modifiers: [reversed] };
+    ui.cursor.input = { fg: black, bg: text };
+    ui.selection = { fg: black, bg: accent };
+    ui.selection.editor = { bg: muted };
+    ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
+
+    ui.border.focused.fg = accent;
+    ui.border.inactive.fg = muted;
+
+    ui.modal.help.fg = accent;
+    ui.modal.hints.fg = warning;
+    ui.modal.palette.fg = special;
+    ui.modal.picker.fg = special;
+    ui.modal.run.fg = warning;
+
+    ui.prompt.fg = warning;
+    ui.key_label.fg = accent;
+    ui.heading = { fg: warning, modifiers: [bold] };
+    ui.error.fg = danger;
+    ui.text.fg = text;
+    ui.text.muted.fg = muted;
+    ui.text.dim.fg = dim;
+
+    ui.badge.active.fg = warning;
+    ui.badge.complete.fg = success;
+    ui.badge.error.fg = danger;
+
+    ui.statusbar.focused   = { fg: text, bg: muted };
+    ui.statusbar.unfocused = { fg: muted, bg: black };
+    ui.mode_label          = { fg: black, modifiers: [bold] };
+
+    ui.statusline.normal.fg   = primary;
+    ui.statusline.insert.fg   = success;
+    ui.statusline.run.fg      = special;
+    ui.statusline.commits.fg  = warning;
+    ui.statusline.rebase.fg   = danger;
+    ui.statusline.reword.fg   = danger;
+    ui.statusline.conflict.fg = light_red;
+    ui.statusline.review.fg   = info;
+    ui.statusline.default.fg  = dim;
+
+    diff.added.fg        = success;
+    diff.deleted.fg      = danger;
+    diff.modified.fg     = warning;
+    diff.moved.fg        = info;
+    diff.context.fg      = muted;
+    diff.current_hunk    = { fg: info, modifiers: [bold] };
+
+    vcs.conflict.header  = { fg: danger, modifiers: [bold] };
+    vcs.conflict.ours.fg   = success;
+    vcs.conflict.theirs.fg = special;
+
+    vcs.commit.sha.fg      = warning;
+    vcs.commit.summary.fg  = text;
+    vcs.commit.metadata.fg = muted;
+
+    vcs.rebase.pick.fg   = success;
+    vcs.rebase.squash.fg = warning;
+    vcs.rebase.fixup.fg  = warning;
+    vcs.rebase.reword.fg = special;
+    vcs.rebase.edit.fg   = special;
+    vcs.rebase.drop.fg   = danger;
+
+    syntax.keyword                = { fg: primary, modifiers: [bold] };
+    syntax.string.fg              = success;
+    syntax.string.escape          = { fg: light_green, modifiers: [bold] };
+    syntax.comment                = { fg: muted, modifiers: [italic] };
+    syntax.comment.documentation  = { fg: dim, modifiers: [italic] };
+    syntax.function.fg            = warning;
+    syntax.function.special       = { fg: light_yellow, modifiers: [bold] };
+    syntax.type.fg                = info;
+    syntax.constant.fg            = special;
+    syntax.operator.fg            = light_cyan;
+    syntax.punctuation.fg         = dim;
+    syntax.property.fg            = light_blue;
+    syntax.attribute.fg           = light_magenta;
+    syntax.variable.fg            = text;
+    syntax.variable.special       = { fg: light_red, modifiers: [italic] };
+    syntax.special.lifetime       = { fg: light_yellow, modifiers: [italic] };
+    syntax.markup.title           = { fg: light_cyan, modifiers: [bold] };
+    syntax.markup.link_text.fg    = light_blue;
+    syntax.markup.link_uri        = { fg: primary, modifiers: [underlined] };
+    syntax.markup.emphasis        = { modifiers: [italic] };
+    syntax.markup.emphasis.strong = { modifiers: [bold] };
+    syntax.markup.text.literal.fg = light_yellow;
+    syntax.markup.strikethrough   = { modifiers: [strikethrough] };
+
+    chat.user.fg         = success;
+    chat.text.fg         = text;
+    chat.meta.fg         = muted;
+    chat.time.fg         = dim;
+    chat.thinking        = { fg: muted, modifiers: [italic] };
+    chat.tool.header.fg  = primary;
+    chat.tool.body.fg    = muted;
+    chat.error.fg        = danger;
+    chat.separator.fg    = muted;
+    chat.throbber        = { fg: special, modifiers: [bold] };
+}
+
+on init {
+    theme = default_dark;
+}
+
 on key {
     ? -> OpenHelp();
     mode == normal {

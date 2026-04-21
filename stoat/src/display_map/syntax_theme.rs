@@ -1,20 +1,18 @@
 use crate::{
     display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
     host::DiffStatus,
+    theme::Theme,
 };
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use std::sync::Arc;
 use stoat_language::HighlightId;
 
-/// Canonical theme key list. Each entry is a dot-separated capture
-/// name pattern. Tree-sitter capture names matched against this list
-/// via longest-prefix matching produce a [`HighlightId`] that indexes
-/// directly back into [`SyntaxStyles::theme_table`].
-///
-/// Adding a new entry: append it to [`THEME_KEYS`] and return its
-/// [`HighlightStyle`] from [`style_for_theme_key`]. New, finer-grained
-/// captures (e.g. distinct entries for `string.regex` vs
-/// `string.escape`) only require touching this file.
+/// Canonical list of syntax scope stems this build recognizes. Each entry
+/// is the tree-sitter capture-name suffix; the full theme scope is
+/// `syntax.<entry>`. Tree-sitter capture names match longest-prefix
+/// against this list to produce a [`HighlightId`] indexing into
+/// [`SyntaxStyles::theme_table`]. Adding a new capture requires adding
+/// the stem here and its style to the active theme.
 const THEME_KEYS: &[&str] = &[
     "keyword",
     "keyword.control",
@@ -50,6 +48,26 @@ const THEME_KEYS: &[&str] = &[
     "strikethrough.markup",
 ];
 
+/// Translate a flat [`THEME_KEYS`] stem into the hierarchical scope used
+/// by the [`Theme`]. Tree-sitter captures like `string.escape` become
+/// `syntax.string.escape`; legacy suffix form `title.markup` becomes
+/// `syntax.markup.title`. Markup-family captures use an inverted order
+/// in tree-sitter queries to preserve longest-prefix matching on
+/// `.markup`; the theme reorders them so the hierarchy rooted at
+/// `syntax.markup` can fall back naturally.
+fn theme_scope_for_key(key: &str) -> String {
+    if let Some(rest) = key.strip_suffix(".markup") {
+        // e.g. "emphasis.strong.markup" → "syntax.markup.emphasis.strong"
+        return format!("syntax.markup.{rest}");
+    }
+    match key {
+        "boolean" => "syntax.constant.boolean".to_string(),
+        "number" => "syntax.constant.numeric".to_string(),
+        "lifetime" => "syntax.special.lifetime".to_string(),
+        _ => format!("syntax.{key}"),
+    }
+}
+
 #[derive(Clone)]
 pub struct SyntaxStyles {
     pub interner: Arc<HighlightStyleInterner>,
@@ -62,11 +80,19 @@ pub struct SyntaxStyles {
 }
 
 impl SyntaxStyles {
-    pub fn standard() -> Self {
+    /// Build syntax styles from the active [`Theme`]. Each [`THEME_KEYS`]
+    /// stem is translated to a theme scope via [`theme_scope_for_key`]
+    /// and the resulting [`Style`] is decomposed into a [`HighlightStyle`]
+    /// for the merge-friendly display pipeline.
+    pub fn from_theme(theme: &Theme) -> Self {
         let mut interner = HighlightStyleInterner::default();
         let theme_table: Vec<HighlightStyleId> = THEME_KEYS
             .iter()
-            .map(|key| interner.intern(style_for_theme_key(key)))
+            .map(|key| {
+                let scope = theme_scope_for_key(key);
+                let style = theme.get(&scope);
+                interner.intern(style_to_highlight_style(&style))
+            })
             .collect();
         Self {
             interner: Arc::new(interner),
@@ -94,11 +120,23 @@ impl SyntaxStyles {
     }
 }
 
+fn style_to_highlight_style(s: &Style) -> HighlightStyle {
+    let mods = s.add_modifier;
+    HighlightStyle {
+        foreground: s.fg,
+        background: s.bg,
+        bold: mods.contains(Modifier::BOLD).then_some(true),
+        italic: mods.contains(Modifier::ITALIC).then_some(true),
+        underline: mods.contains(Modifier::UNDERLINED).then_some(true),
+        strikethrough: mods.contains(Modifier::CROSSED_OUT).then_some(true),
+    }
+}
+
 /// Central theme map for diff gutter / highlight colors. One entry
-/// per [`DiffStatus`] plus a default for unchanged lines. Kept
-/// alongside [`SyntaxStyles`] so all theming lives in one module and
-/// new diff statuses (e.g. [`DiffStatus::Moved`]) have a single place
-/// to wire their color.
+/// per [`DiffStatus`] plus a default for unchanged lines. Built from
+/// `diff.*` scopes on the active [`Theme`]; any missing scope falls
+/// back to the built-in defaults so the UI always renders something
+/// reasonable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiffTheme {
     pub added: Color,
@@ -124,6 +162,19 @@ impl Default for DiffTheme {
 }
 
 impl DiffTheme {
+    /// Build a [`DiffTheme`] from `diff.*` scopes on the active theme.
+    /// Missing `fg` values fall back to the built-in default colors so
+    /// themes can omit any entry without the UI breaking.
+    pub fn from_theme(theme: &Theme) -> Self {
+        let default = Self::default();
+        Self {
+            added: theme.get("diff.added").fg.unwrap_or(default.added),
+            deleted: theme.get("diff.deleted").fg.unwrap_or(default.deleted),
+            modified: theme.get("diff.modified").fg.unwrap_or(default.modified),
+            moved: theme.get("diff.moved").fg.unwrap_or(default.moved),
+        }
+    }
+
     /// Resolve a [`DiffStatus`] to its themed color. Returns `None`
     /// for unchanged lines so callers can leave them unstyled.
     pub fn color_for(&self, status: DiffStatus) -> Option<Color> {
@@ -136,139 +187,94 @@ impl DiffTheme {
     }
 }
 
-fn style_for_theme_key(key: &str) -> HighlightStyle {
-    let mut s = HighlightStyle::default();
-    match key {
-        "keyword" | "keyword.control" => {
-            s.foreground = Some(Color::Blue);
-            s.bold = Some(true);
-        },
-        "string" => {
-            s.foreground = Some(Color::Green);
-        },
-        "string.escape" => {
-            s.foreground = Some(Color::LightGreen);
-            s.bold = Some(true);
-        },
-        "comment" => {
-            s.foreground = Some(Color::DarkGray);
-            s.italic = Some(true);
-        },
-        "comment.doc" => {
-            s.foreground = Some(Color::Gray);
-            s.italic = Some(true);
-        },
-        "function" | "function.method" => {
-            s.foreground = Some(Color::Yellow);
-        },
-        "function.special" => {
-            s.foreground = Some(Color::LightYellow);
-            s.bold = Some(true);
-        },
-        "type" | "type.builtin" | "type.interface" => {
-            s.foreground = Some(Color::Cyan);
-        },
-        "constant" | "constant.builtin" | "boolean" | "number" => {
-            s.foreground = Some(Color::Magenta);
-        },
-        "operator" => {
-            s.foreground = Some(Color::LightCyan);
-        },
-        "punctuation.bracket" | "punctuation.delimiter" => {
-            s.foreground = Some(Color::Gray);
-        },
-        "property" => {
-            s.foreground = Some(Color::LightBlue);
-        },
-        "attribute" => {
-            s.foreground = Some(Color::LightMagenta);
-        },
-        "variable" | "variable.parameter" => {
-            s.foreground = Some(Color::White);
-        },
-        "variable.special" => {
-            s.foreground = Some(Color::LightRed);
-            s.italic = Some(true);
-        },
-        "lifetime" => {
-            s.foreground = Some(Color::LightYellow);
-            s.italic = Some(true);
-        },
-        "title.markup" => {
-            s.foreground = Some(Color::LightCyan);
-            s.bold = Some(true);
-        },
-        "link_text.markup" => {
-            s.foreground = Some(Color::LightBlue);
-        },
-        "link_uri.markup" => {
-            s.foreground = Some(Color::Blue);
-            s.underline = Some(true);
-        },
-        "emphasis.markup" => {
-            s.italic = Some(true);
-        },
-        "emphasis.strong.markup" => {
-            s.bold = Some(true);
-        },
-        "text.literal.markup" => {
-            s.foreground = Some(Color::LightYellow);
-        },
-        "strikethrough.markup" => {
-            s.strikethrough = Some(true);
-        },
-        _ => {},
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{SyntaxStyles, THEME_KEYS};
+    use super::{theme_scope_for_key, DiffTheme, SyntaxStyles, THEME_KEYS};
+    use crate::theme::Theme;
+    use stoat_config::parse;
     use stoat_language::HighlightId;
 
+    fn theme_from(src: &str) -> Theme {
+        let (config, errors) = parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        Theme::from_config(&config.unwrap(), "t").unwrap()
+    }
+
     #[test]
-    fn id_for_highlight_resolves_every_theme_key() {
-        let styles = SyntaxStyles::standard();
+    fn id_for_highlight_returns_none_for_default() {
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
+        assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn empty_theme_builds_empty_styles() {
+        let styles = SyntaxStyles::from_theme(&Theme::empty());
         for idx in 0..THEME_KEYS.len() {
             let id = HighlightId(idx as u32);
             let style_id = styles
                 .id_for_highlight(id)
                 .expect("every theme key must resolve");
-            // The interned style must be valid.
-            let _style = &styles.interner[style_id];
+            let style = &styles.interner[style_id];
+            assert_eq!(style.foreground, None);
+            assert_eq!(style.background, None);
         }
     }
 
     #[test]
-    fn id_for_highlight_returns_none_for_default() {
-        let styles = SyntaxStyles::standard();
-        assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
-    }
-
-    #[test]
     fn distinct_theme_keys_get_distinct_styles() {
-        let styles = SyntaxStyles::standard();
+        let theme = theme_from(
+            r##"theme t {
+                syntax.keyword = { fg: blue, modifiers: [bold] };
+                syntax.string.fg = green;
+            }"##,
+        );
+        let styles = SyntaxStyles::from_theme(&theme);
         let keyword_idx = THEME_KEYS.iter().position(|k| *k == "keyword").unwrap() as u32;
         let string_idx = THEME_KEYS.iter().position(|k| *k == "string").unwrap() as u32;
         let kw = styles.id_for_highlight(HighlightId(keyword_idx)).unwrap();
         let st = styles.id_for_highlight(HighlightId(string_idx)).unwrap();
-        assert_ne!(
-            styles.interner[kw], styles.interner[st],
-            "Keyword and String should produce visually distinct styles"
+        assert_ne!(styles.interner[kw], styles.interner[st]);
+    }
+
+    #[test]
+    fn markup_keys_route_to_syntax_markup_scope() {
+        assert_eq!(theme_scope_for_key("title.markup"), "syntax.markup.title");
+        assert_eq!(
+            theme_scope_for_key("emphasis.markup"),
+            "syntax.markup.emphasis"
+        );
+        assert_eq!(
+            theme_scope_for_key("emphasis.strong.markup"),
+            "syntax.markup.emphasis.strong"
+        );
+        assert_eq!(
+            theme_scope_for_key("strikethrough.markup"),
+            "syntax.markup.strikethrough"
+        );
+        assert_eq!(
+            theme_scope_for_key("link_uri.markup"),
+            "syntax.markup.link_uri"
         );
     }
 
     #[test]
+    fn constant_suffix_keys_reroute() {
+        assert_eq!(theme_scope_for_key("boolean"), "syntax.constant.boolean");
+        assert_eq!(theme_scope_for_key("number"), "syntax.constant.numeric");
+        assert_eq!(theme_scope_for_key("lifetime"), "syntax.special.lifetime");
+    }
+
+    #[test]
+    fn plain_keys_get_syntax_prefix() {
+        assert_eq!(theme_scope_for_key("keyword"), "syntax.keyword");
+        assert_eq!(theme_scope_for_key("string.escape"), "syntax.string.escape");
+    }
+
+    #[test]
     fn diff_theme_covers_every_status() {
-        use super::DiffTheme;
         use crate::host::DiffStatus;
         let theme = DiffTheme::default();
-        // Unchanged intentionally returns None so the renderer can
-        // leave the row unstyled.
         assert!(theme.color_for(DiffStatus::Unchanged).is_none());
-        // The three active statuses must produce three visually
-        // distinct colors.
         let colors = [
             theme.color_for(DiffStatus::Added).unwrap(),
             theme.color_for(DiffStatus::Modified).unwrap(),
@@ -282,5 +288,28 @@ mod tests {
             3,
             "Added/Modified/Moved must be visually distinct"
         );
+    }
+
+    #[test]
+    fn diff_theme_from_theme_reads_scopes() {
+        let theme = theme_from(
+            r##"theme t {
+                diff.added.fg = green;
+                diff.deleted.fg = red;
+                diff.modified.fg = yellow;
+                diff.moved.fg = cyan;
+            }"##,
+        );
+        let dt = DiffTheme::from_theme(&theme);
+        assert_eq!(dt.added, ratatui::style::Color::Green);
+        assert_eq!(dt.deleted, ratatui::style::Color::Red);
+        assert_eq!(dt.modified, ratatui::style::Color::Yellow);
+        assert_eq!(dt.moved, ratatui::style::Color::Cyan);
+    }
+
+    #[test]
+    fn diff_theme_from_empty_theme_uses_defaults() {
+        let dt = DiffTheme::from_theme(&Theme::empty());
+        assert_eq!(dt, DiffTheme::default());
     }
 }

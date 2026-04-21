@@ -21,6 +21,7 @@ mod review_apply;
 mod review_session;
 pub mod run;
 mod selection;
+pub mod theme;
 pub mod ui;
 pub mod workspace;
 pub mod workspace_picker;

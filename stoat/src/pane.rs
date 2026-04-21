@@ -984,6 +984,7 @@ mod tests {
             stoat_config::Settings {
                 text_proto_log: None,
                 claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
+                theme: None,
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
