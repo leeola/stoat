@@ -1,0 +1,845 @@
+use crate::{
+    action_handlers::read_string_via_host,
+    app::{Stoat, UpdateEffect},
+    display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
+    editor_state::{EditorId, EditorState},
+    pane::View,
+    review_session::{ReviewSession, ReviewSource, ReviewViewState},
+    workspace::Workspace,
+};
+use ratatui::{
+    style::{Color, Style},
+    text::Line,
+};
+use std::{path::Path, sync::Arc};
+
+pub(super) fn open_review_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
+    let Some(session) = scan_commit(stoat, workdir, sha) else {
+        return;
+    };
+    install_review_session(stoat, session);
+}
+
+pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::GitApplyError, review_apply::remove_chunks_from_buffer, review_session::ChunkStatus,
+    };
+
+    let (workdir, sha, staged_groups, full_trees_by_file) = {
+        let Some(session) = stoat.active_workspace().review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let (workdir, sha) = match &session.source {
+            ReviewSource::Commit { workdir, sha } => (workdir.clone(), sha.clone()),
+            _ => {
+                tracing::warn!("ReviewRemoveSelected: only commit-source reviews support removal");
+                emit_review_error_badge(stoat, "remove only valid for commit reviews", None);
+                return UpdateEffect::Redraw;
+            },
+        };
+        let mut groups: std::collections::HashMap<usize, Vec<&crate::review_session::ReviewChunk>> =
+            std::collections::HashMap::new();
+        for id in &session.order {
+            if let Some(chunk) = session.chunks.get(id) {
+                if chunk.status == ChunkStatus::Staged {
+                    groups.entry(chunk.file_index).or_default().push(chunk);
+                }
+            }
+        }
+        let tree_snapshot: Vec<(usize, String, Arc<String>, Arc<String>)> = session
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                (
+                    i,
+                    f.rel_path.clone(),
+                    f.base_text.clone(),
+                    f.buffer_text.clone(),
+                )
+            })
+            .collect();
+        let groups_owned: Vec<(usize, Vec<crate::review_session::ReviewChunk>)> = groups
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().cloned().collect()))
+            .collect();
+        (workdir, sha, groups_owned, tree_snapshot)
+    };
+
+    if staged_groups.is_empty() {
+        emit_review_info_badge(stoat, "nothing staged for removal");
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        emit_review_error_badge(stoat, "git repo not found", None);
+        return UpdateEffect::Redraw;
+    };
+    if !repo.changed_files().is_empty() {
+        emit_review_error_badge(stoat, "working tree dirty: commit or stash first", None);
+        return UpdateEffect::Redraw;
+    }
+
+    let Some(mut new_tree) = repo.commit_tree(&sha) else {
+        emit_review_error_badge(stoat, "commit tree unreadable", None);
+        return UpdateEffect::Redraw;
+    };
+
+    for (file_index, chunks) in &staged_groups {
+        let Some((_, rel_path, base_arc, buffer_arc)) = full_trees_by_file
+            .iter()
+            .find(|(i, _, _, _)| i == file_index)
+        else {
+            continue;
+        };
+        let chunk_refs: Vec<&crate::review_session::ReviewChunk> = chunks.iter().collect();
+        let new_buffer = remove_chunks_from_buffer(base_arc, buffer_arc, &chunk_refs);
+        let rel = std::path::PathBuf::from(rel_path);
+        if new_buffer.is_empty() && base_arc.is_empty() {
+            new_tree.remove(&rel);
+        } else {
+            new_tree.insert(rel, new_buffer);
+        }
+    }
+
+    let head_sha = repo.log_commits(None, 1).into_iter().next().map(|c| c.sha);
+    let is_head = head_sha.as_deref() == Some(sha.as_str());
+
+    if is_head {
+        match repo.amend_head(&new_tree, None) {
+            Ok(new_sha) => {
+                emit_review_complete_badge(
+                    stoat,
+                    &format!(
+                        "removed {} hunk(s), HEAD amended",
+                        staged_groups.iter().map(|(_, v)| v.len()).sum::<usize>()
+                    ),
+                );
+                reopen_review_on_commit(stoat, &workdir, &new_sha);
+            },
+            Err(GitApplyError::Backend(msg)) => {
+                emit_review_error_badge(stoat, "amend failed", Some(msg));
+            },
+        }
+    } else {
+        let descendants = repo
+            .log_commits(None, usize::MAX)
+            .into_iter()
+            .map(|c| c.sha)
+            .take_while(|candidate| candidate != &sha)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        match repo.rewrite_commit(&sha, &new_tree, None, &descendants) {
+            Ok(result) => {
+                let new_sha = result.mapping.get(&sha).cloned().unwrap_or(result.new_head);
+                let total: usize = staged_groups.iter().map(|(_, v)| v.len()).sum();
+                emit_review_complete_badge(
+                    stoat,
+                    &format!(
+                        "removed {total} hunk(s), rewrote {} commit(s)",
+                        descendants.len() + 1
+                    ),
+                );
+                reopen_review_on_commit(stoat, &workdir, &new_sha);
+            },
+            Err(GitApplyError::Backend(msg)) => {
+                emit_review_error_badge(stoat, "rewrite failed", Some(msg));
+            },
+        }
+    }
+
+    UpdateEffect::Redraw
+}
+
+fn reopen_review_on_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
+    let origin = stoat
+        .active_workspace()
+        .review
+        .as_ref()
+        .map(|s| s.origin)
+        .unwrap_or_default();
+    if let Some(mut session) = scan_commit(stoat, workdir, sha) {
+        session.origin = origin;
+        install_review_session(stoat, session);
+    } else {
+        // Rewritten commit has no diffs vs. parent. Drop the review;
+        // `close_review` routes back to commits mode if that's where the
+        // user launched from.
+        close_review(stoat);
+    }
+}
+
+fn emit_review_complete_badge(stoat: &mut Stoat, label: &str) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Complete,
+        label: label.to_string(),
+        detail: None,
+    });
+}
+
+fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Active,
+        label: label.to_string(),
+        detail: None,
+    });
+}
+
+fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Option<String>) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+    let ws = stoat.active_workspace_mut();
+    ws.badges.remove_by_source(BadgeSource::Review);
+    ws.badges.insert(Badge {
+        source: BadgeSource::Review,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Error,
+        label: label.to_string(),
+        detail,
+    });
+}
+
+pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::review_session::ReviewOrigin;
+
+    let Some((workdir, sha)) = stoat.active_workspace().commits.as_ref().and_then(|s| {
+        s.selected_sha()
+            .map(|sha| (s.workdir.clone(), sha.to_string()))
+    }) else {
+        return UpdateEffect::None;
+    };
+    let Some(mut session) = scan_commit(stoat, &workdir, &sha) else {
+        return UpdateEffect::None;
+    };
+    session.origin = ReviewOrigin::FromCommits;
+    install_review_session(stoat, session);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
+    let Some(session) = scan_commit_range(stoat, workdir, from, to) else {
+        return;
+    };
+    install_review_session(stoat, session);
+}
+
+pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::AgentEdit]) {
+    let proposals: Vec<crate::review_session::AgentEditProposal> = edits
+        .iter()
+        .map(|e| crate::review_session::AgentEditProposal {
+            path: e.path.clone(),
+            base_text: e.base_text.clone(),
+            proposed_text: e.proposed_text.clone(),
+        })
+        .collect();
+    let Some(session) = scan_agent_edits(stoat, &proposals) else {
+        return;
+    };
+    install_review_session(stoat, session);
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ReviewStep {
+    Next,
+    Prev,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ReviewMark {
+    Stage,
+    Unstage,
+    Toggle,
+    Skip,
+}
+
+pub(super) fn review_step(stoat: &mut Stoat, step: ReviewStep) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let moved = match step {
+        ReviewStep::Next => session.next(),
+        ReviewStep::Prev => session.prev(),
+    };
+    if moved.is_none() {
+        return UpdateEffect::None;
+    }
+    let chunk_id = session.cursor.current;
+    let editor_id = session.view_editor;
+    sync_review_view_and_scroll(ws, editor_id, chunk_id);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
+    use crate::{
+        badge::{Anchor, Badge, BadgeSource, BadgeState},
+        review_session::ChunkStatus,
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(id) = session.cursor.current else {
+        return UpdateEffect::None;
+    };
+    match mark {
+        ReviewMark::Stage => session.set_status(id, ChunkStatus::Staged),
+        ReviewMark::Unstage => session.set_status(id, ChunkStatus::Unstaged),
+        ReviewMark::Toggle => session.toggle_stage(id),
+        ReviewMark::Skip => session.set_status(id, ChunkStatus::Skipped),
+    }
+    let editor_id = session.view_editor;
+    let complete = session.is_complete();
+    let progress = session.progress();
+    sync_review_view_and_scroll(ws, editor_id, None);
+
+    let existing = ws.badges.find_by_source(BadgeSource::Review);
+    if complete {
+        let label = format!("review complete: {} chunks", progress.total);
+        let detail = format!(
+            "{} staged · {} unstaged · {} skipped",
+            progress.staged, progress.unstaged, progress.skipped
+        );
+        match existing {
+            Some(bid) => {
+                if let Some(badge) = ws.badges.get_mut(bid) {
+                    badge.state = BadgeState::Complete;
+                    badge.label = label;
+                    badge.detail = Some(detail);
+                }
+            },
+            None => {
+                ws.badges.insert(Badge {
+                    source: BadgeSource::Review,
+                    anchor: Anchor::BottomRight,
+                    state: BadgeState::Complete,
+                    label,
+                    detail: Some(detail),
+                });
+            },
+        }
+    } else if let Some(bid) = existing {
+        ws.badges.remove(bid);
+    }
+
+    UpdateEffect::Redraw
+}
+
+/// Refresh the editor's review view cache from the session and, if a chunk
+/// is supplied, scroll so that chunk sits near the top of the pane. Split
+/// borrow of `ws.editors` and `ws.review` is done here so callers can drop
+/// their `&mut ws.review` borrow before invoking.
+fn sync_review_view_and_scroll(
+    ws: &mut Workspace,
+    editor_id: Option<EditorId>,
+    scroll_to_chunk: Option<crate::review_session::ReviewChunkId>,
+) {
+    let Some(editor_id) = editor_id else { return };
+    let Some(editor) = ws.editors.get_mut(editor_id) else {
+        return;
+    };
+    let Some(view) = editor.review_view.as_mut() else {
+        return;
+    };
+    if let Some(session) = ws.review.as_ref() {
+        view.refresh_from_session(session);
+    }
+    if let Some(chunk_id) = scroll_to_chunk {
+        if let Some(row) = view.row_of_chunk(chunk_id) {
+            editor.scroll_row = row.saturating_sub(3);
+        }
+    }
+}
+
+pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        badge::{Anchor, Badge, BadgeSource, BadgeState},
+        host::GitApplyError,
+        review_apply::chunk_to_unified_diff,
+        review_session::{ChunkStatus, ReviewChunkId},
+    };
+
+    let (staged, workdir): (Vec<(ReviewChunkId, String)>, std::path::PathBuf) = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let workdir = match &session.source {
+            ReviewSource::WorkingTree { workdir } => workdir.clone(),
+            _ => {
+                tracing::warn!(
+                    "ReviewApplyStaged: only WorkingTree sources are applyable; \
+                     other sources are read-only reviews"
+                );
+                return UpdateEffect::None;
+            },
+        };
+        let staged = session
+            .order
+            .iter()
+            .filter_map(|id| {
+                let c = session.chunks.get(id)?;
+                if c.status != ChunkStatus::Staged {
+                    return None;
+                }
+                let file = session.files.get(c.file_index)?;
+                Some((*id, chunk_to_unified_diff(file, c, &workdir)))
+            })
+            .collect();
+        (staged, workdir)
+    };
+
+    if staged.is_empty() {
+        tracing::info!("ReviewApplyStaged: nothing staged");
+        return UpdateEffect::None;
+    }
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        tracing::warn!("ReviewApplyStaged: no git repo at {}", workdir.display());
+        return UpdateEffect::None;
+    };
+
+    let total = staged.len();
+    let mut applied = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (_, patch) in &staged {
+        match repo.apply_to_index(patch) {
+            Ok(()) => applied += 1,
+            Err(GitApplyError::Backend(msg)) => failures.push(msg),
+        }
+    }
+
+    {
+        let ws = stoat.active_workspace_mut();
+        ws.badges.remove_by_source(BadgeSource::Review);
+        let (state, label, detail) = if failures.is_empty() {
+            (
+                BadgeState::Complete,
+                format!("applied {applied} chunk{}", plural(applied)),
+                None,
+            )
+        } else {
+            (
+                BadgeState::Error,
+                format!("applied {applied} of {total} chunks"),
+                Some(failures.first().cloned().unwrap_or_default()),
+            )
+        };
+        ws.badges.insert(Badge {
+            source: BadgeSource::Review,
+            anchor: Anchor::BottomRight,
+            state,
+            label,
+            detail,
+        });
+    }
+
+    if failures.is_empty() && applied > 0 {
+        return review_refresh(stoat);
+    }
+    UpdateEffect::Redraw
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::review_session::ChunkIdentity;
+    use std::collections::HashMap;
+
+    let source = {
+        let ws = stoat.active_workspace();
+        let Some(old) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        old.source.clone()
+    };
+
+    let carried: HashMap<ChunkIdentity, crate::review_session::ChunkStatus> = {
+        let ws = stoat.active_workspace();
+        let old = ws
+            .review
+            .as_ref()
+            .expect("review session still present (early-returned above when absent)");
+        old.order
+            .iter()
+            .filter_map(|id| {
+                let status = old.chunks.get(id)?.status;
+                if !status.is_decided() {
+                    return None;
+                }
+                let ident = old.identity_key(*id)?;
+                Some((ident, status))
+            })
+            .collect()
+    };
+
+    let Some(mut new_session) = rescan_source(stoat, &source) else {
+        return UpdateEffect::None;
+    };
+
+    let ids: Vec<_> = new_session.order.clone();
+    for id in ids {
+        if let Some(ident) = new_session.identity_key(id) {
+            if let Some(status) = carried.get(&ident).copied() {
+                new_session.set_status(id, status);
+            }
+        }
+    }
+
+    install_review_session(stoat, new_session);
+    UpdateEffect::Redraw
+}
+
+/// Re-scan the underlying source of a review session. Returns `None` when
+/// the source has no re-scannable state (currently `InMemory`) or when the
+/// scan produced no hunks.
+fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> {
+    match source {
+        ReviewSource::WorkingTree { workdir } => scan_working_tree(stoat, workdir),
+        ReviewSource::Commit { workdir, sha } => scan_commit(stoat, workdir, sha),
+        ReviewSource::CommitRange { workdir, from, to } => {
+            scan_commit_range(stoat, workdir, from, to)
+        },
+        ReviewSource::AgentEdits { edits } => scan_agent_edits(stoat, edits.as_ref()),
+        ReviewSource::InMemory { .. } => None,
+    }
+}
+
+pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{badge::BadgeSource, review_session::ReviewOrigin};
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.take() else {
+        return UpdateEffect::None;
+    };
+    let origin = session.origin;
+    ws.badges.remove_by_source(BadgeSource::Review);
+    let next_mode = match origin {
+        ReviewOrigin::FromCommits if ws.commits.is_some() => "commits",
+        _ => "normal",
+    };
+    let Some(review_editor_id) = session.view_editor else {
+        stoat.mode = next_mode.to_string();
+        return UpdateEffect::Redraw;
+    };
+
+    let (scratch_id, scratch_buffer) = ws.buffers.new_scratch();
+    let replacement = EditorState::new(scratch_id, scratch_buffer, executor);
+    let replacement_id = ws.editors.insert(replacement);
+
+    let focused = ws.panes.focus();
+    let replace_focused = matches!(
+        ws.panes.pane(focused).view,
+        View::Editor(eid) if eid == review_editor_id
+    );
+    if replace_focused {
+        ws.panes.pane_mut(focused).view = View::Editor(replacement_id);
+    } else {
+        ws.editors.remove(replacement_id);
+    }
+
+    let still_referenced = ws
+        .panes
+        .split_panes()
+        .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == review_editor_id));
+    if !still_referenced {
+        ws.editors.remove(review_editor_id);
+    }
+
+    stoat.mode = next_mode.to_string();
+    UpdateEffect::Redraw
+}
+
+pub(super) fn open_review(stoat: &mut Stoat) {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(session) = scan_working_tree(stoat, &git_root) else {
+        return;
+    };
+    install_review_session(stoat, session);
+}
+
+/// Build a review session by scanning the git working tree rooted at
+/// `git_root`. Returns `None` when the root is not a repository or has no
+/// diff hunks. Shared by [`open_review`] and [`review_refresh`].
+fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
+    let repo = match stoat.git_host.discover(git_root) {
+        Some(r) => r,
+        None => {
+            tracing::warn!("open_review: not inside a git repository");
+            return None;
+        },
+    };
+    let workdir = repo.workdir()?;
+
+    let changed = repo.changed_files();
+    if changed.is_empty() {
+        tracing::warn!("open_review: no changed files");
+        return None;
+    }
+
+    let mut session = ReviewSession::new(ReviewSource::WorkingTree {
+        workdir: workdir.clone(),
+    });
+
+    for file in &changed {
+        let buffer_text = match read_string_via_host(&*stoat.fs_host, &file.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                tracing::warn!(
+                    path = %file.path.display(),
+                    error = %e,
+                    "scan_working_tree: skip file",
+                );
+                continue;
+            },
+        };
+        let base_text = repo.head_content(&file.path).unwrap_or_default();
+        let lang = stoat.language_registry.for_path(&file.path);
+        let rel_path = file
+            .path
+            .strip_prefix(&workdir)
+            .unwrap_or(&file.path)
+            .display()
+            .to_string();
+        session.add_file(
+            file.path.clone(),
+            rel_path,
+            lang,
+            Arc::new(base_text),
+            Arc::new(buffer_text),
+        );
+    }
+
+    if session.order.is_empty() {
+        tracing::warn!("open_review: no diff hunks to display");
+        return None;
+    }
+
+    Some(session)
+}
+
+/// Build a session from a single commit by diffing its tree against its
+/// first parent (or the empty tree for a root commit). Returns `None` when
+/// the repo or sha is unknown, or when no paths differ.
+pub(super) fn scan_commit(stoat: &Stoat, workdir: &Path, sha: &str) -> Option<ReviewSession> {
+    let repo = stoat.git_host.discover(workdir)?;
+    let workdir = repo.workdir()?;
+    let new_tree = repo.commit_tree(sha)?;
+    let base_tree = match repo.parent_sha(sha) {
+        Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+        None => std::collections::BTreeMap::new(),
+    };
+    build_session_from_trees(
+        stoat,
+        ReviewSource::Commit {
+            workdir: workdir.clone(),
+            sha: sha.to_string(),
+        },
+        &workdir,
+        &base_tree,
+        &new_tree,
+    )
+}
+
+/// Build a session from a commit range `from..=to` (inclusive of `to`,
+/// exclusive of `from` -- same as `git diff from..to`). Pairs each path
+/// in either tree to form file-level base/buffer contents.
+fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Option<ReviewSession> {
+    let repo = stoat.git_host.discover(workdir)?;
+    let workdir = repo.workdir()?;
+    let base_tree = repo.commit_tree(from).unwrap_or_default();
+    let new_tree = repo.commit_tree(to)?;
+    build_session_from_trees(
+        stoat,
+        ReviewSource::CommitRange {
+            workdir: workdir.clone(),
+            from: from.to_string(),
+            to: to.to_string(),
+        },
+        &workdir,
+        &base_tree,
+        &new_tree,
+    )
+}
+
+/// Build a session from a list of agent edit proposals. No repo access
+/// needed; each proposal becomes one file in the session with the given
+/// `base_text`/`proposed_text`.
+fn scan_agent_edits(
+    stoat: &Stoat,
+    edits: &[crate::review_session::AgentEditProposal],
+) -> Option<ReviewSession> {
+    if edits.is_empty() {
+        return None;
+    }
+    let mut session = ReviewSession::new(ReviewSource::AgentEdits {
+        edits: Arc::new(edits.to_vec()),
+    });
+    for edit in edits {
+        let lang = stoat.language_registry.for_path(&edit.path);
+        let rel_path = edit.path.display().to_string();
+        session.add_file(
+            edit.path.clone(),
+            rel_path,
+            lang,
+            edit.base_text.clone(),
+            edit.proposed_text.clone(),
+        );
+    }
+    if session.order.is_empty() {
+        return None;
+    }
+    Some(session)
+}
+
+/// Common builder used by [`scan_commit`] / [`scan_commit_range`]. Walks
+/// the union of paths across `base_tree` and `new_tree`, skipping any
+/// pair whose base and buffer contents are equal.
+fn build_session_from_trees(
+    stoat: &Stoat,
+    source: ReviewSource,
+    workdir: &Path,
+    base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
+) -> Option<ReviewSession> {
+    let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+    for p in base_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    for p in new_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    if paths.is_empty() {
+        return None;
+    }
+    let mut session = ReviewSession::new(source);
+    for rel in paths {
+        let base = base_tree.get(rel).cloned().unwrap_or_default();
+        let buffer = new_tree.get(rel).cloned().unwrap_or_default();
+        if base == buffer {
+            continue;
+        }
+        let abs = workdir.join(rel);
+        let lang = stoat.language_registry.for_path(&abs);
+        session.add_file(
+            abs,
+            rel.display().to_string(),
+            lang,
+            Arc::new(base),
+            Arc::new(buffer),
+        );
+    }
+    if session.order.is_empty() {
+        return None;
+    }
+    Some(session)
+}
+
+/// Build a flattened [`ReviewViewState`] and chunk-header [`BlockProperties`]
+/// from the session, spawn a placeholder buffer + editor to host the view,
+/// and swap it into the focused pane. The session is stored on the
+/// workspace; the editor references it indirectly via `review_view`.
+pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSession) {
+    let view = ReviewViewState::from_session(&session);
+    let blocks = build_review_blocks(&session, &view);
+    let row_count = view.rows.len();
+
+    let placeholder = " \n".repeat(row_count.saturating_sub(1)) + " ";
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    {
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.edit(0..0, &placeholder);
+        guard.dirty = false;
+    }
+
+    let mut editor = EditorState::new(buffer_id, buffer, executor);
+    editor.display_map.insert_blocks(blocks);
+    editor.review_view = Some(view);
+
+    let new_editor_id = ws.editors.insert(editor);
+    session.view_editor = Some(new_editor_id);
+    ws.review = Some(session);
+
+    let focused = ws.panes.focus();
+    let old = match ws.panes.pane(focused).view {
+        View::Editor(eid) => Some(eid),
+        _ => None,
+    };
+    ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+    if let Some(old_id) = old {
+        let still_referenced = ws
+            .panes
+            .split_panes()
+            .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == old_id));
+        if !still_referenced {
+            ws.editors.remove(old_id);
+        }
+    }
+
+    stoat.mode = "review".to_string();
+}
+
+fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<BlockProperties> {
+    let mut blocks: Vec<BlockProperties> = Vec::with_capacity(view.chunk_row_starts.len());
+    for (chunk_id, row) in &view.chunk_row_starts {
+        let Some(chunk) = session.chunks.get(chunk_id) else {
+            continue;
+        };
+        let Some(file) = session.files.get(chunk.file_index) else {
+            continue;
+        };
+        let file_total = file.chunks.len();
+        let lang_str = file
+            .language
+            .as_ref()
+            .map(|l| l.name.to_string())
+            .unwrap_or_default();
+        let label = format!(
+            "{} --- {}/{} --- {}",
+            file.rel_path,
+            chunk.chunk_index_in_file + 1,
+            file_total,
+            lang_str
+        );
+        let render: RenderBlock = {
+            let label = label.clone();
+            Arc::new(move |_ctx| {
+                vec![Line::styled(
+                    label.clone(),
+                    Style::default().fg(Color::Yellow),
+                )]
+            })
+        };
+        blocks.push(BlockProperties {
+            placement: BlockPlacement::Above(*row),
+            height: Some(1),
+            style: BlockStyle::Fixed,
+            render,
+            diff_status: None,
+            priority: 0,
+        });
+    }
+    blocks
+}
