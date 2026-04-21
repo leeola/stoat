@@ -117,7 +117,6 @@ on key {
     ? -> OpenHelp();
     mode == normal {
         q -> Quit();
-        Escape -> Quit();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
         i -> SetMode(insert);
