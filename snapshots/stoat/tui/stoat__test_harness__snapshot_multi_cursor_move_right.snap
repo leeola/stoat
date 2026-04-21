@@ -1,5 +1,6 @@
 ---
 source: stoat/src/test_harness.rs
+assertion_line: 316
 expression: text
 ---
 actions: l
@@ -12,4 +13,4 @@ size: 20x6
 [0m[97mghi[0m
 
 
-[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100ms.tx[0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m/tes[0m

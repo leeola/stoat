@@ -20,7 +20,7 @@ use crate::{
     review_session::ReviewSession,
     run::{PtyNotification, RunId, RunState},
     workspace::{Workspace, WorkspaceId},
-    workspace_picker::{PickerOutcome, WorkspacePicker},
+    workspace_picker::{PathDisplay, PickerOutcome, WorkspacePicker},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -1235,6 +1235,14 @@ impl Stoat {
             .unwrap_or("(unnamed)")
             .to_string();
 
+        let frame = FrameCtx {
+            workspace_name: &workspace_name,
+            workspace_root: &ws.git_root,
+            mode: &self.mode,
+            theme: &self.theme,
+            render_tick: self.render_tick,
+        };
+
         // Render split panes first so docks overlay on top.
         let split_focused = ws.panes.focus();
         for (id, pane) in ws.panes.split_panes() {
@@ -1251,10 +1259,7 @@ impl Stoat {
                     runs: &ws.runs,
                     chats: &ws.chats,
                 },
-                &workspace_name,
-                &self.mode,
-                self.render_tick,
-                &self.theme,
+                frame,
                 &mut buf,
             );
         }
@@ -1266,27 +1271,11 @@ impl Stoat {
             let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
             if commits_mode {
                 if let Some(state) = ws.commits.as_mut() {
-                    render_commits(
-                        pane,
-                        is_focused,
-                        state,
-                        &workspace_name,
-                        &self.mode,
-                        &self.theme,
-                        &mut buf,
-                    );
+                    render_commits(pane, is_focused, state, frame, &mut buf);
                 }
             } else if rebase_mode {
                 if let Some(state) = ws.rebase.as_ref() {
-                    render_rebase(
-                        pane,
-                        is_focused,
-                        state,
-                        &workspace_name,
-                        &self.mode,
-                        &self.theme,
-                        &mut buf,
-                    );
+                    render_rebase(pane, is_focused, state, frame, &mut buf);
                 }
             } else if reword_mode {
                 let reword_ctx = ws
@@ -1308,30 +1297,12 @@ impl Stoat {
                     });
                 if let Some((sha, orig, editor_id)) = reword_ctx {
                     if let Some(editor) = ws.editors.get_mut(editor_id) {
-                        render_reword(
-                            pane,
-                            is_focused,
-                            editor,
-                            &sha,
-                            &orig,
-                            &self.mode,
-                            &workspace_name,
-                            &self.theme,
-                            &mut buf,
-                        );
+                        render_reword(pane, is_focused, editor, &sha, &orig, frame, &mut buf);
                     }
                 }
             } else if conflict_mode {
                 if let Some(active) = ws.rebase_active.as_ref() {
-                    render_conflict(
-                        pane,
-                        is_focused,
-                        active,
-                        &workspace_name,
-                        &self.mode,
-                        &self.theme,
-                        &mut buf,
-                    );
+                    render_conflict(pane, is_focused, active, frame, &mut buf);
                 }
             }
         }
@@ -1348,11 +1319,13 @@ impl Stoat {
                 render_dock_open(
                     dock,
                     is_focused,
-                    &mut ws.editors,
-                    &ws.buffers,
-                    &ws.chats,
-                    self.render_tick,
-                    &self.theme,
+                    PaneCtx {
+                        editors: &mut ws.editors,
+                        buffers: &ws.buffers,
+                        runs: &ws.runs,
+                        chats: &ws.chats,
+                    },
+                    frame,
                     &mut buf,
                 );
             }
@@ -1854,6 +1827,9 @@ fn render_workspace_picker(
     const RUN_W: u16 = 5;
     const EDIT_W: u16 = 6;
 
+    let path_display = picker.path_display();
+    let show_path = !matches!(path_display, PathDisplay::Omit);
+
     let edit_col_x = inner.x + inner.width.saturating_sub(1 + EDIT_W);
     let run_col_x = edit_col_x.saturating_sub(RUN_W);
     let chat_col_x = run_col_x.saturating_sub(CHAT_W);
@@ -1872,7 +1848,9 @@ fn render_workspace_picker(
 
     let header_row = inner.y;
     write_str(buf, name_x, header_row, "name", header_style);
-    write_str(buf, path_x, header_row, "path", header_style);
+    if show_path {
+        write_str(buf, path_x, header_row, "path", header_style);
+    }
     write_str(
         buf,
         buf_col_x,
@@ -1924,9 +1902,16 @@ fn render_workspace_picker(
         write_str(buf, marker_x, row, marker, base_style);
         let name: String = entry.basename.chars().take(NAME_W as usize).collect();
         write_str(buf, name_x, row, &name, base_style);
-        let path = entry.git_root.display().to_string();
-        let path_trimmed: String = path.chars().take(path_w as usize).collect();
-        write_str(buf, path_x, row, &path_trimmed, base_style);
+        if show_path {
+            let context: &Path = match &path_display {
+                PathDisplay::Omit => unreachable!("show_path guards against Omit"),
+                PathDisplay::Relative(ancestor) => ancestor.as_path(),
+                PathDisplay::TildeAbsolute => Path::new(""),
+            };
+            let path = crate::paths::display_relative(&entry.git_root, context);
+            let path_trimmed: String = path.chars().take(path_w as usize).collect();
+            write_str(buf, path_x, row, &path_trimmed, base_style);
+        }
         write_str(
             buf,
             buf_col_x,
@@ -1977,11 +1962,13 @@ fn render_command_palette(
             input,
             error,
         } => render_palette_collect_args(
-            entry,
-            collected,
-            *current,
-            input,
-            error.as_deref(),
+            PaletteCollect {
+                entry,
+                collected,
+                current: *current,
+                input,
+                error: error.as_deref(),
+            },
             theme,
             area,
             buf,
@@ -2104,16 +2091,29 @@ fn render_palette_filter(
     }
 }
 
-fn render_palette_collect_args(
+/// Per-frame state bundled so `render_palette_collect_args` stays under the
+/// argument-count threshold.
+struct PaletteCollect<'a> {
     entry: &'static stoat_action::registry::RegistryEntry,
-    collected: &[stoat_action::ParamValue],
+    collected: &'a [stoat_action::ParamValue],
     current: usize,
-    input: &str,
-    error: Option<&str>,
+    input: &'a str,
+    error: Option<&'a str>,
+}
+
+fn render_palette_collect_args(
+    state: PaletteCollect<'_>,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
+    let PaletteCollect {
+        entry,
+        collected,
+        current,
+        input,
+        error,
+    } = state;
     if area.width < 30 || area.height < 10 {
         return;
     }
@@ -2832,17 +2832,15 @@ fn render_dock_minimized(
 fn render_dock_open(
     dock: &DockPanel,
     is_focused: bool,
-    editors: &mut SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
-    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
-    render_tick: u64,
-    theme: &crate::theme::Theme,
+    ctx: PaneCtx<'_>,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let theme = frame.theme;
     let border_style = if is_focused {
         theme.get(crate::theme::scope::UI_BORDER_FOCUSED)
     } else {
@@ -2857,19 +2855,23 @@ fn render_dock_open(
     let inner = block.inner(area);
     block.render(area, buf);
 
+    let PaneCtx {
+        editors,
+        buffers,
+        runs,
+        chats,
+    } = ctx;
+
     match &dock.view {
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(
-                    chat,
+                let chat_ctx = PaneCtx {
                     editors,
                     buffers,
-                    inner,
-                    is_focused,
-                    render_tick,
-                    theme,
-                    buf,
-                );
+                    runs,
+                    chats,
+                };
+                render_claude_pane(chat, chat_ctx, inner, is_focused, frame, buf);
             }
         },
         View::Editor(editor_id) => {
@@ -2883,12 +2885,10 @@ fn render_dock_open(
 
 fn render_claude_pane(
     chat: &ClaudeChatState,
-    editors: &mut SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
+    ctx: PaneCtx<'_>,
     area: Rect,
     is_focused: bool,
-    render_tick: u64,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
     use crate::{
@@ -2899,6 +2899,12 @@ fn render_claude_pane(
     if area.height < 4 || area.width < 4 {
         return;
     }
+
+    let PaneCtx {
+        editors, buffers, ..
+    } = ctx;
+    let theme = frame.theme;
+    let render_tick = frame.render_tick;
 
     let input_lines = buffers
         .get(chat.input_buffer_id)
@@ -3207,16 +3213,26 @@ struct PaneCtx<'a> {
     chats: &'a HashMap<ClaudeSessionId, ClaudeChatState>,
 }
 
+/// Ambient workspace and frame state shared across render functions. Bundled
+/// so individual render functions stay under the `clippy::too_many_arguments`
+/// threshold; every field is a cheap borrow or `Copy`.
+#[derive(Clone, Copy)]
+struct FrameCtx<'a> {
+    workspace_name: &'a str,
+    workspace_root: &'a Path,
+    mode: &'a str,
+    theme: &'a crate::theme::Theme,
+    render_tick: u64,
+}
+
 fn render_pane(
     pane: &Pane,
     is_focused: bool,
     ctx: PaneCtx<'_>,
-    workspace_name: &str,
-    mode: &str,
-    render_tick: u64,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
+    let theme = frame.theme;
     let text_style = if is_focused {
         theme.get(crate::theme::scope::UI_TEXT)
     } else {
@@ -3249,16 +3265,13 @@ fn render_pane(
         },
         View::Claude(session_id) => {
             if let Some(chat) = chats.get(session_id) {
-                render_claude_pane(
-                    chat,
+                let chat_ctx = PaneCtx {
                     editors,
                     buffers,
-                    content_area,
-                    is_focused,
-                    render_tick,
-                    theme,
-                    buf,
-                );
+                    runs,
+                    chats,
+                };
+                render_claude_pane(chat, chat_ctx, content_area, is_focused, frame, buf);
             }
         },
     }
@@ -3267,11 +3280,9 @@ fn render_pane(
         &pane.view,
         is_focused,
         status_area,
-        workspace_name,
-        mode,
+        frame,
         editors,
         buffers,
-        theme,
         buf,
     );
 }
@@ -3283,12 +3294,13 @@ fn render_pane(
 fn render_overlay_status(
     area: Rect,
     is_focused: bool,
-    workspace_name: &str,
-    mode: &str,
+    frame: FrameCtx<'_>,
     label: &str,
-    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
+    let workspace_name = frame.workspace_name;
+    let mode = frame.mode;
+    let theme = frame.theme;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -3397,16 +3409,19 @@ fn render_pane_status(
     view: &View,
     is_focused: bool,
     area: Rect,
-    workspace_name: &str,
-    mode: &str,
+    frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
-    theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    let workspace_name = frame.workspace_name;
+    let workspace_root = frame.workspace_root;
+    let mode = frame.mode;
+    let theme = frame.theme;
 
     let base_style = if is_focused {
         theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
@@ -3436,7 +3451,7 @@ fn render_pane_status(
         );
     }
 
-    let (filename, dirty, cursor_pos) = pane_status_info(view, editors, buffers);
+    let (filename, dirty, cursor_pos) = pane_status_info(view, workspace_root, editors, buffers);
     if let Some(name) = filename {
         let left_pad = if cursor == area.x { " " } else { "" };
         let text = if dirty {
@@ -3496,6 +3511,7 @@ fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static str, Color
 
 fn pane_status_info(
     view: &View,
+    workspace_root: &Path,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
 ) -> (Option<String>, bool, Option<(u32, u32)>) {
@@ -3507,9 +3523,7 @@ fn pane_status_info(
             let buffer_id = editor.buffer_id;
             let path = buffers.path_for(buffer_id);
             let filename = path
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
+                .map(|p| crate::paths::display_relative(p, workspace_root))
                 .or_else(|| Some("[scratch]".to_string()));
             let dirty = buffers
                 .get(buffer_id)
@@ -3881,21 +3895,13 @@ fn render_reword(
     editor: &mut EditorState,
     cherry_picked_commit: &str,
     original_message: &str,
-    current_mode: &str,
-    workspace_name: &str,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
+    let current_mode = frame.mode;
+    let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        workspace_name,
-        current_mode,
-        "reword",
-        theme,
-        buf,
-    );
+    render_overlay_status(status_area, is_focused, frame, "reword", buf);
     if inner.width < 10 || inner.height < 4 {
         return;
     }
@@ -3954,23 +3960,15 @@ fn render_conflict(
     pane: &Pane,
     is_focused: bool,
     active: &ActiveRebase,
-    workspace_name: &str,
-    mode: &str,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
     use crate::rebase::ConflictResolution;
 
+    let theme = frame.theme;
+    let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        workspace_name,
-        mode,
-        "conflict",
-        theme,
-        buf,
-    );
+    render_overlay_status(status_area, is_focused, frame, "conflict", buf);
     if inner.width < 20 || inner.height < 4 {
         return;
     }
@@ -4064,7 +4062,10 @@ fn render_conflict(
             buf,
             path_x,
             y,
-            &truncate_to_cols(&file.path.display().to_string(), path_max),
+            &truncate_to_cols(
+                &crate::paths::display_relative(&file.path, workspace_root),
+                path_max,
+            ),
             row_style,
         );
     }
@@ -4118,21 +4119,12 @@ fn render_rebase(
     pane: &Pane,
     is_focused: bool,
     state: &RebaseState,
-    workspace_name: &str,
-    mode: &str,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
+    let theme = frame.theme;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        workspace_name,
-        mode,
-        "rebase",
-        theme,
-        buf,
-    );
+    render_overlay_status(status_area, is_focused, frame, "rebase", buf);
 
     if inner.width < 10 || inner.height == 0 {
         return;
@@ -4230,21 +4222,13 @@ fn render_commits(
     pane: &Pane,
     is_focused: bool,
     state: &mut CommitListState,
-    workspace_name: &str,
-    mode: &str,
-    theme: &crate::theme::Theme,
+    frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
+    let theme = frame.theme;
+    let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        workspace_name,
-        mode,
-        "commits",
-        theme,
-        buf,
-    );
+    render_overlay_status(status_area, is_focused, frame, "commits", buf);
 
     if inner.width < 10 || inner.height == 0 {
         return;
@@ -4267,7 +4251,7 @@ fn render_commits(
 
     if right_w > 0 {
         let right_area = Rect::new(right_x, inner.y, right_w, inner.height);
-        render_commit_detail_pane(state, theme, right_area, buf);
+        render_commit_detail_pane(state, workspace_root, theme, right_area, buf);
     }
 }
 
@@ -4347,6 +4331,7 @@ fn render_commit_list_pane(
 
 fn render_commit_detail_pane(
     state: &CommitListState,
+    workspace_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -4358,7 +4343,7 @@ fn render_commit_detail_pane(
     };
 
     let summary_rows = match state.summaries.get(sha) {
-        Some(changes) => render_commit_summary(changes, theme, area, buf),
+        Some(changes) => render_commit_summary(changes, workspace_root, theme, area, buf),
         None => {
             write_str(buf, area.x, area.y, "loading summary...", dim);
             1
@@ -4393,6 +4378,7 @@ fn render_commit_detail_pane(
 
 fn render_commit_summary(
     changes: &[CommitFileChange],
+    workspace_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -4424,7 +4410,7 @@ fn render_commit_summary(
             CommitFileChangeKind::TypeChange => 'T',
         };
         write_str(buf, area.x, y, &format!("{kind_char} "), path_style);
-        let rel = change.rel_path.display().to_string();
+        let rel = crate::paths::display_relative(&change.rel_path, workspace_root);
         let path_width = area.width.saturating_sub(2 + 12) as usize;
         let rel = truncate_to_cols(&rel, path_width);
         write_str(buf, area.x + 2, y, &rel, path_style);

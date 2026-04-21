@@ -15,6 +15,7 @@ pub mod host;
 pub mod keymap;
 pub mod multi_buffer;
 pub mod pane;
+mod paths;
 mod rebase;
 mod review;
 mod review_apply;

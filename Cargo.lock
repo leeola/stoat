@@ -2118,6 +2118,7 @@ dependencies = [
  "async-trait",
  "compact_str 0.8.1",
  "crossterm",
+ "etcetera",
  "futures",
  "git2",
  "ignore",

@@ -1,5 +1,6 @@
 ---
 source: stoat/src/test_harness.rs
+assertion_line: 316
 expression: text
 ---
 actions: open_file
@@ -30,4 +31,4 @@ size: 80x24
                           [0m[90m│[0m                          [0m[36m│[0m
                           [0m[90m│[0m                          [0m[36m│[0m
                           [0m[90m│[0m                          [0m[36m│[0m
-[0m[90m[40m a.txt                1:1 [0m[90m│[0m[90m[40m b.txt                1:1 [0m[36m│[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100mc.txt     [0m
+[0m[90m[40m /test/a.txt          1:1 [0m[90m│[0m[90m[40m /test/b.txt          1:1 [0m[36m│[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m/test/c.tx[0m

@@ -1,5 +1,6 @@
 ---
 source: stoat/src/test_harness.rs
+assertion_line: 316
 expression: text
 ---
 actions: fold
@@ -14,4 +15,4 @@ size: 40x8
 
 
 
-[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100mfolded.rs           1:1 [0m
+[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m/test/folded.rs     1:1 [0m

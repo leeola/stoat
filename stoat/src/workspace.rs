@@ -40,7 +40,7 @@ new_key_type! {
 /// workspace keeps the same filename across sessions. The nanosecond timestamp
 /// also gives a natural creation-order sort that complements mtime-based
 /// "most recent" selection on load.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WorkspaceUid(pub u64);
 
 impl WorkspaceUid {

@@ -63,12 +63,6 @@ pub(crate) struct WorkspaceStateV1 {
     pub claude_session_id: Option<String>,
 }
 
-impl Default for WorkspaceUid {
-    fn default() -> Self {
-        Self(0)
-    }
-}
-
 /// Resolve the per-git-root directory that holds every workspace persisted
 /// against that root. One file per workspace sits in this directory, named
 /// by the workspace's [`WorkspaceUid`]. Canonical form of `git_root` is
@@ -738,7 +732,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
         let original_uid = ws.uid;
 
         let state_path = tmp.path().join("state.ron");
