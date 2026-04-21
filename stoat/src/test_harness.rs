@@ -3,9 +3,10 @@
 pub(crate) mod claude;
 
 use crate::{
-    app::{arg_as_str, Stoat, UpdateEffect},
+    app::{Stoat, UpdateEffect},
     host::ClaudeSessionId,
     keymap::resolve_config_action,
+    keymap_state::arg_as_str,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{

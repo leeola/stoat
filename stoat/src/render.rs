@@ -1,0 +1,265 @@
+pub(crate) mod badges;
+pub(crate) mod claude_pane;
+pub(crate) mod command_palette;
+pub(crate) mod commits;
+pub(crate) mod conflict;
+pub(crate) mod dock;
+pub(crate) mod editor;
+pub(crate) mod help;
+pub(crate) mod hints;
+pub(crate) mod layout;
+pub(crate) mod pane;
+pub(crate) mod rebase;
+pub(crate) mod review;
+pub(crate) mod reword;
+pub(crate) mod run_pane;
+pub(crate) mod text;
+pub(crate) mod workspace_picker;
+
+use crate::{
+    app::Stoat,
+    buffer_registry::BufferRegistry,
+    claude_chat::ClaudeChatState,
+    editor_state::{EditorId, EditorState},
+    host::ClaudeSessionId,
+    keymap_state::{action_display_desc, StoatKeymapState},
+    pane::{DockVisibility, FocusTarget},
+    rebase::RebasePause,
+    run::{RunId, RunState},
+};
+use ratatui::{buffer::Buffer, layout::Rect};
+use slotmap::SlotMap;
+use std::{collections::HashMap, path::Path};
+
+pub(crate) struct PaneCtx<'a> {
+    pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
+    pub(crate) buffers: &'a BufferRegistry,
+    pub(crate) runs: &'a SlotMap<RunId, RunState>,
+    pub(crate) chats: &'a HashMap<ClaudeSessionId, ClaudeChatState>,
+}
+
+/// Ambient workspace and frame state shared across render functions. Bundled
+/// so individual render functions stay under the `clippy::too_many_arguments`
+/// threshold; every field is a cheap borrow or `Copy`.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameCtx<'a> {
+    pub(crate) workspace_name: &'a str,
+    pub(crate) workspace_root: &'a Path,
+    pub(crate) mode: &'a str,
+    pub(crate) theme: &'a crate::theme::Theme,
+    pub(crate) render_tick: u64,
+}
+
+pub(crate) const PRIMARY_MODES: &[&str] = &[
+    "normal",
+    "insert",
+    "run",
+    "commits",
+    "rebase",
+    "reword",
+    "reword_insert",
+    "conflict",
+];
+
+/// Reserves the bottom row for the pane status bar so the hints overlay
+/// does not paint over it.
+pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
+    Rect {
+        x: size.x,
+        y: size.y,
+        width: size.width,
+        height: size.height.saturating_sub(1),
+    }
+}
+
+/// Paint one full frame of the TUI into `buf`. Called once per [`Stoat::render`]
+/// tick after the parse pipeline and commits pump have run.
+pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
+    let size = stoat.size();
+    let ws = &mut stoat.workspaces[stoat.active_workspace];
+
+    ws.layout(size);
+
+    let commits_mode = stoat.mode == "commits";
+    let rebase_mode = stoat.mode == "rebase";
+    let reword_mode = stoat.mode == "reword" || stoat.mode == "reword_insert";
+    let conflict_mode = stoat.mode == "conflict";
+    let overlay_pane = if (commits_mode && ws.commits.is_some())
+        || (rebase_mode && ws.rebase.is_some())
+        || ((reword_mode || conflict_mode) && ws.rebase_active.is_some())
+    {
+        Some(ws.panes.focus())
+    } else {
+        None
+    };
+
+    let workspace_name = ws
+        .git_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("(unnamed)")
+        .to_string();
+
+    let frame = FrameCtx {
+        workspace_name: &workspace_name,
+        workspace_root: &ws.git_root,
+        mode: &stoat.mode,
+        theme: &stoat.theme,
+        render_tick: stoat.render_tick,
+    };
+
+    let split_focused = ws.panes.focus();
+    for (id, pane) in ws.panes.split_panes() {
+        let is_focused = matches!(ws.focus, FocusTarget::SplitPane(_)) && id == split_focused;
+        if Some(id) == overlay_pane {
+            continue;
+        }
+        pane::render_pane(
+            pane,
+            is_focused,
+            PaneCtx {
+                editors: &mut ws.editors,
+                buffers: &ws.buffers,
+                runs: &ws.runs,
+                chats: &ws.chats,
+            },
+            frame,
+            buf,
+        );
+    }
+
+    pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf);
+
+    if let Some(pane_id) = overlay_pane {
+        let pane = ws.panes.pane(pane_id);
+        let is_focused = matches!(ws.focus, FocusTarget::SplitPane(id) if id == pane_id);
+        if commits_mode {
+            if let Some(state) = ws.commits.as_mut() {
+                commits::render_commits(pane, is_focused, state, frame, buf);
+            }
+        } else if rebase_mode {
+            if let Some(state) = ws.rebase.as_ref() {
+                rebase::render_rebase(pane, is_focused, state, frame, buf);
+            }
+        } else if reword_mode {
+            let reword_ctx = ws
+                .rebase_active
+                .as_ref()
+                .and_then(|a| a.pause.as_ref())
+                .and_then(|p| match p {
+                    RebasePause::Reword {
+                        cherry_picked_commit,
+                        original_message,
+                        editor_id,
+                        ..
+                    } => Some((
+                        cherry_picked_commit.clone(),
+                        original_message.clone(),
+                        *editor_id,
+                    )),
+                    _ => None,
+                });
+            if let Some((sha, orig, editor_id)) = reword_ctx {
+                if let Some(editor) = ws.editors.get_mut(editor_id) {
+                    reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
+                }
+            }
+        } else if conflict_mode {
+            if let Some(active) = ws.rebase_active.as_ref() {
+                conflict::render_conflict(pane, is_focused, active, frame, buf);
+            }
+        }
+    }
+
+    for (dock_id, dock) in &ws.docks {
+        if matches!(dock.visibility, DockVisibility::Hidden) {
+            continue;
+        }
+        let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
+        if matches!(dock.visibility, DockVisibility::Minimized) {
+            dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf);
+        } else {
+            dock::render_dock_open(
+                dock,
+                is_focused,
+                PaneCtx {
+                    editors: &mut ws.editors,
+                    buffers: &ws.buffers,
+                    runs: &ws.runs,
+                    chats: &ws.chats,
+                },
+                frame,
+                buf,
+            );
+        }
+    }
+    badges::render_badges(
+        &ws.badges,
+        &stoat.badges,
+        size,
+        stoat.render_tick,
+        &stoat.theme,
+        buf,
+    );
+    if let Some(run_id) = stoat.modal_run {
+        if let Some(run_state) = ws.runs.get(run_id) {
+            run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
+        }
+    } else if let Some(help) = &stoat.help {
+        help::render_help(help, &stoat.theme, size, buf);
+    } else if let Some(palette) = &stoat.command_palette {
+        command_palette::render_command_palette(palette, &stoat.theme, size, buf);
+    } else if let Some(picker) = &stoat.workspace_picker {
+        workspace_picker::render_workspace_picker(picker, &stoat.theme, size, buf);
+        let bindings = picker.hint_bindings();
+        hints::render_hints(
+            "picker",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
+    } else if !PRIMARY_MODES.contains(&stoat.mode.as_str()) {
+        let state = StoatKeymapState::new(&stoat.mode);
+        let raw = stoat.keymap.active_bindings(&state);
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
+        let footer = if stoat.mode == "review" {
+            ws.review.as_ref().map(|session| {
+                let p = session.progress();
+                let complete = session.is_complete();
+                let text = if complete {
+                    format!("all {} reviewed", p.total)
+                } else {
+                    let current = p.current_index.unwrap_or(0);
+                    format!(
+                        "{}/{} · {} staged · {} unstaged · {} pending",
+                        current, p.total, p.staged, p.unstaged, p.pending
+                    )
+                };
+                let style = if complete {
+                    stoat.theme.get(crate::theme::scope::UI_BADGE_COMPLETE)
+                } else {
+                    stoat.theme.get(crate::theme::scope::UI_TEXT)
+                };
+                hints::HintsFooter { text, style }
+            })
+        } else {
+            None
+        };
+        hints::render_hints(
+            &stoat.mode,
+            &bindings,
+            footer.as_ref(),
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
+    }
+}
