@@ -3649,6 +3649,34 @@ mod tests {
     }
 
     #[test]
+    fn fresh_workspace_is_fresh() {
+        let h = Stoat::test();
+        assert!(h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn typing_in_scratch_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.edit_focused(0..0, "x");
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn opening_file_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.fake_fs.insert_file("/work/note.txt", b"hello");
+        h.stoat.open_file(Path::new("/work/note.txt"));
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
+    fn splitting_pane_breaks_freshness() {
+        let mut h = Stoat::test();
+        h.type_action("SplitRight()");
+        assert!(!h.stoat.active_workspace().is_fresh());
+    }
+
+    #[test]
     fn close_workspace_switches_to_sibling() {
         let mut h = Stoat::test();
         let first = h.stoat.active_workspace;

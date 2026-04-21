@@ -54,6 +54,29 @@ impl BufferRegistry {
         self.buffers.len()
     }
 
+    /// True when the registry holds exactly one buffer, that buffer has no
+    /// backing file path, and its text is empty: the state left by
+    /// [`Self::new_scratch`] without any subsequent edits. Used by
+    /// [`crate::workspace::Workspace::is_fresh`] to decide whether a
+    /// workspace is worth persisting.
+    pub(crate) fn only_empty_scratch(&self) -> bool {
+        if self.buffers.len() != 1 || !self.path_to_id.is_empty() {
+            return false;
+        }
+        let Some(entry) = self.buffers.values().next() else {
+            return false;
+        };
+        if entry.path.is_some() {
+            return false;
+        }
+        entry
+            .buffer
+            .read()
+            .expect("buffer poisoned")
+            .snapshot
+            .is_empty()
+    }
+
     fn allocate_id(&mut self) -> BufferId {
         let id = BufferId::new(self.next_id);
         self.next_id += 1;

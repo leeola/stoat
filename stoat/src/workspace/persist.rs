@@ -1,11 +1,13 @@
 //! Per-workspace session state persistence.
 //!
 //! Each workspace serializes to
-//! `<stoat_log::workspace_state_dir()>/<git_root_hash>/<uid>.ron`. On launch
-//! at a given git root, the directory is scanned and the most recently
-//! modified workspace file is rehydrated before the first frame renders.
+//! `<stoat_log::workspace_state_dir()>/<git_root_hash>/<uid>.ron`. When the
+//! user passes `--continue`, the binary scans this directory and rehydrates
+//! the most-recently-modified file before the first frame renders; a bare
+//! launch skips the load so each new session begins in a fresh workspace.
 //! Multiple workspaces per git root coexist as sibling files in the same
-//! directory.
+//! directory. [`crate::workspace::Workspace::is_fresh`] gates the save side
+//! so unused fresh workspaces never write a file at all.
 //!
 //! Coverage is best-effort: see sibling FIXMEs in `multi_buffer.rs`,
 //! `review_session.rs`, `commit_list.rs`, and `claude_chat.rs` for the

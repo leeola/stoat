@@ -375,11 +375,11 @@ impl Stoat {
     }
 
     /// Rehydrate the active workspace from its most-recently-modified
-    /// persisted file under `$XDG_STATE_HOME/stoat/workspaces/<hash>/`. Call
-    /// this once after [`Self::new`] in the main binary so an existing
-    /// workspace at `initial_git_root` is restored before the first frame.
-    /// Tests intentionally skip this to stay isolated from the real state
-    /// directory.
+    /// persisted file under `$XDG_STATE_HOME/stoat/workspaces/<hash>/`. The
+    /// binary only invokes this when the user passes `--continue`; a bare
+    /// `stoat` launch leaves the default fresh workspace in place so each
+    /// session starts clean. Tests intentionally skip this to stay isolated
+    /// from the real state directory.
     pub fn load_active_workspace_state(&mut self) {
         let git_root = self.active_workspace().git_root.clone();
         let files = match crate::workspace::list_workspace_files(&git_root) {
@@ -405,9 +405,15 @@ impl Stoat {
     /// Persist a workspace's state to disk. Failures are logged and swallowed
     /// so a write error never prevents a clean shutdown or workspace switch.
     /// No-op when [`Self::persistence_disabled`] is set (used by the test
-    /// harness to keep the real `$XDG_STATE_HOME` pristine).
+    /// harness to keep the real `$XDG_STATE_HOME` pristine) or when the
+    /// workspace is still in its freshly-created state per
+    /// [`Workspace::is_fresh`], so launches without `--continue` do not
+    /// write a throwaway session file on quit.
     pub(crate) fn save_workspace(&self, ws: &Workspace) {
         if self.persistence_disabled {
+            return;
+        }
+        if ws.is_fresh() {
             return;
         }
         let path = match crate::workspace::state_path_for(&ws.git_root, ws.uid) {

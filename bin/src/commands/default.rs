@@ -28,6 +28,12 @@ pub struct Args {
     #[arg(help = "Files to open")]
     pub files: Vec<PathBuf>,
 
+    /// Restore the most-recently-used workspace for this repository instead
+    /// of starting in a fresh one. `continue` is a Rust keyword so the field
+    /// is named `continue_`; clap exposes it as `--continue` / `-c`.
+    #[arg(short = 'c', long = "continue")]
+    pub continue_: bool,
+
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
@@ -57,14 +63,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let Args {
         command,
         files,
+        continue_,
         text_proto_log,
         ..
     } = Args::parse();
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
-        Some(Command::Review) => run_tui(text_proto_log, files, TuiStart::Review),
-        None => run_tui(text_proto_log, files, TuiStart::Files),
+        Some(Command::Review) => run_tui(text_proto_log, files, continue_, TuiStart::Review),
+        None => run_tui(text_proto_log, files, continue_, TuiStart::Files),
     }
 }
 
@@ -76,6 +83,7 @@ enum TuiStart {
 fn run_tui(
     text_proto_log: Option<bool>,
     files: Vec<PathBuf>,
+    continue_: bool,
     start: TuiStart,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
@@ -102,7 +110,9 @@ fn run_tui(
 
     rt.block_on(async {
         let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
-        stoat.load_active_workspace_state();
+        if continue_ {
+            stoat.load_active_workspace_state();
+        }
         stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new()));
 
         match start {

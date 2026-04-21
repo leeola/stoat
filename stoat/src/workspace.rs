@@ -152,6 +152,27 @@ impl Workspace {
         }
     }
 
+    /// True when this workspace is structurally indistinguishable from the
+    /// state produced by [`Self::new`]: one empty scratch buffer, one editor,
+    /// one un-split pane, and no auxiliary state (docks, chats, review,
+    /// commits, rebase, runs). Used by [`crate::app::Stoat::save_workspace`]
+    /// to skip persisting workspaces the user opened but never used, so the
+    /// on-disk directory does not fill up with empty session files now that
+    /// each launch without `--continue` spawns a fresh workspace.
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.claude_chat.is_none()
+            && self.chats.is_empty()
+            && self.review.is_none()
+            && self.commits.is_none()
+            && self.rebase.is_none()
+            && self.rebase_active.is_none()
+            && self.runs.is_empty()
+            && self.docks.is_empty()
+            && self.editors.len() == 1
+            && self.panes.split_panes().count() == 1
+            && self.buffers.only_empty_scratch()
+    }
+
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
