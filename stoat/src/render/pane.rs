@@ -261,7 +261,7 @@ fn paint_segment(
     x
 }
 
-fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static str, Color) {
+pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static str, Color) {
     use crate::theme::scope;
     let (label, default, scope_name) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),

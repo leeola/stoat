@@ -1,6 +1,9 @@
 use crate::{
     help::Help,
-    render::text::{wrap_text, write_str, write_str_clipped},
+    render::{
+        pane::mode_segment,
+        text::{wrap_text, write_str, write_str_clipped},
+    },
 };
 use ratatui::{
     buffer::Buffer,
@@ -63,19 +66,21 @@ pub(crate) fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, 
                 .set_style(cursor_style);
         }
     }
-    let mode_hint = match help.input_mode() {
-        HelpInput::Insert => "[insert]",
-        HelpInput::Normal => "[normal]",
-    };
-    let hint_col = inner.x + inner.width.saturating_sub(mode_hint.chars().count() as u16);
-    write_str(buf, hint_col, search_row, mode_hint, muted);
-
-    let sep_top = search_row + 1;
+    let status_row = search_row + 1;
+    let status_base = theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
     for col in inner.x..inner.x + inner.width {
-        buf[(col, sep_top)].set_char('─').set_style(muted);
+        buf[(col, status_row)].set_char(' ').set_style(status_base);
     }
+    let mode_str = match help.input_mode() {
+        HelpInput::Insert => "insert",
+        HelpInput::Normal => "normal",
+    };
+    let (mode_label, mode_bg) = mode_segment(mode_str, theme);
+    let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
+    let chip = format!(" {mode_label} ");
+    write_str(buf, inner.x, status_row, &chip, mode_style);
 
-    let body_top = sep_top + 1;
+    let body_top = status_row + 1;
     let body_height = (inner.y + inner.height).saturating_sub(body_top);
     if body_height == 0 {
         return;
