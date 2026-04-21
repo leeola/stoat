@@ -50,6 +50,10 @@ impl BufferRegistry {
         }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
     fn allocate_id(&mut self) -> BufferId {
         let id = BufferId::new(self.next_id);
         self.next_id += 1;

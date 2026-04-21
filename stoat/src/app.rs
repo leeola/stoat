@@ -1351,6 +1351,8 @@ impl Stoat {
             render_command_palette(palette, self.size, &mut buf);
         } else if let Some(picker) = &self.workspace_picker {
             render_workspace_picker(picker, self.size, &mut buf);
+            let bindings = picker.hint_bindings();
+            render_hints("picker", &bindings, None, self.size, &mut buf);
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
             let raw = self.keymap.active_bindings(&state);
@@ -1776,7 +1778,7 @@ struct HintsFooter {
 }
 
 fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffer) {
-    if area.width < 40 || area.height < 8 {
+    if area.width < 60 || area.height < 8 {
         return;
     }
 
@@ -1784,14 +1786,14 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
     if entries.is_empty() {
         return;
     }
-    let max_rows = 10u16;
-    let row_count = (entries.len() as u16).min(max_rows);
+    let max_entries = 10u16;
+    let entry_rows = (entries.len() as u16).min(max_entries);
 
-    let box_width = 70u16.min(area.width.saturating_sub(4));
-    if box_width < 30 {
+    let box_width = 90u16.min(area.width.saturating_sub(4));
+    if box_width < 60 {
         return;
     }
-    let box_height = 1 + row_count + 1 + 1 + 1;
+    let box_height = 3 + entry_rows;
     if box_height > area.height {
         return;
     }
@@ -1808,17 +1810,65 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
     let inner = block.inner(picker_area);
     block.render(picker_area, buf);
 
+    const NAME_W: u16 = 12;
+    const BUF_W: u16 = 5;
+    const CHAT_W: u16 = 6;
+    const RUN_W: u16 = 5;
+    const EDIT_W: u16 = 6;
+
+    let edit_col_x = inner.x + inner.width.saturating_sub(1 + EDIT_W);
+    let run_col_x = edit_col_x.saturating_sub(RUN_W);
+    let chat_col_x = run_col_x.saturating_sub(CHAT_W);
+    let buf_col_x = chat_col_x.saturating_sub(BUF_W);
+    let marker_x = inner.x + 1;
+    let name_x = marker_x + 2;
+    let path_x = name_x + NAME_W + 2;
+    let path_w = buf_col_x.saturating_sub(2).saturating_sub(path_x);
+
+    let right_pad = |label: &str, width: u16| format!("{:>w$}", label, w = width as usize);
+
     let row_style = Style::default().fg(Color::White);
     let current_style = Style::default().fg(Color::Yellow);
     let selected_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let dim_style = Style::default().fg(Color::DarkGray);
+    let header_style = Style::default().fg(Color::DarkGray);
 
-    let list_top = inner.y;
+    let header_row = inner.y;
+    write_str(buf, name_x, header_row, "name", header_style);
+    write_str(buf, path_x, header_row, "path", header_style);
+    write_str(
+        buf,
+        buf_col_x,
+        header_row,
+        &right_pad("buf", BUF_W),
+        header_style,
+    );
+    write_str(
+        buf,
+        chat_col_x,
+        header_row,
+        &right_pad("chat", CHAT_W),
+        header_style,
+    );
+    write_str(
+        buf,
+        run_col_x,
+        header_row,
+        &right_pad("run", RUN_W),
+        header_style,
+    );
+    write_str(
+        buf,
+        edit_col_x,
+        header_row,
+        &right_pad("edit", EDIT_W),
+        header_style,
+    );
+
+    let entries_top = inner.y + 1;
     let selected = picker.selected();
-    let inner_width = inner.width as usize;
 
-    for (i, entry) in entries.iter().take(max_rows as usize).enumerate() {
-        let row = list_top + i as u16;
+    for (i, entry) in entries.iter().take(max_entries as usize).enumerate() {
+        let row = entries_top + i as u16;
         let is_selected = i == selected;
         let base_style = if is_selected {
             selected_style
@@ -1833,35 +1883,41 @@ fn render_workspace_picker(picker: &WorkspacePicker, area: Rect, buf: &mut Buffe
         }
 
         let marker = if entry.is_current { "*" } else { " " };
+        write_str(buf, marker_x, row, marker, base_style);
+        let name: String = entry.basename.chars().take(NAME_W as usize).collect();
+        write_str(buf, name_x, row, &name, base_style);
         let path = entry.git_root.display().to_string();
-        let line = if path.is_empty() {
-            format!("{marker} {basename}", basename = entry.basename)
-        } else {
-            format!(
-                "{marker} {basename}  {path}",
-                basename = entry.basename,
-                path = path
-            )
-        };
-        let trimmed: String = line.chars().take(inner_width).collect();
-        write_str(buf, inner.x + 1, row, &trimmed, base_style);
+        let path_trimmed: String = path.chars().take(path_w as usize).collect();
+        write_str(buf, path_x, row, &path_trimmed, base_style);
+        write_str(
+            buf,
+            buf_col_x,
+            row,
+            &right_pad(&entry.buffer_count.to_string(), BUF_W),
+            base_style,
+        );
+        write_str(
+            buf,
+            chat_col_x,
+            row,
+            &right_pad(&entry.chat_count.to_string(), CHAT_W),
+            base_style,
+        );
+        write_str(
+            buf,
+            run_col_x,
+            row,
+            &right_pad(&entry.run_count.to_string(), RUN_W),
+            base_style,
+        );
+        write_str(
+            buf,
+            edit_col_x,
+            row,
+            &right_pad(&entry.editor_count.to_string(), EDIT_W),
+            base_style,
+        );
     }
-
-    let separator_row = list_top + row_count;
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, separator_row)]
-            .set_char('─')
-            .set_style(Style::default().fg(Color::DarkGray));
-    }
-
-    let footer_row = separator_row + 1;
-    write_str(
-        buf,
-        inner.x + 1,
-        footer_row,
-        "Enter select  Esc cancel  Ctrl-P/N navigate",
-        dim_style,
-    );
 }
 
 fn render_command_palette(palette: &CommandPalette, area: Rect, buf: &mut Buffer) {

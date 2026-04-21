@@ -20,6 +20,10 @@ pub struct PickerEntry {
     pub git_root: PathBuf,
     pub uid: WorkspaceUid,
     pub is_current: bool,
+    pub buffer_count: usize,
+    pub chat_count: usize,
+    pub run_count: usize,
+    pub editor_count: usize,
 }
 
 pub enum PickerOutcome {
@@ -47,6 +51,10 @@ impl WorkspacePicker {
                 git_root: ws.git_root.clone(),
                 uid: ws.uid,
                 is_current: id == active,
+                buffer_count: ws.buffers.len(),
+                chat_count: ws.chats.len(),
+                run_count: ws.runs.len(),
+                editor_count: ws.editors.len(),
             })
             .collect();
         // Current workspace first, then alphabetical by basename so the list
@@ -68,6 +76,17 @@ impl WorkspacePicker {
 
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Enter", "select".to_string()),
+            ("Esc", "cancel".to_string()),
+            ("Ctrl-N", "next".to_string()),
+            ("Ctrl-P", "prev".to_string()),
+            ("\u{2193}", "next".to_string()),
+            ("\u{2191}", "prev".to_string()),
+        ]
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
