@@ -26,8 +26,8 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m                                          [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m                                          [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  q[0m[97m  Quit  [0m[90mexit stoat[0m[97m         [0m[90m│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[36m│[0m
-  [0m[36m│[0m[90mEnter dispatch | Esc normal | Shift-Tab scope | C-u/d scroll | Bksp[0m       [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  w[0m[97m  MoveNextWordStart  [0m[90mselect│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m                               [0m[90m│[0m                                          [0m[36m│[0m
   [0m[36m└──────────────────────────────────────────────────────────────────────────┘[0m
 
 [0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

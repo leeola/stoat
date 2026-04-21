@@ -75,19 +75,8 @@ pub(crate) fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, 
         buf[(col, sep_top)].set_char('─').set_style(muted);
     }
 
-    let footer_row = inner.y + inner.height.saturating_sub(1);
-    let sep_bottom = footer_row.saturating_sub(1);
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, sep_bottom)].set_char('─').set_style(muted);
-    }
-    let footer_text = match help.input_mode() {
-        HelpInput::Insert => "Enter dispatch | Esc normal | Shift-Tab scope | C-u/d scroll | Bksp",
-        HelpInput::Normal => "i insert | j/k select | g/G top/end | C-u/d scroll | Esc close",
-    };
-    write_str(buf, inner.x, footer_row, footer_text, muted);
-
     let body_top = sep_top + 1;
-    let body_height = sep_bottom.saturating_sub(body_top);
+    let body_height = (inner.y + inner.height).saturating_sub(body_top);
     if body_height == 0 {
         return;
     }
