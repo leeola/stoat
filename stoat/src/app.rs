@@ -1355,7 +1355,14 @@ impl Stoat {
         } else if let Some(picker) = &self.workspace_picker {
             render_workspace_picker(picker, &self.theme, self.size, &mut buf);
             let bindings = picker.hint_bindings();
-            render_hints("picker", &bindings, None, &self.theme, self.size, &mut buf);
+            render_hints(
+                "picker",
+                &bindings,
+                None,
+                &self.theme,
+                hints_overlay_area(self.size),
+                &mut buf,
+            );
         } else if !PRIMARY_MODES.contains(&self.mode.as_str()) {
             let state = StoatKeymapState::new(&self.mode);
             let raw = self.keymap.active_bindings(&state);
@@ -1394,7 +1401,7 @@ impl Stoat {
                 &bindings,
                 footer.as_ref(),
                 &self.theme,
-                self.size,
+                hints_overlay_area(self.size),
                 &mut buf,
             );
         }
@@ -1692,6 +1699,17 @@ fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
             tracing::warn!("action `{name}`: {e}");
             None
         },
+    }
+}
+
+/// Reserves the bottom row for the pane status bar so the hints overlay
+/// does not paint over it.
+fn hints_overlay_area(size: Rect) -> Rect {
+    Rect {
+        x: size.x,
+        y: size.y,
+        width: size.width,
+        height: size.height.saturating_sub(1),
     }
 }
 
