@@ -9,25 +9,25 @@ size: 80x24
 ---
 [0m[7m [0m
 
-
-
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m AddSelectionBelow  add cursor below                                      [0m[35m│[0m
-  [0m[35m│[0m[97m ClosePane          [0m[90mclose pane[0m[97m                                            [0m[35m│[0m
-  [0m[35m│[0m[97m CloseWorkspace     [0m[90mclose this workspace[0m[97m                                  [0m[35m│[0m
-  [0m[35m│[0m[97m CopyWorkspace      [0m[90mduplicate this workspace[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m Dump               [0m[90mcapture a workspace dump[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m FocusDown          [0m[90mfocus pane down[0m[97m                                       [0m[35m│[0m
-  [0m[35m│[0m[97m FocusLeft          [0m[90mfocus pane left[0m[97m                                       [0m[35m│[0m
-  [0m[35m│[0m[97m FocusNext          [0m[90mfocus next pane[0m[97m                                       [0m[35m│[0m
-  [0m[35m│[0m[97m FocusPrev          [0m[90mfocus previous pane[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m FocusRight         [0m[90mfocus pane right[0m[97m                                      [0m[35m│[0m
+  [0m[35m│[0m[30m[46m NewWorkspace  create a new workspace                                     [0m[35m│[0m
+  [0m[35m│[0m[97m OpenClaude    [0m[90mopen claude chat[0m[97m                                           [0m[35m│[0m
+  [0m[35m│[0m[97m OpenCommits   [0m[90mbrowse commit history[0m[97m                                      [0m[35m│[0m
+  [0m[35m│[0m[97m OpenFile      [0m[90mopen a file[0m[97m                                                [0m[35m│[0m
+  [0m[35m│[0m[97m OpenReview    [0m[90mreview changed files[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m OpenRun       [0m[90mopen terminal[0m[97m                                              [0m[35m│[0m
+  [0m[35m│[0m[97m Quit          [0m[90mexit stoat[0m[97m                                                 [0m[35m│[0m
+  [0m[35m│[0m[97m Run           [0m[90mrun command[0m[97m                                                [0m[35m│[0m
+  [0m[35m│[0m[97m SplitDown     [0m[90msplit pane down[0m[97m                                            [0m[35m│[0m
+  [0m[35m│[0m[97m SplitRight    [0m[90msplit pane right[0m[97m                                           [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mAdd a new cursor on the line below the newest cursor.[0m                     [0m[35m│[0m
+  [0m[35m│[0m[37mCreate a fresh workspace at the current workspace's git root. The new[0m     [0m[35m│[0m
+  [0m[35m│[0m[37mworkspace has default panes and no inherited buffers, Claude session, or[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mrebase state. The current workspace is saved and kept in the background;[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mthe new workspace becomes active.[0m                                         [0m[35m│[0m
   [0m[35m└──────────────────────────────────────────────────────────────────────────┘[0m
-
 
 
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     OpenReviewDef,
@@ -6,7 +6,8 @@ define_action!(
     "OpenReview",
     ActionKind::OpenReview,
     "review changed files",
-    "Open the first modified or staged file with a structural diff against HEAD."
+    "Open the first modified or staged file with a structural diff against HEAD.",
+    ActionPriority::Common
 );
 
 define_action!(
@@ -17,7 +18,8 @@ define_action!(
     "jump to the source of a moved hunk",
     "If the cursor is on a Moved hunk, navigate to its first recorded source \
      location. For ambiguous moves, JumpToNextMoveSource / JumpToPrevMoveSource \
-     cycle among the alternates."
+     cycle among the alternates.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -27,7 +29,8 @@ define_action!(
     ActionKind::JumpToMoveTarget,
     "jump to the target of a moved hunk",
     "From the negative (source) side of a Moved hunk, navigate forward to the \
-     corresponding target location on the positive side."
+     corresponding target location on the positive side.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -37,7 +40,8 @@ define_action!(
     ActionKind::JumpToNextMoveSource,
     "cycle to the next source of an ambiguous moved hunk",
     "When a Moved hunk has multiple candidate sources (consolidation from N to \
-     1), advance the selection cursor to the next source and jump there."
+     1), advance the selection cursor to the next source and jump there.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -47,7 +51,8 @@ define_action!(
     ActionKind::JumpToPrevMoveSource,
     "cycle to the previous source of an ambiguous moved hunk",
     "When a Moved hunk has multiple candidate sources, step the selection cursor \
-     to the previous source and jump there."
+     to the previous source and jump there.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -58,7 +63,8 @@ define_action!(
     "describe the move provenance at the cursor",
     "Report the cardinality and source locations of the Moved hunk under the \
      cursor. Scriptable surface for future automation hooks; a no-op today \
-     when the cursor is not on a Moved hunk."
+     when the cursor is not on a Moved hunk.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -69,7 +75,8 @@ define_action!(
     "advance to the next review chunk",
     "Move the review cursor forward to the next chunk in visit order, \
      scrolling the pane to keep the chunk's header in view. Clamps at the \
-     last chunk and emits an end-of-review badge when already there."
+     last chunk and emits an end-of-review badge when already there.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -80,7 +87,8 @@ define_action!(
     "step back to the previous review chunk",
     "Move the review cursor backward to the previous chunk in visit order, \
      scrolling the pane to keep the chunk's header in view. Clamps at the \
-     first chunk."
+     first chunk.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -90,7 +98,8 @@ define_action!(
     ActionKind::ReviewStageChunk,
     "mark the current chunk as staged",
     "Mark the current review chunk as Staged. Progress footer updates and \
-     the chunk's gutter flips to the staged glyph."
+     the chunk's gutter flips to the staged glyph.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -99,7 +108,8 @@ define_action!(
     "ReviewUnstageChunk",
     ActionKind::ReviewUnstageChunk,
     "mark the current chunk as unstaged",
-    "Mark the current review chunk as Unstaged."
+    "Mark the current review chunk as Unstaged.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -109,7 +119,8 @@ define_action!(
     ActionKind::ReviewToggleStage,
     "toggle staged/unstaged for the current chunk",
     "Flip the current chunk between Staged and Unstaged. Chunks in Pending \
-     or Skipped flip to Staged on first press."
+     or Skipped flip to Staged on first press.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -120,7 +131,8 @@ define_action!(
     "skip the current chunk",
     "Mark the current chunk as Skipped: read but not acted on. Used when \
      stepping through commits to pass over changes that don't need a \
-     stage/unstage decision."
+     stage/unstage decision.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -130,7 +142,8 @@ define_action!(
     ActionKind::ReviewRefresh,
     "rescan the review source",
     "Rebuild the review session from its source, preserving staged/unstaged \
-     decisions on chunks whose base content still matches."
+     decisions on chunks whose base content still matches.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -140,7 +153,8 @@ define_action!(
     ActionKind::ReviewApplyStaged,
     "apply staged chunks",
     "Apply all staged chunks to the underlying source (git index for the \
-     working tree, commit rewrite for past commits). Unimplemented for v1."
+     working tree, commit rewrite for past commits). Unimplemented for v1.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -164,7 +178,8 @@ define_action!(
      commit with every Staged chunk spliced back to its parent-side \
      content. When the reviewed commit is HEAD, amends HEAD directly; \
      otherwise rewrites and cherry-picks descendants. Refuses with an \
-     error badge if the working tree is dirty."
+     error badge if the working tree is dirty.",
+    ActionPriority::Rare
 );
 
 use crate::{Action, ActionDef, ParamDef, ParamKind};

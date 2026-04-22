@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     SplitRightDef,
@@ -6,7 +6,8 @@ define_action!(
     "SplitRight",
     ActionKind::SplitRight,
     "split pane right",
-    "Split the focused pane vertically, creating a new pane to the right."
+    "Split the focused pane vertically, creating a new pane to the right.",
+    ActionPriority::Common
 );
 define_action!(
     SplitDownDef,
@@ -14,7 +15,8 @@ define_action!(
     "SplitDown",
     ActionKind::SplitDown,
     "split pane down",
-    "Split the focused pane horizontally, creating a new pane below."
+    "Split the focused pane horizontally, creating a new pane below.",
+    ActionPriority::Common
 );
 define_action!(
     FocusLeftDef,

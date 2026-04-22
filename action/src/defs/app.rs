@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     QuitDef,
@@ -6,7 +6,8 @@ define_action!(
     "Quit",
     ActionKind::Quit,
     "exit stoat",
-    "Exit the application, closing all panes and viewports."
+    "Exit the application, closing all panes and viewports.",
+    ActionPriority::Common
 );
 
 #[cfg(test)]

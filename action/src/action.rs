@@ -1,6 +1,26 @@
 use crate::{kind::ActionKind, param::ParamDef};
 use std::{any::Any, fmt::Debug};
 
+/// Default listing priority applied within a match tier in the command
+/// palette. Prefix/substring tier ordering dominates; priority is the
+/// tie-breaker before alphabetical name order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionPriority {
+    Common,
+    Normal,
+    Rare,
+}
+
+impl ActionPriority {
+    pub fn ord(self) -> u8 {
+        match self {
+            Self::Common => 0,
+            Self::Normal => 1,
+            Self::Rare => 2,
+        }
+    }
+}
+
 pub trait ActionDef: Debug + Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn kind(&self) -> ActionKind;
@@ -14,6 +34,10 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
     fn palette_visible(&self) -> bool {
         true
     }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Normal
+    }
 }
 
 pub trait Action: Debug + Send + 'static {
@@ -26,6 +50,17 @@ pub trait Action: Debug + Send + 'static {
 
 macro_rules! define_action {
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $crate::ActionPriority::Normal
+        );
+    };
+    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -48,6 +83,10 @@ macro_rules! define_action {
 
             fn long_desc(&self) -> &'static str {
                 $long
+            }
+
+            fn priority(&self) -> $crate::ActionPriority {
+                $priority
             }
         }
 

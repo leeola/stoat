@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     EnterRebaseDef,
@@ -17,7 +17,8 @@ define_action!(
     ActionKind::AbortRebase,
     "discard the current rebase plan",
     "Drop the in-progress todo list without executing it and return to \
-     commits mode. No commits are rewritten."
+     commits mode. No commits are rewritten.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -38,7 +39,8 @@ define_action!(
     "RebaseNext",
     ActionKind::RebaseNext,
     "select the next entry in the rebase plan",
-    "Move the rebase-mode cursor down by one todo entry."
+    "Move the rebase-mode cursor down by one todo entry.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -47,7 +49,8 @@ define_action!(
     "RebasePrev",
     ActionKind::RebasePrev,
     "select the previous entry in the rebase plan",
-    "Move the rebase-mode cursor up by one todo entry."
+    "Move the rebase-mode cursor up by one todo entry.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -56,7 +59,8 @@ define_action!(
     "RebaseMoveUp",
     ActionKind::RebaseMoveUp,
     "swap selected rebase entry with the one above",
-    "Reorder the rebase todo list: move the selected entry one row up."
+    "Reorder the rebase todo list: move the selected entry one row up.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -65,7 +69,8 @@ define_action!(
     "RebaseMoveDown",
     ActionKind::RebaseMoveDown,
     "swap selected rebase entry with the one below",
-    "Reorder the rebase todo list: move the selected entry one row down."
+    "Reorder the rebase todo list: move the selected entry one row down.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -75,7 +80,8 @@ define_action!(
     ActionKind::SetRebaseOpPick,
     "mark selected rebase entry as Pick",
     "Set the selected todo entry's operation to Pick (apply the commit \
-     as-is on top of the running HEAD)."
+     as-is on top of the running HEAD).",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -85,7 +91,8 @@ define_action!(
     ActionKind::SetRebaseOpSquash,
     "mark selected rebase entry as Squash",
     "Set the selected todo entry's operation to Squash: merge this \
-     commit into the previous one in the plan, combining both messages."
+     commit into the previous one in the plan, combining both messages.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -95,7 +102,8 @@ define_action!(
     ActionKind::SetRebaseOpFixup,
     "mark selected rebase entry as Fixup",
     "Set the selected todo entry's operation to Fixup: like Squash but \
-     discard this commit's message."
+     discard this commit's message.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -105,7 +113,8 @@ define_action!(
     ActionKind::SetRebaseOpDrop,
     "mark selected rebase entry as Drop",
     "Set the selected todo entry's operation to Drop: skip this commit \
-     entirely during execution."
+     entirely during execution.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -115,7 +124,8 @@ define_action!(
     ActionKind::SetRebaseOpReword,
     "mark selected rebase entry as Reword",
     "Set the selected todo entry's operation to Reword: apply the \
-     commit, then pause during execution so you can edit its message."
+     commit, then pause during execution so you can edit its message.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -126,7 +136,8 @@ define_action!(
     "mark selected rebase entry as Edit",
     "Set the selected todo entry's operation to Edit: apply the commit, \
      then pause during execution so you can modify it (via review-mode \
-     hunk removal, etc.). Resume with `RebaseContinue`."
+     hunk removal, etc.). Resume with `RebaseContinue`.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -136,7 +147,8 @@ define_action!(
     ActionKind::RewordConfirm,
     "confirm the reworded commit message",
     "Replace the paused commit with a new one carrying the edited \
-     message and resume the rebase."
+     message and resume the rebase.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -146,7 +158,8 @@ define_action!(
     ActionKind::RewordAbort,
     "abort the paused rebase during reword",
     "Discard the in-progress rebase, leaving HEAD where the stepper \
-     had last advanced it."
+     had last advanced it.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -167,7 +180,8 @@ define_action!(
     ActionKind::ConflictTakeOurs,
     "resolve conflicted file by taking ours",
     "Mark the currently selected conflicted file to resolve with the \
-     'ours' side (the rebase-so-far's version) when the plan resumes."
+     'ours' side (the rebase-so-far's version) when the plan resumes.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -177,7 +191,8 @@ define_action!(
     ActionKind::ConflictTakeTheirs,
     "resolve conflicted file by taking theirs",
     "Mark the currently selected conflicted file to resolve with the \
-     'theirs' side (the commit being applied)."
+     'theirs' side (the commit being applied).",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -187,7 +202,8 @@ define_action!(
     ActionKind::ConflictSkipEntry,
     "skip the entire conflicted entry",
     "Abandon the cherry-pick for this entry and continue with the \
-     next one, as if it were marked Drop."
+     next one, as if it were marked Drop.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -196,7 +212,8 @@ define_action!(
     "ConflictNextFile",
     ActionKind::ConflictNextFile,
     "select the next conflicted file",
-    "Move the conflict-mode cursor to the next file in the list."
+    "Move the conflict-mode cursor to the next file in the list.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -205,7 +222,8 @@ define_action!(
     "ConflictPrevFile",
     ActionKind::ConflictPrevFile,
     "select the previous conflicted file",
-    "Move the conflict-mode cursor to the previous file in the list."
+    "Move the conflict-mode cursor to the previous file in the list.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -216,7 +234,8 @@ define_action!(
     "apply the current conflict resolutions and resume the rebase",
     "Build the merged tree from each file's TakeOurs/TakeTheirs choice, \
      create a commit, and continue the rebase. Files without an \
-     explicit choice default to TakeTheirs."
+     explicit choice default to TakeTheirs.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -226,5 +245,6 @@ define_action!(
     ActionKind::ConflictAbort,
     "abort the rebase from the conflict resolver",
     "Drop the in-flight rebase execution state and return to commits \
-     mode without making further changes."
+     mode without making further changes.",
+    ActionPriority::Rare
 );

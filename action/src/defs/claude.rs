@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     OpenClaudeDef,
@@ -6,7 +6,8 @@ define_action!(
     "OpenClaude",
     ActionKind::OpenClaude,
     "open claude chat",
-    "Open a Claude Code chat panel. Placement is controlled by the `claude.default_placement` setting (defaults to a split pane)."
+    "Open a Claude Code chat panel. Placement is controlled by the `claude.default_placement` setting (defaults to a split pane).",
+    ActionPriority::Common
 );
 
 define_action!(
@@ -15,7 +16,8 @@ define_action!(
     "ClaudeToPane",
     ActionKind::ClaudeToPane,
     "move claude to pane",
-    "Move the active Claude chat into a new split pane. Reuses the existing session."
+    "Move the active Claude chat into a new split pane. Reuses the existing session.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -24,7 +26,8 @@ define_action!(
     "ClaudeToDockLeft",
     ActionKind::ClaudeToDockLeft,
     "move claude to left dock",
-    "Move the active Claude chat to the left dock. Reuses the existing session."
+    "Move the active Claude chat to the left dock. Reuses the existing session.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -33,7 +36,8 @@ define_action!(
     "ClaudeToDockRight",
     ActionKind::ClaudeToDockRight,
     "move claude to right dock",
-    "Move the active Claude chat to the right dock. Reuses the existing session."
+    "Move the active Claude chat to the right dock. Reuses the existing session.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -42,7 +46,8 @@ define_action!(
     "ClaudeSubmit",
     ActionKind::ClaudeSubmit,
     "send to claude",
-    "Send the current input to Claude."
+    "Send the current input to Claude.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -51,7 +56,8 @@ define_action!(
     "ToggleDockRight",
     ActionKind::ToggleDockRight,
     "toggle right dock",
-    "Cycle the right dock panel through visible, minimized, and hidden states."
+    "Cycle the right dock panel through visible, minimized, and hidden states.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -60,5 +66,6 @@ define_action!(
     "ToggleDockLeft",
     ActionKind::ToggleDockLeft,
     "toggle left dock",
-    "Cycle the left dock panel through visible, minimized, and hidden states."
+    "Cycle the left dock panel through visible, minimized, and hidden states.",
+    ActionPriority::Rare
 );

@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     NewWorkspaceDef,
@@ -6,7 +6,8 @@ define_action!(
     "NewWorkspace",
     ActionKind::NewWorkspace,
     "create a new workspace",
-    "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers, Claude session, or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active."
+    "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers, Claude session, or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active.",
+    ActionPriority::Common
 );
 
 define_action!(
@@ -24,7 +25,8 @@ define_action!(
     "SwitchWorkspace",
     ActionKind::SwitchWorkspace,
     "switch workspaces",
-    "Open the workspace picker to choose another open workspace to switch to. The current workspace is saved before the switch; its panes, buffers, and selections are preserved for the return trip."
+    "Open the workspace picker to choose another open workspace to switch to. The current workspace is saved before the switch; its panes, buffers, and selections are preserved for the return trip.",
+    ActionPriority::Common
 );
 
 define_action!(

@@ -1,4 +1,6 @@
-use crate::{action::define_action, Action, ActionDef, ActionKind, ParamDef, ParamKind};
+use crate::{
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+};
 use std::any::Any;
 
 define_action!(
@@ -7,7 +9,8 @@ define_action!(
     "OpenRun",
     ActionKind::OpenRun,
     "open terminal",
-    "Open a terminal pane for running commands."
+    "Open a terminal pane for running commands.",
+    ActionPriority::Common
 );
 
 define_action!(
@@ -75,6 +78,10 @@ impl ActionDef for RunDef {
 
     fn long_desc(&self) -> &'static str {
         "Run a shell command in a temporary modal overlay. The modal shows output while running and can be dismissed when done."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
     }
 }
 

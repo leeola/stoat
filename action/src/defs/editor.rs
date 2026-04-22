@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     AddSelectionBelowDef,
@@ -6,7 +6,8 @@ define_action!(
     "AddSelectionBelow",
     ActionKind::AddSelectionBelow,
     "add cursor below",
-    "Add a new cursor on the line below the newest cursor."
+    "Add a new cursor on the line below the newest cursor.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -15,7 +16,8 @@ define_action!(
     "MoveLeft",
     ActionKind::MoveLeft,
     "move cursor left",
-    "Move every cursor one grapheme to the left and collapse any selection."
+    "Move every cursor one grapheme to the left and collapse any selection.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -24,7 +26,8 @@ define_action!(
     "MoveRight",
     ActionKind::MoveRight,
     "move cursor right",
-    "Move every cursor one grapheme to the right and collapse any selection."
+    "Move every cursor one grapheme to the right and collapse any selection.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -33,7 +36,8 @@ define_action!(
     "MoveUp",
     ActionKind::MoveUp,
     "move cursor up",
-    "Move every cursor one display line up, preserving the goal column."
+    "Move every cursor one display line up, preserving the goal column.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -42,7 +46,8 @@ define_action!(
     "MoveDown",
     ActionKind::MoveDown,
     "move cursor down",
-    "Move every cursor one display line down, preserving the goal column."
+    "Move every cursor one display line down, preserving the goal column.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -51,7 +56,8 @@ define_action!(
     "MoveNextWordStart",
     ActionKind::MoveNextWordStart,
     "select to next word start",
-    "Select from each cursor head to the start of the next word."
+    "Select from each cursor head to the start of the next word.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -60,7 +66,8 @@ define_action!(
     "MoveNextWordEnd",
     ActionKind::MoveNextWordEnd,
     "select to next word end",
-    "Select from each cursor head to the end of the next word."
+    "Select from each cursor head to the end of the next word.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -69,7 +76,8 @@ define_action!(
     "MovePrevWordStart",
     ActionKind::MovePrevWordStart,
     "select to previous word start",
-    "Select backward from each cursor head to the start of the previous word."
+    "Select backward from each cursor head to the start of the previous word.",
+    ActionPriority::Rare
 );
 
 #[cfg(test)]

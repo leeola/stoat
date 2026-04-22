@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     OpenCommitsDef,
@@ -7,7 +7,8 @@ define_action!(
     ActionKind::OpenCommits,
     "browse commit history",
     "Open the commit-list view: a left pane of commits on the current \
-     branch with a right-pane preview of the selected commit's changes."
+     branch with a right-pane preview of the selected commit's changes.",
+    ActionPriority::Common
 );
 
 define_action!(
@@ -27,7 +28,8 @@ define_action!(
     "select the next commit",
     "Move the selection cursor one row down in the commit list. \
      Triggers a lazy page-load when the cursor approaches the tail of \
-     the currently loaded window."
+     the currently loaded window.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -36,7 +38,8 @@ define_action!(
     "CommitsPrev",
     ActionKind::CommitsPrev,
     "select the previous commit",
-    "Move the selection cursor one row up in the commit list."
+    "Move the selection cursor one row up in the commit list.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -45,7 +48,8 @@ define_action!(
     "CommitsPageDown",
     ActionKind::CommitsPageDown,
     "scroll the commit list down a page",
-    "Advance the commit-list selection by one viewport height."
+    "Advance the commit-list selection by one viewport height.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -54,7 +58,8 @@ define_action!(
     "CommitsPageUp",
     ActionKind::CommitsPageUp,
     "scroll the commit list up a page",
-    "Retreat the commit-list selection by one viewport height."
+    "Retreat the commit-list selection by one viewport height.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -63,7 +68,8 @@ define_action!(
     "CommitsFirst",
     ActionKind::CommitsFirst,
     "jump to HEAD in the commit list",
-    "Move the selection to the newest commit (top of the list)."
+    "Move the selection to the newest commit (top of the list).",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -73,7 +79,8 @@ define_action!(
     ActionKind::CommitsLast,
     "jump to the oldest loaded commit",
     "Move the selection to the oldest commit currently in the loaded \
-     window. Does not force a full walk of history."
+     window. Does not force a full walk of history.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -83,7 +90,8 @@ define_action!(
     ActionKind::CommitsRefresh,
     "rescan the commit list",
     "Discard the loaded commits and preview caches and reload the \
-     first page from HEAD. Use after external branch changes."
+     first page from HEAD. Use after external branch changes.",
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -96,5 +104,6 @@ define_action!(
      session is read-only (ReviewApplyStaged is a no-op for commit \
      sources); use the separate `ReviewRemoveSelected` action to \
      actually remove staged hunks from the commit. Closing the review \
-     returns to commits mode."
+     returns to commits mode.",
+    ActionPriority::Rare
 );

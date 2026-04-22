@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
 use std::{any::Any, path::PathBuf};
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -30,6 +30,10 @@ impl ActionDef for OpenFileDef {
 
     fn long_desc(&self) -> &'static str {
         "Read a file from disk into a buffer and show it in the focused pane."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
     }
 }
 

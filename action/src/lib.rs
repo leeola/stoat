@@ -4,7 +4,7 @@ mod kind;
 mod param;
 pub mod registry;
 
-pub use action::{Action, ActionDef};
+pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
     app::Quit,
     claude::{

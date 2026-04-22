@@ -9,25 +9,25 @@ size: 80x24
 ---
 [0m[7m [0m
 
-
   [0m[35m┌ command palette (all) ───────────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m AbortRebase        discard the current rebase plan                       [0m[35m│[0m
-  [0m[35m│[0m[97m AddSelectionBelow  [0m[90madd cursor below[0m[97m                                      [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeSubmit       [0m[90msend to claude[0m[97m                                        [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToDockLeft   [0m[90mmove claude to left dock[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToDockRight  [0m[90mmove claude to right dock[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToPane       [0m[90mmove claude to pane[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m CloseCommits       [0m[90mclose the commit-list view[0m[97m                            [0m[35m│[0m
-  [0m[35m│[0m[97m ClosePane          [0m[90mclose pane[0m[97m                                            [0m[35m│[0m
-  [0m[35m│[0m[97m CloseReview        [0m[90mclose the active review[0m[97m                               [0m[35m│[0m
-  [0m[35m│[0m[97m CloseWorkspace     [0m[90mclose this workspace[0m[97m                                  [0m[35m│[0m
+  [0m[35m│[0m[30m[46m NewWorkspace  create a new workspace                                     [0m[35m│[0m
+  [0m[35m│[0m[97m OpenClaude    [0m[90mopen claude chat[0m[97m                                           [0m[35m│[0m
+  [0m[35m│[0m[97m OpenCommits   [0m[90mbrowse commit history[0m[97m                                      [0m[35m│[0m
+  [0m[35m│[0m[97m OpenFile      [0m[90mopen a file[0m[97m                                                [0m[35m│[0m
+  [0m[35m│[0m[97m OpenReview    [0m[90mreview changed files[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m OpenRun       [0m[90mopen terminal[0m[97m                                              [0m[35m│[0m
+  [0m[35m│[0m[97m Quit          [0m[90mexit stoat[0m[97m                                                 [0m[35m│[0m
+  [0m[35m│[0m[97m Run           [0m[90mrun command[0m[97m                                                [0m[35m│[0m
+  [0m[35m│[0m[97m SplitDown     [0m[90msplit pane down[0m[97m                                            [0m[35m│[0m
+  [0m[35m│[0m[97m SplitRight    [0m[90msplit pane right[0m[97m                                           [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mDrop the in-progress todo list without executing it and return to commits[0m [0m[35m│[0m
-  [0m[35m│[0m[37mmode. No commits are rewritten.[0m                                           [0m[35m│[0m
+  [0m[35m│[0m[37mCreate a fresh workspace at the current workspace's git root. The new[0m     [0m[35m│[0m
+  [0m[35m│[0m[37mworkspace has default panes and no inherited buffers, Claude session, or[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mrebase state. The current workspace is saved and kept in the background;[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mthe new workspace becomes active.[0m                                         [0m[35m│[0m
   [0m[35m└──────────────────────────────────────────────────────────────────────────┘[0m
-
 
 
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

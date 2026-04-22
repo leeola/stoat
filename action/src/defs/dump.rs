@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
 use std::any::Any;
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -30,6 +30,10 @@ impl ActionDef for DumpDef {
 
     fn long_desc(&self) -> &'static str {
         "Write a compressed snapshot of the current repository (working tree + `.git/`) plus a metadata file to `$XDG_DATA_HOME/stoat/dumps/<timestamp>_<name>.tar.zst`. The name is sanitized into a path-safe slug."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
     }
 }
 

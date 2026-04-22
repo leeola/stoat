@@ -378,8 +378,8 @@ pub(crate) fn refilter(
         }
     }
 
-    prefix.sort_by_key(|e| e.def.name());
-    substring.sort_by_key(|e| e.def.name());
+    prefix.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
+    substring.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
     prefix.extend(substring);
     *filtered = prefix;
 
@@ -407,15 +407,64 @@ mod tests {
         filtered.iter().map(|e| e.def.name()).collect()
     }
 
+    fn priority_ord_of(name: &str) -> u8 {
+        registry::all()
+            .find(|e| e.def.name() == name)
+            .unwrap_or_else(|| panic!("action {name} not registered"))
+            .def
+            .priority()
+            .ord()
+    }
+
+    fn pos_in(listed: &[&'static str], name: &str) -> usize {
+        listed
+            .iter()
+            .position(|n| *n == name)
+            .unwrap_or_else(|| panic!("{name} missing from listing"))
+    }
+
     #[test]
-    fn empty_filter_lists_visible_actions_alphabetically() {
+    fn empty_filter_groups_by_priority_then_alphabetical() {
         let listed = names_for("");
         assert!(listed.contains(&"Quit"));
         assert!(listed.contains(&"OpenFile"));
         assert!(!listed.contains(&"OpenCommandPalette"));
-        let mut sorted = listed.clone();
+
+        let listed_with_prio: Vec<(u8, &&'static str)> =
+            listed.iter().map(|n| (priority_ord_of(n), n)).collect();
+        let mut sorted = listed_with_prio.clone();
         sorted.sort();
-        assert_eq!(listed, sorted);
+        assert_eq!(
+            listed_with_prio, sorted,
+            "listing not sorted by (priority, name)"
+        );
+    }
+
+    #[test]
+    fn priority_orders_within_prefix_tier() {
+        let listed = names_for("");
+        // `Run` is Common; `CloseCommits` is Normal. Alphabetically
+        // `CloseCommits` < `Run`, so without priority it would come first.
+        assert!(pos_in(&listed, "Run") < pos_in(&listed, "CloseCommits"));
+    }
+
+    #[test]
+    fn tier_boundary_dominates_priority() {
+        // `OpenRun` is Common but matches `"Run"` only as a substring, so it
+        // must sink below every prefix-tier match regardless of that match's
+        // priority (Common `Run`, Normal `RunSubmit`, etc.).
+        let listed = names_for("Run");
+        let open_run = pos_in(&listed, "OpenRun");
+        assert!(pos_in(&listed, "Run") < open_run);
+        assert!(pos_in(&listed, "RunSubmit") < open_run);
+        assert!(pos_in(&listed, "RunHistoryNext") < open_run);
+    }
+
+    #[test]
+    fn alphabetical_within_same_priority() {
+        let listed = names_for("");
+        assert!(pos_in(&listed, "CloseCommits") < pos_in(&listed, "CloseReview"));
+        assert!(pos_in(&listed, "CloseReview") < pos_in(&listed, "CloseWorkspace"));
     }
 
     #[test]
