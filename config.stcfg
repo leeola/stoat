@@ -259,14 +259,10 @@ on key {
     mode == space {
         Escape -> SetMode(normal);
         q -> Quit();
-        s -> SetMode(space_split);
+        a -> SetMode(space_pane_nav);
         t -> [OpenRun(), SetMode(run)];
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
-        h -> [FocusLeft(), SetMode(normal)];
-        j -> [FocusDown(), SetMode(normal)];
-        k -> [FocusUp(), SetMode(normal)];
-        l -> [FocusRight(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {
@@ -283,11 +279,20 @@ on key {
         Up -> RunHistoryPrev();
         Down -> RunHistoryNext();
     }
-    mode == space_split {
+    mode == space_pane_nav {
         Escape -> SetMode(normal);
-        r -> [SplitRight(), SetMode(normal)];
-        d -> [SplitDown(), SetMode(normal)];
-        c -> [ClosePane(), SetMode(normal)];
+        s -> [SplitRight(), SetMode(normal)];
+        v -> [SplitDown(), SetMode(normal)];
+        q -> [ClosePane(), SetMode(normal)];
+        w -> [FocusNext(), SetMode(normal)];
+        h -> [FocusLeft(), SetMode(normal)];
+        Left -> [FocusLeft(), SetMode(normal)];
+        j -> [FocusDown(), SetMode(normal)];
+        Down -> [FocusDown(), SetMode(normal)];
+        k -> [FocusUp(), SetMode(normal)];
+        Up -> [FocusUp(), SetMode(normal)];
+        l -> [FocusRight(), SetMode(normal)];
+        Right -> [FocusRight(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == claude {
