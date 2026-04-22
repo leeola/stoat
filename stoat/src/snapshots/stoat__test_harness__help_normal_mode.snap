@@ -14,20 +14,20 @@ size: 80x24
   [0m[36m│[0m[1m[30m[44m NOR [0m[97m[100m                                                                     [0m[36m│[0m
   [0m[36m│[0m[30m[46m   :  OpenCommandPalette  open [0m[90m│[0m [0m[1m[33mOpenCommandPalette[0m                       [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m [0m[36mbound: :[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  C[0m[97m  AddSelectionBelow  [0m[90madd cu│[0m [0m[97mopen the command palette[0m                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  L[0m[97m  OpenCommits  [0m[90mbrowse commi│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  R[0m[97m  OpenReview  [0m[90mreview change│[0m [0m[97mOpen an interactive list of every visible[0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36mSpc[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[97macti[0m[33m┌ help ──────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m [0m[97mnavi[0m[33m│[0m[36m      Esc[0m[97m   close helpEscape to[0m     [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m [0m[97mcanc[0m[33m│[0m[36m     i, a[0m[97m   prompt mode[0m             [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m     [0m[33m│[0m[36m      Ret[0m[97m   submit prompt input[0m     [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[1m[33mExam│[0m[1m[36m   [0m[36m j, Dn[0m[97m   next help entry[0m         [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  j[0m[97m  MoveDown  [0m[90mmove cursor dow│[0m [0m[90m  Op[0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m     [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m     [0m[33m│[0m[36m        g[0m[97m   jump to first help entry[0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m     [0m[33m│[0m[36m        G[0m[97m   jump to last help entry[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  q[0m[97m  Quit  [0m[90mclose pane or exit[0m[97m [0m[90m│[0m     [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m   [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  w[0m[97m  MoveNextWordStart  [0m[90mselect│[0m     [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m [0m[33m│[0m
-  [0m[36m│[0m                               [0m[90m│[0m     [0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m       [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  B[0m[97m  ExtendPrevWordStart  [0m[90mexte│[0m [0m[97mopen the command palette[0m                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  C[0m[97m  AddSelectionBelow  [0m[90madd cu│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  E[0m[97m  ExtendNextWordEnd  [0m[90mextend│[0m [0m[97mOpen an interactive list of every visible[0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  H[0m[97m  ExtendLeft  [0m[90mextend select│[0m [0m[97macti[0m[33m┌ help ──────────────────────────────┐[0m
+  [0m[36m│[0m[97m [0m[36m  J[0m[97m  ExtendDown  [0m[90mextend select│[0m [0m[97mnavi[0m[33m│[0m[36m      Esc[0m[97m   close helpEscape to[0m     [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  K[0m[97m  ExtendUp  [0m[90mextend selectio│[0m [0m[97mcanc[0m[33m│[0m[36m     i, a[0m[97m   prompt mode[0m             [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  L[0m[97m  ExtendRight  [0m[90mextend selec│[0m     [0m[33m│[0m[36m      Ret[0m[97m   submit prompt input[0m     [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  R[0m[97m  OpenReview  [0m[90mreview change│[0m [0m[1m[33mExam│[0m[1m[36m   [0m[36m j, Dn[0m[97m   next help entry[0m         [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36mSpc[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[90m  Op[0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m     [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  W[0m[97m  ExtendNextWordStart  [0m[90mexte│[0m     [0m[33m│[0m[36m        g[0m[97m   jump to first help entry[0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m     [0m[33m│[0m[36m        G[0m[97m   jump to last help entry[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m     [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m   [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m     [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m     [0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m       [0m[33m│[0m
   [0m[36m└─────────────────────────────────────[0m[33m└────────────────────────────────────┘[0m
 
 [0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

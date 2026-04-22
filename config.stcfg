@@ -146,8 +146,14 @@ on key {
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
+        H -> ExtendLeft();
+        J -> ExtendDown();
+        K -> ExtendUp();
+        L -> ExtendRight();
+        B -> ExtendPrevWordStart();
+        W -> ExtendNextWordStart();
+        E -> ExtendNextWordEnd();
         R -> OpenReview();
-        L -> OpenCommits();
     }
     mode == commits {
         Escape -> CloseCommits();

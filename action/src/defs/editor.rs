@@ -80,6 +80,76 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    ExtendLeftDef,
+    ExtendLeft,
+    "ExtendLeft",
+    ActionKind::ExtendLeft,
+    "extend selection left",
+    "Move every cursor head one grapheme left, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendRightDef,
+    ExtendRight,
+    "ExtendRight",
+    ActionKind::ExtendRight,
+    "extend selection right",
+    "Move every cursor head one grapheme right, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendUpDef,
+    ExtendUp,
+    "ExtendUp",
+    ActionKind::ExtendUp,
+    "extend selection up",
+    "Move every cursor head one display line up, keeping the tail fixed and preserving the goal column.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendDownDef,
+    ExtendDown,
+    "ExtendDown",
+    ActionKind::ExtendDown,
+    "extend selection down",
+    "Move every cursor head one display line down, keeping the tail fixed and preserving the goal column.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendNextWordStartDef,
+    ExtendNextWordStart,
+    "ExtendNextWordStart",
+    ActionKind::ExtendNextWordStart,
+    "extend selection to next word start",
+    "Extend each selection's head to the start of the next word, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendNextWordEndDef,
+    ExtendNextWordEnd,
+    "ExtendNextWordEnd",
+    ActionKind::ExtendNextWordEnd,
+    "extend selection to next word end",
+    "Extend each selection's head to the end of the next word, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendPrevWordStartDef,
+    ExtendPrevWordStart,
+    "ExtendPrevWordStart",
+    ActionKind::ExtendPrevWordStart,
+    "extend selection to previous word start",
+    "Extend each selection's head backward to the start of the previous word, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +180,24 @@ mod tests {
     }
 
     #[test]
+    fn extend_kinds_and_names() {
+        assert_eq!(ExtendLeft.kind(), ActionKind::ExtendLeft);
+        assert_eq!(ExtendLeft.def().name(), "ExtendLeft");
+        assert_eq!(ExtendRight.kind(), ActionKind::ExtendRight);
+        assert_eq!(ExtendRight.def().name(), "ExtendRight");
+        assert_eq!(ExtendUp.kind(), ActionKind::ExtendUp);
+        assert_eq!(ExtendUp.def().name(), "ExtendUp");
+        assert_eq!(ExtendDown.kind(), ActionKind::ExtendDown);
+        assert_eq!(ExtendDown.def().name(), "ExtendDown");
+        assert_eq!(ExtendNextWordStart.kind(), ActionKind::ExtendNextWordStart);
+        assert_eq!(ExtendNextWordStart.def().name(), "ExtendNextWordStart");
+        assert_eq!(ExtendNextWordEnd.kind(), ActionKind::ExtendNextWordEnd);
+        assert_eq!(ExtendNextWordEnd.def().name(), "ExtendNextWordEnd");
+        assert_eq!(ExtendPrevWordStart.kind(), ActionKind::ExtendPrevWordStart);
+        assert_eq!(ExtendPrevWordStart.def().name(), "ExtendPrevWordStart");
+    }
+
+    #[test]
     fn downcast() {
         let action: Box<dyn Action> = Box::new(AddSelectionBelow);
         assert!(action
@@ -118,5 +206,7 @@ mod tests {
             .is_some());
         let action: Box<dyn Action> = Box::new(MoveLeft);
         assert!(action.as_any().downcast_ref::<MoveLeft>().is_some());
+        let action: Box<dyn Action> = Box::new(ExtendLeft);
+        assert!(action.as_any().downcast_ref::<ExtendLeft>().is_some());
     }
 }

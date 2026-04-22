@@ -115,16 +115,31 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
-        ActionKind::MoveLeft => movement::move_horizontal(stoat, -1),
-        ActionKind::MoveRight => movement::move_horizontal(stoat, 1),
-        ActionKind::MoveUp => movement::move_vertical(stoat, -1),
-        ActionKind::MoveDown => movement::move_vertical(stoat, 1),
+        ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),
+        ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
+        ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),
+        ActionKind::MoveDown => movement::move_vertical(stoat, 1, false),
         ActionKind::MoveNextWordStart => {
-            movement::move_word(stoat, movement::WordTarget::NextStart)
+            movement::move_word(stoat, movement::WordTarget::NextStart, false)
         },
-        ActionKind::MoveNextWordEnd => movement::move_word(stoat, movement::WordTarget::NextEnd),
+        ActionKind::MoveNextWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::NextEnd, false)
+        },
         ActionKind::MovePrevWordStart => {
-            movement::move_word(stoat, movement::WordTarget::PrevStart)
+            movement::move_word(stoat, movement::WordTarget::PrevStart, false)
+        },
+        ActionKind::ExtendLeft => movement::move_horizontal(stoat, -1, true),
+        ActionKind::ExtendRight => movement::move_horizontal(stoat, 1, true),
+        ActionKind::ExtendUp => movement::move_vertical(stoat, -1, true),
+        ActionKind::ExtendDown => movement::move_vertical(stoat, 1, true),
+        ActionKind::ExtendNextWordStart => {
+            movement::move_word(stoat, movement::WordTarget::NextStart, true)
+        },
+        ActionKind::ExtendNextWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::NextEnd, true)
+        },
+        ActionKind::ExtendPrevWordStart => {
+            movement::move_word(stoat, movement::WordTarget::PrevStart, true)
         },
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
@@ -359,8 +374,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use stoat_action::{
-        AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
+        AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
+        ExtendPrevWordStart, ExtendRight, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd,
+        MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -717,6 +733,136 @@ mod tests {
         );
         let after_two = cursor_display_positions(&mut stoat);
         assert_eq!(after_two, vec![(0, 0), (0, 7), (1, 2), (2, 7)]);
+    }
+
+    #[test]
+    fn extend_right_grows_selection_from_cursor() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 1, false)]);
+    }
+
+    #[test]
+    fn extend_right_further_keeps_tail() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abcdef");
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+    }
+
+    #[test]
+    fn extend_right_at_end_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "ab");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+    }
+
+    #[test]
+    fn extend_left_across_tail_flips_reversed() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abcdef");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 4, false)]);
+        dispatch(&mut stoat, &ExtendLeft);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 3, false)]);
+        dispatch(&mut stoat, &ExtendLeft);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        dispatch(&mut stoat, &ExtendLeft);
+        assert_eq!(selection_spans(&mut stoat), vec![(1, 2, true)]);
+    }
+
+    #[test]
+    fn extend_down_preserves_goal_column() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+        for _ in 0..7 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 7)]);
+        dispatch(&mut stoat, &ExtendDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 2)]);
+        dispatch(&mut stoat, &ExtendDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(2, 7)]);
+    }
+
+    #[test]
+    fn extend_down_at_last_row_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &ExtendDown);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+    }
+
+    #[test]
+    fn extend_up_from_second_line_grows_backward() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        dispatch(&mut stoat, &MoveDown);
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(5, 5, false)]);
+        dispatch(&mut stoat, &ExtendUp);
+        assert_eq!(selection_spans(&mut stoat), vec![(1, 5, true)]);
+    }
+
+    #[test]
+    fn extend_next_word_start_grows_selection_from_cursor() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &ExtendNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+    }
+
+    #[test]
+    fn extend_next_word_start_repeated_keeps_tail() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar baz");
+        dispatch(&mut stoat, &ExtendNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        dispatch(&mut stoat, &ExtendNextWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 7, false)]);
+    }
+
+    #[test]
+    fn extend_next_word_end_grows_selection_from_cursor() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &ExtendNextWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+    }
+
+    #[test]
+    fn extend_prev_word_start_keeps_tail_at_cursor() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..6 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(selection_spans(&mut stoat), vec![(6, 6, false)]);
+        dispatch(&mut stoat, &ExtendPrevWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(4, 6, true)]);
+    }
+
+    #[test]
+    fn extend_right_with_multiple_cursors_grows_each() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(
+            selection_spans(&mut stoat),
+            vec![(0, 1, false), (4, 5, false)]
+        );
     }
 
     #[test]

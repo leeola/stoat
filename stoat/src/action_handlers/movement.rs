@@ -3,8 +3,11 @@ use crate::{
     app::{Stoat, UpdateEffect},
     display_map::DisplayPoint,
     editor_state::EditorState,
+    multi_buffer::MultiBufferSnapshot,
 };
-use stoat_text::{next_word_end, next_word_start, prev_word_start, Bias, Selection, SelectionGoal};
+use stoat_text::{
+    next_word_end, next_word_start, prev_word_start, Anchor, Bias, Selection, SelectionGoal,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub(super) enum MoveNavigation {
@@ -173,7 +176,7 @@ pub(super) fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -197,14 +200,24 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
             return sel.clone();
         }
         let anchor = buffer_snapshot.anchor_at(new_offset, Bias::Right);
-        let mut new = sel.clone();
-        new.collapse_to(anchor, SelectionGoal::None);
-        new
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                new_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        }
     });
     UpdateEffect::Redraw
 }
 
-pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -232,14 +245,24 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         };
         let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
         let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
-        let mut new = sel.clone();
-        new.collapse_to(anchor, SelectionGoal::Column(goal_col));
-        new
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                offset,
+                SelectionGoal::Column(goal_col),
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::Column(goal_col));
+            new
+        }
     });
     UpdateEffect::Redraw
 }
 
-pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
+pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -256,6 +279,26 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
         if target_offset == head_offset {
             return sel.clone();
         }
+
+        if extend {
+            let new_head_offset = if target_offset > head_offset {
+                rope.reversed_chars_at(target_offset)
+                    .next()
+                    .map(|ch| target_offset - ch.len_utf8())
+                    .unwrap_or(target_offset)
+            } else {
+                target_offset
+            };
+            let head_anchor = buffer_snapshot.anchor_at(new_head_offset, Bias::Right);
+            return extend_head(
+                sel,
+                head_anchor,
+                new_head_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            );
+        }
+
         if target_offset > head_offset {
             let end_offset = rope
                 .reversed_chars_at(target_offset)
@@ -288,4 +331,27 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget) -> UpdateEffect {
         }
     });
     UpdateEffect::Redraw
+}
+
+fn extend_head(
+    sel: &Selection<Anchor>,
+    new_head: Anchor,
+    new_head_offset: usize,
+    goal: SelectionGoal,
+    buffer: &MultiBufferSnapshot,
+) -> Selection<Anchor> {
+    let tail_anchor = sel.tail();
+    let tail_offset = buffer.resolve_anchor(&tail_anchor);
+    let mut new = sel.clone();
+    new.goal = goal;
+    if new_head_offset < tail_offset {
+        new.start = new_head;
+        new.end = tail_anchor;
+        new.reversed = true;
+    } else {
+        new.start = tail_anchor;
+        new.end = new_head;
+        new.reversed = false;
+    }
+    new
 }

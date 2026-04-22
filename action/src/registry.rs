@@ -11,8 +11,9 @@ use crate::{
         },
         dump::Dump,
         editor::{
-            AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-            MovePrevWordStart, MoveRight, MoveUp,
+            AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
+            ExtendPrevWordStart, ExtendRight, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd,
+            MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
         },
         file::OpenFile,
         help::{
@@ -166,6 +167,17 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MoveNextWordStart::DEF, |_| Ok(Box::new(MoveNextWordStart)));
     add(MoveNextWordEnd::DEF, |_| Ok(Box::new(MoveNextWordEnd)));
     add(MovePrevWordStart::DEF, |_| Ok(Box::new(MovePrevWordStart)));
+    add(ExtendLeft::DEF, |_| Ok(Box::new(ExtendLeft)));
+    add(ExtendRight::DEF, |_| Ok(Box::new(ExtendRight)));
+    add(ExtendUp::DEF, |_| Ok(Box::new(ExtendUp)));
+    add(ExtendDown::DEF, |_| Ok(Box::new(ExtendDown)));
+    add(ExtendNextWordStart::DEF, |_| {
+        Ok(Box::new(ExtendNextWordStart))
+    });
+    add(ExtendNextWordEnd::DEF, |_| Ok(Box::new(ExtendNextWordEnd)));
+    add(ExtendPrevWordStart::DEF, |_| {
+        Ok(Box::new(ExtendPrevWordStart))
+    });
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -455,10 +467,11 @@ mod tests {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
         // + 1 PaletteScopeToggle + 2 run-history actions
-        // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll.
+        // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
+        // + 7 extend-selection variants.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 105);
+        assert_eq!(all().count(), 112);
     }
 
     #[test]
