@@ -4,6 +4,7 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders, Widget},
 };
+use std::collections::HashMap;
 
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
@@ -22,8 +23,10 @@ pub(crate) fn render_hints(
         return;
     }
 
-    let key_width = bindings.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    let action_width = bindings.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
+    let rows = group_by_action(bindings);
+
+    let key_width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let action_width = rows.iter().map(|(_, a)| a.len()).max().unwrap_or(0);
     let gap = 3;
     let bindings_width = key_width + gap + action_width;
     let border_pad = 2;
@@ -32,7 +35,7 @@ pub(crate) fn render_hints(
     let content_width = bindings_width.max(title_width).max(footer_width);
     let extra_rows = footer.map(|_| 2).unwrap_or(0);
     let box_width = (content_width + border_pad) as u16;
-    let box_height = (bindings.len() + border_pad + extra_rows) as u16;
+    let box_height = (rows.len() + border_pad + extra_rows) as u16;
 
     if box_width > area.width || box_height > area.height {
         return;
@@ -54,7 +57,7 @@ pub(crate) fn render_hints(
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
 
-    for (i, (key, action)) in bindings.iter().enumerate() {
+    for (i, (key, action)) in rows.iter().enumerate() {
         let row = inner.y + i as u16;
         if row >= inner.y + inner.height {
             break;
@@ -77,7 +80,7 @@ pub(crate) fn render_hints(
     }
 
     if let Some(footer) = footer {
-        let sep_row = inner.y + bindings.len() as u16;
+        let sep_row = inner.y + rows.len() as u16;
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
             let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
@@ -96,4 +99,23 @@ pub(crate) fn render_hints(
             }
         }
     }
+}
+
+/// Collapses entries that share an action description, joining their keys with
+/// `", "` in first-seen order. Ensures each action appears on exactly one row.
+fn group_by_action<'a>(bindings: &'a [(&str, String)]) -> Vec<(String, &'a str)> {
+    let mut rows: Vec<(String, &'a str)> = Vec::new();
+    let mut index: HashMap<&'a str, usize> = HashMap::new();
+    for (key, action) in bindings {
+        let action = action.as_str();
+        if let Some(&i) = index.get(action) {
+            let row = &mut rows[i];
+            row.0.push_str(", ");
+            row.0.push_str(key);
+        } else {
+            index.insert(action, rows.len());
+            rows.push((key.to_string(), action));
+        }
+    }
+    rows
 }
