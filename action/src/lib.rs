@@ -6,7 +6,7 @@ pub mod registry;
 
 pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
-    app::Quit,
+    app::{Quit, QuitAll},
     claude::{
         ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
         ToggleDockLeft, ToggleDockRight,

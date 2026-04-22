@@ -4,6 +4,34 @@ use crate::{
     pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
 };
 
+/// Closes the focused pane and disposes its backing view state. Returns
+/// `false` when the pane tree refused to close (only one split pane
+/// remains); in that case no state is touched so callers can choose to
+/// exit the application instead.
+pub(super) fn close_focused_pane(stoat: &mut Stoat) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let view = ws.panes.pane(focused).view.clone();
+    if !ws.panes.close(focused) {
+        return false;
+    }
+    match view {
+        View::Editor(id) => {
+            ws.editors.remove(id);
+        },
+        View::Run(id) => {
+            if let Some(mut state) = ws.runs.remove(id) {
+                if let Some(handle) = &mut state.shell_handle {
+                    handle.kill();
+                }
+                state.dispose(ws);
+            }
+        },
+        View::Label(_) | View::Claude(_) => {},
+    }
+    true
+}
+
 pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();

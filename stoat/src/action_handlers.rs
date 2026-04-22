@@ -33,7 +33,15 @@ use stoat_action::{
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     let effect = match action.kind() {
-        ActionKind::Quit => UpdateEffect::Quit,
+        ActionKind::Quit => {
+            if pane::close_focused_pane(stoat) {
+                UpdateEffect::Redraw
+            } else {
+                UpdateEffect::Quit
+            }
+        },
+        // FIXME: prompt on unsaved buffers once dirty tracking exists
+        ActionKind::QuitAll => UpdateEffect::Quit,
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::FocusLeft => {
@@ -67,26 +75,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ClosePane => {
-            let ws = stoat.active_workspace_mut();
-            let focused = ws.panes.focus();
-            match ws.panes.pane(focused).view {
-                View::Editor(id) => {
-                    ws.panes.close(focused);
-                    ws.editors.remove(id);
-                },
-                View::Run(id) => {
-                    ws.panes.close(focused);
-                    if let Some(mut state) = ws.runs.remove(id) {
-                        if let Some(handle) = &mut state.shell_handle {
-                            handle.kill();
-                        }
-                        state.dispose(ws);
-                    }
-                },
-                View::Label(_) | View::Claude(_) => {
-                    ws.panes.close(focused);
-                },
-            }
+            pane::close_focused_pane(stoat);
             UpdateEffect::Redraw
         },
         ActionKind::OpenFile => {
@@ -371,7 +360,7 @@ mod tests {
     use std::sync::Arc;
     use stoat_action::{
         AddSelectionBelow, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordStart, MoveRight, MoveUp, Quit,
+        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -468,6 +457,24 @@ mod tests {
     #[test]
     fn dispatch_quit() {
         assert_eq!(dispatch(&mut stoat(), &Quit), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn dispatch_quit_with_splits_closes_pane() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        assert_eq!(stoat.active_workspace().panes.pane_count(), 2);
+        assert_eq!(dispatch(&mut stoat, &Quit), UpdateEffect::Redraw);
+        assert_eq!(stoat.active_workspace().panes.pane_count(), 1);
+    }
+
+    #[test]
+    fn dispatch_quit_all_exits_with_splits() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        dispatch(&mut stoat, &SplitRight);
+        assert_eq!(stoat.active_workspace().panes.pane_count(), 3);
+        assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Quit);
     }
 
     #[test]

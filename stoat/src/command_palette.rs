@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_filter() {
-        assert_eq!(names_for("quit"), vec!["Quit"]);
+        assert_eq!(names_for("quit"), vec!["Quit", "QuitAll"]);
     }
 
     #[test]
@@ -497,8 +497,8 @@ mod tests {
             &mut filtered,
             &mut selected,
         );
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(selected, 0);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(selected, 1);
     }
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_filter_narrows_to_one() {
         let mut h = crate::Stoat::test();
-        h.type_text(":quit");
+        h.type_text(":quitA");
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 

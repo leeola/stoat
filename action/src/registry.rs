@@ -1,6 +1,6 @@
 use crate::{
     defs::{
-        app::Quit,
+        app::{Quit, QuitAll},
         claude::{
             ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
             ToggleDockLeft, ToggleDockRight,
@@ -65,6 +65,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     };
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
+    add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(FocusLeft::DEF, |_| Ok(Box::new(FocusLeft)));
@@ -295,6 +296,7 @@ mod tests {
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
+        "QuitAll",
         "SplitRight",
         "SplitDown",
         "FocusLeft",
@@ -453,10 +455,10 @@ mod tests {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
         // + 1 PaletteScopeToggle + 2 run-history actions
-        // + 7 help plumbing actions + 1 CloseHelp.
+        // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 104);
+        assert_eq!(all().count(), 105);
     }
 
     #[test]

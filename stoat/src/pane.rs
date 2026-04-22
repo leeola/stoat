@@ -952,6 +952,14 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_quit_closes_one_split() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("Quit()");
+        h.assert_snapshot("quit_closes_one_split");
+    }
+
+    #[test]
     fn snapshot_split_right_focus_left() {
         let mut h = crate::Stoat::test();
         h.type_action("SplitRight()");

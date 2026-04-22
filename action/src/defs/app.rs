@@ -5,8 +5,18 @@ define_action!(
     Quit,
     "Quit",
     ActionKind::Quit,
-    "exit stoat",
-    "Exit the application, closing all panes and viewports.",
+    "close pane or exit",
+    "Close the focused pane. Exit the application when closing the last remaining pane.",
+    ActionPriority::Common
+);
+
+define_action!(
+    QuitAllDef,
+    QuitAll,
+    "QuitAll",
+    ActionKind::QuitAll,
+    "exit stoat, closing all panes",
+    "Exit the application immediately, closing every pane and viewport. See also Quit, which closes the current pane and only exits when it is the last.",
     ActionPriority::Common
 );
 
@@ -20,7 +30,15 @@ mod tests {
         assert_eq!(Quit.kind(), ActionKind::Quit);
         assert_eq!(Quit.def().name(), "Quit");
         assert!(Quit.def().params().is_empty());
-        assert_eq!(Quit.def().short_desc(), "exit stoat");
+        assert_eq!(Quit.def().short_desc(), "close pane or exit");
+    }
+
+    #[test]
+    fn quit_all() {
+        assert_eq!(QuitAll.kind(), ActionKind::QuitAll);
+        assert_eq!(QuitAll.def().name(), "QuitAll");
+        assert!(QuitAll.def().params().is_empty());
+        assert_eq!(QuitAll.def().short_desc(), "exit stoat, closing all panes");
     }
 
     #[test]

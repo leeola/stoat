@@ -18,10 +18,10 @@ size: 80x24
   [0m[35m│[0m[97m OpenFile      [0m[90mopen a file[0m[97m                                                [0m[35m│[0m
   [0m[35m│[0m[97m OpenReview    [0m[90mreview changed files[0m[97m                                       [0m[35m│[0m
   [0m[35m│[0m[97m OpenRun       [0m[90mopen terminal[0m[97m                                              [0m[35m│[0m
-  [0m[35m│[0m[97m Quit          [0m[90mexit stoat[0m[97m                                                 [0m[35m│[0m
+  [0m[35m│[0m[97m Quit          [0m[90mclose pane or exit[0m[97m                                         [0m[35m│[0m
+  [0m[35m│[0m[97m QuitAll       [0m[90mexit stoat, closing all panes[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[97m Run           [0m[90mrun command[0m[97m                                                [0m[35m│[0m
   [0m[35m│[0m[97m SplitDown     [0m[90msplit pane down[0m[97m                                            [0m[35m│[0m
-  [0m[35m│[0m[97m SplitRight    [0m[90msplit pane right[0m[97m                                           [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mCreate a fresh workspace at the current workspace's git root. The new[0m     [0m[35m│[0m
   [0m[35m│[0m[37mworkspace has default panes and no inherited buffers, Claude session, or[0m  [0m[35m│[0m

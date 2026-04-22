@@ -551,7 +551,7 @@ mod tests {
         open_help_with(&mut h, sample_active());
         send_key(&mut h, key(KeyCode::BackTab));
         type_str(&mut h, "exit stoat");
-        assert_eq!(filtered_names(&h), vec!["Quit"]);
+        assert_eq!(filtered_names(&h), vec!["QuitAll"]);
     }
 
     #[test]
