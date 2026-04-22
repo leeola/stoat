@@ -21,11 +21,18 @@ pub use defs::{
         MovePrevWordStart, MoveRight, MoveUp,
     },
     file::OpenFile,
-    help::OpenHelp,
+    help::{
+        CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
+        HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+    },
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitRight,
+    },
+    prompt::{
+        CancelPromptInput, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
+        SubmitPromptInput,
     },
     rebase::{
         AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -41,7 +48,7 @@ pub use defs::{
         ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
         ReviewToggleStage, ReviewUnstageChunk,
     },
-    run::{OpenRun, Run, RunInterrupt, RunSubmit},
+    run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, SwitchWorkspace},
 };
 pub use kind::ActionKind;

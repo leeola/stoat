@@ -1,10 +1,11 @@
 use crate::{
+    input_view::{InputView, SubmitTarget},
     keymap::{ResolvedAction, ResolvedArg},
-    run::CommandBuffer,
+    workspace::Workspace,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use stoat_action::{registry, ActionDef, ActionKind, ParamDef, ParamValue};
 use stoat_config::Value;
+use stoat_scheduler::Executor;
 
 /// Synthetic [`ActionDef`] used to surface `SetMode` keybindings in help.
 /// `SetMode` is handled specially in [`crate::app::Stoat::handle_key`] and
@@ -51,9 +52,13 @@ static SET_MODE_PARAMS: &[ParamDef] = &[ParamDef {
 }];
 
 pub struct Help {
-    input: CommandBuffer,
-    input_mode: HelpInput,
+    pub(crate) input: InputView,
     scope: HelpScope,
+    /// Mode to restore when the help modal closes. Saved at `new()` time so
+    /// `close_help` in the action-handler layer can transition
+    /// [`crate::app::Stoat::mode`] back to whatever the user was in before
+    /// `?` was pressed.
+    pub(crate) previous_mode: String,
     snapshot_mode: String,
     active: Vec<(String, Vec<ResolvedAction>)>,
     entries: Vec<HelpEntry>,
@@ -66,6 +71,17 @@ pub struct Help {
 pub enum HelpInput {
     Insert,
     Normal,
+}
+
+/// Derive the help "sub-mode" from the global [`crate::app::Stoat::mode`].
+/// `"prompt"` maps to [`HelpInput::Insert`] (user is typing into the search
+/// field); anything else maps to [`HelpInput::Normal`] (user is navigating
+/// the list with hjkl).
+pub fn help_input_mode(stoat_mode: &str) -> HelpInput {
+    match stoat_mode {
+        "prompt" => HelpInput::Insert,
+        _ => HelpInput::Normal,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +103,18 @@ pub enum HelpOutcome {
 }
 
 impl Help {
-    pub fn new(snapshot_mode: &str, active: Vec<(String, Vec<ResolvedAction>)>) -> Self {
+    pub fn new(
+        snapshot_mode: &str,
+        active: Vec<(String, Vec<ResolvedAction>)>,
+        ws: &mut Workspace,
+        executor: Executor,
+        previous_mode: String,
+    ) -> Self {
+        let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "prompt", 1);
         let mut help = Self {
-            input: CommandBuffer::new(),
-            input_mode: HelpInput::Insert,
+            input,
             scope: HelpScope::Active,
+            previous_mode,
             snapshot_mode: snapshot_mode.to_owned(),
             active,
             entries: Vec::new(),
@@ -103,16 +126,18 @@ impl Help {
         help
     }
 
-    pub fn input(&self) -> &str {
-        self.input.as_str()
+    pub fn input_text(&self, ws: &Workspace) -> String {
+        self.input.text(ws)
     }
 
-    pub fn input_cursor_column(&self) -> usize {
-        self.input.cursor_column()
+    pub fn input_cursor_column(&self, ws: &mut Workspace) -> usize {
+        self.input.cursor_column(ws)
     }
 
-    pub fn input_mode(&self) -> HelpInput {
-        self.input_mode
+    /// Remove the underlying scratch editor. Called when the help modal is
+    /// closed so the slot does not linger in the workspace.
+    pub(crate) fn dispose(&self, ws: &mut Workspace) {
+        self.input.dispose(ws);
     }
 
     pub fn scope(&self) -> HelpScope {
@@ -144,141 +169,35 @@ impl Help {
         self.detail_scroll
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> HelpOutcome {
-        match self.input_mode {
-            HelpInput::Insert => self.handle_insert_key(key),
-            HelpInput::Normal => self.handle_normal_key(key),
-        }
+    /// Refilter the help entries against the current input text. Called from
+    /// `handle_insert_key` after the global prompt-mode short-circuit mutates
+    /// the help input's buffer, so the list stays in sync without a dedicated
+    /// post-edit hook.
+    pub(crate) fn sync_filter(&mut self, ws: &Workspace) {
+        self.refilter(ws);
     }
 
-    fn handle_insert_key(&mut self, key: KeyEvent) -> HelpOutcome {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-
-        match key.code {
-            KeyCode::Esc => {
-                self.input_mode = HelpInput::Normal;
-                HelpOutcome::None
-            },
-            KeyCode::Enter => self.dispatch_selected(),
-            KeyCode::Up => {
-                self.move_selection(-1);
-                HelpOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                HelpOutcome::None
-            },
-            KeyCode::Char('p') if ctrl => {
-                self.move_selection(-1);
-                HelpOutcome::None
-            },
-            KeyCode::Char('n') if ctrl => {
-                self.move_selection(1);
-                HelpOutcome::None
-            },
-            KeyCode::Char('u') if ctrl => {
-                self.scroll_detail(-5);
-                HelpOutcome::None
-            },
-            KeyCode::Char('d') if ctrl => {
-                self.scroll_detail(5);
-                HelpOutcome::None
-            },
-            KeyCode::PageUp => {
-                self.scroll_detail(-5);
-                HelpOutcome::None
-            },
-            KeyCode::PageDown => {
-                self.scroll_detail(5);
-                HelpOutcome::None
-            },
-            KeyCode::BackTab => {
-                self.toggle_scope();
-                HelpOutcome::None
-            },
-            KeyCode::Backspace => {
-                self.input.delete_backward();
-                self.refilter();
-                HelpOutcome::None
-            },
-            KeyCode::Left => {
-                self.input.move_left();
-                HelpOutcome::None
-            },
-            KeyCode::Right => {
-                self.input.move_right();
-                HelpOutcome::None
-            },
-            KeyCode::Home => {
-                self.input.move_home();
-                HelpOutcome::None
-            },
-            KeyCode::End => {
-                self.input.move_end();
-                HelpOutcome::None
-            },
-            KeyCode::Char(c) if !ctrl && !alt => {
-                self.input.insert_char(c);
-                self.refilter();
-                HelpOutcome::None
-            },
-            _ => HelpOutcome::None,
-        }
+    pub(crate) fn dispatch_selected_pub(&self) -> HelpOutcome {
+        self.dispatch_selected_inner()
     }
 
-    fn handle_normal_key(&mut self, key: KeyEvent) -> HelpOutcome {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-        match key.code {
-            KeyCode::Esc => HelpOutcome::Close,
-            KeyCode::Char('i') if !ctrl => {
-                self.input_mode = HelpInput::Insert;
-                HelpOutcome::None
-            },
-            KeyCode::Enter => self.dispatch_selected(),
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.move_selection(1);
-                HelpOutcome::None
-            },
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.move_selection(-1);
-                HelpOutcome::None
-            },
-            KeyCode::Char('g') if !ctrl => {
-                self.jump_selection(0);
-                HelpOutcome::None
-            },
-            KeyCode::Char('G') if !ctrl => {
-                let last = self.filtered.len().saturating_sub(1);
-                self.jump_selection(last);
-                HelpOutcome::None
-            },
-            KeyCode::Char('u') if ctrl => {
-                self.scroll_detail(-5);
-                HelpOutcome::None
-            },
-            KeyCode::Char('d') if ctrl => {
-                self.scroll_detail(5);
-                HelpOutcome::None
-            },
-            KeyCode::PageUp => {
-                self.scroll_detail(-5);
-                HelpOutcome::None
-            },
-            KeyCode::PageDown => {
-                self.scroll_detail(5);
-                HelpOutcome::None
-            },
-            KeyCode::BackTab => {
-                self.toggle_scope();
-                HelpOutcome::None
-            },
-            _ => HelpOutcome::None,
-        }
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        self.move_selection_inner(delta);
     }
 
-    fn dispatch_selected(&mut self) -> HelpOutcome {
+    pub(crate) fn jump_selection(&mut self, target: usize) {
+        self.jump_selection_inner(target);
+    }
+
+    pub(crate) fn scroll_detail(&mut self, delta: i32) {
+        self.scroll_detail_inner(delta);
+    }
+
+    pub(crate) fn toggle_scope_pub(&mut self, ws: &Workspace) {
+        self.toggle_scope(ws);
+    }
+
+    fn dispatch_selected_inner(&self) -> HelpOutcome {
         let Some(entry) = self.selected_entry() else {
             return HelpOutcome::None;
         };
@@ -303,7 +222,7 @@ impl Help {
         HelpOutcome::Dispatch(registry_entry, values)
     }
 
-    fn move_selection(&mut self, delta: i32) {
+    fn move_selection_inner(&mut self, delta: i32) {
         if self.filtered.is_empty() {
             self.selected = 0;
             return;
@@ -313,12 +232,12 @@ impl Help {
         self.detail_scroll = 0;
     }
 
-    fn jump_selection(&mut self, target: usize) {
+    fn jump_selection_inner(&mut self, target: usize) {
         self.selected = target.min(self.filtered.len().saturating_sub(1));
         self.detail_scroll = 0;
     }
 
-    fn scroll_detail(&mut self, delta: i32) {
+    fn scroll_detail_inner(&mut self, delta: i32) {
         if delta < 0 {
             self.detail_scroll = self.detail_scroll.saturating_sub((-delta) as u16);
         } else {
@@ -326,24 +245,35 @@ impl Help {
         }
     }
 
-    fn toggle_scope(&mut self) {
+    fn toggle_scope(&mut self, ws: &Workspace) {
         self.scope = match self.scope {
             HelpScope::Active => HelpScope::All,
             HelpScope::All => HelpScope::Active,
         };
-        self.rebuild_entries();
+        self.entries = match self.scope {
+            HelpScope::Active => build_active_entries(&self.active),
+            HelpScope::All => build_all_entries(),
+        };
+        self.refilter(ws);
     }
 
+    /// Rebuild entries from the current scope. Called at construction, before
+    /// a workspace is available for reading the input rope, so the refilter
+    /// step assumes an empty needle.
     fn rebuild_entries(&mut self) {
         self.entries = match self.scope {
             HelpScope::Active => build_active_entries(&self.active),
             HelpScope::All => build_all_entries(),
         };
-        self.refilter();
+        self.filtered = (0..self.entries.len()).collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+        self.detail_scroll = 0;
     }
 
-    fn refilter(&mut self) {
-        let needle = self.input.as_str().to_lowercase();
+    fn refilter(&mut self, ws: &Workspace) {
+        let needle = self.input.text(ws).to_lowercase();
 
         if needle.is_empty() {
             // Preserve entries order (sorted by key label for Active, by name
@@ -476,6 +406,8 @@ pub fn format_arg(arg: &ResolvedArg) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_harness::TestHarness;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -522,30 +454,64 @@ mod tests {
         ]
     }
 
-    fn type_str(help: &mut Help, s: &str) {
+    /// Open a help modal in the given test harness with the supplied synthetic
+    /// `active` bindings. Also transitions `stoat.mode` to `"prompt"` so help
+    /// starts in its Insert sub-mode, matching the real `OpenHelp` handler.
+    fn open_help_with(h: &mut TestHarness, active: Vec<(String, Vec<ResolvedAction>)>) {
+        let previous_mode = h.stoat.mode.clone();
+        let executor = h.stoat.executor.clone();
+        let active_idx = h.stoat.active_workspace;
+        let ws = &mut h.stoat.workspaces[active_idx];
+        h.stoat.help = Some(Help::new("normal", active, ws, executor, previous_mode));
+        h.stoat.mode = "prompt".into();
+    }
+
+    /// Dispatch a key through the test harness's top-level key handler so
+    /// typing flows through `dispatch_help_key` with workspace access.
+    fn send_key(h: &mut TestHarness, key: KeyEvent) {
+        use crossterm::event::Event;
+        h.stoat.update(Event::Key(key));
+    }
+
+    fn type_str(h: &mut TestHarness, s: &str) {
         for ch in s.chars() {
-            help.handle_key(key(KeyCode::Char(ch)));
+            send_key(h, key(KeyCode::Char(ch)));
         }
     }
 
-    fn selected_name(help: &Help) -> Option<&'static str> {
-        help.selected_entry().map(|e| e.def.name())
+    fn help_ref(h: &TestHarness) -> &Help {
+        h.stoat.help.as_ref().expect("help open")
     }
 
-    fn filtered_names(help: &Help) -> Vec<&'static str> {
+    fn filtered_names(h: &TestHarness) -> Vec<&'static str> {
+        let help = help_ref(h);
         help.filtered()
             .iter()
             .map(|&i| help.entries()[i].def.name())
             .collect()
     }
 
+    fn selected_name(h: &TestHarness) -> Option<&'static str> {
+        help_ref(h).selected_entry().map(|e| e.def.name())
+    }
+
+    fn input_text(h: &mut TestHarness) -> String {
+        let active_idx = h.stoat.active_workspace;
+        let ws = &h.stoat.workspaces[active_idx];
+        help_ref(h).input_text(ws)
+    }
+
     #[test]
     fn new_active_scope_snapshots_mode_and_bindings() {
-        let help = Help::new("normal", sample_active());
-        assert_eq!(help.snapshot_mode(), "normal");
-        assert_eq!(help.scope(), HelpScope::Active);
-        assert_eq!(help.input_mode(), HelpInput::Insert);
-        let names = filtered_names(&help);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        {
+            let help = help_ref(&h);
+            assert_eq!(help.snapshot_mode(), "normal");
+            assert_eq!(help.scope(), HelpScope::Active);
+        }
+        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
+        let names = filtered_names(&h);
         assert!(names.contains(&"Quit"));
         assert!(names.contains(&"MoveDown"));
         assert_eq!(names.len(), 5);
@@ -553,10 +519,11 @@ mod tests {
 
     #[test]
     fn new_all_scope_after_toggle_lists_palette_visible_actions() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::BackTab));
-        assert_eq!(help.scope(), HelpScope::All);
-        let names = filtered_names(&help);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::BackTab));
+        assert_eq!(help_ref(&h).scope(), HelpScope::All);
+        let names = filtered_names(&h);
         assert!(names.contains(&"Quit"));
         assert!(names.contains(&"OpenFile"));
         assert!(!names.contains(&"OpenCommandPalette"));
@@ -565,13 +532,13 @@ mod tests {
 
     #[test]
     fn typing_filters_by_name_prefix() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::BackTab));
-        type_str(&mut help, "Foc");
-        let names = filtered_names(&help);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::BackTab));
+        type_str(&mut h, "Foc");
+        let names = filtered_names(&h);
         assert!(!names.is_empty());
         assert!(names.contains(&"FocusLeft"));
-        // Name-prefix matches rank ahead of other buckets.
         assert!(
             names[0].starts_with("Focus"),
             "expected name-prefix hit first, got {names:?}"
@@ -580,185 +547,189 @@ mod tests {
 
     #[test]
     fn typing_filters_by_short_desc_substring() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::BackTab));
-        type_str(&mut help, "exit stoat");
-        let names = filtered_names(&help);
-        assert_eq!(names, vec!["Quit"]);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::BackTab));
+        type_str(&mut h, "exit stoat");
+        assert_eq!(filtered_names(&h), vec!["Quit"]);
     }
 
     #[test]
     fn typing_filters_by_key_label() {
-        let mut help = Help::new("normal", sample_active());
-        type_str(&mut help, "j");
-        let names = filtered_names(&help);
-        assert!(names.contains(&"MoveDown"));
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        type_str(&mut h, "j");
+        assert!(filtered_names(&h).contains(&"MoveDown"));
     }
 
     #[test]
     fn shift_tab_toggles_scope() {
-        let mut help = Help::new("normal", sample_active());
-        assert_eq!(help.scope(), HelpScope::Active);
-        help.handle_key(key(KeyCode::BackTab));
-        assert_eq!(help.scope(), HelpScope::All);
-        help.handle_key(key(KeyCode::BackTab));
-        assert_eq!(help.scope(), HelpScope::Active);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        assert_eq!(help_ref(&h).scope(), HelpScope::Active);
+        send_key(&mut h, key(KeyCode::BackTab));
+        assert_eq!(help_ref(&h).scope(), HelpScope::All);
+        send_key(&mut h, key(KeyCode::BackTab));
+        assert_eq!(help_ref(&h).scope(), HelpScope::Active);
     }
 
     #[test]
     fn down_up_move_selection_and_reset_scroll() {
-        let mut help = Help::new("normal", sample_active());
-        help.detail_scroll = 7;
-        help.handle_key(key(KeyCode::Down));
-        assert_eq!(help.selected(), 1);
-        assert_eq!(help.detail_scroll(), 0);
-        help.detail_scroll = 3;
-        help.handle_key(key(KeyCode::Up));
-        assert_eq!(help.selected(), 0);
-        assert_eq!(help.detail_scroll(), 0);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        h.stoat.help.as_mut().unwrap().detail_scroll = 7;
+        send_key(&mut h, key(KeyCode::Down));
+        assert_eq!(help_ref(&h).selected(), 1);
+        assert_eq!(help_ref(&h).detail_scroll(), 0);
+        h.stoat.help.as_mut().unwrap().detail_scroll = 3;
+        send_key(&mut h, key(KeyCode::Up));
+        assert_eq!(help_ref(&h).selected(), 0);
+        assert_eq!(help_ref(&h).detail_scroll(), 0);
     }
 
     #[test]
     fn ctrl_d_scrolls_detail_forward_ctrl_u_scrolls_back() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(ctrl('d'));
-        assert_eq!(help.detail_scroll(), 5);
-        help.handle_key(ctrl('d'));
-        assert_eq!(help.detail_scroll(), 10);
-        help.handle_key(ctrl('u'));
-        assert_eq!(help.detail_scroll(), 5);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, ctrl('d'));
+        assert_eq!(help_ref(&h).detail_scroll(), 5);
+        send_key(&mut h, ctrl('d'));
+        assert_eq!(help_ref(&h).detail_scroll(), 10);
+        send_key(&mut h, ctrl('u'));
+        assert_eq!(help_ref(&h).detail_scroll(), 5);
     }
 
     #[test]
     fn esc_in_insert_switches_to_normal() {
-        let mut help = Help::new("normal", sample_active());
-        assert_eq!(help.input_mode(), HelpInput::Insert);
-        help.handle_key(key(KeyCode::Esc));
-        assert_eq!(help.input_mode(), HelpInput::Normal);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
+        send_key(&mut h, key(KeyCode::Esc));
+        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Normal);
     }
 
     #[test]
-    fn esc_in_normal_returns_close() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Esc));
-        assert!(matches!(
-            help.handle_key(key(KeyCode::Esc)),
-            HelpOutcome::Close
-        ));
+    fn esc_in_normal_closes_help() {
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, key(KeyCode::Esc));
+        assert!(h.stoat.help.is_none());
     }
 
     #[test]
     fn i_returns_to_insert_from_normal() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Esc));
-        help.handle_key(key(KeyCode::Char('i')));
-        assert_eq!(help.input_mode(), HelpInput::Insert);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, key(KeyCode::Char('i')));
+        assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
     }
 
     #[test]
     fn normal_mode_j_k_navigate() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Esc));
-        help.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(help.selected(), 1);
-        help.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(help.selected(), 0);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, key(KeyCode::Char('j')));
+        assert_eq!(help_ref(&h).selected(), 1);
+        send_key(&mut h, key(KeyCode::Char('k')));
+        assert_eq!(help_ref(&h).selected(), 0);
     }
 
     #[test]
     fn normal_mode_g_jumps_to_top() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Down));
-        help.handle_key(key(KeyCode::Down));
-        help.handle_key(key(KeyCode::Esc));
-        help.handle_key(key(KeyCode::Char('g')));
-        assert_eq!(help.selected(), 0);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Down));
+        send_key(&mut h, key(KeyCode::Down));
+        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, key(KeyCode::Char('g')));
+        assert_eq!(help_ref(&h).selected(), 0);
     }
 
     #[test]
     fn normal_mode_shift_g_jumps_to_bottom() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Esc));
-        help.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
-        assert_eq!(help.selected(), help.filtered().len() - 1);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Esc));
+        send_key(
+            &mut h,
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+        );
+        let last = help_ref(&h).filtered().len() - 1;
+        assert_eq!(help_ref(&h).selected(), last);
     }
 
     #[test]
-    fn enter_zero_arg_returns_dispatch() {
-        let mut help = Help::new("normal", sample_active());
-        type_str(&mut help, "Quit");
-        assert_eq!(selected_name(&help), Some("Quit"));
-        let outcome = help.handle_key(key(KeyCode::Enter));
-        match outcome {
-            HelpOutcome::Dispatch(entry, params) => {
-                assert_eq!(entry.def.name(), "Quit");
-                assert!(params.is_empty());
-            },
-            _ => panic!("expected Dispatch"),
-        }
+    fn enter_zero_arg_closes_help_on_dispatch() {
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        type_str(&mut h, "Quit");
+        assert_eq!(selected_name(&h), Some("Quit"));
+        send_key(&mut h, key(KeyCode::Enter));
+        assert!(h.stoat.help.is_none(), "Dispatch should close help");
     }
 
     #[test]
-    fn enter_bound_entry_with_args_dispatches_with_params() {
+    fn enter_bound_entry_with_args_dispatches() {
         let active = vec![active_binding_with_arg(
             "C-o",
             "OpenFile",
             Value::String("/tmp/x.rs".to_owned()),
         )];
-        let mut help = Help::new("normal", active);
-        let outcome = help.handle_key(key(KeyCode::Enter));
-        match outcome {
-            HelpOutcome::Dispatch(entry, params) => {
-                assert_eq!(entry.def.name(), "OpenFile");
-                assert_eq!(params, vec![ParamValue::String("/tmp/x.rs".into())]);
-            },
-            _ => panic!("expected Dispatch"),
-        }
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, active);
+        send_key(&mut h, key(KeyCode::Enter));
+        assert!(h.stoat.help.is_none(), "Dispatch should close help");
     }
 
     #[test]
     fn enter_unbound_param_action_is_noop() {
-        let mut help = Help::new("normal", Vec::new());
-        help.handle_key(key(KeyCode::BackTab));
-        type_str(&mut help, "OpenFile");
-        assert_eq!(selected_name(&help), Some("OpenFile"));
-        assert!(matches!(
-            help.handle_key(key(KeyCode::Enter)),
-            HelpOutcome::None
-        ));
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, Vec::new());
+        send_key(&mut h, key(KeyCode::BackTab));
+        type_str(&mut h, "OpenFile");
+        assert_eq!(selected_name(&h), Some("OpenFile"));
+        send_key(&mut h, key(KeyCode::Enter));
+        assert!(
+            h.stoat.help.is_some(),
+            "unbound param action should stay open"
+        );
     }
 
     #[test]
     fn selection_clamps_after_narrowing_filter() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Down));
-        help.handle_key(key(KeyCode::Down));
-        type_str(&mut help, "Quit");
-        assert_eq!(help.selected(), 0);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Down));
+        send_key(&mut h, key(KeyCode::Down));
+        type_str(&mut h, "Quit");
+        assert_eq!(help_ref(&h).selected(), 0);
     }
 
     #[test]
     fn utf8_query_safe() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::Char('é')));
-        assert_eq!(help.input(), "é");
-        help.handle_key(key(KeyCode::Backspace));
-        assert_eq!(help.input(), "");
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::Char('é')));
+        assert_eq!(input_text(&mut h), "é");
+        send_key(&mut h, key(KeyCode::Backspace));
+        assert_eq!(input_text(&mut h), "");
     }
 
     #[test]
     fn backspace_refilters() {
-        let mut help = Help::new("normal", sample_active());
-        help.handle_key(key(KeyCode::BackTab));
-        type_str(&mut help, "Focus");
-        let narrow = help.filtered().len();
-        help.handle_key(key(KeyCode::Backspace));
-        help.handle_key(key(KeyCode::Backspace));
-        help.handle_key(key(KeyCode::Backspace));
-        help.handle_key(key(KeyCode::Backspace));
-        help.handle_key(key(KeyCode::Backspace));
-        assert_eq!(help.input(), "");
-        assert!(help.filtered().len() > narrow);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, sample_active());
+        send_key(&mut h, key(KeyCode::BackTab));
+        type_str(&mut h, "Focus");
+        let narrow = help_ref(&h).filtered().len();
+        for _ in 0..5 {
+            send_key(&mut h, key(KeyCode::Backspace));
+        }
+        assert_eq!(input_text(&mut h), "");
+        assert!(help_ref(&h).filtered().len() > narrow);
     }
 
     #[test]
@@ -778,13 +749,10 @@ mod tests {
             "SetMode",
             Value::Ident("insert".to_owned()),
         )];
-        let help = Help::new("normal", active);
-        let names: Vec<_> = help
-            .filtered()
-            .iter()
-            .map(|&i| help.entries()[i].def.name())
-            .collect();
-        assert_eq!(names, vec!["SetMode"]);
+        let mut h = TestHarness::default();
+        open_help_with(&mut h, active);
+        assert_eq!(filtered_names(&h), vec!["SetMode"]);
+        let help = help_ref(&h);
         let entry = help.selected_entry().unwrap();
         assert_eq!(entry.def.name(), "SetMode");
         assert_eq!(entry.key_label.as_deref(), Some("i"));

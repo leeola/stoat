@@ -55,7 +55,7 @@ pub(crate) fn render_pane(
         },
         View::Run(run_id) => {
             if let Some(run_state) = runs.get(*run_id) {
-                render_run_pane(run_state, theme, content_area, is_focused, buf);
+                render_run_pane(run_state, editors, theme, content_area, is_focused, buf);
             }
         },
         View::Claude(session_id) => {
@@ -266,6 +266,7 @@ pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static
     let (label, default, scope_name) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
         "insert" => ("INS", Color::Green, scope::UI_STATUSLINE_INSERT),
+        "prompt" => ("PMT", Color::Green, scope::UI_STATUSLINE_PROMPT),
         "run" => ("RUN", Color::Magenta, scope::UI_STATUSLINE_RUN),
         "commits" => ("COM", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
         "rebase" => ("REB", Color::Red, scope::UI_STATUSLINE_REBASE),

@@ -33,7 +33,7 @@ pub(crate) fn render_claude_pane(
     let render_tick = frame.render_tick;
 
     let input_lines = buffers
-        .get(chat.input_buffer_id)
+        .get(chat.input.buffer_id)
         .map(|b| {
             let guard = b.read().expect("poisoned");
             guard.snapshot.visible_text.max_point().row + 1
@@ -199,7 +199,7 @@ pub(crate) fn render_claude_pane(
         }
     }
 
-    if let Some(editor) = editors.get_mut(chat.input_editor_id) {
+    if let Some(editor) = editors.get_mut(chat.input.editor_id) {
         let input_style = if is_focused {
             theme.get(crate::theme::scope::UI_TEXT)
         } else {

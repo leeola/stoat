@@ -12,6 +12,7 @@ pub mod dump;
 mod editor_state;
 pub mod help;
 pub mod host;
+mod input_view;
 pub mod keymap;
 mod keymap_state;
 pub mod multi_buffer;

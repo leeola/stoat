@@ -143,6 +143,7 @@ fn resolve_key(key: &Key) -> Option<KeyCode> {
             "Escape" | "Esc" => Some(KeyCode::Esc),
             "Enter" | "Return" => Some(KeyCode::Enter),
             "Tab" => Some(KeyCode::Tab),
+            "BackTab" => Some(KeyCode::BackTab),
             "Backspace" => Some(KeyCode::Backspace),
             "Delete" | "Del" => Some(KeyCode::Delete),
             "Up" => Some(KeyCode::Up),

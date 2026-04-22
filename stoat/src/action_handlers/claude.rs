@@ -23,7 +23,7 @@ pub(super) fn open_claude(stoat: &mut Stoat) -> UpdateEffect {
         ClaudePlacement::DockRight => place_claude_in_dock(stoat, session_id, DockSide::Right),
     }
 
-    stoat.mode = "normal".into();
+    stoat.mode = "prompt".into();
     UpdateEffect::Redraw
 }
 
@@ -59,7 +59,10 @@ fn focus_existing_claude(stoat: &mut Stoat) -> Option<UpdateEffect> {
 }
 
 fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
-    use crate::claude_chat::ClaudeChatState;
+    use crate::{
+        claude_chat::ClaudeChatState,
+        input_view::{InputView, SubmitTarget},
+    };
 
     let session_id = stoat.claude_sessions_mut().reserve_slot();
     let _ = stoat
@@ -70,17 +73,20 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
     let ws = stoat.active_workspace_mut();
     ws.claude_chat = Some(session_id);
 
-    let (buffer_id, buffer) = ws.buffers.new_scratch();
-    let editor_id = ws
-        .editors
-        .insert(EditorState::new(buffer_id, buffer, executor));
+    let input = InputView::create(
+        ws,
+        executor,
+        SubmitTarget::ClaudeChat,
+        "",
+        "prompt",
+        u16::MAX,
+    );
 
     ws.chats.insert(
         session_id,
         ClaudeChatState {
             session_id,
-            input_editor_id: editor_id,
-            input_buffer_id: buffer_id,
+            input,
             messages: Vec::new(),
             streaming_text: None,
             scroll_offset: 0,
@@ -219,7 +225,7 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
             Some(c) => c,
             None => return UpdateEffect::None,
         };
-        let buffer = match ws.buffers.get(chat.input_buffer_id) {
+        let buffer = match ws.buffers.get(chat.input.buffer_id) {
             Some(b) => b,
             None => return UpdateEffect::None,
         };
@@ -241,14 +247,14 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
         });
         chat.active_since = Some(std::time::Instant::now());
 
-        let Some(buffer) = ws.buffers.get(chat.input_buffer_id) else {
+        let Some(buffer) = ws.buffers.get(chat.input.buffer_id) else {
             return UpdateEffect::None;
         };
         {
             let len = buffer.read().expect("poisoned").snapshot.visible_text.len();
             buffer.write().expect("poisoned").edit(0..len, "");
         }
-        let Some(editor) = ws.editors.get_mut(chat.input_editor_id) else {
+        let Some(editor) = ws.editors.get_mut(chat.input.editor_id) else {
             return UpdateEffect::None;
         };
         editor.selections = crate::selection::SelectionsCollection::new();

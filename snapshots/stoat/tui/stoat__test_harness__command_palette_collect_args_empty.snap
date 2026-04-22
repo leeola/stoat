@@ -4,7 +4,7 @@ expression: text
 ---
 actions: enter
 focused: #1 of 1
-mode: normal
+mode: prompt
 size: 80x24
 ---
 [0m[7m [0m
@@ -16,7 +16,7 @@ size: 80x24
 
 
   [0m[35m┌ OpenFile ────────────────────────────────────────────────────────────────┐[0m
-  [0m[35m│[0m[33mpath: [0m[30m[107m [0m                                                                   [0m[35m│[0m
+  [0m[35m│[0m[33mpath: [0m[7m [0m                                                                   [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[90mpath (string, required)[0m                                                   [0m[35m│[0m
   [0m[35m│[0m[37mFilesystem path of the file to open. Relative paths resolve against the[0m   [0m[35m│[0m
@@ -30,4 +30,4 @@ size: 80x24
 
 
 
-[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
+[0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

@@ -8,6 +8,7 @@ use ratatui::{
 
 pub(crate) fn render_run_pane(
     run_state: &RunState,
+    editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
     area: Rect,
     is_focused: bool,
@@ -106,22 +107,12 @@ pub(crate) fn render_run_pane(
     }
 
     let prompt_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
-    let input_style = theme.get(crate::theme::scope::UI_TEXT);
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
-
     write_str(buf, area.x, input_row, "$ ", prompt_style);
-    let input_text = run_state.input.as_str();
-    let max_input = (area.width as usize).saturating_sub(2);
-    let display_input: String = input_text.chars().take(max_input).collect();
-    write_str(buf, area.x + 2, input_row, &display_input, input_style);
 
-    if is_focused {
-        let cursor_col = run_state.input.cursor_column();
-        let cx = area.x + 2 + cursor_col as u16;
-        if cx < area.x + area.width {
-            buf[(cx, input_row)].set_style(cursor_style);
-        }
-    }
+    let input_area = Rect::new(area.x + 2, input_row, area.width.saturating_sub(2), 1);
+    run_state
+        .input
+        .render(editors, input_area, is_focused, "prompt", theme, buf);
 }
 
 enum OutputLine<'a> {

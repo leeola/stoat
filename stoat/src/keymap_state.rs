@@ -1,15 +1,30 @@
-use crate::keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue};
+use crate::{
+    app::Stoat,
+    keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use stoat_action::Action;
 
 pub(crate) struct StoatKeymapState {
     mode_value: StateValue,
+    palette_open: StateValue,
+    help_open: StateValue,
 }
 
 impl StoatKeymapState {
     pub(crate) fn new(mode: &str) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
+            palette_open: StateValue::Bool(false),
+            help_open: StateValue::Bool(false),
+        }
+    }
+
+    pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
+        Self {
+            mode_value: StateValue::String(stoat.mode.as_str().into()),
+            palette_open: StateValue::Bool(stoat.command_palette.is_some()),
+            help_open: StateValue::Bool(stoat.help.is_some()),
         }
     }
 }
@@ -18,6 +33,8 @@ impl KeymapState for StoatKeymapState {
     fn get(&self, field: &str) -> Option<&StateValue> {
         match field {
             "mode" => Some(&self.mode_value),
+            "palette_open" => Some(&self.palette_open),
+            "help_open" => Some(&self.help_open),
             _ => None,
         }
     }

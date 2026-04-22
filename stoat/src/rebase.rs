@@ -1,8 +1,4 @@
-use crate::{
-    buffer::BufferId,
-    editor_state::EditorId,
-    host::{CommitInfo, ConflictedFile, RebaseTodo, RebaseTodoOp},
-};
+use crate::host::{CommitInfo, ConflictedFile, RebaseTodo, RebaseTodoOp};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -141,8 +137,7 @@ pub(crate) enum RebasePause {
         /// Original commit message, kept for the modal's reference line
         /// (the editable copy lives in the buffer below).
         original_message: String,
-        editor_id: EditorId,
-        buffer_id: BufferId,
+        input: crate::input_view::InputView,
     },
     /// Waiting for the user to modify the picked commit (typically via
     /// review-mode hunk removal). The review's current source sha at

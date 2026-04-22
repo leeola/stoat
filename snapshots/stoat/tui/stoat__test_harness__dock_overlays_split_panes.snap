@@ -4,7 +4,7 @@ expression: text
 ---
 actions: open_claude
 focused: #2 of 2
-mode: normal
+mode: prompt
 size: 80x10
 ---
                                        [0m[36m│[0m

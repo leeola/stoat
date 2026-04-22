@@ -15,11 +15,18 @@ use crate::{
             MovePrevWordStart, MoveRight, MoveUp,
         },
         file::OpenFile,
-        help::OpenHelp,
+        help::{
+            CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
+            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+        },
         palette::OpenCommandPalette,
         pane::{
             ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
             SplitRight,
+        },
+        prompt::{
+            CancelPromptInput, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
+            SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -35,7 +42,7 @@ use crate::{
             ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
             ReviewToggleStage, ReviewUnstageChunk,
         },
-        run::{OpenRun, Run, RunInterrupt, RunSubmit},
+        run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, SwitchWorkspace},
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
@@ -174,6 +181,20 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
+    add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
+    add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
+    add(HelpSelectPrev::DEF, |_| Ok(Box::new(HelpSelectPrev)));
+    add(HelpSelectNext::DEF, |_| Ok(Box::new(HelpSelectNext)));
+    add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
+    add(HelpScrollDetailUp::DEF, |_| {
+        Ok(Box::new(HelpScrollDetailUp))
+    });
+    add(HelpScrollDetailDown::DEF, |_| {
+        Ok(Box::new(HelpScrollDetailDown))
+    });
+    add(HelpJumpFirst::DEF, |_| Ok(Box::new(HelpJumpFirst)));
+    add(HelpJumpLast::DEF, |_| Ok(Box::new(HelpJumpLast)));
+    add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
     add(OpenClaude::DEF, |_| Ok(Box::new(OpenClaude)));
     add(ClaudeSubmit::DEF, |_| Ok(Box::new(ClaudeSubmit)));
     add(ClaudeToPane::DEF, |_| Ok(Box::new(ClaudeToPane)));
@@ -246,6 +267,13 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
     add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
     add(CloseWorkspace::DEF, |_| Ok(Box::new(CloseWorkspace)));
+    add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
+    add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
+    add(PromptInsertNewline::DEF, |_| {
+        Ok(Box::new(PromptInsertNewline))
+    });
+    add(PaletteSelectPrev::DEF, |_| Ok(Box::new(PaletteSelectPrev)));
+    add(PaletteSelectNext::DEF, |_| Ok(Box::new(PaletteSelectNext)));
 
     map
 }
@@ -335,6 +363,8 @@ mod tests {
         "OpenRun",
         "RunSubmit",
         "RunInterrupt",
+        "RunHistoryPrev",
+        "RunHistoryNext",
         "OpenClaude",
         "ClaudeSubmit",
         "ClaudeToPane",
@@ -346,6 +376,18 @@ mod tests {
         "CopyWorkspace",
         "SwitchWorkspace",
         "CloseWorkspace",
+        "HelpSelectPrev",
+        "HelpSelectNext",
+        "HelpScopeToggle",
+        "HelpScrollDetailUp",
+        "HelpScrollDetailDown",
+        "HelpJumpFirst",
+        "HelpJumpLast",
+        "SubmitPromptInput",
+        "CancelPromptInput",
+        "PromptInsertNewline",
+        "PaletteSelectPrev",
+        "PaletteSelectNext",
     ];
 
     #[test]
@@ -405,10 +447,11 @@ mod tests {
     #[test]
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
-        // + 4 workspace actions.
+        // + 4 workspace actions + 5 prompt-input plumbing actions
+        // + 2 run-history actions + 7 help plumbing actions + 1 CloseHelp.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 88);
+        assert_eq!(all().count(), 103);
     }
 
     #[test]

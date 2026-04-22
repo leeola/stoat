@@ -43,6 +43,7 @@ theme default_dark {
 
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
+    ui.statusline.prompt.fg   = success;
     ui.statusline.run.fg      = special;
     ui.statusline.commits.fg  = warning;
     ui.statusline.rebase.fg   = danger;
@@ -115,6 +116,23 @@ on init {
 
 on key {
     ? -> OpenHelp();
+    mode == normal && help_open {
+        Escape -> CloseHelp();
+        i -> SetMode(prompt);
+        a -> SetMode(prompt);
+        Enter -> SubmitPromptInput();
+        j -> HelpSelectNext();
+        k -> HelpSelectPrev();
+        Up -> HelpSelectPrev();
+        Down -> HelpSelectNext();
+        g -> HelpJumpFirst();
+        G -> HelpJumpLast();
+        Ctrl-u -> HelpScrollDetailUp();
+        Ctrl-d -> HelpScrollDetailDown();
+        PageUp -> HelpScrollDetailUp();
+        PageDown -> HelpScrollDetailDown();
+        BackTab -> HelpScopeToggle();
+    }
     mode == normal {
         q -> Quit();
         Space -> SetMode(space);
@@ -212,6 +230,31 @@ on key {
         Escape -> SetMode(normal);
         Enter -> ClaudeSubmit();
     }
+    mode == prompt && palette_open {
+        Up -> PaletteSelectPrev();
+        Down -> PaletteSelectNext();
+        Ctrl-p -> PaletteSelectPrev();
+        Ctrl-n -> PaletteSelectNext();
+    }
+    mode == prompt && help_open {
+        Up -> HelpSelectPrev();
+        Down -> HelpSelectNext();
+        Ctrl-p -> HelpSelectPrev();
+        Ctrl-n -> HelpSelectNext();
+        Ctrl-u -> HelpScrollDetailUp();
+        Ctrl-d -> HelpScrollDetailDown();
+        PageUp -> HelpScrollDetailUp();
+        PageDown -> HelpScrollDetailDown();
+        BackTab -> HelpScopeToggle();
+    }
+    mode == prompt {
+        Escape -> CancelPromptInput();
+        Enter -> SubmitPromptInput();
+        Shift-Enter -> PromptInsertNewline();
+        Alt-Enter -> PromptInsertNewline();
+        Up -> MoveUp();
+        Down -> MoveDown();
+    }
     mode == space {
         Escape -> SetMode(normal);
         q -> Quit();
@@ -236,6 +279,8 @@ on key {
     mode == run {
         Escape -> SetMode(normal);
         Enter -> RunSubmit();
+        Up -> RunHistoryPrev();
+        Down -> RunHistoryNext();
     }
     mode == space_split {
         Escape -> SetMode(normal);

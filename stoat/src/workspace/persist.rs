@@ -449,8 +449,13 @@ mod tests {
             chat_id,
             ClaudeChatState {
                 session_id: chat_id,
-                input_editor_id: EditorId::default(),
-                input_buffer_id: BufferId::new(0),
+                input: crate::input_view::InputView {
+                    editor_id: EditorId::default(),
+                    buffer_id: BufferId::new(0),
+                    target: crate::input_view::SubmitTarget::ClaudeChat,
+                    max_height: u16::MAX,
+                    start_mode: "prompt",
+                },
                 messages: Vec::new(),
                 streaming_text: None,
                 scroll_offset: 0,

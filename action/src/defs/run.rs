@@ -28,6 +28,24 @@ define_action!(
     "Send SIGINT to the running shell command."
 );
 
+define_action!(
+    RunHistoryPrevDef,
+    RunHistoryPrev,
+    "RunHistoryPrev",
+    ActionKind::RunHistoryPrev,
+    "previous command in history",
+    "Replace the run input with the previous entry in command history."
+);
+
+define_action!(
+    RunHistoryNextDef,
+    RunHistoryNext,
+    "RunHistoryNext",
+    ActionKind::RunHistoryNext,
+    "next command in history",
+    "Replace the run input with the next entry in command history, or clear the input when past the end."
+);
+
 const RUN_PARAMS: &[ParamDef] = &[ParamDef {
     name: "command",
     kind: ParamKind::String,

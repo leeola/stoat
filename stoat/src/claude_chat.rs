@@ -1,4 +1,4 @@
-use crate::{buffer::BufferId, editor_state::EditorId, host::ClaudeSessionId};
+use crate::{host::ClaudeSessionId, input_view::InputView};
 use std::time::Instant;
 
 // FIXME: Claude session state not persisted across workspace save/load. On
@@ -23,8 +23,7 @@ use std::time::Instant;
 // end-to-end in the agent crate.
 pub struct ClaudeChatState {
     pub session_id: ClaudeSessionId,
-    pub input_editor_id: EditorId,
-    pub input_buffer_id: BufferId,
+    pub(crate) input: InputView,
     pub messages: Vec<ChatMessage>,
     pub streaming_text: Option<String>,
     pub scroll_offset: usize,
@@ -575,5 +574,30 @@ mod tests {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.claude().open();
         h.assert_snapshot("claude_as_pane");
+    }
+
+    #[test]
+    fn claude_defaults_to_prompt_mode() {
+        let mut h = TestHarness::default();
+        let _ = h.claude().open();
+        assert_eq!(h.stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn claude_escape_transitions_to_normal() {
+        let mut h = TestHarness::default();
+        let _ = h.claude().open();
+        assert_eq!(h.stoat.mode, "prompt");
+        h.type_keys("escape");
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn snapshot_claude_prompt_vs_normal_modeline() {
+        let mut h = TestHarness::with_size(60, 10);
+        let _ = h.claude().open();
+        h.assert_snapshot("claude_pane_prompt_mode");
+        h.type_keys("escape");
+        h.assert_snapshot("claude_pane_normal_mode");
     }
 }

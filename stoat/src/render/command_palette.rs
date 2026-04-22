@@ -1,6 +1,8 @@
 use crate::{
-    command_palette::CommandPalette,
+    command_palette::{CommandPalette, PalettePhase},
+    input_view::InputView,
     render::text::{wrap_text, write_str},
+    workspace::Workspace,
 };
 use ratatui::{
     buffer::Buffer,
@@ -9,18 +11,21 @@ use ratatui::{
 };
 
 pub(crate) fn render_command_palette(
-    palette: &CommandPalette,
+    palette: &mut CommandPalette,
+    ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    match palette.phase() {
-        crate::command_palette::PalettePhase::Filter {
+    palette.refilter_from_input(ws);
+
+    match &mut palette.phase {
+        PalettePhase::Filter {
             input,
             filtered,
             selected,
-        } => render_palette_filter(input, filtered, *selected, theme, area, buf),
-        crate::command_palette::PalettePhase::CollectArgs {
+        } => render_palette_filter(input, filtered, *selected, ws, theme, area, buf),
+        PalettePhase::CollectArgs {
             entry,
             collected,
             current,
@@ -34,6 +39,7 @@ pub(crate) fn render_command_palette(
                 input,
                 error: error.as_deref(),
             },
+            ws,
             theme,
             area,
             buf,
@@ -42,9 +48,10 @@ pub(crate) fn render_command_palette(
 }
 
 fn render_palette_filter(
-    input: &str,
+    input: &InputView,
     filtered: &[&'static stoat_action::registry::RegistryEntry],
     selected: usize,
+    ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -87,21 +94,15 @@ fn render_palette_filter(
     block.render(palette_area, buf);
 
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let input_style = theme.get(crate::theme::scope::UI_TEXT);
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let desc_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ":", prompt_style);
-    write_str(buf, inner.x + 2, input_row, input, input_style);
-    let cursor_col = inner.x + 2 + input.chars().count() as u16;
-    if cursor_col < inner.x + inner.width {
-        buf[(cursor_col, input_row)]
-            .set_char(' ')
-            .set_style(cursor_style);
-    }
+
+    let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
+    input.render(&mut ws.editors, input_area, true, "prompt", theme, buf);
 
     let separator_row = inner.y + 1;
     let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
@@ -162,12 +163,13 @@ struct PaletteCollect<'a> {
     entry: &'static stoat_action::registry::RegistryEntry,
     collected: &'a [stoat_action::ParamValue],
     current: usize,
-    input: &'a str,
+    input: &'a InputView,
     error: Option<&'a str>,
 }
 
 fn render_palette_collect_args(
     state: PaletteCollect<'_>,
+    ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -217,8 +219,6 @@ fn render_palette_collect_args(
     block.render(palette_area, buf);
 
     let label_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let value_style = theme.get(crate::theme::scope::UI_TEXT);
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
     let error_style = theme.get(crate::theme::scope::UI_ERROR);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 
@@ -235,11 +235,13 @@ fn render_palette_collect_args(
     let label = format!("{}: ", current_param.name);
     write_str(buf, inner.x, row, &label, label_style);
     let value_col = inner.x + label.chars().count() as u16;
-    write_str(buf, value_col, row, input, value_style);
-    let cursor_col = value_col + input.chars().count() as u16;
-    if cursor_col < inner.x + inner.width {
-        buf[(cursor_col, row)].set_char(' ').set_style(cursor_style);
-    }
+    let input_area = Rect::new(
+        value_col,
+        row,
+        (inner.x + inner.width).saturating_sub(value_col),
+        1,
+    );
+    input.render(&mut ws.editors, input_area, true, "prompt", theme, buf);
     row += 1;
 
     if let Some(msg) = error {

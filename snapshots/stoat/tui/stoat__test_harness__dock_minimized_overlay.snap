@@ -4,7 +4,7 @@ expression: text
 ---
 actions: snapshot
 focused: #1 of 1
-mode: normal
+mode: prompt
 size: 60x10
 ---
 

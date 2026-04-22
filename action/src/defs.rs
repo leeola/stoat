@@ -7,6 +7,7 @@ pub mod file;
 pub mod help;
 pub mod palette;
 pub mod pane;
+pub mod prompt;
 pub mod rebase;
 pub mod review;
 pub mod run;

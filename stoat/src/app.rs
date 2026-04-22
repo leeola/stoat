@@ -2,10 +2,10 @@ use crate::{
     action_handlers,
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray},
     buffer::{BufferId, TextBufferSnapshot},
-    command_palette::{CommandPalette, PaletteOutcome},
+    command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
-    help::{Help, HelpOutcome},
+    help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
         FsHost, GitHost, LocalFs, LocalGit,
@@ -449,11 +449,13 @@ impl Stoat {
                 return UpdateEffect::Redraw;
             }
             if self.help.is_some() {
-                self.help = None;
+                action_handlers::close_help(self);
                 return UpdateEffect::Redraw;
             }
-            if self.command_palette.is_some() {
-                self.command_palette = None;
+            if let Some(palette) = self.command_palette.take() {
+                let active_idx = self.active_workspace;
+                palette.dispose(&mut self.workspaces[active_idx]);
+                self.mode = palette.previous_mode;
                 return UpdateEffect::Redraw;
             }
             if self.workspace_picker.is_some() {
@@ -482,31 +484,30 @@ impl Stoat {
             return UpdateEffect::None;
         }
 
-        if self.help.is_some() {
-            return self.dispatch_help_key(key);
-        }
-
-        if self.command_palette.is_some() {
-            return self.dispatch_palette_key(key);
-        }
-
         if self.workspace_picker.is_some() {
             return self.dispatch_workspace_picker_key(key);
         }
 
-        if self.mode == "run" {
-            if let Some(effect) = self.handle_run_key(key) {
-                return effect;
-            }
-        }
-
-        if self.mode == "insert" || self.mode == "reword_insert" {
+        if self.mode == "insert"
+            || self.mode == "reword_insert"
+            || self.mode == "prompt"
+            || self.mode == "run"
+        {
             if let Some(effect) = self.handle_insert_key(key) {
+                // If help is open, keep its filtered list in sync after every
+                // text mutation in the prompt input.
+                if self.help.is_some() {
+                    let active_idx = self.active_workspace;
+                    let workspaces = &mut self.workspaces;
+                    if let Some(help) = self.help.as_mut() {
+                        help.sync_filter(&workspaces[active_idx]);
+                    }
+                }
                 return effect;
             }
         }
 
-        let state = StoatKeymapState::new(&self.mode);
+        let state = StoatKeymapState::from_stoat(self);
         let Some(actions) = self.keymap.lookup(&state, &key) else {
             return UpdateEffect::None;
         };
@@ -533,78 +534,25 @@ impl Stoat {
         effect
     }
 
-    fn handle_run_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {
-        let ws = self.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let View::Run(id) = ws.panes.pane(focused).view else {
-            return None;
-        };
-        let run_state = ws.runs.get_mut(id)?;
-
-        match key.code {
-            KeyCode::Char(ch)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                run_state.input.insert_char(ch);
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Backspace => {
-                run_state.input.delete_backward();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Delete => {
-                run_state.input.delete_forward();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                run_state.input.move_word_left();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                run_state.input.move_word_right();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Left => {
-                run_state.input.move_left();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Right => {
-                run_state.input.move_right();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Home => {
-                run_state.input.move_home();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::End => {
-                run_state.input.move_end();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Up => {
-                run_state.history_up();
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Down => {
-                run_state.history_down();
-                Some(UpdateEffect::Redraw)
-            },
-            _ => None,
-        }
-    }
-
     fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
+
+        if let Some(palette) = &self.command_palette {
+            if let Some(input) = palette.focused_input() {
+                return Some((input.editor_id, input.buffer_id));
+            }
+        }
+
+        if let Some(help) = &self.help {
+            return Some((help.input.editor_id, help.input.buffer_id));
+        }
 
         if let Some((editor_id, buffer_id)) = ws
             .rebase_active
             .as_ref()
             .and_then(|a| a.pause.as_ref())
             .and_then(|p| match p {
-                RebasePause::Reword {
-                    editor_id,
-                    buffer_id,
-                    ..
-                } => Some((*editor_id, *buffer_id)),
+                RebasePause::Reword { input, .. } => Some((input.editor_id, input.buffer_id)),
                 _ => None,
             })
         {
@@ -628,7 +576,11 @@ impl Stoat {
             },
             View::Claude(session_id) => {
                 let chat = ws.chats.get(&session_id)?;
-                Some((chat.input_editor_id, chat.input_buffer_id))
+                Some((chat.input.editor_id, chat.input.buffer_id))
+            },
+            View::Run(id) => {
+                let run_state = ws.runs.get(id)?;
+                Some((run_state.input.editor_id, run_state.input.buffer_id))
             },
             _ => None,
         }
@@ -677,7 +629,7 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.focused_is_claude() {
+                if self.focused_is_claude() || self.mode == "prompt" || self.mode == "run" {
                     None
                 } else {
                     self.editor_insert(editor_id, buffer_id, "\n");
@@ -692,11 +644,11 @@ impl Stoat {
                 action_handlers::dispatch(self, &stoat_action::MoveRight);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Up => {
+            KeyCode::Up if self.mode != "run" && self.mode != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Down => {
+            KeyCode::Down if self.mode != "run" && self.mode != "prompt" => {
                 action_handlers::dispatch(self, &stoat_action::MoveDown);
                 Some(UpdateEffect::Redraw)
             },
@@ -1195,30 +1147,6 @@ impl Stoat {
         buf
     }
 
-    fn dispatch_palette_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.command_palette.as_mut() {
-            Some(palette) => palette.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PaletteOutcome::None => UpdateEffect::Redraw,
-            PaletteOutcome::Close => {
-                self.command_palette = None;
-                UpdateEffect::Redraw
-            },
-            PaletteOutcome::Dispatch(entry, params) => {
-                self.command_palette = None;
-                match (entry.create)(&params) {
-                    Ok(action) => action_handlers::dispatch(self, &*action),
-                    Err(e) => {
-                        tracing::warn!("palette dispatch `{}`: {e}", entry.def.name());
-                        UpdateEffect::Redraw
-                    },
-                }
-            },
-        }
-    }
-
     fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
         let outcome = match self.workspace_picker.as_mut() {
             Some(picker) => picker.handle_key(key),
@@ -1240,30 +1168,6 @@ impl Stoat {
                 let size = self.size;
                 self.active_workspace_mut().layout(size);
                 UpdateEffect::Redraw
-            },
-        }
-    }
-
-    fn dispatch_help_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.help.as_mut() {
-            Some(help) => help.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            HelpOutcome::None => UpdateEffect::Redraw,
-            HelpOutcome::Close => {
-                self.help = None;
-                UpdateEffect::Redraw
-            },
-            HelpOutcome::Dispatch(entry, params) => {
-                self.help = None;
-                match (entry.create)(&params) {
-                    Ok(action) => action_handlers::dispatch(self, &*action),
-                    Err(e) => {
-                        tracing::warn!("help dispatch `{}`: {e}", entry.def.name());
-                        UpdateEffect::Redraw
-                    },
-                }
             },
         }
     }

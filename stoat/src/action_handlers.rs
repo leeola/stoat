@@ -2,8 +2,11 @@ mod claude;
 mod commits;
 mod conflict;
 mod file;
+mod help;
 mod movement;
+mod palette;
 mod pane;
+mod prompt;
 mod rebase;
 mod review;
 mod reword;
@@ -77,6 +80,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                         if let Some(handle) = &mut state.shell_handle {
                             handle.kill();
                         }
+                        state.dispose(ws);
                     }
                 },
                 View::Label(_) | View::Claude(_) => {
@@ -94,13 +98,21 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::OpenCommandPalette => {
-            stoat.command_palette = Some(CommandPalette::new());
+            let previous_mode = stoat.mode.clone();
+            let executor = stoat.executor.clone();
+            let ws = stoat.active_workspace_mut();
+            stoat.command_palette = Some(CommandPalette::new(ws, executor, previous_mode));
+            stoat.mode = "prompt".into();
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {
             let active = stoat.active_bindings_for_current_mode();
             let mode = stoat.mode.clone();
-            stoat.help = Some(Help::new(&mode, active));
+            let executor = stoat.executor.clone();
+            let previous_mode = stoat.mode.clone();
+            let ws = stoat.active_workspace_mut();
+            stoat.help = Some(Help::new(&mode, active, ws, executor, previous_mode));
+            stoat.mode = "prompt".into();
             UpdateEffect::Redraw
         },
         ActionKind::OpenReview => {
@@ -122,6 +134,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
+        ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
+        ActionKind::RunHistoryNext => run::run_history_next(stoat),
+        ActionKind::HelpSelectPrev => help::help_select_prev(stoat),
+        ActionKind::HelpSelectNext => help::help_select_next(stoat),
+        ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
+        ActionKind::HelpScrollDetailUp => help::help_scroll_detail_up(stoat),
+        ActionKind::HelpScrollDetailDown => help::help_scroll_detail_down(stoat),
+        ActionKind::HelpJumpFirst => help::help_jump_first(stoat),
+        ActionKind::HelpJumpLast => help::help_jump_last(stoat),
+        ActionKind::CloseHelp => help::help_cancel(stoat),
         ActionKind::Run => {
             let cmd = action
                 .as_any()
@@ -264,6 +286,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
+        ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
+        ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
+        ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
+        ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
+        ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
     };
     stoat.sync_claude_badges();
     effect
@@ -284,7 +311,7 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
         .as_ref()
         .and_then(|a| a.pause.as_ref())
         .and_then(|p| match p {
-            RebasePause::Reword { editor_id, .. } => Some(*editor_id),
+            RebasePause::Reword { input, .. } => Some(input.editor_id),
             _ => None,
         })
     {
@@ -304,11 +331,24 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     match view {
         View::Editor(id) => ws.editors.get_mut(id),
         View::Claude(session_id) => {
-            let editor_id = ws.chats.get(&session_id)?.input_editor_id;
+            let editor_id = ws.chats.get(&session_id)?.input.editor_id;
             ws.editors.get_mut(editor_id)
         },
         _ => None,
     }
+}
+
+/// Close the help modal, disposing its scratch editor and restoring the
+/// mode that was active before the modal opened. No-op when help is not
+/// open. Shared between `CancelPromptInput`, Ctrl-C cleanup, and the help
+/// `HelpOutcome::Close`/`HelpOutcome::Dispatch` paths.
+pub(crate) fn close_help(stoat: &mut Stoat) {
+    let Some(help) = stoat.help.take() else {
+        return;
+    };
+    let active_idx = stoat.active_workspace;
+    help.dispose(&mut stoat.workspaces[active_idx]);
+    stoat.mode = help.previous_mode.clone();
 }
 
 /// Read `path` through the supplied [`FsHost`] as a UTF-8 string.
@@ -683,7 +723,7 @@ mod tests {
         {
             let ws = stoat.active_workspace();
             let chat = ws.chats.get(&session_id).expect("chat state exists");
-            let buffer = ws.buffers.get(chat.input_buffer_id).expect("buffer");
+            let buffer = ws.buffers.get(chat.input.buffer_id).expect("buffer");
             buffer.write().expect("poisoned").edit(0..0, "hello claude");
         }
 

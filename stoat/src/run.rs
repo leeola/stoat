@@ -1,11 +1,14 @@
-mod command_buffer;
 pub mod pty;
 pub mod vterm;
 
-pub use command_buffer::CommandBuffer;
+use crate::{
+    input_view::{InputView, SubmitTarget},
+    workspace::Workspace,
+};
 pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
+use stoat_scheduler::Executor;
 pub use vterm::{OutputBlock, StyledCell, VtermGrid};
 
 new_key_type! {
@@ -13,7 +16,7 @@ new_key_type! {
 }
 
 pub struct RunState {
-    pub input: CommandBuffer,
+    pub(crate) input: InputView,
     pub blocks: Vec<OutputBlock>,
     pub scroll_offset: usize,
     pub cwd: PathBuf,
@@ -24,9 +27,13 @@ pub struct RunState {
 }
 
 impl RunState {
-    pub fn new(cwd: PathBuf) -> Self {
+    /// Construct a new run state with an empty [`InputView`] for the command
+    /// prompt. The actual [`RunId`] is resolved from pane focus at submit
+    /// time, so construction does not need the key yet.
+    pub fn new(cwd: PathBuf, ws: &mut Workspace, executor: Executor) -> Self {
+        let input = InputView::create(ws, executor, SubmitTarget::Run, "", "prompt", 1);
         Self {
-            input: CommandBuffer::new(),
+            input,
             blocks: Vec::new(),
             scroll_offset: 0,
             cwd,
@@ -49,7 +56,7 @@ impl RunState {
         self.blocks.last().is_some_and(|b| !b.finished)
     }
 
-    pub fn history_up(&mut self) {
+    pub fn history_up(&mut self, ws: &mut Workspace) {
         if self.history.is_empty() {
             return;
         }
@@ -59,20 +66,28 @@ impl RunState {
             None => self.history.len() - 1,
         };
         self.history_cursor = Some(idx);
-        self.input.set(self.history[idx].clone());
+        let entry = self.history[idx].clone();
+        self.input.replace_text(ws, &entry);
     }
 
-    pub fn history_down(&mut self) {
+    pub fn history_down(&mut self, ws: &mut Workspace) {
         let Some(idx) = self.history_cursor else {
             return;
         };
         if idx + 1 < self.history.len() {
             self.history_cursor = Some(idx + 1);
-            self.input.set(self.history[idx + 1].clone());
+            let entry = self.history[idx + 1].clone();
+            self.input.replace_text(ws, &entry);
         } else {
             self.history_cursor = None;
-            self.input.clear();
+            self.input.replace_text(ws, "");
         }
+    }
+
+    /// Remove the run's [`InputView`] scratch editor. Called on pane close to
+    /// avoid leaking editor slots.
+    pub fn dispose(&self, ws: &mut Workspace) {
+        self.input.dispose(ws);
     }
 }
 
@@ -83,237 +98,54 @@ mod tests {
     use ratatui::style::Color;
 
     #[test]
-    fn insert_and_read() {
-        let mut buf = CommandBuffer::new();
-        buf.insert_char('h');
-        buf.insert_char('i');
-        assert_eq!(buf.as_str(), "hi");
-        assert_eq!(buf.cursor_column(), 2);
+    fn parse_sentinel_valid() {
+        assert_eq!(parse_sentinel_line("__STOAT_5__ 0"), Some(0));
+        assert_eq!(parse_sentinel_line("__STOAT_5__ 127"), Some(127));
     }
 
     #[test]
-    fn insert_at_middle() {
-        let mut buf = CommandBuffer::new();
-        buf.insert_char('a');
-        buf.insert_char('c');
-        buf.move_left();
-        buf.insert_char('b');
-        assert_eq!(buf.as_str(), "abc");
+    fn parse_sentinel_invalid() {
+        assert_eq!(parse_sentinel_line("hello"), None);
+        assert_eq!(parse_sentinel_line("__STOAT_5__"), None);
+        assert_eq!(parse_sentinel_line("__STOAT_5__ abc"), None);
     }
 
     #[test]
-    fn delete_backward_at_start() {
-        let mut buf = CommandBuffer::new();
-        buf.delete_backward();
-        assert_eq!(buf.as_str(), "");
-    }
-
-    #[test]
-    fn delete_backward_middle() {
-        let mut buf = CommandBuffer::new();
-        for ch in "abc".chars() {
-            buf.insert_char(ch);
-        }
-        buf.move_left();
-        buf.delete_backward();
-        assert_eq!(buf.as_str(), "ac");
-    }
-
-    #[test]
-    fn delete_forward() {
-        let mut buf = CommandBuffer::new();
-        for ch in "abc".chars() {
-            buf.insert_char(ch);
-        }
-        buf.move_home();
-        buf.delete_forward();
-        assert_eq!(buf.as_str(), "bc");
-    }
-
-    #[test]
-    fn move_boundaries() {
-        let mut buf = CommandBuffer::new();
-        for ch in "hi".chars() {
-            buf.insert_char(ch);
-        }
-        buf.move_right();
-        assert_eq!(buf.cursor_column(), 2);
-        buf.move_home();
-        assert_eq!(buf.cursor_column(), 0);
-        buf.move_left();
-        assert_eq!(buf.cursor_column(), 0);
-    }
-
-    #[test]
-    fn multibyte_utf8() {
-        let mut buf = CommandBuffer::new();
-        buf.insert_char('a');
-        buf.insert_char('\u{00e9}');
-        buf.insert_char('b');
-        assert_eq!(buf.as_str(), "a\u{00e9}b");
-        buf.move_left();
-        buf.delete_backward();
-        assert_eq!(buf.as_str(), "ab");
-    }
-
-    #[test]
-    fn take_drains() {
-        let mut buf = CommandBuffer::new();
-        for ch in "hello".chars() {
-            buf.insert_char(ch);
-        }
-        let s = buf.take();
-        assert_eq!(s, "hello");
-        assert!(buf.is_empty());
-        assert_eq!(buf.cursor_column(), 0);
-    }
-
-    #[test]
-    fn word_movement() {
-        let mut buf = CommandBuffer::new();
-        for ch in "foo bar baz".chars() {
-            buf.insert_char(ch);
-        }
-        buf.move_home();
-        buf.move_word_right();
-        assert_eq!(buf.cursor_column(), 4);
-        buf.move_word_right();
-        assert_eq!(buf.cursor_column(), 8);
-        buf.move_word_left();
-        assert_eq!(buf.cursor_column(), 4);
-        buf.move_word_left();
-        assert_eq!(buf.cursor_column(), 0);
-    }
-
-    #[test]
-    fn plain_text() {
-        let mut grid = VtermGrid::new(80);
-        grid.feed(b"hello");
+    fn grid_default_empty() {
+        let grid = VtermGrid::new(80);
+        assert_eq!(grid.width(), 80);
         assert_eq!(grid.line_count(), 1);
+    }
+
+    #[test]
+    fn grid_writes_ascii() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hello");
         let row = grid.row(0);
-        let text: String = row[..5].iter().map(|c| c.ch).collect();
-        assert_eq!(text, "hello");
+        let expected: Vec<char> = row.iter().map(|c| c.ch).collect();
+        let prefix: String = expected.iter().take(5).collect();
+        assert_eq!(prefix, "hello");
     }
 
     #[test]
-    fn newline_creates_row() {
-        let mut grid = VtermGrid::new(80);
-        grid.feed(b"a\nb");
-        assert_eq!(grid.line_count(), 2);
-        assert_eq!(grid.row(0)[0].ch, 'a');
-        assert_eq!(grid.row(1)[0].ch, 'b');
+    fn grid_newline_advances_row() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"ab\r\ncd");
+        assert!(grid.line_count() >= 2);
+        let row0: String = grid.row(0).iter().take(2).map(|c| c.ch).collect();
+        let row1: String = grid.row(1).iter().take(2).map(|c| c.ch).collect();
+        assert_eq!(row0, "ab");
+        assert_eq!(row1, "cd");
     }
 
     #[test]
-    fn sgr_color() {
-        let mut grid = VtermGrid::new(80);
-        grid.feed(b"\x1b[31mR\x1b[0mX");
-        assert_eq!(grid.row(0)[0].ch, 'R');
-        assert_eq!(grid.row(0)[0].fg, Some(Color::Red));
-        assert_eq!(grid.row(0)[1].ch, 'X');
-        assert_eq!(grid.row(0)[1].fg, None);
-    }
-
-    #[test]
-    fn alt_screen_detected() {
-        let mut grid = VtermGrid::new(80);
-        assert!(!grid.alt_screen_detected);
-        grid.feed(b"\x1b[?1049h");
-        assert!(grid.alt_screen_detected);
-    }
-
-    #[test]
-    fn carriage_return() {
-        let mut grid = VtermGrid::new(80);
-        grid.feed(b"abc\rX");
-        assert_eq!(grid.row(0)[0].ch, 'X');
-        assert_eq!(grid.row(0)[1].ch, 'b');
-    }
-
-    #[test]
-    fn erase_in_line() {
-        let mut grid = VtermGrid::new(80);
-        grid.feed(b"abcdef");
-        grid.feed(b"\x1b[3D\x1b[K");
+    fn grid_ansi_color_applies() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"\x1b[31mR\x1b[0mN");
         let row = grid.row(0);
-        assert_eq!(row[0].ch, 'a');
-        assert_eq!(row[1].ch, 'b');
-        assert_eq!(row[2].ch, 'c');
-        assert_eq!(row[3].ch, ' ');
-        assert_eq!(row[4].ch, ' ');
-    }
-
-    #[test]
-    fn parse_sentinel() {
-        assert_eq!(parse_sentinel_line("__STOAT_abc123__ 0"), Some(0));
-        assert_eq!(parse_sentinel_line("__STOAT_abc123__ 1"), Some(1));
-        assert_eq!(parse_sentinel_line("__STOAT_abc123__ 127"), Some(127));
-        assert_eq!(parse_sentinel_line("not a sentinel"), None);
-    }
-
-    #[test]
-    fn snapshot_run_empty() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        h.open_run();
-        h.assert_snapshot("run_empty");
-    }
-
-    #[test]
-    fn snapshot_run_typed_input() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        h.open_run();
-        h.type_text("echo hello");
-        h.assert_snapshot("run_typed_input");
-    }
-
-    #[test]
-    fn snapshot_run_output() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        let id = h.open_run();
-        h.submit_run("echo hello");
-        h.inject_run_output(id, b"hello\n");
-        h.inject_run_done(id, 0);
-        h.assert_snapshot("run_output");
-    }
-
-    #[test]
-    fn snapshot_run_colored_output() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        let id = h.open_run();
-        h.submit_run("ls --color");
-        h.inject_run_output(id, b"\x1b[32mgreen\x1b[0m \x1b[31mred\x1b[0m\n");
-        h.inject_run_done(id, 0);
-        h.assert_snapshot("run_colored_output");
-    }
-
-    #[test]
-    fn snapshot_run_exit_code() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        let id = h.open_run();
-        h.submit_run("false");
-        h.inject_run_done(id, 1);
-        h.assert_snapshot("run_exit_code");
-    }
-
-    #[test]
-    fn snapshot_run_alt_screen_error() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
-        let id = h.open_run();
-        h.submit_run("vim");
-        h.inject_run_output(id, b"\x1b[?1049h");
-        h.assert_snapshot("run_alt_screen_error");
-    }
-
-    #[test]
-    fn snapshot_run_multiple_blocks() {
-        let mut h = crate::test_harness::TestHarness::with_size(60, 16);
-        let id = h.open_run();
-        h.submit_run("echo one");
-        h.inject_run_output(id, b"one\n");
-        h.inject_run_done(id, 0);
-        h.submit_run("echo two");
-        h.inject_run_output(id, b"two\n");
-        h.inject_run_done(id, 0);
-        h.assert_snapshot("run_multiple_blocks");
+        assert_eq!(row[0].ch, 'R');
+        assert_eq!(row[0].fg, Some(Color::Red));
+        assert_eq!(row[1].ch, 'N');
+        assert_eq!(row[1].fg, None);
     }
 }

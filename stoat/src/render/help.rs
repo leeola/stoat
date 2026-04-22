@@ -12,8 +12,16 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
-pub(crate) fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, buf: &mut Buffer) {
-    use crate::help::{HelpInput, HelpScope};
+pub(crate) fn render_help(
+    help: &Help,
+    stoat_mode: &str,
+    ws: &mut crate::workspace::Workspace,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    use crate::help::{help_input_mode, HelpInput, HelpScope};
+    let input_mode = help_input_mode(stoat_mode);
 
     if area.width < 40 || area.height < 12 {
         return;
@@ -52,14 +60,15 @@ pub(crate) fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, 
     let heading = theme.get(crate::theme::scope::UI_HEADING);
 
     let search_row = inner.y;
-    let prompt = match help.input_mode() {
+    let prompt = match input_mode {
         HelpInput::Insert => "> ",
         HelpInput::Normal => ": ",
     };
     write_str(buf, inner.x, search_row, prompt, prompt_style);
-    write_str(buf, inner.x + 2, search_row, help.input(), input_style);
-    if matches!(help.input_mode(), HelpInput::Insert) {
-        let cursor_col = inner.x + 2 + help.input_cursor_column() as u16;
+    let input_text = help.input_text(ws);
+    write_str(buf, inner.x + 2, search_row, &input_text, input_style);
+    if matches!(input_mode, HelpInput::Insert) {
+        let cursor_col = inner.x + 2 + help.input_cursor_column(ws) as u16;
         if cursor_col < inner.x + inner.width {
             buf[(cursor_col, search_row)]
                 .set_char(' ')
@@ -71,7 +80,7 @@ pub(crate) fn render_help(help: &Help, theme: &crate::theme::Theme, area: Rect, 
     for col in inner.x..inner.x + inner.width {
         buf[(col, status_row)].set_char(' ').set_style(status_base);
     }
-    let mode_str = match help.input_mode() {
+    let mode_str = match input_mode {
         HelpInput::Insert => "insert",
         HelpInput::Normal => "normal",
     };

@@ -53,6 +53,7 @@ pub(crate) struct FrameCtx<'a> {
 pub(crate) const PRIMARY_MODES: &[&str] = &[
     "normal",
     "insert",
+    "prompt",
     "run",
     "commits",
     "rebase",
@@ -150,12 +151,11 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                     RebasePause::Reword {
                         cherry_picked_commit,
                         original_message,
-                        editor_id,
-                        ..
+                        input,
                     } => Some((
                         cherry_picked_commit.clone(),
                         original_message.clone(),
-                        *editor_id,
+                        input.editor_id,
                     )),
                     _ => None,
                 });
@@ -205,10 +205,12 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         if let Some(run_state) = ws.runs.get(run_id) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
-    } else if let Some(help) = &stoat.help {
-        help::render_help(help, &stoat.theme, size, buf);
-    } else if let Some(palette) = &stoat.command_palette {
-        command_palette::render_command_palette(palette, &stoat.theme, size, buf);
+    } else if stoat.help.is_some() {
+        let help = stoat.help.as_ref().expect("just checked");
+        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf);
+    } else if stoat.command_palette.is_some() {
+        let palette = stoat.command_palette.as_mut().expect("just checked");
+        command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
     } else if let Some(picker) = &stoat.workspace_picker {
         workspace_picker::render_workspace_picker(picker, &stoat.theme, size, buf);
         let bindings = picker.hint_bindings();
