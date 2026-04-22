@@ -18,16 +18,16 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m  L[0m[97m  OpenCommits  [0m[90mbrowse commi│[0m                                          [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  R[0m[97m  OpenReview  [0m[90mreview change│[0m [0m[97mOpen an interactive list of every visible[0m[36m│[0m
   [0m[36m│[0m[97m [0m[36mSpc[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[97maction. Type to filter, Up/Down to[0m       [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m [0m[97mnavigate, [0m[33m┌ help ────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m [0m[97mcancel.[0m   [0m[33m│[0m[36m  Up[0m[97m   previous help entry[0m    [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m           [0m[33m│[0m[36m  Dn[0m[97m   next help entry[0m        [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[1m[33mExample:[0m  [0m[33m│[0m[36m C-p[0m[97m   previous help entry[0m    [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  j[0m[97m  MoveDown  [0m[90mmove cursor dow│[0m [0m[90m  OpenComm[0m[33m│[0m[36m C-n[0m[97m   next help entry[0m        [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m           [0m[33m│[0m[36m C-u[0m[97m   scroll help detail up[0m  [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m           [0m[33m│[0m[36m C-d[0m[97m   scroll help detail down[0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  q[0m[97m  Quit  [0m[90mexit stoat[0m[97m         [0m[90m│[0m           [0m[33m│[0m[36mPgUp[0m[97m   scroll help detail up[0m  [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  w[0m[97m  MoveNextWordStart  [0m[90mselect│[0m           [0m[33m│[0m[36mPgDn[0m[97m   scroll help detail down[0m[33m│[0m
-  [0m[36m│[0m                               [0m[90m│[0m           [0m[33m│[0m[36m   ?[0m[97m   toggle help scope[0m      [0m[33m│[0m
-  [0m[36m└───────────────────────────────────────────[0m[33m└──────────────────────────────┘[0m
+  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m [0m[97mnavigate,[0m[33m┌ help ─────────────────────────┐[0m
+  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m [0m[97mcancel.[0m  [0m[33m│[0m[36m   Up[0m[97m   previous help entry[0m    [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m          [0m[33m│[0m[36m   Dn[0m[97m   next help entry[0m        [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  i[0m[97m  SetMode  [0m[90mtransition to a │[0m [0m[1m[33mExample:[0m [0m[33m│[0m[36m  C-p[0m[97m   previous help entry[0m    [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  j[0m[97m  MoveDown  [0m[90mmove cursor dow│[0m [0m[90m  OpenCom[0m[33m│[0m[36m  C-n[0m[97m   next help entry[0m        [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m          [0m[33m│[0m[36m  C-u[0m[97m   scroll help detail up[0m  [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m          [0m[33m│[0m[36m  C-d[0m[97m   scroll help detail down[0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  q[0m[97m  Quit  [0m[90mexit stoat[0m[97m         [0m[90m│[0m          [0m[33m│[0m[36m PgUp[0m[97m   scroll help detail up[0m  [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  w[0m[97m  MoveNextWordStart  [0m[90mselect│[0m          [0m[33m│[0m[36m PgDn[0m[97m   scroll help detail down[0m[33m│[0m
+  [0m[36m│[0m                               [0m[90m│[0m          [0m[33m│[0m[36mS-Tab[0m[97m   toggle help scope[0m      [0m[33m│[0m
+  [0m[36m└──────────────────────────────────────────[0m[33m└───────────────────────────────┘[0m
 
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

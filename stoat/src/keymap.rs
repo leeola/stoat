@@ -117,6 +117,7 @@ impl CompiledKey {
             KeyCode::Esc => "Esc".to_string(),
             KeyCode::Enter => "Ret".to_string(),
             KeyCode::Tab => "Tab".to_string(),
+            KeyCode::BackTab => "S-Tab".to_string(),
             KeyCode::Backspace => "Bsp".to_string(),
             KeyCode::Delete => "Del".to_string(),
             KeyCode::Up => "Up".to_string(),
@@ -916,6 +917,15 @@ mod tests {
             .display_label(),
             "Spc"
         );
+    }
+
+    #[test]
+    fn display_label_backtab() {
+        let ck = CompiledKey {
+            code: KeyCode::BackTab,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(ck.display_label(), "S-Tab");
     }
 
     #[test]
