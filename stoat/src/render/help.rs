@@ -1,6 +1,7 @@
 use crate::{
     help::Help,
     render::{
+        hints::render_hints,
         pane::mode_segment,
         text::{wrap_text, write_str, write_str_clipped},
     },
@@ -19,6 +20,7 @@ pub(crate) fn render_help(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    hints: &[(&str, String)],
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
     let input_mode = help_input_mode(stoat_mode);
@@ -122,6 +124,8 @@ pub(crate) fn render_help(
         muted,
     );
     render_help_detail(help, detail_rect, buf, heading, row_style, muted, key_style);
+
+    render_hints("help", hints, None, theme, help_area, buf);
 }
 
 fn render_help_list(

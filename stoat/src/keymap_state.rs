@@ -13,19 +13,23 @@ pub(crate) struct StoatKeymapState {
 
 impl StoatKeymapState {
     pub(crate) fn new(mode: &str) -> Self {
+        Self::with_flags(mode, false, false)
+    }
+
+    pub(crate) fn with_flags(mode: &str, palette_open: bool, help_open: bool) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
-            palette_open: StateValue::Bool(false),
-            help_open: StateValue::Bool(false),
+            palette_open: StateValue::Bool(palette_open),
+            help_open: StateValue::Bool(help_open),
         }
     }
 
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
-        Self {
-            mode_value: StateValue::String(stoat.mode.as_str().into()),
-            palette_open: StateValue::Bool(stoat.command_palette.is_some()),
-            help_open: StateValue::Bool(stoat.help.is_some()),
-        }
+        Self::with_flags(
+            stoat.mode.as_str(),
+            stoat.command_palette.is_some(),
+            stoat.help.is_some(),
+        )
     }
 }
 

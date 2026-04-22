@@ -206,8 +206,17 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
     } else if stoat.help.is_some() {
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, true);
+        let raw = stoat.keymap.scoped_bindings(&state, "help_open");
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
         let help = stoat.help.as_ref().expect("just checked");
-        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf);
+        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf, &bindings);
     } else if stoat.command_palette.is_some() {
         let palette = stoat.command_palette.as_mut().expect("just checked");
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);

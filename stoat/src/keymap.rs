@@ -334,6 +334,49 @@ impl Keymap {
         }
         results
     }
+
+    /// Returns active bindings that explicitly scope themselves by `scope_field`:
+    /// at least one of the binding's predicates must reference that field.
+    /// Used to surface only modal-specific keybinds (e.g. `help_open`) in hint
+    /// popups, filtering out the broader mode-level bindings that also happen
+    /// to match when the modal is open.
+    pub fn scoped_bindings(
+        &self,
+        state: &dyn KeymapState,
+        scope_field: &str,
+    ) -> Vec<(String, &[ResolvedAction])> {
+        let mut results = Vec::new();
+        for binding in &self.bindings {
+            let matches = binding.predicates.iter().all(|p| evaluate(p, state));
+            if !matches {
+                continue;
+            }
+            let in_scope = binding
+                .predicates
+                .iter()
+                .any(|p| predicate_mentions_field(p, scope_field));
+            if in_scope {
+                results.push((binding.key.display_label(), binding.actions.as_slice()));
+            }
+        }
+        results
+    }
+}
+
+fn predicate_mentions_field(pred: &Predicate, field: &str) -> bool {
+    match pred {
+        Predicate::Eq(f, _)
+        | Predicate::NotEq(f, _)
+        | Predicate::Gt(f, _)
+        | Predicate::Lt(f, _)
+        | Predicate::Gte(f, _)
+        | Predicate::Lte(f, _)
+        | Predicate::Matches(f, _)
+        | Predicate::Bool(f) => f.node == field,
+        Predicate::And(l, r) | Predicate::Or(l, r) => {
+            predicate_mentions_field(&l.node, field) || predicate_mentions_field(&r.node, field)
+        },
+    }
 }
 
 fn collect_functions(
@@ -968,5 +1011,89 @@ mod tests {
             .set("mode", StateValue::String("space".into()))
             .set("has_selection", StateValue::Bool(true));
         assert_eq!(keymap.active_bindings(&with).len(), 2);
+    }
+
+    #[test]
+    fn scoped_bindings_keeps_only_scoped() {
+        let config = parse_config(
+            r#"on key {
+                ? -> OpenHelp();
+                mode == "normal" && help_open {
+                    Escape -> CloseHelp();
+                    j -> HelpNext();
+                }
+                mode == "normal" {
+                    q -> Quit();
+                    j -> MoveDown();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("help_open", StateValue::Bool(true));
+
+        let scoped: Vec<_> = keymap
+            .scoped_bindings(&state, "help_open")
+            .iter()
+            .map(|(k, a)| (k.clone(), a[0].name.clone()))
+            .collect();
+        assert_eq!(
+            scoped,
+            vec![
+                ("Esc".to_string(), "CloseHelp".to_string()),
+                ("j".to_string(), "HelpNext".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn scoped_bindings_requires_state_match() {
+        let config = parse_config(
+            r#"on key {
+                mode == "normal" && help_open {
+                    Escape -> CloseHelp();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        let closed = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("help_open", StateValue::Bool(false));
+        assert!(keymap.scoped_bindings(&closed, "help_open").is_empty());
+
+        let wrong_mode = TestState::new()
+            .set("mode", StateValue::String("insert".into()))
+            .set("help_open", StateValue::Bool(true));
+        assert!(keymap.scoped_bindings(&wrong_mode, "help_open").is_empty());
+    }
+
+    #[test]
+    fn scoped_bindings_ignores_unrelated_scope() {
+        let config = parse_config(
+            r#"on key {
+                mode == "normal" && palette_open {
+                    Escape -> ClosePalette();
+                }
+                mode == "normal" && help_open {
+                    Escape -> CloseHelp();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("help_open", StateValue::Bool(true))
+            .set("palette_open", StateValue::Bool(true));
+
+        let scoped: Vec<_> = keymap
+            .scoped_bindings(&state, "help_open")
+            .iter()
+            .map(|(_, a)| a[0].name.clone())
+            .collect();
+        assert_eq!(scoped, vec!["CloseHelp".to_string()]);
     }
 }
