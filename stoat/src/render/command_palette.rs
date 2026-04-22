@@ -1,5 +1,5 @@
 use crate::{
-    command_palette::{CommandPalette, PalettePhase},
+    command_palette::{CommandPalette, PalettePhase, PaletteScope},
     input_view::InputView,
     render::text::{wrap_text, write_str},
     workspace::Workspace,
@@ -18,13 +18,14 @@ pub(crate) fn render_command_palette(
     buf: &mut Buffer,
 ) {
     palette.refilter_from_input(ws);
+    let scope = palette.scope();
 
     match &mut palette.phase {
         PalettePhase::Filter {
             input,
             filtered,
             selected,
-        } => render_palette_filter(input, filtered, *selected, ws, theme, area, buf),
+        } => render_palette_filter(input, filtered, *selected, scope, ws, theme, area, buf),
         PalettePhase::CollectArgs {
             entry,
             collected,
@@ -47,10 +48,12 @@ pub(crate) fn render_command_palette(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
     filtered: &[&'static stoat_action::registry::RegistryEntry],
     selected: usize,
+    scope: PaletteScope,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     area: Rect,
@@ -85,10 +88,14 @@ fn render_palette_filter(
     let palette_area = Rect::new(x, y, box_width, box_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
+    let title = match scope {
+        PaletteScope::Active => " command palette (applicable) ",
+        PaletteScope::All => " command palette (all) ",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(modal_style)
-        .title(" command palette ")
+        .title(title)
         .title_style(modal_style);
     let inner = block.inner(palette_area);
     block.render(palette_area, buf);

@@ -879,6 +879,7 @@ fn resolve_token(token: &str) -> (KeyCode, KeyModifiers) {
         "escape" | "esc" => (KeyCode::Esc, KeyModifiers::NONE),
         "enter" | "return" => (KeyCode::Enter, KeyModifiers::NONE),
         "tab" => (KeyCode::Tab, KeyModifiers::NONE),
+        "backtab" => (KeyCode::BackTab, KeyModifiers::NONE),
         "backspace" => (KeyCode::Backspace, KeyModifiers::NONE),
         "delete" | "del" => (KeyCode::Delete, KeyModifiers::NONE),
         "up" => (KeyCode::Up, KeyModifiers::NONE),

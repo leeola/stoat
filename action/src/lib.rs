@@ -31,8 +31,8 @@ pub use defs::{
         SplitRight,
     },
     prompt::{
-        CancelPromptInput, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
-        SubmitPromptInput,
+        CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
+        PromptInsertNewline, SubmitPromptInput,
     },
     rebase::{
         AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,

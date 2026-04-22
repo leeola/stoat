@@ -100,8 +100,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenCommandPalette => {
             let previous_mode = stoat.mode.clone();
             let executor = stoat.executor.clone();
+            let availability = crate::command_palette::Availability::from_stoat(stoat);
             let ws = stoat.active_workspace_mut();
-            stoat.command_palette = Some(CommandPalette::new(ws, executor, previous_mode));
+            stoat.command_palette = Some(CommandPalette::new(
+                ws,
+                executor,
+                previous_mode,
+                availability,
+            ));
             stoat.mode = "prompt".into();
             UpdateEffect::Redraw
         },
@@ -291,6 +297,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
         ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
         ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
+        ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
     };
     stoat.sync_claude_badges();
     effect

@@ -235,6 +235,7 @@ on key {
         Down -> PaletteSelectNext();
         Ctrl-p -> PaletteSelectPrev();
         Ctrl-n -> PaletteSelectNext();
+        BackTab -> PaletteScopeToggle();
     }
     mode == prompt && help_open {
         Up -> HelpSelectPrev();

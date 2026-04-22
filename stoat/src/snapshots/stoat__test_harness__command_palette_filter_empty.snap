@@ -10,22 +10,22 @@ size: 80x24
 [0m[7m [0m
 
 
-  [0m[35m┌ command palette ─────────────────────────────────────────────────────────┐[0m
+
+  [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m AbortRebase        discard the current rebase plan                       [0m[35m│[0m
-  [0m[35m│[0m[97m AddSelectionBelow  [0m[90madd cursor below[0m[97m                                      [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeSubmit       [0m[90msend to claude[0m[97m                                        [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToDockLeft   [0m[90mmove claude to left dock[0m[97m                              [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToDockRight  [0m[90mmove claude to right dock[0m[97m                             [0m[35m│[0m
-  [0m[35m│[0m[97m ClaudeToPane       [0m[90mmove claude to pane[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m CloseCommits       [0m[90mclose the commit-list view[0m[97m                            [0m[35m│[0m
+  [0m[35m│[0m[30m[46m AddSelectionBelow  add cursor below                                      [0m[35m│[0m
   [0m[35m│[0m[97m ClosePane          [0m[90mclose pane[0m[97m                                            [0m[35m│[0m
-  [0m[35m│[0m[97m CloseReview        [0m[90mclose the active review[0m[97m                               [0m[35m│[0m
   [0m[35m│[0m[97m CloseWorkspace     [0m[90mclose this workspace[0m[97m                                  [0m[35m│[0m
+  [0m[35m│[0m[97m CopyWorkspace      [0m[90mduplicate this workspace[0m[97m                              [0m[35m│[0m
+  [0m[35m│[0m[97m Dump               [0m[90mcapture a workspace dump[0m[97m                              [0m[35m│[0m
+  [0m[35m│[0m[97m FocusDown          [0m[90mfocus pane down[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m FocusLeft          [0m[90mfocus pane left[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m FocusNext          [0m[90mfocus next pane[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m FocusPrev          [0m[90mfocus previous pane[0m[97m                                   [0m[35m│[0m
+  [0m[35m│[0m[97m FocusRight         [0m[90mfocus pane right[0m[97m                                      [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mDrop the in-progress todo list without executing it and return to commits[0m [0m[35m│[0m
-  [0m[35m│[0m[37mmode. No commits are rewritten.[0m                                           [0m[35m│[0m
+  [0m[35m│[0m[37mAdd a new cursor on the line below the newest cursor.[0m                     [0m[35m│[0m
   [0m[35m└──────────────────────────────────────────────────────────────────────────┘[0m
 
 

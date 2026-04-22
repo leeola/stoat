@@ -62,6 +62,18 @@ pub(super) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
     Some(UpdateEffect::Redraw)
 }
 
+/// Flip the palette's [`crate::command_palette::PaletteScope`]. No-op when the
+/// palette is closed or is past the filter phase (args collection).
+pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+    let workspaces = &mut stoat.workspaces;
+    let Some(palette) = stoat.command_palette.as_mut() else {
+        return UpdateEffect::None;
+    };
+    palette.toggle_scope(&workspaces[active_idx]);
+    UpdateEffect::Redraw
+}
+
 fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
     match outcome {
         PaletteOutcome::None => UpdateEffect::Redraw,

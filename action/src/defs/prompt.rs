@@ -236,3 +236,52 @@ impl Action for PaletteSelectNext {
         self
     }
 }
+
+#[derive(Debug)]
+pub struct PaletteScopeToggleDef;
+
+impl ActionDef for PaletteScopeToggleDef {
+    fn name(&self) -> &'static str {
+        "PaletteScopeToggle"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::PaletteScopeToggle
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "toggle command palette scope"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Flip the command palette between its default Active scope (actions \
+         applicable to the current UI/user state) and All scope (every \
+         palette-visible action). Bound by default to Shift-Tab while the \
+         palette is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct PaletteScopeToggle;
+
+impl PaletteScopeToggle {
+    pub const DEF: &PaletteScopeToggleDef = &PaletteScopeToggleDef;
+}
+
+impl Action for PaletteScopeToggle {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

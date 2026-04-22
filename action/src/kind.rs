@@ -94,6 +94,7 @@ pub enum ActionKind {
     PromptInsertNewline,
     PaletteSelectPrev,
     PaletteSelectNext,
+    PaletteScopeToggle,
     RunHistoryPrev,
     RunHistoryNext,
     HelpSelectPrev,

@@ -25,8 +25,8 @@ use crate::{
             SplitRight,
         },
         prompt::{
-            CancelPromptInput, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
-            SubmitPromptInput,
+            CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
+            PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -274,6 +274,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(PaletteSelectPrev::DEF, |_| Ok(Box::new(PaletteSelectPrev)));
     add(PaletteSelectNext::DEF, |_| Ok(Box::new(PaletteSelectNext)));
+    add(PaletteScopeToggle::DEF, |_| {
+        Ok(Box::new(PaletteScopeToggle))
+    });
 
     map
 }
@@ -388,6 +391,7 @@ mod tests {
         "PromptInsertNewline",
         "PaletteSelectPrev",
         "PaletteSelectNext",
+        "PaletteScopeToggle",
     ];
 
     #[test]
@@ -448,10 +452,11 @@ mod tests {
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
-        // + 2 run-history actions + 7 help plumbing actions + 1 CloseHelp.
+        // + 1 PaletteScopeToggle + 2 run-history actions
+        // + 7 help plumbing actions + 1 CloseHelp.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 103);
+        assert_eq!(all().count(), 104);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 use crate::{
+    app::Stoat,
     input_view::{InputView, SubmitTarget},
+    pane::{FocusTarget, View},
+    rebase::RebasePause,
     workspace::Workspace,
 };
-use stoat_action::{registry, ParamValue};
+use stoat_action::{registry, ActionKind, ParamValue};
 use stoat_scheduler::Executor;
 
 pub struct CommandPalette {
@@ -11,6 +14,129 @@ pub struct CommandPalette {
     /// the palette can transition [`crate::app::Stoat::mode`] back to whatever
     /// the user was in before `:` was pressed.
     pub(crate) previous_mode: String,
+    /// Which subset of actions the palette currently lists. Captured at
+    /// open time and toggled by `PaletteScopeToggle` (Shift-Tab).
+    pub(crate) scope: PaletteScope,
+    /// Snapshot of contextual state derived from [`Stoat`] when the palette
+    /// opened. Reused across every [`CommandPalette::refilter_from_input`]
+    /// call because the workspace cannot mutate while the palette is modal.
+    pub(crate) availability: Availability,
+}
+
+/// Palette listing mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteScope {
+    /// Only actions applicable to the captured [`Availability`] snapshot.
+    Active,
+    /// Every `palette_visible()` action, regardless of availability.
+    All,
+}
+
+/// Snapshot of stoat state relevant to per-action availability. Booleans are
+/// derived once at palette-open via [`Availability::from_stoat`] so the scope
+/// filter is a cheap lookup on every keystroke.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Availability {
+    /// `workspace.rebase.is_some()`: user has an editable rebase plan.
+    pub in_rebase_plan: bool,
+    /// `workspace.rebase_active.is_some()`: a rebase is mid-execution
+    /// (paused on reword/edit/conflict, or running).
+    pub in_rebase_exec: bool,
+    /// The in-flight rebase is paused on [`RebasePause::Reword`].
+    pub in_rebase_reword: bool,
+    /// The in-flight rebase is paused on [`RebasePause::Conflict`].
+    pub in_conflict: bool,
+    /// `workspace.review.is_some()`.
+    pub review_open: bool,
+    /// `workspace.commits.is_some()`.
+    pub commits_open: bool,
+    /// Focused pane or dock currently hosts a [`View::Claude`].
+    pub claude_focused: bool,
+    /// Focused pane hosts a [`View::Run`], or a modal run is active.
+    pub run_focused: bool,
+}
+
+impl Availability {
+    /// Derive the availability snapshot from the active workspace.
+    pub fn from_stoat(stoat: &Stoat) -> Self {
+        let ws = &stoat.workspaces[stoat.active_workspace];
+
+        let (in_rebase_reword, in_conflict) = ws
+            .rebase_active
+            .as_ref()
+            .and_then(|a| a.pause.as_ref())
+            .map(|p| {
+                (
+                    matches!(p, RebasePause::Reword { .. }),
+                    matches!(p, RebasePause::Conflict { .. }),
+                )
+            })
+            .unwrap_or((false, false));
+
+        let focused_view = match ws.focus {
+            FocusTarget::SplitPane(_) => Some(ws.panes.pane(ws.panes.focus()).view.clone()),
+            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
+        };
+        let claude_focused = matches!(focused_view, Some(View::Claude(_)));
+        let run_focused = matches!(focused_view, Some(View::Run(_))) || stoat.modal_run.is_some();
+
+        Self {
+            in_rebase_plan: ws.rebase.is_some(),
+            in_rebase_exec: ws.rebase_active.is_some(),
+            in_rebase_reword,
+            in_conflict,
+            review_open: ws.review.is_some(),
+            commits_open: ws.commits.is_some(),
+            claude_focused,
+            run_focused,
+        }
+    }
+}
+
+/// Whether `kind` should appear in the palette's Active scope given `ctx`.
+/// All scope bypasses this function entirely. Actions not listed here are
+/// always available (globally applicable like `Quit`, `FocusLeft`, etc.).
+pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool {
+    use ActionKind::*;
+
+    match kind {
+        AbortRebase | ExecuteRebase | RebaseNext | RebasePrev | RebaseMoveUp | RebaseMoveDown
+        | SetRebaseOpPick | SetRebaseOpSquash | SetRebaseOpFixup | SetRebaseOpDrop
+        | SetRebaseOpReword | SetRebaseOpEdit => ctx.in_rebase_plan,
+
+        EnterRebase => ctx.commits_open,
+
+        RebaseContinue => ctx.in_rebase_exec,
+        RewordConfirm | RewordAbort => ctx.in_rebase_reword,
+
+        ConflictTakeOurs | ConflictTakeTheirs | ConflictSkipEntry | ConflictNextFile
+        | ConflictPrevFile | ConflictApply | ConflictAbort => ctx.in_conflict,
+
+        ReviewNextChunk
+        | ReviewPrevChunk
+        | ReviewStageChunk
+        | ReviewUnstageChunk
+        | ReviewToggleStage
+        | ReviewSkipChunk
+        | ReviewRefresh
+        | ReviewApplyStaged
+        | CloseReview
+        | ReviewRemoveSelected
+        | JumpToMoveSource
+        | JumpToMoveTarget
+        | JumpToNextMoveSource
+        | JumpToPrevMoveSource
+        | QueryMoveRelationships => ctx.review_open,
+
+        CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
+        | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
+
+        ClaudeSubmit | ClaudeToPane | ClaudeToDockLeft | ClaudeToDockRight => ctx.claude_focused,
+
+        RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
+
+        _ => true,
+    }
 }
 
 pub(crate) enum PalettePhase {
@@ -48,8 +174,14 @@ pub(crate) enum PaletteOutcome {
 }
 
 impl CommandPalette {
-    pub fn new(ws: &mut Workspace, executor: Executor, previous_mode: String) -> Self {
+    pub fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        previous_mode: String,
+        availability: Availability,
+    ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "prompt", 1);
+        let scope = PaletteScope::Active;
         let mut phase = PalettePhase::Filter {
             input,
             filtered: Vec::new(),
@@ -59,17 +191,34 @@ impl CommandPalette {
             filtered, selected, ..
         } = &mut phase
         {
-            refilter("", filtered, selected);
+            refilter("", scope, &availability, filtered, selected);
         }
         Self {
             phase,
             previous_mode,
+            scope,
+            availability,
         }
     }
 
     #[allow(dead_code)]
     pub(crate) fn phase(&self) -> &PalettePhase {
         &self.phase
+    }
+
+    pub(crate) fn scope(&self) -> PaletteScope {
+        self.scope
+    }
+
+    /// Flip the palette's [`PaletteScope`] and re-run the current-input
+    /// filter against the new scope. Called from the `PaletteScopeToggle`
+    /// action handler (Shift-Tab).
+    pub(crate) fn toggle_scope(&mut self, ws: &Workspace) {
+        self.scope = match self.scope {
+            PaletteScope::Active => PaletteScope::All,
+            PaletteScope::All => PaletteScope::Active,
+        };
+        self.refilter_from_input(ws);
     }
 
     /// Returns the palette's focused [`InputView`], which is always present
@@ -107,7 +256,7 @@ impl CommandPalette {
         } = &mut self.phase
         {
             let text = input.text(ws);
-            refilter(&text, filtered, selected);
+            refilter(&text, self.scope, &self.availability, filtered, selected);
         }
     }
 
@@ -201,6 +350,8 @@ impl CommandPalette {
 
 pub(crate) fn refilter(
     input: &str,
+    scope: PaletteScope,
+    availability: &Availability,
     filtered: &mut Vec<&'static registry::RegistryEntry>,
     selected: &mut usize,
 ) {
@@ -210,6 +361,9 @@ pub(crate) fn refilter(
 
     for entry in registry::all() {
         if !entry.def.palette_visible() {
+            continue;
+        }
+        if scope == PaletteScope::Active && !action_is_available(entry.def.kind(), availability) {
             continue;
         }
         if needle.is_empty() {
@@ -239,9 +393,17 @@ mod tests {
     use super::*;
 
     fn names_for(text: &str) -> Vec<&'static str> {
+        names_for_scope(text, PaletteScope::All, &Availability::default())
+    }
+
+    fn names_for_scope(
+        text: &str,
+        scope: PaletteScope,
+        availability: &Availability,
+    ) -> Vec<&'static str> {
         let mut filtered = Vec::new();
         let mut selected = 0;
-        refilter(text, &mut filtered, &mut selected);
+        refilter(text, scope, availability, &mut filtered, &mut selected);
         filtered.iter().map(|e| e.def.name()).collect()
     }
 
@@ -279,9 +441,183 @@ mod tests {
     fn refilter_clamps_selected_when_results_shrink() {
         let mut filtered = Vec::new();
         let mut selected = 7;
-        refilter("quit", &mut filtered, &mut selected);
+        refilter(
+            "quit",
+            PaletteScope::All,
+            &Availability::default(),
+            &mut filtered,
+            &mut selected,
+        );
         assert_eq!(filtered.len(), 1);
         assert_eq!(selected, 0);
+    }
+
+    #[test]
+    fn active_scope_default_availability_hides_contextual_actions() {
+        let listed = names_for_scope("", PaletteScope::Active, &Availability::default());
+        for name in [
+            "AbortRebase",
+            "ExecuteRebase",
+            "RewordConfirm",
+            "RewordAbort",
+            "RebaseContinue",
+            "ConflictTakeOurs",
+            "ConflictApply",
+            "ReviewStageChunk",
+            "ReviewApplyStaged",
+            "CommitsNext",
+            "CommitsOpenReview",
+            "ClaudeSubmit",
+            "RunSubmit",
+            "EnterRebase",
+        ] {
+            assert!(!listed.contains(&name), "{name} unexpectedly visible");
+        }
+        for name in ["Quit", "OpenFile", "OpenReview", "OpenCommits", "FocusLeft"] {
+            assert!(
+                listed.contains(&name),
+                "{name} missing from applicable list"
+            );
+        }
+    }
+
+    #[test]
+    fn active_scope_in_rebase_plan_surfaces_rebase_actions() {
+        let ctx = Availability {
+            in_rebase_plan: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in [
+            "AbortRebase",
+            "ExecuteRebase",
+            "SetRebaseOpPick",
+            "SetRebaseOpSquash",
+        ] {
+            assert!(listed.contains(&name), "{name} missing when in_rebase_plan");
+        }
+        assert!(!listed.contains(&"RewordConfirm"));
+        assert!(!listed.contains(&"ConflictApply"));
+    }
+
+    #[test]
+    fn active_scope_in_reword_surfaces_reword_actions() {
+        let ctx = Availability {
+            in_rebase_exec: true,
+            in_rebase_reword: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["RewordConfirm", "RewordAbort", "RebaseContinue"] {
+            assert!(listed.contains(&name), "{name} missing in reword");
+        }
+        assert!(!listed.contains(&"AbortRebase"));
+    }
+
+    #[test]
+    fn active_scope_in_conflict_surfaces_conflict_actions() {
+        let ctx = Availability {
+            in_rebase_exec: true,
+            in_conflict: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in [
+            "ConflictTakeOurs",
+            "ConflictTakeTheirs",
+            "ConflictApply",
+            "ConflictAbort",
+        ] {
+            assert!(listed.contains(&name), "{name} missing in conflict");
+        }
+        assert!(!listed.contains(&"RewordConfirm"));
+    }
+
+    #[test]
+    fn active_scope_review_open_surfaces_review_actions() {
+        let ctx = Availability {
+            review_open: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
+            assert!(listed.contains(&name), "{name} missing when review_open");
+        }
+        assert!(!listed.contains(&"CommitsNext"));
+    }
+
+    #[test]
+    fn active_scope_commits_open_surfaces_commits_actions() {
+        let ctx = Availability {
+            commits_open: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["CommitsNext", "CommitsOpenReview", "EnterRebase"] {
+            assert!(listed.contains(&name), "{name} missing when commits_open");
+        }
+        assert!(!listed.contains(&"ReviewStageChunk"));
+    }
+
+    #[test]
+    fn active_scope_claude_focused_surfaces_claude_actions() {
+        let ctx = Availability {
+            claude_focused: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["ClaudeSubmit", "ClaudeToPane"] {
+            assert!(listed.contains(&name), "{name} missing when claude_focused");
+        }
+    }
+
+    #[test]
+    fn active_scope_run_focused_surfaces_run_actions() {
+        let ctx = Availability {
+            run_focused: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["RunSubmit", "RunInterrupt"] {
+            assert!(listed.contains(&name), "{name} missing when run_focused");
+        }
+    }
+
+    #[test]
+    fn all_scope_shows_contextual_actions_regardless_of_state() {
+        let listed = names_for_scope("", PaletteScope::All, &Availability::default());
+        for name in [
+            "AbortRebase",
+            "RewordConfirm",
+            "ConflictApply",
+            "ReviewStageChunk",
+            "CommitsNext",
+            "ClaudeSubmit",
+            "RunSubmit",
+        ] {
+            assert!(listed.contains(&name), "{name} missing in All scope");
+        }
+    }
+
+    #[test]
+    fn every_registered_action_is_available_when_all_flags_set() {
+        let ctx = Availability {
+            in_rebase_plan: true,
+            in_rebase_exec: true,
+            in_rebase_reword: true,
+            in_conflict: true,
+            review_open: true,
+            commits_open: true,
+            claude_focused: true,
+            run_focused: true,
+        };
+        for entry in registry::all() {
+            assert!(
+                action_is_available(entry.def.kind(), &ctx),
+                "{} missing from availability predicate",
+                entry.def.name(),
+            );
+        }
     }
 
     #[test]
@@ -334,6 +670,57 @@ mod tests {
         let mut h = crate::Stoat::test();
         h.type_text(":");
         h.assert_snapshot("command_palette_filter_empty");
+    }
+
+    #[test]
+    fn snapshot_command_palette_scope_all_after_backtab() {
+        let mut h = crate::Stoat::test();
+        h.type_text(":");
+        h.type_keys("backtab");
+        h.assert_snapshot("command_palette_scope_all_after_backtab");
+    }
+
+    #[test]
+    fn backtab_toggles_scope_to_all_and_back() {
+        let mut h = crate::Stoat::test();
+        h.type_text(":");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().unwrap().scope(),
+            PaletteScope::Active
+        );
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().unwrap().scope(),
+            PaletteScope::All
+        );
+        h.type_keys("backtab");
+        assert_eq!(
+            h.stoat.command_palette.as_ref().unwrap().scope(),
+            PaletteScope::Active
+        );
+    }
+
+    #[test]
+    fn abort_rebase_hidden_by_default_visible_after_backtab() {
+        let mut h = crate::Stoat::test();
+        h.type_text(":Abort");
+        {
+            let palette = h.stoat.command_palette.as_ref().unwrap();
+            let PalettePhase::Filter { filtered, .. } = &palette.phase else {
+                panic!("expected filter phase");
+            };
+            let names: Vec<_> = filtered.iter().map(|e| e.def.name()).collect();
+            assert!(!names.contains(&"AbortRebase"), "got {names:?}");
+        }
+        h.type_keys("backtab");
+        {
+            let palette = h.stoat.command_palette.as_ref().unwrap();
+            let PalettePhase::Filter { filtered, .. } = &palette.phase else {
+                panic!("expected filter phase");
+            };
+            let names: Vec<_> = filtered.iter().map(|e| e.def.name()).collect();
+            assert!(names.contains(&"AbortRebase"), "got {names:?}");
+        }
     }
 
     #[test]
