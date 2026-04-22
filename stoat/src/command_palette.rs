@@ -5,8 +5,18 @@ use crate::{
     rebase::RebasePause,
     workspace::Workspace,
 };
+use nucleo::{
+    pattern::{Atom, AtomKind, CaseMatching, Normalization},
+    Matcher, Utf32Str,
+};
+use std::sync::{Mutex, OnceLock};
 use stoat_action::{registry, ActionKind, ParamValue};
 use stoat_scheduler::Executor;
+
+fn fuzzy_matcher() -> &'static Mutex<Matcher> {
+    static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
+    MATCHER.get_or_init(|| Mutex::new(Matcher::default()))
+}
 
 pub struct CommandPalette {
     pub(crate) phase: PalettePhase,
@@ -358,6 +368,22 @@ pub(crate) fn refilter(
     let needle = input.to_lowercase();
     let mut prefix: Vec<&'static registry::RegistryEntry> = Vec::new();
     let mut substring: Vec<&'static registry::RegistryEntry> = Vec::new();
+    let mut fuzzy: Vec<&'static registry::RegistryEntry> = Vec::new();
+
+    let fuzzy_atom = (!needle.is_empty()).then(|| {
+        Atom::new(
+            input,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+            false,
+        )
+    });
+
+    let mut hay_buf: Vec<char> = Vec::new();
+    let mut matcher_guard = fuzzy_atom
+        .as_ref()
+        .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
 
     for entry in registry::all() {
         if !entry.def.palette_visible() {
@@ -375,12 +401,19 @@ pub(crate) fn refilter(
             prefix.push(entry);
         } else if name_lc.contains(&needle) {
             substring.push(entry);
+        } else if let (Some(atom), Some(matcher)) = (&fuzzy_atom, matcher_guard.as_deref_mut()) {
+            let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
+            if atom.score(hay, matcher).is_some() {
+                fuzzy.push(entry);
+            }
         }
     }
 
     prefix.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
     substring.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
+    fuzzy.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
     prefix.extend(substring);
+    prefix.extend(fuzzy);
     *filtered = prefix;
 
     if *selected >= filtered.len() {
@@ -458,6 +491,31 @@ mod tests {
         assert!(pos_in(&listed, "Run") < open_run);
         assert!(pos_in(&listed, "RunSubmit") < open_run);
         assert!(pos_in(&listed, "RunHistoryNext") < open_run);
+    }
+
+    #[test]
+    fn fuzzy_matches_noncontiguous_subsequence() {
+        // `:qa` matches `QuitAll` via subsequence Q(0),A(4); `Quit` has no `a`.
+        let listed = names_for("qa");
+        assert!(listed.contains(&"QuitAll"), "QuitAll must match via fuzzy");
+        assert!(
+            !listed.contains(&"Quit"),
+            "Quit lacks 'a' and must not match"
+        );
+    }
+
+    #[test]
+    fn tiers_order_prefix_then_substring_then_fuzzy() {
+        // For query `re`:
+        // - `ReviewRefresh` starts with "re" (prefix).
+        // - `OpenReview` contains "re" as a non-prefix substring.
+        // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
+        let listed = names_for("re");
+        let prefix = pos_in(&listed, "ReviewRefresh");
+        let substring = pos_in(&listed, "OpenReview");
+        let fuzzy = pos_in(&listed, "RunInterrupt");
+        assert!(prefix < substring, "prefix ranks above substring");
+        assert!(substring < fuzzy, "substring ranks above fuzzy");
     }
 
     #[test]
