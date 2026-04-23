@@ -132,6 +132,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MovePrevWordStart => {
             movement::move_word(stoat, movement::WordTarget::PrevStart, false)
         },
+        ActionKind::MovePrevWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::PrevEnd, false)
+        },
         ActionKind::ExtendLeft => movement::move_horizontal(stoat, -1, true),
         ActionKind::ExtendRight => movement::move_horizontal(stoat, 1, true),
         ActionKind::ExtendUp => movement::move_vertical(stoat, -1, true),
@@ -144,6 +147,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::ExtendPrevWordStart => {
             movement::move_word(stoat, movement::WordTarget::PrevStart, true)
+        },
+        ActionKind::ExtendPrevWordEnd => {
+            movement::move_word(stoat, movement::WordTarget::PrevEnd, true)
         },
         ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
         ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
@@ -393,10 +399,10 @@ mod tests {
     use std::sync::Arc;
     use stoat_action::{
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-        ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine,
-        ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown, MoveLeft,
-        MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll,
-        SelectAll, SplitRight,
+        ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+        ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+        FlipSelections, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd,
+        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SelectAll, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -662,6 +668,27 @@ mod tests {
     }
 
     #[test]
+    fn move_prev_word_end_lands_on_last_char_of_prev_word() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..6 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(head_offsets(&mut stoat), vec![6]);
+        dispatch(&mut stoat, &MovePrevWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 7, true)]);
+        assert_eq!(head_offsets(&mut stoat), vec![2]);
+    }
+
+    #[test]
+    fn move_prev_word_end_at_start_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &MovePrevWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+    }
+
+    #[test]
     fn move_right_with_multiple_cursors_advances_each() {
         let mut stoat = stoat();
         seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
@@ -870,6 +897,18 @@ mod tests {
         assert_eq!(selection_spans(&mut stoat), vec![(6, 6, false)]);
         dispatch(&mut stoat, &ExtendPrevWordStart);
         assert_eq!(selection_spans(&mut stoat), vec![(4, 6, true)]);
+    }
+
+    #[test]
+    fn extend_prev_word_end_keeps_tail_at_cursor() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..6 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        assert_eq!(selection_spans(&mut stoat), vec![(6, 6, false)]);
+        dispatch(&mut stoat, &ExtendPrevWordEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 6, true)]);
     }
 
     #[test]

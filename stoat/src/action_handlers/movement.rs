@@ -6,7 +6,8 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
 };
 use stoat_text::{
-    next_word_end, next_word_start, prev_word_start, Anchor, Bias, Point, Selection, SelectionGoal,
+    next_word_end, next_word_start, prev_word_end, prev_word_start, Anchor, Bias, Point, Selection,
+    SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -133,6 +134,7 @@ pub(super) enum WordTarget {
     NextStart,
     NextEnd,
     PrevStart,
+    PrevEnd,
 }
 
 pub(super) fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
@@ -275,20 +277,26 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             WordTarget::NextStart => next_word_start(rope, head_offset),
             WordTarget::NextEnd => next_word_end(rope, head_offset),
             WordTarget::PrevStart => prev_word_start(rope, head_offset),
+            WordTarget::PrevEnd => prev_word_end(rope, head_offset),
         };
         if target_offset == head_offset {
             return sel.clone();
         }
 
+        let shift_to_prev_char = || {
+            rope.reversed_chars_at(target_offset)
+                .next()
+                .map(|ch| target_offset - ch.len_utf8())
+                .unwrap_or(target_offset)
+        };
+
         if extend {
-            let new_head_offset = if target_offset > head_offset {
-                rope.reversed_chars_at(target_offset)
-                    .next()
-                    .map(|ch| target_offset - ch.len_utf8())
-                    .unwrap_or(target_offset)
-            } else {
-                target_offset
-            };
+            let new_head_offset =
+                if target_offset > head_offset || matches!(target, WordTarget::PrevEnd) {
+                    shift_to_prev_char()
+                } else {
+                    target_offset
+                };
             let head_anchor = buffer_snapshot.anchor_at(new_head_offset, Bias::Right);
             return extend_head(
                 sel,
@@ -300,11 +308,7 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
         }
 
         if target_offset > head_offset {
-            let end_offset = rope
-                .reversed_chars_at(target_offset)
-                .next()
-                .map(|ch| target_offset - ch.len_utf8())
-                .unwrap_or(target_offset);
+            let end_offset = shift_to_prev_char();
             let tail_anchor = buffer_snapshot.anchor_at(head_offset, Bias::Right);
             let head_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
             Selection {
@@ -315,7 +319,12 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
                 goal: SelectionGoal::None,
             }
         } else {
-            let head_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+            let resolved_head_offset = if matches!(target, WordTarget::PrevEnd) {
+                shift_to_prev_char()
+            } else {
+                target_offset
+            };
+            let head_anchor = buffer_snapshot.anchor_at(resolved_head_offset, Bias::Right);
             let tail_offset = match rope.chars_at(head_offset).next() {
                 Some(ch) => head_offset + ch.len_utf8(),
                 None => head_offset,

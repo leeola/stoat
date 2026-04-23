@@ -19,7 +19,7 @@ pub use fragment::{
 };
 pub use locator::Locator;
 pub use movement::{
-    categorize_char, next_word_end, next_word_start, prev_word_start, CharCategory,
+    categorize_char, next_word_end, next_word_start, prev_word_end, prev_word_start, CharCategory,
 };
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};

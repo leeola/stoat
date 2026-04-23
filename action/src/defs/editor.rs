@@ -81,6 +81,16 @@ define_action!(
 );
 
 define_action!(
+    MovePrevWordEndDef,
+    MovePrevWordEnd,
+    "MovePrevWordEnd",
+    ActionKind::MovePrevWordEnd,
+    "select to previous word end",
+    "Select backward from each cursor head to the end of the previous word.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendLeftDef,
     ExtendLeft,
     "ExtendLeft",
@@ -147,6 +157,16 @@ define_action!(
     ActionKind::ExtendPrevWordStart,
     "extend selection to previous word start",
     "Extend each selection's head backward to the start of the previous word, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendPrevWordEndDef,
+    ExtendPrevWordEnd,
+    "ExtendPrevWordEnd",
+    ActionKind::ExtendPrevWordEnd,
+    "extend selection to previous word end",
+    "Extend each selection's head backward to the end of the previous word, keeping the tail fixed.",
     ActionPriority::Rare
 );
 
@@ -317,6 +337,8 @@ mod tests {
         assert_eq!(MoveNextWordEnd.def().name(), "MoveNextWordEnd");
         assert_eq!(MovePrevWordStart.kind(), ActionKind::MovePrevWordStart);
         assert_eq!(MovePrevWordStart.def().name(), "MovePrevWordStart");
+        assert_eq!(MovePrevWordEnd.kind(), ActionKind::MovePrevWordEnd);
+        assert_eq!(MovePrevWordEnd.def().name(), "MovePrevWordEnd");
     }
 
     #[test]
@@ -335,6 +357,8 @@ mod tests {
         assert_eq!(ExtendNextWordEnd.def().name(), "ExtendNextWordEnd");
         assert_eq!(ExtendPrevWordStart.kind(), ActionKind::ExtendPrevWordStart);
         assert_eq!(ExtendPrevWordStart.def().name(), "ExtendPrevWordStart");
+        assert_eq!(ExtendPrevWordEnd.kind(), ActionKind::ExtendPrevWordEnd);
+        assert_eq!(ExtendPrevWordEnd.def().name(), "ExtendPrevWordEnd");
     }
 
     #[test]

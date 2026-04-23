@@ -131,6 +131,56 @@ fn prev_word_start_from_end(rope: &Rope, from: usize) -> usize {
     }
 }
 
+pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
+    if from == 0 {
+        return 0;
+    }
+    let Some(first_char) = rope.chars_at(from).next() else {
+        return prev_word_end_from_end(rope, from);
+    };
+    let head_start = from;
+    let mut head = head_start;
+    let mut prev_ch = first_char;
+    let mut iter = rope.reversed_chars_at(from);
+
+    loop {
+        let Some(ch) = iter.next() else {
+            return head;
+        };
+        let boundary = is_word_boundary(prev_ch, ch);
+        let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
+        if target && head != head_start {
+            return head;
+        }
+        prev_ch = ch;
+        head -= ch.len_utf8();
+    }
+}
+
+fn prev_word_end_from_end(rope: &Rope, from: usize) -> usize {
+    let head_start = from;
+    let mut head = head_start;
+    let mut iter = rope.reversed_chars_at(from);
+    let Some(seed) = iter.next() else {
+        return head;
+    };
+    head -= seed.len_utf8();
+    let mut prev_ch = seed;
+
+    loop {
+        let Some(ch) = iter.next() else {
+            return head;
+        };
+        let boundary = is_word_boundary(prev_ch, ch);
+        let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
+        if target && head != head_start - seed.len_utf8() {
+            return head;
+        }
+        prev_ch = ch;
+        head -= ch.len_utf8();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,5 +381,62 @@ mod tests {
     fn next_word_start_trailing_whitespace() {
         let r = rope("hello   ");
         assert_eq!(next_word_start(&r, 0), 8);
+    }
+
+    #[test]
+    fn prev_word_end_basic() {
+        let r = rope("hello world");
+        assert_eq!(prev_word_end(&r, 9), 5);
+    }
+
+    #[test]
+    fn prev_word_end_from_end() {
+        let r = rope("hello world");
+        assert_eq!(prev_word_end(&r, 11), 5);
+    }
+
+    #[test]
+    fn prev_word_end_from_word_start() {
+        let r = rope("foo bar");
+        assert_eq!(prev_word_end(&r, 4), 3);
+    }
+
+    #[test]
+    fn prev_word_end_from_whitespace_skips_prev_word() {
+        let r = rope("foo bar baz");
+        assert_eq!(prev_word_end(&r, 7), 3);
+    }
+
+    #[test]
+    fn prev_word_end_at_start_is_noop() {
+        let r = rope("hello");
+        assert_eq!(prev_word_end(&r, 0), 0);
+    }
+
+    #[test]
+    fn prev_word_end_empty_rope() {
+        let r = rope("");
+        assert_eq!(prev_word_end(&r, 0), 0);
+    }
+
+    #[test]
+    fn prev_word_end_punctuation() {
+        let r = rope("abc.def");
+        assert_eq!(prev_word_end(&r, 7), 4);
+        assert_eq!(prev_word_end(&r, 4), 3);
+    }
+
+    #[test]
+    fn prev_word_end_multibyte() {
+        let r = rope("héllo wörld");
+        let world_end = r.len();
+        let hello_end = "héllo".len();
+        assert_eq!(prev_word_end(&r, world_end), hello_end);
+    }
+
+    #[test]
+    fn prev_word_end_all_newlines() {
+        let r = rope("\n\n\n\n\n");
+        assert_eq!(prev_word_end(&r, 5), 0);
     }
 }

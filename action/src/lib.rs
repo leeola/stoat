@@ -18,11 +18,12 @@ pub use defs::{
     dump::Dump,
     editor::{
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-        ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine,
-        ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart,
-        GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart, KeepPrimarySelection,
-        MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight,
-        MoveUp, SelectAll, SelectLineBelow,
+        ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+        ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+        FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
+        GotoLineStart, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
+        MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, SelectAll,
+        SelectLineBelow,
     },
     file::OpenFile,
     help::{

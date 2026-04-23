@@ -12,11 +12,12 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
-            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-            MovePrevWordStart, MoveRight, MoveUp, SelectAll, SelectLineBelow,
+            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+            FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
+            GotoLineStart, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
+            MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, SelectAll,
+            SelectLineBelow,
         },
         file::OpenFile,
         help::{
@@ -171,6 +172,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MoveNextWordStart::DEF, |_| Ok(Box::new(MoveNextWordStart)));
     add(MoveNextWordEnd::DEF, |_| Ok(Box::new(MoveNextWordEnd)));
     add(MovePrevWordStart::DEF, |_| Ok(Box::new(MovePrevWordStart)));
+    add(MovePrevWordEnd::DEF, |_| Ok(Box::new(MovePrevWordEnd)));
     add(ExtendLeft::DEF, |_| Ok(Box::new(ExtendLeft)));
     add(ExtendRight::DEF, |_| Ok(Box::new(ExtendRight)));
     add(ExtendUp::DEF, |_| Ok(Box::new(ExtendUp)));
@@ -182,6 +184,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
+    add(ExtendPrevWordEnd::DEF, |_| Ok(Box::new(ExtendPrevWordEnd)));
     add(GotoLineStart::DEF, |_| Ok(Box::new(GotoLineStart)));
     add(GotoLineEnd::DEF, |_| Ok(Box::new(GotoLineEnd)));
     add(GotoFirstNonwhitespace::DEF, |_| {
@@ -357,6 +360,7 @@ mod tests {
         "MoveNextWordStart",
         "MoveNextWordEnd",
         "MovePrevWordStart",
+        "MovePrevWordEnd",
         "GotoLineStart",
         "GotoLineEnd",
         "CollapseSelection",
@@ -502,9 +506,10 @@ mod tests {
         // + 2 goto-line-boundary actions + 3 goto-file/line/nonwhitespace
         // actions + 4 extend-to goto variants + 3 selection primitives
         // (collapse/flip/select-all) + 2 more (select-line-below,
-        // keep-primary). Insert and Backspace in reword mode are handled
-        // by the editor directly, not via the action registry.
-        assert_eq!(all().count(), 127);
+        // keep-primary) + 2 prev-word-end variants (move + extend).
+        // Insert and Backspace in reword mode are handled by the editor
+        // directly, not via the action registry.
+        assert_eq!(all().count(), 129);
     }
 
     #[test]
