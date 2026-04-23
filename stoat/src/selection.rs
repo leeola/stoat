@@ -485,4 +485,42 @@ mod tests {
         h.type_keys("g i");
         h.assert_snapshot("snapshot_goto_first_nonwhitespace_empty_line");
     }
+
+    #[test]
+    fn snapshot_extend_to_line_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w w");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineStart);
+        h.assert_snapshot("snapshot_extend_to_line_start");
+    }
+
+    #[test]
+    fn snapshot_extend_to_line_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineEnd);
+        h.assert_snapshot("snapshot_extend_to_line_end");
+    }
+
+    #[test]
+    fn snapshot_extend_to_file_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("j j l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToFileStart);
+        h.assert_snapshot("snapshot_extend_to_file_start");
+    }
+
+    #[test]
+    fn snapshot_extend_to_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLastLine);
+        h.assert_snapshot("snapshot_extend_to_last_line");
+    }
 }

@@ -200,6 +200,46 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    ExtendToLineStartDef,
+    ExtendToLineStart,
+    "ExtendToLineStart",
+    ActionKind::ExtendToLineStart,
+    "extend selection to line start",
+    "Extend each selection's head to column 0 of the line containing its cursor head, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendToLineEndDef,
+    ExtendToLineEnd,
+    "ExtendToLineEnd",
+    ActionKind::ExtendToLineEnd,
+    "extend selection to line end",
+    "Extend each selection's head to the end of the line containing its cursor head (just before the trailing newline), keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendToFileStartDef,
+    ExtendToFileStart,
+    "ExtendToFileStart",
+    ActionKind::ExtendToFileStart,
+    "extend selection to file start",
+    "Extend each selection's head to offset 0 of the focused buffer, keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendToLastLineDef,
+    ExtendToLastLine,
+    "ExtendToLastLine",
+    ActionKind::ExtendToLastLine,
+    "extend selection to last line",
+    "Extend each selection's head to column 0 of the buffer's last line (falling back to the second-to-last line when the buffer ends with a trailing newline), keeping the tail fixed.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

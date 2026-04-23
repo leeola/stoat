@@ -12,9 +12,10 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevWordStart, ExtendRight, ExtendUp, GotoFileStart, GotoFirstNonwhitespace,
-            GotoLastLine, GotoLineEnd, GotoLineStart, MoveDown, MoveLeft, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
+            ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
+            ExtendToLineStart, ExtendUp, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineStart, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+            MovePrevWordStart, MoveRight, MoveUp,
         },
         file::OpenFile,
         help::{
@@ -187,6 +188,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
+    add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
+    add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
+    add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
+    add(ExtendToLastLine::DEF, |_| Ok(Box::new(ExtendToLastLine)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -482,9 +487,10 @@ mod tests {
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
         // + 7 extend-selection variants + 1 CloseOtherPanes
         // + 2 goto-line-boundary actions + 3 goto-file/line/nonwhitespace
-        // actions. Insert and Backspace in reword mode are handled by the
-        // editor directly, not via the action registry.
-        assert_eq!(all().count(), 118);
+        // actions + 4 extend-to goto variants. Insert and Backspace in
+        // reword mode are handled by the editor directly, not via the
+        // action registry.
+        assert_eq!(all().count(), 122);
     }
 
     #[test]

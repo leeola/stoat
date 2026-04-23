@@ -150,6 +150,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),
         ActionKind::GotoFileStart => movement::goto_file_start(stoat, false),
         ActionKind::GotoLastLine => movement::goto_last_line(stoat, false),
+        ActionKind::ExtendToLineStart => movement::goto_line_start(stoat, true),
+        ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
+        ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),
+        ActionKind::ExtendToLastLine => movement::goto_last_line(stoat, true),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
@@ -384,8 +388,9 @@ mod tests {
     use std::sync::Arc;
     use stoat_action::{
         AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-        ExtendPrevWordStart, ExtendRight, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd,
-        MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
+        ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
+        ExtendToLineStart, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -872,6 +877,44 @@ mod tests {
             selection_spans(&mut stoat),
             vec![(0, 1, false), (4, 5, false)]
         );
+    }
+
+    #[test]
+    fn extend_to_line_end_grows_forward() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &ExtendToLineEnd);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 7, false)]);
+    }
+
+    #[test]
+    fn extend_to_line_start_from_mid_reverses() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &ExtendToLineStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, true)]);
+    }
+
+    #[test]
+    fn extend_to_last_line_grows_forward() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        dispatch(&mut stoat, &ExtendToLastLine);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 8, false)]);
+    }
+
+    #[test]
+    fn extend_to_file_start_reverses_from_end() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abcdef");
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &MoveRight);
+        dispatch(&mut stoat, &ExtendToFileStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, true)]);
     }
 
     #[test]
