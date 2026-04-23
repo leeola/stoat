@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::EditorState,
-    pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, View},
+    pane::{Axis, Direction, DockSide, DockVisibility, FocusTarget, PaneId, View},
 };
 
 /// Closes the focused pane and disposes its backing view state. Returns
@@ -9,10 +9,37 @@ use crate::{
 /// remains); in that case no state is touched so callers can choose to
 /// exit the application instead.
 pub(super) fn close_focused_pane(stoat: &mut Stoat) -> bool {
-    let ws = stoat.active_workspace_mut();
+    let focused = stoat.active_workspace().panes.focus();
+    close_pane_by_id(stoat, focused)
+}
+
+/// Closes every split pane except the focused one. Pre-collects the
+/// non-focused ids before looping so the tree's in-place mutations don't
+/// invalidate the iteration; remaining ids stay keyed to their still-present
+/// panes. Focus never moves because [`crate::pane::PaneTree::close`] only
+/// reassigns focus when the closed pane *is* the focused one.
+pub(super) fn close_other_panes(stoat: &mut Stoat) {
+    let ws = stoat.active_workspace();
     let focused = ws.panes.focus();
-    let view = ws.panes.pane(focused).view.clone();
-    if !ws.panes.close(focused) {
+    let others: Vec<PaneId> = ws
+        .panes
+        .split_pane_ids()
+        .into_iter()
+        .filter(|id| *id != focused)
+        .collect();
+
+    for id in others {
+        close_pane_by_id(stoat, id);
+    }
+}
+
+/// Closes a specific pane by id and disposes its backing view state. Returns
+/// `false` when the pane tree refused to close (only one split pane
+/// remains); in that case no state is touched.
+fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let view = ws.panes.pane(id).view.clone();
+    if !ws.panes.close(id) {
         return false;
     }
     match view {

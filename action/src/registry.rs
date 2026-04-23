@@ -22,8 +22,8 @@ use crate::{
         },
         palette::OpenCommandPalette,
         pane::{
-            ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
-            SplitRight,
+            CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
+            FocusUp, SplitDown, SplitRight,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -76,6 +76,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FocusNext::DEF, |_| Ok(Box::new(FocusNext)));
     add(FocusPrev::DEF, |_| Ok(Box::new(FocusPrev)));
     add(ClosePane::DEF, |_| Ok(Box::new(ClosePane)));
+    add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
     });
@@ -318,6 +319,7 @@ mod tests {
         "FocusNext",
         "FocusPrev",
         "ClosePane",
+        "CloseOtherPanes",
         "OpenCommandPalette",
         "OpenHelp",
         "OpenReview",
@@ -468,10 +470,10 @@ mod tests {
         // + 4 workspace actions + 5 prompt-input plumbing actions
         // + 1 PaletteScopeToggle + 2 run-history actions
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
-        // + 7 extend-selection variants.
+        // + 7 extend-selection variants + 1 CloseOtherPanes.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 112);
+        assert_eq!(all().count(), 113);
     }
 
     #[test]

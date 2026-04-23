@@ -78,6 +78,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             pane::close_focused_pane(stoat);
             UpdateEffect::Redraw
         },
+        ActionKind::CloseOtherPanes => {
+            pane::close_other_panes(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::OpenFile => {
             let open = action
                 .as_any()

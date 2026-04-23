@@ -74,6 +74,14 @@ define_action!(
     "close pane",
     "Close the focused pane. Refuses if it is the last remaining pane."
 );
+define_action!(
+    CloseOtherPanesDef,
+    CloseOtherPanes,
+    "CloseOtherPanes",
+    ActionKind::CloseOtherPanes,
+    "close other panes",
+    "Close every split pane except the focused one. No-op when the focused pane is the only one."
+);
 
 #[cfg(test)]
 mod tests {
@@ -91,12 +99,14 @@ mod tests {
         assert_eq!(FocusNext.kind(), ActionKind::FocusNext);
         assert_eq!(FocusPrev.kind(), ActionKind::FocusPrev);
         assert_eq!(ClosePane.kind(), ActionKind::ClosePane);
+        assert_eq!(CloseOtherPanes.kind(), ActionKind::CloseOtherPanes);
     }
 
     #[test]
     fn action_names() {
         assert_eq!(SplitRight.def().name(), "SplitRight");
         assert_eq!(ClosePane.def().name(), "ClosePane");
+        assert_eq!(CloseOtherPanes.def().name(), "CloseOtherPanes");
     }
 
     #[test]

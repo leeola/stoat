@@ -11,6 +11,7 @@ pub enum ActionKind {
     FocusNext,
     FocusPrev,
     ClosePane,
+    CloseOtherPanes,
     OpenFile,
     OpenCommandPalette,
     OpenHelp,

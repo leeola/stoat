@@ -290,6 +290,7 @@ on key {
         s -> [SplitRight(), SetMode(normal)];
         v -> [SplitDown(), SetMode(normal)];
         q -> [ClosePane(), SetMode(normal)];
+        o -> [CloseOtherPanes(), SetMode(normal)];
         w -> [FocusNext(), SetMode(normal)];
         h -> [FocusLeft(), SetMode(normal)];
         Left -> [FocusLeft(), SetMode(normal)];

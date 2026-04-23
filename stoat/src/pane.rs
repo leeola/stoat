@@ -952,6 +952,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_close_other_panes_from_three() {
+        let mut h = crate::Stoat::test();
+        h.type_action("SplitRight()");
+        h.type_action("SplitRight()");
+        h.type_action("CloseOtherPanes()");
+        h.assert_snapshot("close_other_panes_from_three");
+    }
+
+    #[test]
     fn snapshot_quit_closes_one_split() {
         let mut h = crate::Stoat::test();
         h.type_action("SplitRight()");
