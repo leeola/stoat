@@ -155,7 +155,15 @@ on key {
         E -> ExtendNextWordEnd();
         Home -> GotoLineStart();
         End -> GotoLineEnd();
+        g -> SetMode(goto);
         R -> OpenReview();
+    }
+    mode == goto {
+        Escape -> SetMode(normal);
+        i -> [GotoFirstNonwhitespace(), SetMode(normal)];
+        j -> [GotoLastLine(), SetMode(normal)];
+        k -> [GotoFileStart(), SetMode(normal)];
+        : -> OpenCommandPalette();
     }
     mode == commits {
         Escape -> CloseCommits();

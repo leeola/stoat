@@ -170,6 +170,36 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    GotoFirstNonwhitespaceDef,
+    GotoFirstNonwhitespace,
+    "GotoFirstNonwhitespace",
+    ActionKind::GotoFirstNonwhitespace,
+    "goto first nonwhitespace",
+    "Collapse every selection to the first non-whitespace column of the line containing its cursor head; leaves the selection unchanged if the line is empty or only whitespace.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoFileStartDef,
+    GotoFileStart,
+    "GotoFileStart",
+    ActionKind::GotoFileStart,
+    "goto file start",
+    "Collapse every selection to offset 0 of the focused buffer.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoLastLineDef,
+    GotoLastLine,
+    "GotoLastLine",
+    ActionKind::GotoLastLine,
+    "goto last line",
+    "Collapse every selection to column 0 of the buffer's last line (falling back to the second-to-last line when the buffer ends with a trailing newline).",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

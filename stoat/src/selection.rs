@@ -447,4 +447,42 @@ mod tests {
         h.type_keys("end");
         h.assert_snapshot("snapshot_goto_line_end_empty_line");
     }
+
+    #[test]
+    fn snapshot_goto_file_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("j j l l");
+        h.type_keys("g k");
+        h.assert_snapshot("snapshot_goto_file_start");
+    }
+
+    #[test]
+    fn snapshot_goto_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("g j");
+        h.assert_snapshot("snapshot_goto_last_line");
+    }
+
+    #[test]
+    fn snapshot_goto_first_nonwhitespace() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "    foo bar\n");
+        h.open_file(&path);
+        h.type_keys("g i");
+        h.assert_snapshot("snapshot_goto_first_nonwhitespace");
+    }
+
+    #[test]
+    fn snapshot_goto_first_nonwhitespace_empty_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\n\nxyz\n");
+        h.open_file(&path);
+        h.type_keys("j");
+        h.type_keys("g i");
+        h.assert_snapshot("snapshot_goto_first_nonwhitespace_empty_line");
+    }
 }

@@ -18,8 +18,9 @@ pub use defs::{
     dump::Dump,
     editor::{
         AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-        ExtendPrevWordStart, ExtendRight, ExtendUp, GotoLineEnd, GotoLineStart, MoveDown, MoveLeft,
-        MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
+        ExtendPrevWordStart, ExtendRight, ExtendUp, GotoFileStart, GotoFirstNonwhitespace,
+        GotoLastLine, GotoLineEnd, GotoLineStart, MoveDown, MoveLeft, MoveNextWordEnd,
+        MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
     },
     file::OpenFile,
     help::{

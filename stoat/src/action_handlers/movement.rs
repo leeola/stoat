@@ -402,3 +402,108 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
     });
     UpdateEffect::Redraw
 }
+
+pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_anchor = sel.head();
+        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
+        let row = head_point.row;
+        let line_start = rope.point_to_offset(Point::new(row, 0));
+        let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
+
+        let mut found = None;
+        let mut cursor = line_start;
+        for ch in rope.chars_at(line_start) {
+            if cursor >= line_end {
+                break;
+            }
+            if !ch.is_whitespace() {
+                found = Some(cursor);
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        let Some(target_offset) = found else {
+            return sel.clone();
+        };
+
+        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        }
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let target_offset = 0;
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        }
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let mut target_row = rope.max_point().row;
+    if target_row > 0 && rope.line_len(target_row) == 0 {
+        target_row -= 1;
+    }
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        }
+    });
+    UpdateEffect::Redraw
+}

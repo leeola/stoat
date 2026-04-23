@@ -528,8 +528,14 @@ mod tests {
     #[test]
     fn prefix_filter_ranks_first() {
         let listed = names_for("Foc");
-        assert!(listed.iter().all(|n| n.starts_with("Focus")));
         assert!(listed.contains(&"FocusLeft"));
+        let first_non_prefix = listed.iter().position(|n| !n.starts_with("Focus"));
+        if let Some(idx) = first_non_prefix {
+            assert!(
+                listed[idx..].iter().all(|n| !n.starts_with("Focus")),
+                "prefix matches must come before any fuzzy matches",
+            );
+        }
     }
 
     #[test]

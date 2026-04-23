@@ -12,8 +12,9 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevWordStart, ExtendRight, ExtendUp, GotoLineEnd, GotoLineStart, MoveDown,
-            MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
+            ExtendPrevWordStart, ExtendRight, ExtendUp, GotoFileStart, GotoFirstNonwhitespace,
+            GotoLastLine, GotoLineEnd, GotoLineStart, MoveDown, MoveLeft, MoveNextWordEnd,
+            MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
         },
         file::OpenFile,
         help::{
@@ -181,6 +182,11 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoLineStart::DEF, |_| Ok(Box::new(GotoLineStart)));
     add(GotoLineEnd::DEF, |_| Ok(Box::new(GotoLineEnd)));
+    add(GotoFirstNonwhitespace::DEF, |_| {
+        Ok(Box::new(GotoFirstNonwhitespace))
+    });
+    add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
+    add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -475,10 +481,10 @@ mod tests {
         // + 1 PaletteScopeToggle + 2 run-history actions
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
         // + 7 extend-selection variants + 1 CloseOtherPanes
-        // + 2 goto-line-boundary actions.
-        // Insert and Backspace in reword mode are handled by the
+        // + 2 goto-line-boundary actions + 3 goto-file/line/nonwhitespace
+        // actions. Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 115);
+        assert_eq!(all().count(), 118);
     }
 
     #[test]
