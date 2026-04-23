@@ -477,6 +477,51 @@ pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.collapse_to(sel.head(), sel.goal);
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        if !new.is_empty() {
+            new.reversed = !new.reversed;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let end_offset = buffer_snapshot.rope().len();
+    let start_anchor = buffer_snapshot.anchor_at(0, Bias::Left);
+    let end_anchor = buffer_snapshot.anchor_at(end_offset, Bias::Right);
+    editor
+        .selections
+        .set_single_range(start_anchor, end_anchor, SelectionGoal::None);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

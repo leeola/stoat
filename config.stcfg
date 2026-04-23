@@ -155,6 +155,9 @@ on key {
         E -> ExtendNextWordEnd();
         Home -> GotoLineStart();
         End -> GotoLineEnd();
+        ; -> CollapseSelection();
+        Alt-; -> FlipSelections();
+        % -> SelectAll();
         g -> SetMode(goto);
         R -> OpenReview();
     }

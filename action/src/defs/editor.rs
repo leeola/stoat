@@ -240,6 +240,36 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    CollapseSelectionDef,
+    CollapseSelection,
+    "CollapseSelection",
+    ActionKind::CollapseSelection,
+    "collapse selection",
+    "Collapse every selection to its cursor head, leaving the cursor position unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    FlipSelectionsDef,
+    FlipSelections,
+    "FlipSelections",
+    ActionKind::FlipSelections,
+    "flip selection anchors",
+    "Swap head and anchor for every non-empty selection, keeping the range fixed while moving the cursor to the opposite end.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    SelectAllDef,
+    SelectAll,
+    "SelectAll",
+    ActionKind::SelectAll,
+    "select all",
+    "Replace every selection with a single selection spanning the entire focused buffer.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +323,16 @@ mod tests {
         assert_eq!(GotoLineStart.def().name(), "GotoLineStart");
         assert_eq!(GotoLineEnd.kind(), ActionKind::GotoLineEnd);
         assert_eq!(GotoLineEnd.def().name(), "GotoLineEnd");
+    }
+
+    #[test]
+    fn selection_primitive_kinds_and_names() {
+        assert_eq!(CollapseSelection.kind(), ActionKind::CollapseSelection);
+        assert_eq!(CollapseSelection.def().name(), "CollapseSelection");
+        assert_eq!(FlipSelections.kind(), ActionKind::FlipSelections);
+        assert_eq!(FlipSelections.def().name(), "FlipSelections");
+        assert_eq!(SelectAll.kind(), ActionKind::SelectAll);
+        assert_eq!(SelectAll.def().name(), "SelectAll");
     }
 
     #[test]

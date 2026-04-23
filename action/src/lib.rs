@@ -17,11 +17,11 @@ pub use defs::{
     },
     dump::Dump,
     editor::{
-        AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-        ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
-        ExtendToLineStart, ExtendUp, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
-        GotoLineEnd, GotoLineStart, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordStart, MoveRight, MoveUp,
+        AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
+        ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine,
+        ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart,
+        GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart, MoveDown, MoveLeft,
+        MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp, SelectAll,
     },
     file::OpenFile,
     help::{

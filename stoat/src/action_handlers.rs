@@ -154,6 +154,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
         ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendToLastLine => movement::goto_last_line(stoat, true),
+        ActionKind::CollapseSelection => movement::collapse_selection(stoat),
+        ActionKind::FlipSelections => movement::flip_selections(stoat),
+        ActionKind::SelectAll => movement::select_all(stoat),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
@@ -387,10 +390,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use stoat_action::{
-        AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-        ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
-        ExtendToLineStart, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SplitRight,
+        AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
+        ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine,
+        ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown, MoveLeft,
+        MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll,
+        SelectAll, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -915,6 +919,87 @@ mod tests {
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendToFileStart);
         assert_eq!(selection_spans(&mut stoat), vec![(0, 3, true)]);
+    }
+
+    #[test]
+    fn collapse_selection_shrinks_to_head() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abcdef");
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        dispatch(&mut stoat, &CollapseSelection);
+        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+    }
+
+    #[test]
+    fn collapse_selection_preserves_reversed_head() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "foo bar");
+        for _ in 0..6 {
+            dispatch(&mut stoat, &MoveRight);
+        }
+        dispatch(&mut stoat, &MovePrevWordStart);
+        assert_eq!(selection_spans(&mut stoat), vec![(4, 7, true)]);
+        dispatch(&mut stoat, &CollapseSelection);
+        assert_eq!(selection_spans(&mut stoat), vec![(4, 4, false)]);
+    }
+
+    #[test]
+    fn collapse_selection_multi_cursor_collapses_each() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        dispatch(&mut stoat, &AddSelectionBelow);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(
+            selection_spans(&mut stoat),
+            vec![(0, 1, false), (4, 5, false)]
+        );
+        dispatch(&mut stoat, &CollapseSelection);
+        assert_eq!(
+            selection_spans(&mut stoat),
+            vec![(1, 1, false), (5, 5, false)]
+        );
+    }
+
+    #[test]
+    fn flip_selections_toggles_reversed() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abcdef");
+        dispatch(&mut stoat, &ExtendRight);
+        dispatch(&mut stoat, &ExtendRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        dispatch(&mut stoat, &FlipSelections);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, true)]);
+        dispatch(&mut stoat, &FlipSelections);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+    }
+
+    #[test]
+    fn flip_selections_empty_is_noop() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc");
+        dispatch(&mut stoat, &MoveRight);
+        assert_eq!(selection_spans(&mut stoat), vec![(1, 1, false)]);
+        dispatch(&mut stoat, &FlipSelections);
+        assert_eq!(selection_spans(&mut stoat), vec![(1, 1, false)]);
+    }
+
+    #[test]
+    fn select_all_replaces_all_selections() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        dispatch(&mut stoat, &SelectAll);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 8, false)]);
+    }
+
+    #[test]
+    fn select_all_on_empty_buffer() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SelectAll);
+        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
     }
 
     #[test]

@@ -65,6 +65,18 @@ impl SelectionsCollection {
         self.disjoint.insert(pos, selection);
     }
 
+    pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
+        let id = self.next_selection_id;
+        self.next_selection_id += 1;
+        self.disjoint = vec![Selection {
+            id,
+            start,
+            end,
+            reversed: false,
+            goal,
+        }];
+    }
+
     pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
@@ -522,5 +534,34 @@ mod tests {
         h.open_file(&path);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLastLine);
         h.assert_snapshot("snapshot_extend_to_last_line");
+    }
+
+    #[test]
+    fn snapshot_collapse_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w w");
+        h.type_keys(";");
+        h.assert_snapshot("snapshot_collapse_selection");
+    }
+
+    #[test]
+    fn snapshot_flip_selections() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w");
+        h.type_keys("alt-;");
+        h.assert_snapshot("snapshot_flip_selections");
+    }
+
+    #[test]
+    fn snapshot_select_all() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        h.assert_snapshot("snapshot_select_all");
     }
 }
