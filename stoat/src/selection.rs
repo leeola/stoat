@@ -418,4 +418,33 @@ mod tests {
         h.type_keys("C l l");
         h.assert_snapshot("snapshot_multi_cursor_move_right");
     }
+
+    #[test]
+    fn snapshot_goto_line_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("w w");
+        h.type_keys("home");
+        h.assert_snapshot("snapshot_goto_line_start");
+    }
+
+    #[test]
+    fn snapshot_goto_line_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        h.open_file(&path);
+        h.type_keys("end");
+        h.assert_snapshot("snapshot_goto_line_end");
+    }
+
+    #[test]
+    fn snapshot_goto_line_end_empty_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\n\nxyz\n");
+        h.open_file(&path);
+        h.type_keys("j");
+        h.type_keys("end");
+        h.assert_snapshot("snapshot_goto_line_end_empty_line");
+    }
 }

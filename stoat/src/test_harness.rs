@@ -929,6 +929,8 @@ fn key_description(event: &KeyEvent) -> String {
         KeyCode::Down => "down".to_string(),
         KeyCode::Left => "left".to_string(),
         KeyCode::Right => "right".to_string(),
+        KeyCode::Home => "home".to_string(),
+        KeyCode::End => "end".to_string(),
         KeyCode::F(n) => format!("f{n}"),
         _ => "?".to_string(),
     };

@@ -145,6 +145,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendPrevWordStart => {
             movement::move_word(stoat, movement::WordTarget::PrevStart, true)
         },
+        ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
+        ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),

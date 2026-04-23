@@ -6,7 +6,7 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
 };
 use stoat_text::{
-    next_word_end, next_word_start, prev_word_start, Anchor, Bias, Selection, SelectionGoal,
+    next_word_end, next_word_start, prev_word_start, Anchor, Bias, Point, Selection, SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -118,7 +118,7 @@ fn set_cursor_row(editor: &mut EditorState, row: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let point = stoat_text::Point::new(row, 0);
+    let point = Point::new(row, 0);
     let offset = rope.point_to_offset(point);
     let anchor = buffer_snapshot.anchor_at(offset, Bias::Left);
     editor.selections = crate::selection::SelectionsCollection::new();
@@ -354,4 +354,51 @@ fn extend_head(
         new.reversed = false;
     }
     new
+}
+
+pub(super) fn goto_line_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    goto_line_boundary(stoat, LineBoundary::Start, extend)
+}
+
+pub(super) fn goto_line_end(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
+    goto_line_boundary(stoat, LineBoundary::End, extend)
+}
+
+#[derive(Copy, Clone)]
+enum LineBoundary {
+    Start,
+    End,
+}
+
+fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let head_anchor = sel.head();
+        let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
+        let col = match boundary {
+            LineBoundary::Start => 0,
+            LineBoundary::End => rope.line_len(head_point.row),
+        };
+        let target_offset = rope.point_to_offset(Point::new(head_point.row, col));
+        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        if extend {
+            extend_head(
+                sel,
+                anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        }
+    });
+    UpdateEffect::Redraw
 }

@@ -153,6 +153,8 @@ on key {
         B -> ExtendPrevWordStart();
         W -> ExtendNextWordStart();
         E -> ExtendNextWordEnd();
+        Home -> GotoLineStart();
+        End -> GotoLineEnd();
         R -> OpenReview();
     }
     mode == commits {

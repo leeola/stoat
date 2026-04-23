@@ -150,6 +150,26 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    GotoLineStartDef,
+    GotoLineStart,
+    "GotoLineStart",
+    ActionKind::GotoLineStart,
+    "goto line start",
+    "Collapse every selection to column 0 of the line containing its cursor head.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoLineEndDef,
+    GotoLineEnd,
+    "GotoLineEnd",
+    ActionKind::GotoLineEnd,
+    "goto line end",
+    "Collapse every selection to the end of the line containing its cursor head (just before the trailing newline).",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +215,14 @@ mod tests {
         assert_eq!(ExtendNextWordEnd.def().name(), "ExtendNextWordEnd");
         assert_eq!(ExtendPrevWordStart.kind(), ActionKind::ExtendPrevWordStart);
         assert_eq!(ExtendPrevWordStart.def().name(), "ExtendPrevWordStart");
+    }
+
+    #[test]
+    fn goto_kinds_and_names() {
+        assert_eq!(GotoLineStart.kind(), ActionKind::GotoLineStart);
+        assert_eq!(GotoLineStart.def().name(), "GotoLineStart");
+        assert_eq!(GotoLineEnd.kind(), ActionKind::GotoLineEnd);
+        assert_eq!(GotoLineEnd.def().name(), "GotoLineEnd");
     }
 
     #[test]

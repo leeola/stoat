@@ -31,6 +31,8 @@ pub enum ActionKind {
     ExtendNextWordStart,
     ExtendNextWordEnd,
     ExtendPrevWordStart,
+    GotoLineStart,
+    GotoLineEnd,
     OpenRun,
     RunSubmit,
     RunInterrupt,

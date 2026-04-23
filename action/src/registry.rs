@@ -12,8 +12,8 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionBelow, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevWordStart, ExtendRight, ExtendUp, MoveDown, MoveLeft, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
+            ExtendPrevWordStart, ExtendRight, ExtendUp, GotoLineEnd, GotoLineStart, MoveDown,
+            MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight, MoveUp,
         },
         file::OpenFile,
         help::{
@@ -179,6 +179,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
+    add(GotoLineStart::DEF, |_| Ok(Box::new(GotoLineStart)));
+    add(GotoLineEnd::DEF, |_| Ok(Box::new(GotoLineEnd)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -336,6 +338,8 @@ mod tests {
         "MoveNextWordStart",
         "MoveNextWordEnd",
         "MovePrevWordStart",
+        "GotoLineStart",
+        "GotoLineEnd",
         "ReviewNextChunk",
         "ReviewPrevChunk",
         "ReviewStageChunk",
@@ -470,10 +474,11 @@ mod tests {
         // + 4 workspace actions + 5 prompt-input plumbing actions
         // + 1 PaletteScopeToggle + 2 run-history actions
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
-        // + 7 extend-selection variants + 1 CloseOtherPanes.
+        // + 7 extend-selection variants + 1 CloseOtherPanes
+        // + 2 goto-line-boundary actions.
         // Insert and Backspace in reword mode are handled by the
         // editor directly, not via the action registry.
-        assert_eq!(all().count(), 113);
+        assert_eq!(all().count(), 115);
     }
 
     #[test]
