@@ -158,6 +158,8 @@ on key {
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         % -> SelectAll();
+        x -> SelectLineBelow();
+        , -> KeepPrimarySelection();
         g -> SetMode(goto);
         R -> OpenReview();
     }

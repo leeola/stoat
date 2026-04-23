@@ -43,6 +43,8 @@ pub enum ActionKind {
     CollapseSelection,
     FlipSelections,
     SelectAll,
+    SelectLineBelow,
+    KeepPrimarySelection,
     OpenRun,
     RunSubmit,
     RunInterrupt,

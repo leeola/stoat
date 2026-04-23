@@ -15,8 +15,8 @@ use crate::{
             ExtendNextWordStart, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
             ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
-            MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordStart, MoveRight,
-            MoveUp, SelectAll,
+            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+            MovePrevWordStart, MoveRight, MoveUp, SelectAll, SelectLineBelow,
         },
         file::OpenFile,
         help::{
@@ -196,6 +196,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CollapseSelection::DEF, |_| Ok(Box::new(CollapseSelection)));
     add(FlipSelections::DEF, |_| Ok(Box::new(FlipSelections)));
     add(SelectAll::DEF, |_| Ok(Box::new(SelectAll)));
+    add(SelectLineBelow::DEF, |_| Ok(Box::new(SelectLineBelow)));
+    add(KeepPrimarySelection::DEF, |_| {
+        Ok(Box::new(KeepPrimarySelection))
+    });
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -358,6 +362,8 @@ mod tests {
         "CollapseSelection",
         "FlipSelections",
         "SelectAll",
+        "SelectLineBelow",
+        "KeepPrimarySelection",
         "ReviewNextChunk",
         "ReviewPrevChunk",
         "ReviewStageChunk",
@@ -495,9 +501,10 @@ mod tests {
         // + 7 extend-selection variants + 1 CloseOtherPanes
         // + 2 goto-line-boundary actions + 3 goto-file/line/nonwhitespace
         // actions + 4 extend-to goto variants + 3 selection primitives
-        // (collapse/flip/select-all). Insert and Backspace in reword mode
-        // are handled by the editor directly, not via the action registry.
-        assert_eq!(all().count(), 125);
+        // (collapse/flip/select-all) + 2 more (select-line-below,
+        // keep-primary). Insert and Backspace in reword mode are handled
+        // by the editor directly, not via the action registry.
+        assert_eq!(all().count(), 127);
     }
 
     #[test]

@@ -270,6 +270,26 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    SelectLineBelowDef,
+    SelectLineBelow,
+    "SelectLineBelow",
+    ActionKind::SelectLineBelow,
+    "select line below",
+    "Snap every selection to its containing lines; extend one line downward when the selection is already line-shaped.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    KeepPrimarySelectionDef,
+    KeepPrimarySelection,
+    "KeepPrimarySelection",
+    ActionKind::KeepPrimarySelection,
+    "keep primary selection",
+    "Discard every selection except the newest (primary) one.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +353,13 @@ mod tests {
         assert_eq!(FlipSelections.def().name(), "FlipSelections");
         assert_eq!(SelectAll.kind(), ActionKind::SelectAll);
         assert_eq!(SelectAll.def().name(), "SelectAll");
+        assert_eq!(SelectLineBelow.kind(), ActionKind::SelectLineBelow);
+        assert_eq!(SelectLineBelow.def().name(), "SelectLineBelow");
+        assert_eq!(
+            KeepPrimarySelection.kind(),
+            ActionKind::KeepPrimarySelection
+        );
+        assert_eq!(KeepPrimarySelection.def().name(), "KeepPrimarySelection");
     }
 
     #[test]

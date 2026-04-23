@@ -157,6 +157,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CollapseSelection => movement::collapse_selection(stoat),
         ActionKind::FlipSelections => movement::flip_selections(stoat),
         ActionKind::SelectAll => movement::select_all(stoat),
+        ActionKind::SelectLineBelow => movement::select_line_below(stoat),
+        ActionKind::KeepPrimarySelection => movement::keep_primary_selection(stoat),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),

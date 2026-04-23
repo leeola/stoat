@@ -77,6 +77,11 @@ impl SelectionsCollection {
         }];
     }
 
+    pub(crate) fn keep_primary(&mut self) {
+        let primary = self.newest_anchor().clone();
+        self.disjoint = vec![primary];
+    }
+
     pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
@@ -170,6 +175,32 @@ mod tests {
         );
         assert_eq!(collection.newest_anchor().id, 1);
         assert_eq!(collection.newest_anchor().goal, SelectionGoal::Column(4));
+    }
+
+    #[test]
+    fn keep_primary_retains_only_newest() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::Column(4),
+            &snapshot,
+        );
+        assert_eq!(collection.all_anchors().len(), 3);
+
+        collection.keep_primary();
+
+        let remaining = collection.all_anchors();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, 2);
+        assert_eq!(remaining[0].goal, SelectionGoal::Column(4));
     }
 
     #[test]
@@ -563,5 +594,33 @@ mod tests {
         h.open_file(&path);
         h.type_keys("%");
         h.assert_snapshot("snapshot_select_all");
+    }
+
+    #[test]
+    fn snapshot_select_line_below_snaps_to_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("x");
+        h.assert_snapshot("snapshot_select_line_below_snaps_to_line");
+    }
+
+    #[test]
+    fn snapshot_select_line_below_extends_on_repeat() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("x x");
+        h.assert_snapshot("snapshot_select_line_below_extends_on_repeat");
+    }
+
+    #[test]
+    fn snapshot_keep_primary_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("C");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
+        h.assert_snapshot("snapshot_keep_primary_selection");
     }
 }

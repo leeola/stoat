@@ -522,6 +522,66 @@ pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn select_line_below(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+    let rope_len = rope.len();
+
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let line_start = |row: u32| -> usize {
+            if row > max_row {
+                rope_len
+            } else {
+                rope.point_to_offset(Point::new(row, 0))
+            }
+        };
+
+        let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+        let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+        let start_row = rope.offset_to_point(start_offset).row;
+        let end_point = rope.offset_to_point(end_offset);
+        let end_row = if end_offset > start_offset && end_point.column == 0 {
+            end_point.row.saturating_sub(1)
+        } else {
+            end_point.row
+        };
+
+        let current_line_start = line_start(start_row);
+        let current_line_end = line_start(end_row + 1);
+        let already_line_shaped =
+            start_offset == current_line_start && end_offset == current_line_end;
+
+        let (new_start_offset, new_end_offset) = if already_line_shaped {
+            (current_line_start, line_start(end_row + 2))
+        } else {
+            (current_line_start, current_line_end)
+        };
+
+        let start_anchor = buffer_snapshot.anchor_at(new_start_offset, Bias::Left);
+        let end_anchor = buffer_snapshot.anchor_at(new_end_offset, Bias::Right);
+        let mut new = sel.clone();
+        new.start = start_anchor;
+        new.end = end_anchor;
+        new.reversed = false;
+        new.goal = SelectionGoal::None;
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    editor.selections.keep_primary();
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
