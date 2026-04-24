@@ -702,4 +702,85 @@ mod tests {
             "out-of-workspace path must not scroll editors: {editor_rows:?}"
         );
     }
+
+    #[test]
+    fn claude_follow_reuses_editor_on_repeat_reads() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, path) = seed_follow_scenario(&mut h);
+        toggle_follow(&mut h);
+
+        let editor_pane = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .find(|(_, p)| matches!(p.view, View::Editor(_)))
+            .map(|(pid, _)| pid)
+            .expect("follow scenario should seed an editor pane");
+
+        inject_read_tool_use(&mut h, id, &path, 30);
+        let first = match h.stoat.active_workspace().panes.pane(editor_pane).view {
+            View::Editor(eid) => eid,
+            _ => panic!("pane should still hold an editor"),
+        };
+
+        inject_read_tool_use(&mut h, id, &path, 50);
+        let second = match h.stoat.active_workspace().panes.pane(editor_pane).view {
+            View::Editor(eid) => eid,
+            _ => panic!("pane should still hold an editor"),
+        };
+
+        assert_eq!(
+            first, second,
+            "editor must be reused across repeat reads of the same file"
+        );
+        let editor = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(second)
+            .expect("editor should exist");
+        assert_eq!(editor.scroll_row, 47);
+    }
+
+    fn seed_chat_only_scenario(h: &mut TestHarness) -> (ClaudeSessionId, std::path::PathBuf) {
+        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/test");
+        let content: String = (1..=80)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = crate::test_harness::write_file(h, "long.txt", &content);
+        let id = h.claude().open();
+        (id, path)
+    }
+
+    #[test]
+    fn claude_follow_creates_editor_when_chat_only() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, path) = seed_chat_only_scenario(&mut h);
+        assert_eq!(
+            h.stoat.active_workspace().panes.pane_count(),
+            1,
+            "chat-only scenario should start with a single Claude pane"
+        );
+        toggle_follow(&mut h);
+
+        inject_read_tool_use(&mut h, id, &path, 50);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            ws.panes.pane_count(),
+            2,
+            "follow must split to create an editor pane"
+        );
+        let editor_row = ws
+            .panes
+            .split_panes()
+            .find_map(|(_, p)| match p.view {
+                View::Editor(eid) => ws.editors.get(eid).map(|e| e.scroll_row),
+                _ => None,
+            })
+            .expect("split should have produced an editor pane");
+        assert_eq!(editor_row, 47);
+    }
 }

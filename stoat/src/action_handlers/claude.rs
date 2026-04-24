@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::EditorState,
     host::{ToolCallLocation, ToolKind},
-    pane::{DockSide, DockVisibility, FocusTarget, PaneId, View},
+    pane::{Axis, DockSide, DockVisibility, FocusTarget, PaneId, View},
     workspace::WorkspaceId,
 };
 use std::path::PathBuf;
@@ -301,7 +301,7 @@ pub(super) fn toggle_claude_follow(stoat: &mut Stoat) -> UpdateEffect {
 /// file in an editor pane of the chat's workspace and moves the cursor to
 /// `loc.line` when present. Silent no-op when any guard fails (non-file tool
 /// kind, missing location, workspace not active, path outside the workspace
-/// cwd, no editor pane available).
+/// cwd). If no editor pane exists, splits the focused pane and creates one.
 pub(crate) fn handle_follow_tool_use(
     stoat: &mut Stoat,
     wid: WorkspaceId,
@@ -346,34 +346,49 @@ pub(crate) fn handle_follow_tool_use(
 }
 
 fn resolve_follow_target(
-    stoat: &Stoat,
+    stoat: &mut Stoat,
     wid: WorkspaceId,
     path: &std::path::Path,
 ) -> Option<(PaneId, PathBuf)> {
-    let ws = &stoat.workspaces[wid];
+    let absolute = {
+        let ws = &stoat.workspaces[wid];
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            ws.git_root.join(path)
+        };
 
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        ws.git_root.join(path)
+        let canonical_abs = std::fs::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
+        let canonical_root =
+            std::fs::canonicalize(&ws.git_root).unwrap_or_else(|_| ws.git_root.clone());
+        if !canonical_abs.starts_with(&canonical_root) {
+            return None;
+        }
+
+        let focused = ws.panes.focus();
+        if matches!(ws.panes.pane(focused).view, View::Editor(_)) {
+            return Some((focused, absolute));
+        }
+
+        if let Some(fallback) = ws
+            .panes
+            .split_panes()
+            .find(|(_, p)| matches!(p.view, View::Editor(_)))
+            .map(|(id, _)| id)
+        {
+            return Some((fallback, absolute));
+        }
+
+        absolute
     };
 
-    let canonical_abs = std::fs::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
-    let canonical_root =
-        std::fs::canonicalize(&ws.git_root).unwrap_or_else(|_| ws.git_root.clone());
-    if !canonical_abs.starts_with(&canonical_root) {
-        return None;
-    }
-
-    let focused = ws.panes.focus();
-    if matches!(ws.panes.pane(focused).view, View::Editor(_)) {
-        return Some((focused, absolute));
-    }
-
-    let fallback = ws
-        .panes
-        .split_panes()
-        .find(|(_, p)| matches!(p.view, View::Editor(_)))
-        .map(|(id, _)| id)?;
-    Some((fallback, absolute))
+    let executor = stoat.executor.clone();
+    let ws = &mut stoat.workspaces[wid];
+    let prev_focus = ws.panes.focus();
+    let new_pane = ws.panes.split(Axis::Vertical);
+    let (bid, buffer) = ws.buffers.new_scratch();
+    let eid = ws.editors.insert(EditorState::new(bid, buffer, executor));
+    ws.panes.pane_mut(new_pane).view = View::Editor(eid);
+    ws.panes.set_focus(prev_focus);
+    Some((new_pane, absolute))
 }

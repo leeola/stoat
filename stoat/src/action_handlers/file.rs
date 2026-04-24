@@ -37,8 +37,21 @@ pub(crate) fn open_file_in_pane(
 
     let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
     if let Some(lang) = lang {
-        ws.buffers.set_language(buffer_id, lang);
+        if ws.buffers.language_for(buffer_id).is_none() {
+            ws.buffers.set_language(buffer_id, lang);
+        }
     }
+
+    if let View::Editor(eid) = ws.panes.pane(target).view {
+        if ws
+            .editors
+            .get(eid)
+            .is_some_and(|e| e.buffer_id == buffer_id)
+        {
+            return Some(buffer_id);
+        }
+    }
+
     let new_editor_id = ws
         .editors
         .insert(EditorState::new(buffer_id, buffer, executor));
