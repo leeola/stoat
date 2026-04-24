@@ -115,7 +115,7 @@ pub(super) fn move_nav(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-fn set_cursor_row(editor: &mut EditorState, row: u32) {
+pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();

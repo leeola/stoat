@@ -1,8 +1,12 @@
 use crate::{
+    action_handlers::{file::open_file_in_pane, movement::set_cursor_row},
     app::{Stoat, UpdateEffect},
     editor_state::EditorState,
-    pane::{DockSide, DockVisibility, FocusTarget, View},
+    host::{ToolCallLocation, ToolKind},
+    pane::{DockSide, DockVisibility, FocusTarget, PaneId, View},
+    workspace::WorkspaceId,
 };
+use std::path::PathBuf;
 
 pub(super) fn open_claude(stoat: &mut Stoat) -> UpdateEffect {
     use stoat_config::ClaudePlacement;
@@ -93,6 +97,7 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             pending_sends: Vec::new(),
             active_since: None,
             protocol_session_id: None,
+            follow: false,
         },
     );
 
@@ -278,4 +283,97 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     UpdateEffect::Redraw
+}
+
+pub(super) fn toggle_claude_follow(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(session_id) = ws.claude_chat else {
+        return UpdateEffect::None;
+    };
+    let Some(chat) = ws.chats.get_mut(&session_id) else {
+        return UpdateEffect::None;
+    };
+    chat.follow = !chat.follow;
+    UpdateEffect::Redraw
+}
+
+/// Acts on a `ToolUse` whose chat has follow enabled: opens the tool's target
+/// file in an editor pane of the chat's workspace and moves the cursor to
+/// `loc.line` when present. Silent no-op when any guard fails (non-file tool
+/// kind, missing location, workspace not active, path outside the workspace
+/// cwd, no editor pane available).
+pub(crate) fn handle_follow_tool_use(
+    stoat: &mut Stoat,
+    wid: WorkspaceId,
+    kind: ToolKind,
+    locations: &[ToolCallLocation],
+) {
+    if !matches!(kind, ToolKind::Read | ToolKind::Edit) {
+        return;
+    }
+    let Some(loc) = locations.first() else {
+        return;
+    };
+
+    if stoat.active_workspace != wid {
+        return;
+    }
+
+    let Some((target_pane, absolute)) = resolve_follow_target(stoat, wid, &loc.path) else {
+        return;
+    };
+
+    open_file_in_pane(stoat, target_pane, &absolute);
+
+    if let Some(line) = loc.line {
+        let row = line.saturating_sub(1);
+        let ws = stoat.active_workspace_mut();
+        let View::Editor(eid) = ws.panes.pane(target_pane).view else {
+            return;
+        };
+        let Some(editor) = ws.editors.get_mut(eid) else {
+            return;
+        };
+        let max_row = editor
+            .display_map
+            .snapshot()
+            .buffer_snapshot()
+            .rope()
+            .max_point()
+            .row;
+        set_cursor_row(editor, row.min(max_row));
+    }
+}
+
+fn resolve_follow_target(
+    stoat: &Stoat,
+    wid: WorkspaceId,
+    path: &std::path::Path,
+) -> Option<(PaneId, PathBuf)> {
+    let ws = &stoat.workspaces[wid];
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        ws.git_root.join(path)
+    };
+
+    let canonical_abs = std::fs::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
+    let canonical_root =
+        std::fs::canonicalize(&ws.git_root).unwrap_or_else(|_| ws.git_root.clone());
+    if !canonical_abs.starts_with(&canonical_root) {
+        return None;
+    }
+
+    let focused = ws.panes.focus();
+    if matches!(ws.panes.pane(focused).view, View::Editor(_)) {
+        return Some((focused, absolute));
+    }
+
+    let fallback = ws
+        .panes
+        .split_panes()
+        .find(|(_, p)| matches!(p.view, View::Editor(_)))
+        .map(|(id, _)| id)?;
+    Some((fallback, absolute))
 }

@@ -38,6 +38,10 @@ pub struct ClaudeChatState {
     /// as part of workspace state so a future launch can pass it to
     /// `ClaudeCodeHost::resume_session`.
     pub protocol_session_id: Option<String>,
+    /// When true, file-oriented tool calls (`Read`/`Edit`) open their
+    /// target file in an editor pane and move the cursor to the line Claude
+    /// is touching (when known). Toggled via `ClaudeToggleFollow`.
+    pub follow: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -599,5 +603,103 @@ mod tests {
         h.assert_snapshot("claude_pane_prompt_mode");
         h.type_keys("escape");
         h.assert_snapshot("claude_pane_normal_mode");
+    }
+
+    fn inject_read_tool_use(
+        h: &mut TestHarness,
+        id: ClaudeSessionId,
+        path: &std::path::Path,
+        line: u32,
+    ) {
+        use crate::host::{AgentMessage, ToolCallLocation, ToolKind};
+        let path_str = path.display().to_string();
+        let input = serde_json::json!({
+            "file_path": path_str,
+            "offset": line,
+        })
+        .to_string();
+        h.claude().get_session(id).raw(AgentMessage::ToolUse {
+            id: "toolu_follow_test".into(),
+            name: "Read".into(),
+            input,
+            kind: ToolKind::Read,
+            title: format!("Read {path_str} (from {line})"),
+            content: vec![],
+            locations: vec![ToolCallLocation {
+                path: path.to_path_buf(),
+                line: Some(line),
+            }],
+        });
+    }
+
+    fn seed_follow_scenario(h: &mut TestHarness) -> (ClaudeSessionId, std::path::PathBuf) {
+        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/test");
+        let content: String = (1..=80)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = crate::test_harness::write_file(h, "long.txt", &content);
+        h.stoat.open_file(&path);
+        h.type_keys("escape");
+        h.type_action("SplitRight()");
+        let id = h.claude().open();
+        (id, path)
+    }
+
+    fn toggle_follow(h: &mut TestHarness) {
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToggleFollow);
+    }
+
+    #[test]
+    fn claude_follow_opens_file_and_scrolls_to_line() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, path) = seed_follow_scenario(&mut h);
+
+        toggle_follow(&mut h);
+        inject_read_tool_use(&mut h, id, &path, 50);
+
+        h.assert_snapshot("claude_follow_reads_to_line_50");
+    }
+
+    #[test]
+    fn claude_follow_disabled_ignores_tool_use() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, path) = seed_follow_scenario(&mut h);
+
+        inject_read_tool_use(&mut h, id, &path, 50);
+
+        let editor_rows: Vec<u32> = h
+            .stoat
+            .active_workspace()
+            .editors
+            .iter()
+            .map(|(_, e)| e.scroll_row)
+            .collect();
+        assert!(
+            editor_rows.iter().all(|&r| r == 0),
+            "no editor should have scrolled: {editor_rows:?}"
+        );
+    }
+
+    #[test]
+    fn claude_follow_skips_paths_outside_workspace() {
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, _path) = seed_follow_scenario(&mut h);
+        toggle_follow(&mut h);
+
+        let outside = std::path::PathBuf::from("/etc/passwd");
+        inject_read_tool_use(&mut h, id, &outside, 10);
+
+        let editor_rows: Vec<u32> = h
+            .stoat
+            .active_workspace()
+            .editors
+            .iter()
+            .map(|(_, e)| e.scroll_row)
+            .collect();
+        assert!(
+            editor_rows.iter().all(|&r| r == 0),
+            "out-of-workspace path must not scroll editors: {editor_rows:?}"
+        );
     }
 }

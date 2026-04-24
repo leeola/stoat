@@ -23,6 +23,7 @@ use crate::{
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace_picker::WorkspacePicker,
 };
+pub(crate) use claude::handle_follow_tool_use;
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::close_file_finder;
 #[cfg(test)]
@@ -196,6 +197,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ClaudeToPane => claude::claude_to_pane(stoat),
         ActionKind::ClaudeToDockLeft => claude::claude_to_dock(stoat, DockSide::Left),
         ActionKind::ClaudeToDockRight => claude::claude_to_dock(stoat, DockSide::Right),
+        ActionKind::ClaudeToggleFollow => claude::toggle_claude_follow(stoat),
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),
         ActionKind::JumpToMoveSource => {

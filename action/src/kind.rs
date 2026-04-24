@@ -60,6 +60,7 @@ pub enum ActionKind {
     ClaudeToPane,
     ClaudeToDockLeft,
     ClaudeToDockRight,
+    ClaudeToggleFollow,
     ToggleDockRight,
     ToggleDockLeft,
     JumpToMoveSource,

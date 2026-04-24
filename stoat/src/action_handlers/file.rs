@@ -1,10 +1,22 @@
 use crate::{
-    action_handlers::read_string_via_host, app::Stoat, buffer::BufferId, editor_state::EditorState,
-    pane::View,
+    action_handlers::read_string_via_host,
+    app::Stoat,
+    buffer::BufferId,
+    editor_state::EditorState,
+    pane::{PaneId, View},
 };
 use std::path::Path;
 
 pub(super) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
+    let target = stoat.active_workspace().panes.focus();
+    open_file_in_pane(stoat, target, path)
+}
+
+pub(crate) fn open_file_in_pane(
+    stoat: &mut Stoat,
+    target: PaneId,
+    path: &Path,
+) -> Option<BufferId> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -31,12 +43,11 @@ pub(super) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
         .editors
         .insert(EditorState::new(buffer_id, buffer, executor));
 
-    let focused = ws.panes.focus();
-    let old = match ws.panes.pane(focused).view {
+    let old = match ws.panes.pane(target).view {
         View::Editor(eid) => Some(eid),
         _ => None,
     };
-    ws.panes.pane_mut(focused).view = View::Editor(new_editor_id);
+    ws.panes.pane_mut(target).view = View::Editor(new_editor_id);
 
     if let Some(old_id) = old {
         let still_referenced = ws

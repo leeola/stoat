@@ -54,6 +54,15 @@ pub(crate) fn render_claude_pane(
     let meta_style = theme.get(s::CHAT_META);
     let time_style = theme.get(s::CHAT_TIME);
     write_str(buf, msg_area.x, msg_area.y, "Claude", meta_style);
+    if chat.follow {
+        write_str(
+            buf,
+            msg_area.x + "Claude".len() as u16,
+            msg_area.y,
+            " \u{25cf} follow",
+            meta_style,
+        );
+    }
 
     let body_area = Rect::new(
         msg_area.x,

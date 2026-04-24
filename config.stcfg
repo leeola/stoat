@@ -331,5 +331,6 @@ on key {
         p -> [ClaudeToPane(), SetMode(normal)];
         l -> [ClaudeToDockLeft(), SetMode(normal)];
         r -> [ClaudeToDockRight(), SetMode(normal)];
+        f -> [ClaudeToggleFollow(), SetMode(normal)];
     }
 }

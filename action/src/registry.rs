@@ -2,8 +2,8 @@ use crate::{
     defs::{
         app::{Quit, QuitAll},
         claude::{
-            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, OpenClaude,
-            ToggleDockLeft, ToggleDockRight,
+            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
+            OpenClaude, ToggleDockLeft, ToggleDockRight,
         },
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
@@ -251,6 +251,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ClaudeToPane::DEF, |_| Ok(Box::new(ClaudeToPane)));
     add(ClaudeToDockLeft::DEF, |_| Ok(Box::new(ClaudeToDockLeft)));
     add(ClaudeToDockRight::DEF, |_| Ok(Box::new(ClaudeToDockRight)));
+    add(ClaudeToggleFollow::DEF, |_| {
+        Ok(Box::new(ClaudeToggleFollow))
+    });
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(OpenCommits::DEF, |_| Ok(Box::new(OpenCommits)));
@@ -438,6 +441,7 @@ mod tests {
         "ClaudeToPane",
         "ClaudeToDockLeft",
         "ClaudeToDockRight",
+        "ClaudeToggleFollow",
         "ToggleDockRight",
         "ToggleDockLeft",
         "NewWorkspace",
@@ -527,7 +531,8 @@ mod tests {
         // Insert and Backspace in reword mode are handled by the editor
         // directly, not via the action registry.
         // + 4 file-finder actions (open, select prev/next, scope toggle).
-        assert_eq!(all().count(), 133);
+        // + 1 ClaudeToggleFollow.
+        assert_eq!(all().count(), 134);
     }
 
     #[test]

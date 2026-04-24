@@ -51,6 +51,16 @@ define_action!(
 );
 
 define_action!(
+    ClaudeToggleFollowDef,
+    ClaudeToggleFollow,
+    "ClaudeToggleFollow",
+    ActionKind::ClaudeToggleFollow,
+    "toggle claude follow",
+    "Toggle Claude follow mode. When on, file-oriented tool calls open their target file in an editor pane and move the cursor to the line Claude is touching.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ToggleDockRightDef,
     ToggleDockRight,
     "ToggleDockRight",

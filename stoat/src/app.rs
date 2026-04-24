@@ -913,6 +913,11 @@ impl Stoat {
 
         let visible = self.is_claude_visible(session_id);
         let owning = self.workspace_owning_session(session_id);
+        let mut follow_action: Option<(
+            WorkspaceId,
+            crate::host::ToolKind,
+            Vec<crate::host::ToolCallLocation>,
+        )> = None;
 
         if let Some(wid) = owning {
             let chat_ws = &mut self.workspaces[wid];
@@ -939,7 +944,12 @@ impl Stoat {
                         });
                     },
                     AgentMessage::ToolUse {
-                        id, name, input, ..
+                        id,
+                        name,
+                        input,
+                        kind,
+                        locations,
+                        ..
                     } => {
                         chat.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
@@ -949,6 +959,9 @@ impl Stoat {
                                 input: input.clone(),
                             },
                         });
+                        if chat.follow {
+                            follow_action = Some((wid, *kind, locations.clone()));
+                        }
                     },
                     AgentMessage::ToolResult { id, content, .. } => {
                         chat.messages.push(ChatMessage {
@@ -1004,6 +1017,10 @@ impl Stoat {
                     | AgentMessage::Hook(_) => {},
                 }
             }
+        }
+
+        if let Some((wid, kind, locations)) = follow_action {
+            action_handlers::handle_follow_tool_use(self, wid, kind, &locations);
         }
 
         let source = BadgeSource::Claude(session_id);
