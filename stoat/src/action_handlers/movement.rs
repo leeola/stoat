@@ -621,3 +621,52 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     });
     UpdateEffect::Redraw
 }
+
+#[derive(Copy, Clone, Debug)]
+pub(super) enum PageDir {
+    Up,
+    Down,
+}
+
+/// Fallback viewport height when the focused editor has not been
+/// rendered yet (e.g. a unit test that dispatches a page action
+/// without running a render pass).
+const DEFAULT_VIEWPORT_ROWS: u32 = 20;
+
+pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let delta = if half { viewport.div_ceil(2) } else { viewport };
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+
+    let head = editor.selections.newest_anchor().head();
+    let current_row = buffer_snapshot.point_for_anchor(&head).row;
+    let target_row = match dir {
+        PageDir::Up => current_row.saturating_sub(delta),
+        PageDir::Down => current_row.saturating_add(delta).min(max_row),
+    };
+    if target_row == current_row {
+        return UpdateEffect::None;
+    }
+
+    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+    editor.scroll_row = match dir {
+        PageDir::Up => editor.scroll_row.saturating_sub(delta),
+        PageDir::Down => editor.scroll_row.saturating_add(delta).min(max_scroll),
+    };
+
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    let target_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.collapse_to(target_anchor, SelectionGoal::None);
+        new
+    });
+    UpdateEffect::Redraw
+}

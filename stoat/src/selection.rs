@@ -623,4 +623,62 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
         h.assert_snapshot("snapshot_keep_primary_selection");
     }
+
+    fn page_scratch_content() -> String {
+        (0..30).map(|i| format!("line{i:02}\n")).collect()
+    }
+
+    #[test]
+    fn snapshot_page_down_scrolls_and_moves_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        h.assert_snapshot("snapshot_page_down_scrolls_and_moves_cursor");
+    }
+
+    #[test]
+    fn snapshot_page_up_after_page_down_returns_to_top() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f ctrl-b");
+        h.assert_snapshot("snapshot_page_up_after_page_down_returns_to_top");
+    }
+
+    #[test]
+    fn snapshot_half_page_down() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-d");
+        h.assert_snapshot("snapshot_half_page_down");
+    }
+
+    #[test]
+    fn snapshot_half_page_up_from_bottom() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f ctrl-f ctrl-u");
+        h.assert_snapshot("snapshot_half_page_up_from_bottom");
+    }
+
+    #[test]
+    fn snapshot_page_down_clamps_at_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        h.assert_snapshot("snapshot_page_down_clamps_at_last_line");
+    }
+
+    #[test]
+    fn snapshot_page_up_at_top_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-b");
+        h.assert_snapshot("snapshot_page_up_at_top_is_noop");
+    }
 }

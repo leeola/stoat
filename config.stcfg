@@ -143,6 +143,10 @@ on key {
         j -> MoveDown();
         k -> MoveUp();
         l -> MoveRight();
+        Ctrl-b -> PageUp();
+        Ctrl-f -> PageDown();
+        Ctrl-u -> HalfPageUp();
+        Ctrl-d -> HalfPageDown();
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();

@@ -15,9 +15,9 @@ use crate::{
             ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
             ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
             FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
-            GotoLineStart, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, SelectAll,
-            SelectLineBelow,
+            GotoLineStart, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
+            MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
+            MoveUp, PageDown, PageUp, SelectAll, SelectLineBelow,
         },
         file::OpenFile,
         file_finder::{
@@ -182,6 +182,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MoveRight::DEF, |_| Ok(Box::new(MoveRight)));
     add(MoveUp::DEF, |_| Ok(Box::new(MoveUp)));
     add(MoveDown::DEF, |_| Ok(Box::new(MoveDown)));
+    add(PageUp::DEF, |_| Ok(Box::new(PageUp)));
+    add(PageDown::DEF, |_| Ok(Box::new(PageDown)));
+    add(HalfPageUp::DEF, |_| Ok(Box::new(HalfPageUp)));
+    add(HalfPageDown::DEF, |_| Ok(Box::new(HalfPageDown)));
     add(MoveNextWordStart::DEF, |_| Ok(Box::new(MoveNextWordStart)));
     add(MoveNextWordEnd::DEF, |_| Ok(Box::new(MoveNextWordEnd)));
     add(MovePrevWordStart::DEF, |_| Ok(Box::new(MovePrevWordStart)));
@@ -377,6 +381,10 @@ mod tests {
         "MoveRight",
         "MoveUp",
         "MoveDown",
+        "PageUp",
+        "PageDown",
+        "HalfPageUp",
+        "HalfPageDown",
         "MoveNextWordStart",
         "MoveNextWordEnd",
         "MovePrevWordStart",
@@ -532,7 +540,8 @@ mod tests {
         // directly, not via the action registry.
         // + 4 file-finder actions (open, select prev/next, scope toggle).
         // + 1 ClaudeToggleFollow.
-        assert_eq!(all().count(), 134);
+        // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
+        assert_eq!(all().count(), 138);
     }
 
     #[test]

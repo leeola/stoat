@@ -9,6 +9,8 @@ pub(crate) fn render_editor(
     buf: &mut Buffer,
     is_focused: bool,
 ) {
+    editor.viewport_rows = Some(inner.height as u32);
+
     if editor.review_view.is_some() {
         render_review(editor, inner, fallback_style, theme, buf);
         return;

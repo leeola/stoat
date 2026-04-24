@@ -1,0 +1,19 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: ctrl-f
+focused: #1 of 1
+mode: normal
+size: 30x10
+---
+[0m[97ma[0m
+[0m[97mb[0m
+[0m[97mc[0m
+[0m[7m [0m
+
+
+
+
+
+[0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m/test/s.txt   [0m

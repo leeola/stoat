@@ -130,6 +130,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),
         ActionKind::MoveDown => movement::move_vertical(stoat, 1, false),
+        ActionKind::PageUp => movement::page_motion(stoat, movement::PageDir::Up, false),
+        ActionKind::PageDown => movement::page_motion(stoat, movement::PageDir::Down, false),
+        ActionKind::HalfPageUp => movement::page_motion(stoat, movement::PageDir::Up, true),
+        ActionKind::HalfPageDown => movement::page_motion(stoat, movement::PageDir::Down, true),
         ActionKind::MoveNextWordStart => {
             movement::move_word(stoat, movement::WordTarget::NextStart, false)
         },
@@ -409,8 +413,9 @@ mod tests {
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-        FlipSelections, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd,
-        MovePrevWordStart, MoveRight, MoveUp, Quit, QuitAll, SelectAll, SplitRight,
+        FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
+        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, Quit, QuitAll, SelectAll,
+        SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1350,5 +1355,50 @@ mod tests {
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, first);
         assert!(h.stoat.workspaces.get(second).is_none());
+    }
+
+    fn set_focused_viewport_rows(stoat: &mut Stoat, rows: Option<u32>) {
+        let ws = stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        ws.editors[editor_id].viewport_rows = rows;
+    }
+
+    #[test]
+    fn page_down_with_unrendered_editor_uses_default_viewport() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, None);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(20, 0)]);
+    }
+
+    #[test]
+    fn half_page_down_rounds_up_for_one_row_viewport() {
+        let mut stoat = stoat();
+        seed_focused_buffer(&mut stoat, "a\nb\nc\n");
+        set_focused_viewport_rows(&mut stoat, Some(1));
+        dispatch(&mut stoat, &HalfPageDown);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn page_down_collapses_multi_cursors_to_one() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        dispatch(&mut stoat, &AddSelectionBelow);
+        assert_eq!(head_offsets(&mut stoat).len(), 2);
+        dispatch(&mut stoat, &PageDown);
+        // AddSelectionBelow makes row 1 the primary cursor; PageDown from
+        // row 1 with viewport=10 lands on row 11. Both cursors collapse to
+        // the same target via the transform dedupe.
+        assert_eq!(head_offsets(&mut stoat).len(), 1);
+        assert_eq!(cursor_display_positions(&mut stoat), vec![(11, 0)]);
     }
 }

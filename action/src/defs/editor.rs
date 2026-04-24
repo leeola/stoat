@@ -51,6 +51,46 @@ define_action!(
 );
 
 define_action!(
+    PageUpDef,
+    PageUp,
+    "PageUp",
+    ActionKind::PageUp,
+    "move cursor up one page",
+    "Move the cursor up by the focused editor's viewport height and scroll the view by the same amount, keeping the cursor at the same relative screen row.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    PageDownDef,
+    PageDown,
+    "PageDown",
+    ActionKind::PageDown,
+    "move cursor down one page",
+    "Move the cursor down by the focused editor's viewport height and scroll the view by the same amount, keeping the cursor at the same relative screen row.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    HalfPageUpDef,
+    HalfPageUp,
+    "HalfPageUp",
+    ActionKind::HalfPageUp,
+    "move cursor up half a page",
+    "Move the cursor up by half the focused editor's viewport height (rounded up) and scroll the view by the same amount.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    HalfPageDownDef,
+    HalfPageDown,
+    "HalfPageDown",
+    ActionKind::HalfPageDown,
+    "move cursor down half a page",
+    "Move the cursor down by half the focused editor's viewport height (rounded up) and scroll the view by the same amount.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveNextWordStartDef,
     MoveNextWordStart,
     "MoveNextWordStart",

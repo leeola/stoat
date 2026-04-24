@@ -15,6 +15,11 @@ pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
+    /// Last-rendered viewport height in rows. Page-motion handlers read
+    /// this to compute scroll distance without taking a dependency on
+    /// the render pipeline's layout `Rect`. `None` until the editor has
+    /// been rendered at least once; handlers fall back to a default.
+    pub(crate) viewport_rows: Option<u32>,
     /// When `Some`, this editor is a review view; `render_editor` dispatches
     /// to the side-by-side renderer and flattened rows are read from the
     /// cache here. The cache is rebuilt by action handlers whenever the
@@ -50,6 +55,7 @@ impl EditorState {
             buffer_id,
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
+            viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
             move_source_cursor: None,
@@ -66,6 +72,7 @@ impl EditorState {
             buffer_id,
             display_map: DisplayMap::new(multi_buffer, executor),
             scroll_row: 0,
+            viewport_rows: None,
             review_view: None,
             selections: SelectionsCollection::new(),
             move_source_cursor: None,
