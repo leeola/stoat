@@ -538,10 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn space_f_opens_finder_and_switches_to_prompt_mode() {
+    fn space_p_opens_finder_and_switches_to_prompt_mode() {
         let mut h = crate::Stoat::test();
         let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
-        h.type_keys("space f");
+        h.type_keys("space p");
         assert!(h.stoat.file_finder.is_some(), "finder not opened");
         assert_eq!(h.snapshot().mode, "prompt");
     }
@@ -550,7 +550,7 @@ mod tests {
     fn escape_closes_finder_and_restores_mode() {
         let mut h = crate::Stoat::test();
         let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
-        h.type_keys("space f");
+        h.type_keys("space p");
         h.type_keys("escape");
         assert!(h.stoat.file_finder.is_none(), "finder still open");
         assert_eq!(h.snapshot().mode, "normal");
@@ -560,7 +560,7 @@ mod tests {
     fn ctrl_c_closes_finder() {
         let mut h = crate::Stoat::test();
         let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
-        h.type_keys("space f");
+        h.type_keys("space p");
         h.type_keys("Ctrl-c");
         assert!(h.stoat.file_finder.is_none());
         assert_eq!(h.snapshot().mode, "normal");
@@ -570,7 +570,7 @@ mod tests {
     fn second_open_is_noop() {
         let mut h = crate::Stoat::test();
         let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
-        h.type_keys("space f");
+        h.type_keys("space p");
         let ptr_before = h.stoat.file_finder.as_ref().unwrap() as *const FileFinder;
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
         let ptr_after = h.stoat.file_finder.as_ref().unwrap() as *const FileFinder;
@@ -581,7 +581,7 @@ mod tests {
     fn enter_dispatches_open_file_for_selected_path() {
         let mut h = crate::Stoat::test();
         let _tmp = seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
-        h.type_keys("space f");
+        h.type_keys("space p");
         // Only one file in the workspace, so it is the selected row.
         h.type_keys("enter");
         let frame = h.snapshot();
@@ -613,7 +613,7 @@ mod tests {
         // walker's picture matches the git modification state.
         std::fs::write(tmp.path().join("b.rs"), "v2\n").unwrap();
 
-        h.type_keys("space f");
+        h.type_keys("space p");
         {
             let finder = h.stoat.file_finder.as_ref().unwrap();
             assert_eq!(finder.scope(), FinderScope::All);
@@ -637,7 +637,7 @@ mod tests {
             &mut h,
             &[("alpha.rs", ""), ("beta.rs", ""), ("gamma.rs", "")],
         );
-        h.type_keys("space f");
+        h.type_keys("space p");
         // refilter is driven by the render loop; force a snapshot so
         // filtered reflects the current (empty) query.
         let _ = h.snapshot();
@@ -664,7 +664,7 @@ mod tests {
     fn snapshot_file_finder_empty() {
         let mut h = crate::Stoat::test();
         seed_empty_finder_workspace(&mut h);
-        h.type_keys("space f");
+        h.type_keys("space p");
         h.assert_snapshot("file_finder_empty");
     }
 
@@ -672,7 +672,7 @@ mod tests {
     fn snapshot_file_finder_tiny_terminal_no_render() {
         let mut h = TestHarness::with_size(30, 8);
         seed_empty_finder_workspace(&mut h);
-        h.type_keys("space f");
+        h.type_keys("space p");
         h.assert_snapshot("file_finder_tiny_terminal_no_render");
     }
 }

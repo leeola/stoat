@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use stoat_action::OpenFile;
 
 /// Open the file finder. No-op if one is already open so that a second
-/// `space f` keystroke cannot stack modals or reset progress the user has
+/// `space p` keystroke cannot stack modals or reset progress the user has
 /// made. Snapshots the workspace file list and the current git-modified
 /// list at open time. Always restores to normal mode on close: the finder
 /// is a top-level modal, so returning to a leader mode like `space`

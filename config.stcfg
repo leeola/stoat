@@ -291,7 +291,7 @@ on key {
         t -> [OpenRun(), SetMode(run)];
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
-        f -> OpenFileFinder();
+        p -> OpenFileFinder();
         : -> OpenCommandPalette();
     }
     mode == space_workspace {
