@@ -9,18 +9,25 @@ pub(crate) struct StoatKeymapState {
     mode_value: StateValue,
     palette_open: StateValue,
     help_open: StateValue,
+    finder_open: StateValue,
 }
 
 impl StoatKeymapState {
     pub(crate) fn new(mode: &str) -> Self {
-        Self::with_flags(mode, false, false)
+        Self::with_flags(mode, false, false, false)
     }
 
-    pub(crate) fn with_flags(mode: &str, palette_open: bool, help_open: bool) -> Self {
+    pub(crate) fn with_flags(
+        mode: &str,
+        palette_open: bool,
+        help_open: bool,
+        finder_open: bool,
+    ) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
             palette_open: StateValue::Bool(palette_open),
             help_open: StateValue::Bool(help_open),
+            finder_open: StateValue::Bool(finder_open),
         }
     }
 
@@ -29,6 +36,7 @@ impl StoatKeymapState {
             stoat.mode.as_str(),
             stoat.command_palette.is_some(),
             stoat.help.is_some(),
+            stoat.file_finder.is_some(),
         )
     }
 }
@@ -39,6 +47,7 @@ impl KeymapState for StoatKeymapState {
             "mode" => Some(&self.mode_value),
             "palette_open" => Some(&self.palette_open),
             "help_open" => Some(&self.help_open),
+            "finder_open" => Some(&self.finder_open),
             _ => None,
         }
     }

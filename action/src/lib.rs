@@ -26,6 +26,9 @@ pub use defs::{
         SelectLineBelow,
     },
     file::OpenFile,
+    file_finder::{
+        FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
+    },
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,

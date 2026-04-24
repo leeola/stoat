@@ -5,6 +5,9 @@ use crate::app::{Stoat, UpdateEffect};
 /// bindings are added as sites migrate to [`crate::input_view::InputView`];
 /// this acts as a no-op for prompt-mode contexts without a registered owner.
 pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(effect) = super::file_finder::file_finder_submit(stoat) {
+        return effect;
+    }
     if let Some(effect) = super::palette::palette_submit(stoat) {
         return effect;
     }
@@ -39,6 +42,9 @@ fn focused_target(stoat: &Stoat) -> Option<crate::input_view::SubmitTarget> {
 }
 
 pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(effect) = super::file_finder::file_finder_cancel(stoat) {
+        return effect;
+    }
     if let Some(effect) = super::palette::palette_cancel(stoat) {
         return effect;
     }

@@ -2,6 +2,7 @@ mod claude;
 mod commits;
 mod conflict;
 mod file;
+mod file_finder;
 mod help;
 mod movement;
 mod palette;
@@ -23,6 +24,7 @@ use crate::{
     workspace_picker::WorkspacePicker,
 };
 pub(crate) use commits::pump_commits;
+pub(crate) use file_finder::close_file_finder;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 use std::path::Path;
@@ -90,6 +92,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },
+        ActionKind::OpenFileFinder => file_finder::open_file_finder(stoat),
+        ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
+        ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
+        ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
         ActionKind::OpenCommandPalette => {
             let previous_mode = stoat.mode.clone();
             let executor = stoat.executor.clone();

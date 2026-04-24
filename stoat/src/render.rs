@@ -5,6 +5,7 @@ pub(crate) mod commits;
 pub(crate) mod conflict;
 pub(crate) mod dock;
 pub(crate) mod editor;
+pub(crate) mod file_finder;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod layout;
@@ -206,7 +207,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
     } else if stoat.help.is_some() {
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, true);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -217,6 +218,9 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             .collect();
         let help = stoat.help.as_ref().expect("just checked");
         help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf, &bindings);
+    } else if stoat.file_finder.is_some() {
+        let finder = stoat.file_finder.as_mut().expect("just checked");
+        file_finder::render_file_finder(finder, ws, &*stoat.fs_host, &stoat.theme, size, buf);
     } else if stoat.command_palette.is_some() {
         let palette = stoat.command_palette.as_mut().expect("just checked");
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);

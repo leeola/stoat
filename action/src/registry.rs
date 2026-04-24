@@ -20,6 +20,9 @@ use crate::{
             SelectLineBelow,
         },
         file::OpenFile,
+        file_finder::{
+            FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
+        },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
@@ -83,6 +86,16 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
+    });
+    add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
+    add(FileFinderSelectPrev::DEF, |_| {
+        Ok(Box::new(FileFinderSelectPrev))
+    });
+    add(FileFinderSelectNext::DEF, |_| {
+        Ok(Box::new(FileFinderSelectNext))
+    });
+    add(FileFinderScopeToggle::DEF, |_| {
+        Ok(Box::new(FileFinderScopeToggle))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
     add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
@@ -345,6 +358,10 @@ mod tests {
         "ClosePane",
         "CloseOtherPanes",
         "OpenCommandPalette",
+        "OpenFileFinder",
+        "FileFinderSelectPrev",
+        "FileFinderSelectNext",
+        "FileFinderScopeToggle",
         "OpenHelp",
         "OpenReview",
         "JumpToMoveSource",
@@ -509,7 +526,8 @@ mod tests {
         // keep-primary) + 2 prev-word-end variants (move + extend).
         // Insert and Backspace in reword mode are handled by the editor
         // directly, not via the action registry.
-        assert_eq!(all().count(), 129);
+        // + 4 file-finder actions (open, select prev/next, scope toggle).
+        assert_eq!(all().count(), 133);
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod diff_map;
 pub mod display_map;
 pub mod dump;
 mod editor_state;
+pub mod file_finder;
 pub mod help;
 pub mod host;
 mod input_view;

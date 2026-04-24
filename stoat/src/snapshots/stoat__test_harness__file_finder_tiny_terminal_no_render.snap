@@ -1,0 +1,17 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: f
+focused: #1 of 1
+mode: prompt
+size: 30x8
+---
+[0m[7m [0m
+
+
+
+
+
+
+[0m[1m[30m[42m PMT [0m[1m[97m[100m stoat-finder-test-empty [0m

@@ -251,6 +251,13 @@ on key {
         Escape -> SetMode(normal);
         Enter -> ClaudeSubmit();
     }
+    mode == prompt && finder_open {
+        Up -> FileFinderSelectPrev();
+        Down -> FileFinderSelectNext();
+        Ctrl-p -> FileFinderSelectPrev();
+        Ctrl-n -> FileFinderSelectNext();
+        BackTab -> FileFinderScopeToggle();
+    }
     mode == prompt && palette_open {
         Up -> PaletteSelectPrev();
         Down -> PaletteSelectNext();
@@ -284,6 +291,7 @@ on key {
         t -> [OpenRun(), SetMode(run)];
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
+        f -> OpenFileFinder();
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

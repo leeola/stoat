@@ -53,6 +53,7 @@ pub(crate) enum SubmitTarget {
     Run,
     Reword,
     ClaudeChat,
+    FileFinder,
 }
 
 impl InputView {

@@ -5,6 +5,7 @@ use crate::{
     command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
+    file_finder::FileFinder,
     help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
@@ -51,6 +52,7 @@ pub struct Stoat {
     pub theme: crate::theme::Theme,
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
+    pub(crate) file_finder: Option<FileFinder>,
     pub(crate) workspace_picker: Option<WorkspacePicker>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
@@ -176,6 +178,7 @@ impl Stoat {
             theme,
             command_palette: None,
             help: None,
+            file_finder: None,
             workspace_picker: None,
             persistence_disabled: false,
             language_registry,
@@ -452,6 +455,10 @@ impl Stoat {
                 action_handlers::close_help(self);
                 return UpdateEffect::Redraw;
             }
+            if self.file_finder.is_some() {
+                action_handlers::close_file_finder(self);
+                return UpdateEffect::Redraw;
+            }
             if let Some(palette) = self.command_palette.take() {
                 let active_idx = self.active_workspace;
                 palette.dispose(&mut self.workspaces[active_idx]);
@@ -536,6 +543,10 @@ impl Stoat {
 
     fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
+
+        if let Some(finder) = &self.file_finder {
+            return Some((finder.input.editor_id, finder.input.buffer_id));
+        }
 
         if let Some(palette) = &self.command_palette {
             if let Some(input) = palette.focused_input() {
