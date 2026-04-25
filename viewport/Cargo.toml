@@ -12,3 +12,6 @@ tokio = { workspace = true, features = ["net"] }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

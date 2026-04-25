@@ -71,9 +71,8 @@ mod tests {
 
     #[tokio::test]
     async fn listener_and_client_exchange() {
-        let dir = std::env::temp_dir().join(format!("viewport-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("test.sock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join("test.sock");
 
         let listener = ViewportListener::bind(&sock).await.unwrap();
 
@@ -107,14 +106,12 @@ mod tests {
         assert_eq!(msg, ToMain::Detach);
 
         client_handle.await.unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn disconnect_yields_none() {
-        let dir = std::env::temp_dir().join(format!("viewport-disc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("test.sock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join("test.sock");
 
         let listener = ViewportListener::bind(&sock).await.unwrap();
 
@@ -128,8 +125,6 @@ mod tests {
 
         let msg = conn.recv().await.unwrap();
         assert_eq!(msg, None);
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
@@ -162,16 +157,13 @@ mod tests {
 
     #[tokio::test]
     async fn stale_socket_cleanup() {
-        let dir = std::env::temp_dir().join(format!("viewport-stale-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("test.sock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = dir.path().join("test.sock");
 
         // Create a stale socket file (just a regular file, not a real listener)
         std::fs::write(&sock, b"").unwrap();
 
         // bind should clean up the stale file and succeed
         let _listener = ViewportListener::bind(&sock).await.unwrap();
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
