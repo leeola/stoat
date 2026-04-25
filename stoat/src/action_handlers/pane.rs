@@ -77,6 +77,18 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn split_pane_new(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let new_pane_id = ws.panes.split(axis);
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    let new_editor_id = ws
+        .editors
+        .insert(EditorState::new(buffer_id, buffer, executor));
+    ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
     let ws = stoat.active_workspace_mut();
     match (ws.focus, direction) {

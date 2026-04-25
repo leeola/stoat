@@ -319,6 +319,7 @@ on key {
         Escape -> SetMode(normal);
         s -> [SplitRight(), SetMode(normal)];
         v -> [SplitDown(), SetMode(normal)];
+        n -> SetMode(space_pane_nav_new);
         q -> [ClosePane(), SetMode(normal)];
         o -> [CloseOtherPanes(), SetMode(normal)];
         w -> [FocusNext(), SetMode(normal)];
@@ -330,6 +331,12 @@ on key {
         Up -> [FocusUp(), SetMode(normal)];
         l -> [FocusRight(), SetMode(normal)];
         Right -> [FocusRight(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == space_pane_nav_new {
+        Escape -> SetMode(normal);
+        s -> [SplitNewRight(), SetMode(normal)];
+        v -> [SplitNewDown(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == claude {

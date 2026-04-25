@@ -4,6 +4,8 @@ pub enum ActionKind {
     QuitAll,
     SplitRight,
     SplitDown,
+    SplitNewRight,
+    SplitNewDown,
     FocusLeft,
     FocusRight,
     FocusUp,

@@ -19,6 +19,24 @@ define_action!(
     ActionPriority::Common
 );
 define_action!(
+    SplitNewRightDef,
+    SplitNewRight,
+    "SplitNewRight",
+    ActionKind::SplitNewRight,
+    "split pane right with new buffer",
+    "Split the focused pane vertically, opening a new empty scratch buffer in the new pane.",
+    ActionPriority::Common
+);
+define_action!(
+    SplitNewDownDef,
+    SplitNewDown,
+    "SplitNewDown",
+    ActionKind::SplitNewDown,
+    "split pane down with new buffer",
+    "Split the focused pane horizontally, opening a new empty scratch buffer in the new pane.",
+    ActionPriority::Common
+);
+define_action!(
     FocusLeftDef,
     FocusLeft,
     "FocusLeft",
@@ -92,6 +110,8 @@ mod tests {
     fn action_kinds() {
         assert_eq!(SplitRight.kind(), ActionKind::SplitRight);
         assert_eq!(SplitDown.kind(), ActionKind::SplitDown);
+        assert_eq!(SplitNewRight.kind(), ActionKind::SplitNewRight);
+        assert_eq!(SplitNewDown.kind(), ActionKind::SplitNewDown);
         assert_eq!(FocusLeft.kind(), ActionKind::FocusLeft);
         assert_eq!(FocusRight.kind(), ActionKind::FocusRight);
         assert_eq!(FocusUp.kind(), ActionKind::FocusUp);

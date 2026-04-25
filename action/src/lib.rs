@@ -37,7 +37,7 @@ pub use defs::{
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
-        SplitRight,
+        SplitNewDown, SplitNewRight, SplitRight,
     },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,

@@ -47,6 +47,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::QuitAll => UpdateEffect::Quit,
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
+        ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),
+        ActionKind::SplitNewDown => pane::split_pane_new(stoat, Axis::Horizontal),
         ActionKind::FocusLeft => {
             pane::focus_direction(stoat, Direction::Left);
             UpdateEffect::Redraw
@@ -418,7 +420,7 @@ mod tests {
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, Quit, QuitAll, SelectAll,
-        SplitRight,
+        SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -457,6 +459,40 @@ mod tests {
         dispatch(&mut stoat, &SplitRight);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 3);
         assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn split_new_right_uses_fresh_scratch_buffer() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "original");
+
+        let original_pane = stoat.active_workspace().panes.focus();
+        let original_buffer_id = match stoat.active_workspace().panes.pane(original_pane).view {
+            View::Editor(eid) => stoat.active_workspace().editors[eid].buffer_id,
+            _ => panic!("focused pane is not an editor"),
+        };
+
+        dispatch(&mut stoat, &SplitNewRight);
+        assert_eq!(stoat.active_workspace().panes.pane_count(), 2);
+
+        let ws = stoat.active_workspace();
+        let new_pane = ws.panes.focus();
+        assert_ne!(new_pane, original_pane);
+
+        let new_editor_id = match ws.panes.pane(new_pane).view {
+            View::Editor(eid) => eid,
+            _ => panic!("new pane is not an editor"),
+        };
+        let new_buffer_id = ws.editors[new_editor_id].buffer_id;
+        assert_ne!(new_buffer_id, original_buffer_id);
+
+        let new_buffer = ws.buffers.get(new_buffer_id).expect("buffer exists");
+        let guard = new_buffer.read().expect("buffer poisoned");
+        assert_eq!(guard.snapshot.visible_text.to_string(), "");
+
+        let original_buffer = ws.buffers.get(original_buffer_id).expect("buffer exists");
+        let original_guard = original_buffer.read().expect("buffer poisoned");
+        assert_eq!(original_guard.snapshot.visible_text.to_string(), "original");
     }
 
     #[test]

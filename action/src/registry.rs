@@ -31,7 +31,7 @@ use crate::{
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
-            FocusUp, SplitDown, SplitRight,
+            FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -77,6 +77,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
+    add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
+    add(SplitNewDown::DEF, |_| Ok(Box::new(SplitNewDown)));
     add(FocusLeft::DEF, |_| Ok(Box::new(FocusLeft)));
     add(FocusRight::DEF, |_| Ok(Box::new(FocusRight)));
     add(FocusUp::DEF, |_| Ok(Box::new(FocusUp)));
@@ -364,6 +366,8 @@ mod tests {
         "QuitAll",
         "SplitRight",
         "SplitDown",
+        "SplitNewRight",
+        "SplitNewDown",
         "FocusLeft",
         "FocusRight",
         "FocusUp",
@@ -553,7 +557,7 @@ mod tests {
         // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
-        assert_eq!(all().count(), 141);
+        assert_eq!(all().count(), 143);
     }
 
     #[test]
