@@ -14,6 +14,7 @@ pub mod meta;
 mod save;
 pub(crate) mod snapshot;
 
+use crate::host::FsHost;
 pub use meta::DumpMeta;
 pub use save::save_at;
 use std::{
@@ -200,32 +201,30 @@ pub fn dumps_dir() -> Result<PathBuf, DumpError> {
 /// List all dump archives, newest first. Ignores non-archive files in
 /// the dumps directory. If the dumps directory does not exist yet,
 /// returns an empty list.
-pub fn list() -> Result<Vec<DumpEntry>, DumpError> {
+pub fn list(fs: &dyn FsHost) -> Result<Vec<DumpEntry>, DumpError> {
     let dir = dumps_dir()?;
-    if !dir.exists() {
+    if !fs.exists(&dir) {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_file() {
+    for entry in fs.list_dir(&dir)? {
+        if entry.is_dir {
             continue;
         }
-        let name = entry.file_name();
-        let name_str = match name.to_str() {
-            Some(s) => s,
-            None => continue,
-        };
-        let Some(id) = DumpId::from_filename(name_str) else {
+        let Some(id) = DumpId::from_filename(entry.name.as_str()) else {
             continue;
         };
-        let meta = entry.metadata()?;
+        let path = dir.join(entry.name.as_str());
+        let meta = fs.metadata(&path)?;
+        let (size_bytes, modified) = match meta {
+            Some(m) => (m.len, Some(m.modified)),
+            None => (0, None),
+        };
         entries.push(DumpEntry {
             id,
-            path: entry.path(),
-            size_bytes: meta.len(),
-            modified: meta.modified().ok(),
+            path,
+            size_bytes,
+            modified,
         });
     }
 
@@ -237,8 +236,8 @@ pub fn list() -> Result<Vec<DumpEntry>, DumpError> {
 /// full id or the sanitized name suffix. Newest wins when the name
 /// suffix matches multiple dumps; errors when the query matches
 /// nothing or multiple exact ids.
-pub fn resolve(query: &str) -> Result<DumpEntry, DumpError> {
-    let mut all = list()?;
+pub fn resolve(query: &str, fs: &dyn FsHost) -> Result<DumpEntry, DumpError> {
+    let mut all = list(fs)?;
     all.retain(|e| e.id.as_str() == query || e.id.name().map(|n| n == query).unwrap_or(false));
     if all.is_empty() {
         return Err(DumpError::NotFound(query.to_string()));
@@ -247,30 +246,30 @@ pub fn resolve(query: &str) -> Result<DumpEntry, DumpError> {
 }
 
 /// Delete the dump archive identified by `id`.
-pub fn remove(id: &DumpId) -> Result<(), DumpError> {
+pub fn remove(id: &DumpId, fs: &dyn FsHost) -> Result<(), DumpError> {
     let path = dumps_dir()?.join(id.filename());
-    if !path.exists() {
+    if !fs.exists(&path) {
         return Err(DumpError::NotFound(id.as_str().to_string()));
     }
-    fs::remove_file(path)?;
+    fs.remove_file(&path)?;
     Ok(())
 }
 
 /// Delete every dump older than `days` whole days. Returns the ids of
 /// the archives that were removed.
-pub fn clean_older_than(days: u64) -> Result<Vec<DumpId>, DumpError> {
+pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpError> {
     let now = SystemTime::now();
     let cutoff = now
         .checked_sub(std::time::Duration::from_secs(days * 86_400))
         .ok_or_else(|| DumpError::Time("overflow computing cutoff".to_string()))?;
-    let entries = list()?;
+    let entries = list(fs)?;
     let mut removed = Vec::new();
     for entry in entries {
         let Some(modified) = entry.modified else {
             continue;
         };
         if modified < cutoff {
-            fs::remove_file(&entry.path)?;
+            fs.remove_file(&entry.path)?;
             removed.push(entry.id);
         }
     }
@@ -280,9 +279,9 @@ pub fn clean_older_than(days: u64) -> Result<Vec<DumpId>, DumpError> {
 /// Extract a dump archive into `dest`. `dest` must already exist and
 /// be empty. The archive is streamed through zstd decoding + tar
 /// extraction; no intermediate staging occurs.
-pub fn extract(id: &DumpId, dest: &Path) -> Result<(), DumpError> {
+pub fn extract(id: &DumpId, dest: &Path, fs: &dyn FsHost) -> Result<(), DumpError> {
     let archive = dumps_dir()?.join(id.filename());
-    if !archive.exists() {
+    if !fs.exists(&archive) {
         return Err(DumpError::NotFound(id.as_str().to_string()));
     }
     read_archive(&archive, dest)
@@ -300,8 +299,8 @@ pub(crate) fn read_archive(archive_path: &Path, dest: &Path) -> Result<(), DumpE
 }
 
 /// Thin wrapper around [`save_at`] using the current UTC time.
-pub fn save(stoat: &crate::app::Stoat, name: &str) -> Result<DumpId, DumpError> {
-    save_at(stoat, name, OffsetDateTime::now_utc())
+pub fn save(stoat: &crate::app::Stoat, name: &str, fs: &dyn FsHost) -> Result<DumpId, DumpError> {
+    save_at(stoat, name, OffsetDateTime::now_utc(), fs)
 }
 
 /// Load the metadata at `meta_path` (typically
@@ -311,8 +310,14 @@ pub fn save(stoat: &crate::app::Stoat, name: &str) -> Result<DumpId, DumpError> 
 /// Paths captured inside the snapshot (rebase workdirs) are rewritten
 /// to point at the new (extracted) git root because the archive has
 /// been unpacked to a different location than the original capture.
-pub fn hydrate(stoat: &mut crate::app::Stoat, meta_path: &Path) -> Result<(), DumpError> {
-    let ron = fs::read_to_string(meta_path)?;
+pub fn hydrate(
+    stoat: &mut crate::app::Stoat,
+    meta_path: &Path,
+    fs: &dyn FsHost,
+) -> Result<(), DumpError> {
+    let mut buf = Vec::new();
+    fs.read(meta_path, &mut buf)?;
+    let ron = String::from_utf8(buf).map_err(|e| DumpError::Io(io::Error::other(e.to_string())))?;
     let meta = DumpMeta::from_ron(&ron).map_err(|e| DumpError::Ron(e.to_string()))?;
     apply_snapshot(stoat, meta.workspace);
     Ok(())
@@ -436,7 +441,7 @@ mod tests {
 
     #[test]
     fn hydrate_applies_rebase_state_and_rewrites_workdir() {
-        use crate::{app::Stoat, rebase::RebaseState};
+        use crate::{app::Stoat, host::LocalFs, rebase::RebaseState};
         use std::{fs as stdfs, sync::Arc};
         use stoat_config::Settings;
         use stoat_scheduler::TestScheduler;
@@ -471,7 +476,7 @@ mod tests {
         let executor = scheduler.executor();
         let mut stoat = Stoat::new(executor, Settings::default(), new_git_root.clone());
 
-        hydrate(&mut stoat, &meta_path).unwrap();
+        hydrate(&mut stoat, &meta_path, &LocalFs).unwrap();
 
         assert_eq!(stoat.mode, "rebase");
         let rebase = stoat

@@ -1,6 +1,6 @@
 use clap::{ArgAction, Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
-use stoat::{Axis, Settings, Stoat};
+use stoat::{host::LocalFs, Axis, Settings, Stoat};
 use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TestScheduler;
 
@@ -127,7 +127,7 @@ fn run_tui(
         if let Ok(raw) = std::env::var("STOAT_DUMP_LOAD") {
             let dump_path = PathBuf::from(&raw);
             if dump_path.exists() {
-                match stoat::dump::hydrate(&mut stoat, &dump_path) {
+                match stoat::dump::hydrate(&mut stoat, &dump_path, &LocalFs) {
                     Ok(()) => {
                         tracing::info!(path = %raw, "hydrated workspace from dump");
                     },

@@ -1,6 +1,9 @@
 use clap::Subcommand;
 use std::{env, io, process::Command};
-use stoat::dump::{self, DumpEntry, DumpError};
+use stoat::{
+    dump::{self, DumpEntry, DumpError},
+    host::LocalFs,
+};
 use tempfile::Builder as TempBuilder;
 
 #[derive(Subcommand, Debug)]
@@ -35,7 +38,7 @@ pub fn run(sub: DumpCommand) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn ls() -> Result<(), Box<dyn std::error::Error>> {
-    let entries = dump::list()?;
+    let entries = dump::list(&LocalFs)?;
     if entries.is_empty() {
         println!("No dumps found under $XDG_DATA_HOME/stoat/dumps/.");
         return Ok(());
@@ -92,9 +95,9 @@ fn human_size(bytes: u64) -> String {
 }
 
 fn open(query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let entry = dump::resolve(query).map_err(describe)?;
+    let entry = dump::resolve(query, &LocalFs).map_err(describe)?;
     let tempdir = TempBuilder::new().prefix("stoat-dump-").tempdir()?;
-    dump::extract(&entry.id, tempdir.path()).map_err(describe)?;
+    dump::extract(&entry.id, tempdir.path(), &LocalFs).map_err(describe)?;
 
     let current_exe = env::current_exe()?;
     let status = Command::new(&current_exe)
@@ -113,14 +116,14 @@ fn open(query: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn rm(query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let entry = dump::resolve(query).map_err(describe)?;
-    dump::remove(&entry.id).map_err(describe)?;
+    let entry = dump::resolve(query, &LocalFs).map_err(describe)?;
+    dump::remove(&entry.id, &LocalFs).map_err(describe)?;
     println!("Removed {}", entry.id);
     Ok(())
 }
 
 fn clean(older_than_days: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let removed = dump::clean_older_than(older_than_days).map_err(describe)?;
+    let removed = dump::clean_older_than(older_than_days, &LocalFs).map_err(describe)?;
     if removed.is_empty() {
         println!("No dumps older than {older_than_days} days.");
     } else {

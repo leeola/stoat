@@ -79,7 +79,7 @@ fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
 }
 
 pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
-    match crate::dump::save(stoat, name) {
+    match crate::dump::save(stoat, name, &*stoat.fs_host) {
         Ok(id) => tracing::info!(id = %id, "dump captured"),
         Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
     }

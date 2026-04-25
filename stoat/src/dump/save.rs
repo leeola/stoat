@@ -4,11 +4,11 @@ use super::{
     snapshot::{ActiveRebaseSnap, WorkspaceSnapshot},
     DumpError, DumpId,
 };
-use crate::{app::Stoat, workspace::Workspace};
+use crate::{app::Stoat, host::FsHost, workspace::Workspace};
 use ignore::WalkBuilder;
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::File,
     path::{Path, PathBuf},
 };
 use tar::{Builder, Header};
@@ -26,10 +26,15 @@ const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 /// directory, the `.stoat/` directory (if present), and a
 /// `.stoat/dump.ron` file with metadata plus the serializable subset of
 /// the active workspace (rebase plan + active rebase).
-pub fn save_at(stoat: &Stoat, name: &str, at: OffsetDateTime) -> Result<DumpId, DumpError> {
+pub fn save_at(
+    stoat: &Stoat,
+    name: &str,
+    at: OffsetDateTime,
+    fs: &dyn FsHost,
+) -> Result<DumpId, DumpError> {
     let id = DumpId::new(name, at)?;
     let dumps = dumps_dir()?;
-    fs::create_dir_all(&dumps)?;
+    fs.create_dir_all(&dumps)?;
     let archive_path = dumps.join(id.filename());
     write_archive(
         stoat.active_workspace(),
