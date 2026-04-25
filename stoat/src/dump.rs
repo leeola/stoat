@@ -441,14 +441,13 @@ mod tests {
 
     #[test]
     fn hydrate_applies_rebase_state_and_rewrites_workdir() {
-        use crate::{app::Stoat, host::LocalFs, rebase::RebaseState};
-        use std::{fs as stdfs, sync::Arc};
+        use crate::{app::Stoat, host::FakeFs, rebase::RebaseState};
+        use std::sync::Arc;
         use stoat_config::Settings;
         use stoat_scheduler::TestScheduler;
-        use tempfile::TempDir;
 
-        let tempdir = TempDir::new().unwrap();
-        let meta_path = tempdir.path().join("dump.ron");
+        let fake = FakeFs::new();
+        let meta_path = PathBuf::from("/dump/dump.ron");
 
         let original_workdir = PathBuf::from("/original/repo");
         let meta = DumpMeta {
@@ -468,15 +467,14 @@ mod tests {
                 mode: "rebase".to_string(),
             },
         };
-        stdfs::write(&meta_path, meta.to_ron().unwrap()).unwrap();
+        fake.insert_file(&meta_path, meta.to_ron().unwrap());
 
-        let new_git_root = tempdir.path().join("extracted");
-        stdfs::create_dir_all(&new_git_root).unwrap();
+        let new_git_root = PathBuf::from("/extracted");
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
         let mut stoat = Stoat::new(executor, Settings::default(), new_git_root.clone());
 
-        hydrate(&mut stoat, &meta_path, &LocalFs).unwrap();
+        hydrate(&mut stoat, &meta_path, &fake).unwrap();
 
         assert_eq!(stoat.mode, "rebase");
         let rebase = stoat

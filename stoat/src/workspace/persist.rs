@@ -302,21 +302,14 @@ fn clone_docks(docks: &SlotMap<DockId, DockPanel>) -> SlotMap<DockId, DockPanel>
 mod tests {
     use super::*;
     use crate::{
-        host::LocalFs,
+        host::FakeFs,
         pane::{Axis, DockSide, DockVisibility, Placement},
     };
-    use std::{fs, sync::Arc};
+    use std::sync::Arc;
     use stoat_scheduler::TestScheduler;
-    use tempfile::TempDir;
 
     fn executor() -> Executor {
         Arc::new(TestScheduler::new()).executor()
-    }
-
-    fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(&path, body).expect("write fixture");
-        path
     }
 
     fn new_laid_out_workspace(git_root: PathBuf, exec: &Executor) -> Workspace {
@@ -327,12 +320,13 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_pane_tree_and_focus() {
-        let tmp = TempDir::new().unwrap();
-        let file_a = write_file(tmp.path(), "a.txt", "alpha\n");
-        let file_b = write_file(tmp.path(), "b.txt", "beta\n");
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file_a = ws_dir.join("a.txt");
+        let file_b = ws_dir.join("b.txt");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id_a, buf_a) = ws.buffers.open(&file_a, "alpha\n");
         let (id_b, buf_b) = ws.buffers.open(&file_b, "beta\n");
         let editor_a = ws
@@ -350,13 +344,13 @@ mod tests {
         ws.panes.pane_mut(right).view = View::Editor(editor_b);
         ws.focus = FocusTarget::SplitPane(right);
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
         let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
-        assert_eq!(fresh.git_root, tmp.path());
+        assert_eq!(fresh.git_root, ws_dir);
         assert_eq!(fresh.panes.pane_count(), 2);
         // Three editors: the two file-backed editors we inserted plus the
         // scratch-buffer editor that `Workspace::new` creates by default. The
@@ -389,10 +383,11 @@ mod tests {
     #[test]
     fn stale_run_and_claude_views_collapse_to_labels() {
         use crate::{host::ClaudeSessionId, run::RunId};
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let stale_run = RunId::default();
         let stale_chat = ClaudeSessionId::default();
 
@@ -410,11 +405,11 @@ mod tests {
         });
         let _ = dock_id;
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         for id in fresh.panes.split_pane_ids() {
             match &fresh.panes.pane(id).view {
@@ -434,19 +429,20 @@ mod tests {
 
     #[test]
     fn placement_and_layout_rebuild_on_restore() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         ws.panes.split(Axis::Horizontal);
         ws.panes.split(Axis::Vertical);
         let count_before = ws.panes.pane_count();
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.panes.pane_count(), count_before);
         for id in fresh.panes.split_pane_ids() {
@@ -459,10 +455,11 @@ mod tests {
         use crate::{claude_chat::ClaudeChatState, editor_state::EditorId, host::ClaudeSessionId};
         use stoat_text::BufferId;
 
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let chat_id = ClaudeSessionId::default();
         ws.claude_chat = Some(chat_id);
         ws.chats.insert(
@@ -486,11 +483,11 @@ mod tests {
             },
         );
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(
             fresh.restored_claude_session_id,
@@ -500,15 +497,16 @@ mod tests {
 
     #[test]
     fn round_trip_claude_session_id_absent_when_no_chat() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(fresh.restored_claude_session_id, None);
     }
@@ -527,11 +525,12 @@ mod tests {
 
     #[test]
     fn dirty_buffer_content_round_trips() {
-        let tmp = TempDir::new().unwrap();
-        let file = write_file(tmp.path(), "scratch.txt", "hello\n");
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("scratch.txt");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id, buffer) = ws.buffers.open(&file, "hello\n");
         {
             let mut guard = buffer.write().expect("buffer poisoned");
@@ -542,11 +541,11 @@ mod tests {
         assert_eq!(expected_text, "hello, world!\n");
         assert!(buffer_is_dirty(&ws, id));
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), expected_text);
         assert!(buffer_is_dirty(&fresh, id));
@@ -554,11 +553,12 @@ mod tests {
 
     #[test]
     fn undo_stack_survives_restart() {
-        let tmp = TempDir::new().unwrap();
-        let file = write_file(tmp.path(), "count.txt", "one\n");
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("count.txt");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id, buffer) = ws.buffers.open(&file, "one\n");
         {
             let mut guard = buffer.write().expect("buffer poisoned");
@@ -567,11 +567,11 @@ mod tests {
         }
         assert_eq!(buffer_text(&ws, id), "one two three\n");
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         let restored = fresh.buffers.get(id).expect("buffer missing");
         let mut guard = restored.write().expect("buffer poisoned");
@@ -586,11 +586,12 @@ mod tests {
         use crate::{multi_buffer::MultiBuffer, selection::SelectionsCollection};
         use stoat_text::{Bias, SelectionGoal};
 
-        let tmp = TempDir::new().unwrap();
-        let file = write_file(tmp.path(), "code.txt", "abcdefghij\n");
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("code.txt");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id, buffer) = ws.buffers.open(&file, "abcdefghij\n");
         let editor_id = ws
             .editors
@@ -621,11 +622,11 @@ mod tests {
         let root = ws.panes.focus();
         ws.panes.pane_mut(root).view = View::Editor(editor_id);
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         let restored_editor_id = fresh
             .panes
@@ -653,19 +654,20 @@ mod tests {
     fn clean_buffer_has_single_insert_op() {
         use crate::buffer::BufferOp;
 
-        let tmp = TempDir::new().unwrap();
-        let file = write_file(tmp.path(), "untouched.txt", "hello world\n");
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let file = ws_dir.join("untouched.txt");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (id, _) = ws.buffers.open(&file, "hello world\n");
         assert!(!buffer_is_dirty(&ws, id));
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), "hello world\n");
         assert!(!buffer_is_dirty(&fresh, id));
@@ -685,10 +687,11 @@ mod tests {
 
     #[test]
     fn scratch_buffer_history_round_trips() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let mut ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let (scratch_id, scratch_buf) = ws.buffers.new_scratch();
         {
             let mut guard = scratch_buf.write().expect("buffer poisoned");
@@ -697,11 +700,11 @@ mod tests {
         }
         assert_eq!(buffer_text(&ws, scratch_id), "notes\nmore\n");
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, scratch_id), "notes\nmore\n");
         let buffer = fresh.buffers.get(scratch_id).expect("scratch lost");
@@ -711,98 +714,88 @@ mod tests {
 
     #[test]
     fn list_ron_files_sorts_newest_first() {
-        use std::time::{Duration, SystemTime};
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let older = ws_dir.join("aaaa.ron");
+        let newer = ws_dir.join("bbbb.ron");
+        fake.insert_file(&older, "old");
+        fake.insert_file(&newer, "new");
 
-        let tmp = TempDir::new().unwrap();
-        let older = tmp.path().join("aaaa.ron");
-        let newer = tmp.path().join("bbbb.ron");
-        fs::write(&older, "old").unwrap();
-        fs::write(&newer, "new").unwrap();
-
-        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        fs::File::options()
-            .write(true)
-            .open(&older)
-            .unwrap()
-            .set_modified(base)
-            .unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&newer)
-            .unwrap()
-            .set_modified(base + Duration::from_secs(3600))
-            .unwrap();
-
-        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
+        let listed = list_ron_files_by_mtime_desc(&ws_dir, &fake).unwrap();
         assert_eq!(listed, vec![newer, older]);
     }
 
     #[test]
     fn list_ron_files_ignores_non_ron_entries() {
-        let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("ok.ron"), "").unwrap();
-        fs::write(tmp.path().join("skip.txt"), "").unwrap();
-        fs::create_dir(tmp.path().join("subdir")).unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        fake.insert_file(ws_dir.join("ok.ron"), "");
+        fake.insert_file(ws_dir.join("skip.txt"), "");
+        fake.insert_dir(ws_dir.join("subdir"));
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
-        assert_eq!(listed, vec![tmp.path().join("ok.ron")]);
+        let listed = list_ron_files_by_mtime_desc(&ws_dir, &fake).unwrap();
+        assert_eq!(listed, vec![ws_dir.join("ok.ron")]);
     }
 
     #[test]
     fn list_ron_files_missing_dir_returns_empty() {
-        let tmp = TempDir::new().unwrap();
-        let missing = tmp.path().join("nope");
-        assert!(list_ron_files_by_mtime_desc(&missing, &LocalFs)
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let missing = ws_dir.join("nope");
+        assert!(list_ron_files_by_mtime_desc(&missing, &fake)
             .unwrap()
             .is_empty());
     }
 
     #[test]
     fn uid_round_trips_through_save_and_restore() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let original_uid = ws.uid;
 
-        let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path, &LocalFs).unwrap();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
 
-        let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
         assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
-        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.uid, original_uid);
     }
 
     #[test]
     fn multiple_saves_with_same_uid_overwrite() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
-        let path = tmp.path().join(format!("{}.ron", ws.uid));
-        ws.save_state(&path, &LocalFs).unwrap();
-        ws.save_state(&path, &LocalFs).unwrap();
+        let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let path = ws_dir.join(format!("{}.ron", ws.uid));
+        ws.save_state(&path, &fake).unwrap();
+        ws.save_state(&path, &fake).unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
+        let listed = list_ron_files_by_mtime_desc(&ws_dir, &fake).unwrap();
         assert_eq!(listed, vec![path]);
     }
 
     #[test]
     fn different_uids_sit_side_by_side() {
-        let tmp = TempDir::new().unwrap();
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
-        let ws_a = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
-        let ws_b = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
+        let ws_a = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let ws_b = new_laid_out_workspace(ws_dir.clone(), &exec);
         assert_ne!(ws_a.uid, ws_b.uid);
 
-        let path_a = tmp.path().join(format!("{}.ron", ws_a.uid));
-        let path_b = tmp.path().join(format!("{}.ron", ws_b.uid));
-        ws_a.save_state(&path_a, &LocalFs).unwrap();
-        ws_b.save_state(&path_b, &LocalFs).unwrap();
+        let path_a = ws_dir.join(format!("{}.ron", ws_a.uid));
+        let path_b = ws_dir.join(format!("{}.ron", ws_b.uid));
+        ws_a.save_state(&path_a, &fake).unwrap();
+        ws_b.save_state(&path_b, &fake).unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
+        let listed = list_ron_files_by_mtime_desc(&ws_dir, &fake).unwrap();
         assert_eq!(listed.len(), 2);
     }
 }
