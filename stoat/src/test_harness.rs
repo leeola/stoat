@@ -695,6 +695,29 @@ impl TestHarness {
         editor::cursor_display_positions(&mut self.stoat)
     }
 
+    /// `scroll_row` for every editor in the active workspace.
+    pub(crate) fn editor_scroll_rows(&self) -> Vec<u32> {
+        editor::editor_scroll_rows(&self.stoat)
+    }
+
+    /// First split-pane that holds an editor view. Panics if none.
+    pub(crate) fn editor_pane(&self) -> crate::pane::PaneId {
+        editor::editor_pane(&self.stoat)
+    }
+
+    /// `EditorId` held by `pane`. Panics if the pane is not an editor.
+    pub(crate) fn editor_id_in_pane(
+        &self,
+        pane: crate::pane::PaneId,
+    ) -> crate::editor_state::EditorId {
+        editor::editor_id_in_pane(&self.stoat, pane)
+    }
+
+    /// `scroll_row` for a specific editor in the active workspace.
+    pub(crate) fn editor_scroll_row(&self, editor_id: crate::editor_state::EditorId) -> u32 {
+        editor::editor_scroll_row(&self.stoat, editor_id)
+    }
+
     pub(crate) fn capture(&mut self, action: &str) {
         // First render spawns any pending parse jobs. Settling the test
         // scheduler runs them to completion. The second render polls the

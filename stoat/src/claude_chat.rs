@@ -637,13 +637,7 @@ mod tests {
 
         h.claude().get_session(id).read_at(&path, 50);
 
-        let editor_rows: Vec<u32> = h
-            .stoat
-            .active_workspace()
-            .editors
-            .iter()
-            .map(|(_, e)| e.scroll_row)
-            .collect();
+        let editor_rows = h.editor_scroll_rows();
         assert!(
             editor_rows.iter().all(|&r| r == 0),
             "no editor should have scrolled: {editor_rows:?}"
@@ -659,13 +653,7 @@ mod tests {
         let outside = std::path::PathBuf::from("/etc/passwd");
         h.claude().get_session(id).read_at(&outside, 10);
 
-        let editor_rows: Vec<u32> = h
-            .stoat
-            .active_workspace()
-            .editors
-            .iter()
-            .map(|(_, e)| e.scroll_row)
-            .collect();
+        let editor_rows = h.editor_scroll_rows();
         assert!(
             editor_rows.iter().all(|&r| r == 0),
             "out-of-workspace path must not scroll editors: {editor_rows:?}"
@@ -678,38 +666,19 @@ mod tests {
         let (id, path) = seed_follow_scenario(&mut h);
         toggle_follow(&mut h);
 
-        let editor_pane = h
-            .stoat
-            .active_workspace()
-            .panes
-            .split_panes()
-            .find(|(_, p)| matches!(p.view, View::Editor(_)))
-            .map(|(pid, _)| pid)
-            .expect("follow scenario should seed an editor pane");
+        let editor_pane = h.editor_pane();
 
         h.claude().get_session(id).read_at(&path, 30);
-        let first = match h.stoat.active_workspace().panes.pane(editor_pane).view {
-            View::Editor(eid) => eid,
-            _ => panic!("pane should still hold an editor"),
-        };
+        let first = h.editor_id_in_pane(editor_pane);
 
         h.claude().get_session(id).read_at(&path, 50);
-        let second = match h.stoat.active_workspace().panes.pane(editor_pane).view {
-            View::Editor(eid) => eid,
-            _ => panic!("pane should still hold an editor"),
-        };
+        let second = h.editor_id_in_pane(editor_pane);
 
         assert_eq!(
             first, second,
             "editor must be reused across repeat reads of the same file"
         );
-        let editor = h
-            .stoat
-            .active_workspace()
-            .editors
-            .get(second)
-            .expect("editor should exist");
-        assert_eq!(editor.scroll_row, 47);
+        assert_eq!(h.editor_scroll_row(second), 47);
     }
 
     fn seed_chat_only_scenario(h: &mut TestHarness) -> (ClaudeSessionId, std::path::PathBuf) {
