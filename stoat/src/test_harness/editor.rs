@@ -60,6 +60,21 @@ pub(crate) fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
         .collect()
 }
 
+/// Resolved byte offset for the primary (newest) selection's head in the
+/// focused editor.
+pub(crate) fn primary_head_offset(stoat: &mut Stoat) -> usize {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => panic!("focused pane is not an editor"),
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("focused editor");
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head())
+}
+
 /// Display-grid `(row, column)` for each selection's head in the focused
 /// editor.
 pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {

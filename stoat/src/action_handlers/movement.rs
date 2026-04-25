@@ -591,6 +591,82 @@ pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn rotate_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    editor.selections.rotate_primary(true);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn rotate_selections_backward(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    editor.selections.rotate_primary(false);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let trimmed: Vec<Selection<Anchor>> = editor
+        .selections
+        .all_anchors()
+        .iter()
+        .filter_map(|sel| {
+            let start = buffer_snapshot.resolve_anchor(&sel.start);
+            let end = buffer_snapshot.resolve_anchor(&sel.end);
+            let (new_start, new_end) = trim_whitespace(rope, start, end)?;
+
+            let mut new = sel.clone();
+            new.start = buffer_snapshot.anchor_at(new_start, Bias::Left);
+            new.end = buffer_snapshot.anchor_at(new_end, Bias::Right);
+            Some(new)
+        })
+        .collect();
+
+    if trimmed.is_empty() {
+        editor.selections.transform(buffer_snapshot, |sel| {
+            let mut new = sel.clone();
+            new.collapse_to(sel.head(), sel.goal);
+            new
+        });
+        editor.selections.keep_primary();
+    } else {
+        editor.selections.replace_with(trimmed, buffer_snapshot);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Skip leading and trailing whitespace within `[start, end)`. Returns
+/// `None` if the range is empty or contains only whitespace.
+fn trim_whitespace(rope: &stoat_text::Rope, start: usize, end: usize) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+    let mut new_start: Option<usize> = None;
+    let mut last_non_ws_end: Option<usize> = None;
+    let mut cursor = start;
+    for ch in rope.chars_at(start) {
+        if cursor >= end {
+            break;
+        }
+        let next_cursor = cursor + ch.len_utf8();
+        if !ch.is_whitespace() {
+            new_start.get_or_insert(cursor);
+            last_non_ws_end = Some(next_cursor);
+        }
+        cursor = next_cursor;
+    }
+    Some((new_start?, last_non_ws_end?))
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

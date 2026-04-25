@@ -82,12 +82,48 @@ impl SelectionsCollection {
         self.disjoint = vec![primary];
     }
 
+    pub(crate) fn rotate_primary(&mut self, forward: bool) {
+        if self.disjoint.len() < 2 {
+            return;
+        }
+        let primary_id = self.newest_anchor().id;
+        let primary_idx = self
+            .disjoint
+            .iter()
+            .position(|s| s.id == primary_id)
+            .expect("primary id must be in disjoint");
+        let len = self.disjoint.len();
+        let new_idx = if forward {
+            (primary_idx + 1) % len
+        } else {
+            (primary_idx + len - 1) % len
+        };
+        let new_id = self.next_selection_id;
+        self.next_selection_id += 1;
+        self.disjoint[new_idx].id = new_id;
+    }
+
     pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
     {
         let transformed: Vec<Selection<Anchor>> = self.disjoint.iter().map(&mut f).collect();
-        let mut indexed: Vec<(usize, Selection<Anchor>)> = transformed
+        self.replace_with(transformed, snapshot);
+    }
+
+    /// Replace selections with `new_disjoint`, sorting by offset and deduping
+    /// empty collisions at the same offset (keeping the highest-id survivor).
+    /// Asserts non-empty: callers must ensure at least one selection.
+    pub(crate) fn replace_with(
+        &mut self,
+        new_disjoint: Vec<Selection<Anchor>>,
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        assert!(
+            !new_disjoint.is_empty(),
+            "SelectionsCollection invariant: at least one selection"
+        );
+        let mut indexed: Vec<(usize, Selection<Anchor>)> = new_disjoint
             .into_iter()
             .map(|s| (snapshot.resolve_anchor(&s.start), s))
             .collect();
@@ -201,6 +237,77 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, 2);
         assert_eq!(remaining[0].goal, SelectionGoal::Column(4));
+    }
+
+    #[test]
+    fn rotate_primary_single_selection_is_noop() {
+        let multi = singleton("abcdef");
+        let _snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let before_id = collection.newest_anchor().id;
+        collection.rotate_primary(true);
+        assert_eq!(collection.newest_anchor().id, before_id);
+        collection.rotate_primary(false);
+        assert_eq!(collection.newest_anchor().id, before_id);
+    }
+
+    #[test]
+    fn rotate_primary_forward_wraps() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(6, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        let primary_offset = |c: &SelectionsCollection| -> usize {
+            snapshot.resolve_anchor(&c.newest_anchor().start)
+        };
+
+        assert_eq!(primary_offset(&collection), 6);
+        collection.rotate_primary(true);
+        assert_eq!(primary_offset(&collection), 0);
+        collection.rotate_primary(true);
+        assert_eq!(primary_offset(&collection), 3);
+        collection.rotate_primary(true);
+        assert_eq!(primary_offset(&collection), 6);
+    }
+
+    #[test]
+    fn rotate_primary_backward_wraps() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(6, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+
+        let primary_offset = |c: &SelectionsCollection| -> usize {
+            snapshot.resolve_anchor(&c.newest_anchor().start)
+        };
+
+        assert_eq!(primary_offset(&collection), 6);
+        collection.rotate_primary(false);
+        assert_eq!(primary_offset(&collection), 3);
+        collection.rotate_primary(false);
+        assert_eq!(primary_offset(&collection), 0);
+        collection.rotate_primary(false);
+        assert_eq!(primary_offset(&collection), 6);
     }
 
     #[test]
@@ -622,6 +729,75 @@ mod tests {
         h.type_keys("C");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
         h.assert_snapshot("snapshot_keep_primary_selection");
+    }
+
+    #[test]
+    fn rotate_selections_forward_cycles_primary() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("C C");
+        assert_eq!(h.head_offsets(), vec![0, 4, 8]);
+        assert_eq!(h.primary_head_offset(), 8);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsForward);
+        assert_eq!(h.primary_head_offset(), 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsForward);
+        assert_eq!(h.primary_head_offset(), 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsForward);
+        assert_eq!(h.primary_head_offset(), 8);
+    }
+
+    #[test]
+    fn rotate_selections_backward_cycles_primary() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("C C");
+        assert_eq!(h.primary_head_offset(), 8);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsBackward);
+        assert_eq!(h.primary_head_offset(), 4);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsBackward);
+        assert_eq!(h.primary_head_offset(), 0);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsBackward);
+        assert_eq!(h.primary_head_offset(), 8);
+    }
+
+    #[test]
+    fn rotate_single_selection_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsForward);
+        assert_eq!(h.primary_head_offset(), before);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsBackward);
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn snapshot_trim_selections_strips_whitespace() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "  hello  \n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TrimSelections);
+        h.assert_snapshot("snapshot_trim_selections_strips_whitespace");
+    }
+
+    #[test]
+    fn snapshot_trim_selections_all_whitespace_collapses_to_primary() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "   \n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TrimSelections);
+        h.assert_snapshot("snapshot_trim_selections_all_whitespace_collapses_to_primary");
     }
 
     fn page_scratch_content() -> String {

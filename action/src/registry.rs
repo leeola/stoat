@@ -17,7 +17,8 @@ use crate::{
             FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
             GotoLineStart, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
             MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
-            MoveUp, PageDown, PageUp, SelectAll, SelectLineBelow,
+            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll,
+            SelectLineBelow, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -220,6 +221,13 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(KeepPrimarySelection::DEF, |_| {
         Ok(Box::new(KeepPrimarySelection))
     });
+    add(RotateSelectionsForward::DEF, |_| {
+        Ok(Box::new(RotateSelectionsForward))
+    });
+    add(RotateSelectionsBackward::DEF, |_| {
+        Ok(Box::new(RotateSelectionsBackward))
+    });
+    add(TrimSelections::DEF, |_| Ok(Box::new(TrimSelections)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -396,6 +404,9 @@ mod tests {
         "SelectAll",
         "SelectLineBelow",
         "KeepPrimarySelection",
+        "RotateSelectionsForward",
+        "RotateSelectionsBackward",
+        "TrimSelections",
         "ReviewNextChunk",
         "ReviewPrevChunk",
         "ReviewStageChunk",
@@ -541,7 +552,8 @@ mod tests {
         // + 4 file-finder actions (open, select prev/next, scope toggle).
         // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
-        assert_eq!(all().count(), 138);
+        // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
+        assert_eq!(all().count(), 141);
     }
 
     #[test]

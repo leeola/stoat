@@ -684,6 +684,11 @@ impl TestHarness {
         editor::selection_spans(&mut self.stoat)
     }
 
+    /// Byte offset of the primary selection's head in the focused editor.
+    pub(crate) fn primary_head_offset(&mut self) -> usize {
+        editor::primary_head_offset(&mut self.stoat)
+    }
+
     /// Display-grid `(row, column)` for each selection's head in the
     /// focused editor.
     pub(crate) fn cursor_display_positions(&mut self) -> Vec<(u32, u32)> {

@@ -23,7 +23,8 @@ pub use defs::{
         FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
         GotoLineStart, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
         MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
-        PageDown, PageUp, SelectAll, SelectLineBelow,
+        PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll,
+        SelectLineBelow, TrimSelections,
     },
     file::OpenFile,
     file_finder::{

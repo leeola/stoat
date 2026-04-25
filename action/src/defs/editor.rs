@@ -350,6 +350,36 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    RotateSelectionsForwardDef,
+    RotateSelectionsForward,
+    "RotateSelectionsForward",
+    ActionKind::RotateSelectionsForward,
+    "rotate primary selection forward",
+    "Make the next selection (in offset order, wrapping at the end) the primary.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    RotateSelectionsBackwardDef,
+    RotateSelectionsBackward,
+    "RotateSelectionsBackward",
+    ActionKind::RotateSelectionsBackward,
+    "rotate primary selection backward",
+    "Make the previous selection (in offset order, wrapping at the start) the primary.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    TrimSelectionsDef,
+    TrimSelections,
+    "TrimSelections",
+    ActionKind::TrimSelections,
+    "trim whitespace from selections",
+    "Strip leading and trailing whitespace from every selection. Selections that become empty (or were entirely whitespace) are dropped; if all selections drop, collapse the primary to its head.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +454,24 @@ mod tests {
             ActionKind::KeepPrimarySelection
         );
         assert_eq!(KeepPrimarySelection.def().name(), "KeepPrimarySelection");
+        assert_eq!(
+            RotateSelectionsForward.kind(),
+            ActionKind::RotateSelectionsForward
+        );
+        assert_eq!(
+            RotateSelectionsForward.def().name(),
+            "RotateSelectionsForward"
+        );
+        assert_eq!(
+            RotateSelectionsBackward.kind(),
+            ActionKind::RotateSelectionsBackward
+        );
+        assert_eq!(
+            RotateSelectionsBackward.def().name(),
+            "RotateSelectionsBackward"
+        );
+        assert_eq!(TrimSelections.kind(), ActionKind::TrimSelections);
+        assert_eq!(TrimSelections.def().name(), "TrimSelections");
     }
 
     #[test]

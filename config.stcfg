@@ -164,6 +164,9 @@ on key {
         % -> SelectAll();
         x -> SelectLineBelow();
         , -> KeepPrimarySelection();
+        ( -> RotateSelectionsBackward();
+        ) -> RotateSelectionsForward();
+        _ -> TrimSelections();
         g -> SetMode(goto);
         R -> OpenReview();
     }
