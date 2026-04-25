@@ -1,0 +1,11 @@
+# Default ignores baked into the Stoat binary and applied to every
+# workspace's file finder. Users can extend per-repo with their own
+# `.stoatignore`; entries here apply via the walker's `filter_entry`,
+# which runs after the ignore stack, so per-repo negations do not
+# override these defaults.
+#
+# Syntax: standard gitignore.
+
+.git/
+node_modules/
+target/

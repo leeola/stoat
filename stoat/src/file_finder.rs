@@ -6,7 +6,10 @@ use crate::{
     paths,
     workspace::Workspace,
 };
-use ignore::WalkBuilder;
+use ignore::{
+    gitignore::{Gitignore, GitignoreBuilder},
+    WalkBuilder,
+};
 use nucleo::{
     pattern::{Atom, AtomKind, CaseMatching, Normalization},
     Matcher, Utf32Str,
@@ -21,6 +24,11 @@ use stoat_text::{Bias, SelectionGoal};
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
+
+/// Baked-in default ignore patterns applied to every workspace. Parsed with
+/// gitignore semantics at walker-build time; supplements (but does not
+/// override) any per-repo `.stoatignore` the walker picks up at runtime.
+const DEFAULT_STOATIGNORE: &str = include_str!("../../.stoatignore");
 
 fn fuzzy_matcher() -> &'static Mutex<Matcher> {
     static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
@@ -267,10 +275,13 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
     }
 }
 
-/// Enumerate every non-gitignored file under `git_root`. Mirrors the walker
-/// used by [`crate::dump::save`]: respects `.gitignore`, `.git/info/exclude`,
-/// and the global gitignore; does not require `git_root` to be a git repo.
+/// Enumerate every non-ignored file under `git_root`. Respects `.gitignore`,
+/// `.git/info/exclude`, the global gitignore, a per-repo `.stoatignore`,
+/// and the baked-in [`DEFAULT_STOATIGNORE`] patterns. Does not require
+/// `git_root` to be a git repo.
 pub(crate) fn walk_workspace_files(git_root: &Path) -> Vec<PathBuf> {
+    let defaults = build_default_ignore(git_root);
+
     let mut out = Vec::new();
     let walker = WalkBuilder::new(git_root)
         .hidden(false)
@@ -278,6 +289,11 @@ pub(crate) fn walk_workspace_files(git_root: &Path) -> Vec<PathBuf> {
         .git_exclude(true)
         .git_global(true)
         .require_git(false)
+        .add_custom_ignore_filename(".stoatignore")
+        .filter_entry(move |dent| {
+            let is_dir = dent.file_type().is_some_and(|ft| ft.is_dir());
+            !defaults.matched(dent.path(), is_dir).is_ignore()
+        })
         .build();
     for entry in walker.flatten() {
         let ft = match entry.file_type() {
@@ -291,6 +307,16 @@ pub(crate) fn walk_workspace_files(git_root: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+fn build_default_ignore(git_root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(git_root);
+    for line in DEFAULT_STOATIGNORE.lines() {
+        builder
+            .add_line(None, line)
+            .expect("default .stoatignore parses");
+    }
+    builder.build().expect("default .stoatignore builds")
 }
 
 /// Query git for currently-modified files (staged + unstaged), returning
@@ -513,6 +539,97 @@ mod tests {
         assert!(files.iter().all(|p| p.is_file()));
         assert!(files.iter().any(|p| p.ends_with("a.rs")));
         assert!(files.iter().any(|p| p.ends_with("sub/b.rs")));
+    }
+
+    fn seed_fs(base: &Path, files: &[(&str, &str)]) {
+        for (rel, content) in files {
+            let abs = base.join(rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&abs, content).unwrap();
+        }
+    }
+
+    fn walked_rels(base: &Path) -> Vec<String> {
+        let mut rels: Vec<String> = walk_workspace_files(base)
+            .iter()
+            .map(|p| p.strip_prefix(base).unwrap().to_string_lossy().into_owned())
+            .collect();
+        rels.sort();
+        rels
+    }
+
+    #[test]
+    fn walk_workspace_files_ignores_dot_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fs(
+            tmp.path(),
+            &[
+                (".git/HEAD", "ref: refs/heads/main"),
+                (".git/config", "[core]"),
+                (".git/refs/heads/main", "deadbeef"),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        assert_eq!(walked_rels(tmp.path()), vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn walk_workspace_files_ignores_baked_in_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fs(
+            tmp.path(),
+            &[
+                ("target/debug/foo", "bin"),
+                ("node_modules/pkg/index.js", "module.exports = {}"),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        assert_eq!(walked_rels(tmp.path()), vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn walk_workspace_files_honors_stoatignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fs(
+            tmp.path(),
+            &[
+                (".stoatignore", "vendor/\n"),
+                ("vendor/blob.rs", "// generated"),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        assert_eq!(
+            walked_rels(tmp.path()),
+            vec![".stoatignore".to_string(), "src/main.rs".to_string()],
+        );
+    }
+
+    #[test]
+    fn walk_workspace_files_still_walks_non_git_dotfiles() {
+        // Synthetic dotfile names so the test doesn't depend on the user's
+        // global gitignore (which on real machines often excludes `.claude`,
+        // `.vscode`, etc.). Confirms that disabling `hidden(false)` keeps
+        // ordinary dotfiles visible -- only the baked-in defaults filter
+        // them out.
+        let tmp = tempfile::tempdir().unwrap();
+        seed_fs(
+            tmp.path(),
+            &[
+                (".stoat_test_alpha/data", "{}"),
+                (".stoat_test_betarc", ""),
+                ("src/main.rs", "fn main() {}"),
+            ],
+        );
+        assert_eq!(
+            walked_rels(tmp.path()),
+            vec![
+                ".stoat_test_alpha/data".to_string(),
+                ".stoat_test_betarc".to_string(),
+                "src/main.rs".to_string(),
+            ],
+        );
     }
 
     // ----- TestHarness integration tests -----
