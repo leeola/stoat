@@ -1,3 +1,4 @@
+mod name;
 mod persist;
 
 use crate::{
@@ -80,6 +81,11 @@ pub struct Workspace {
     /// [`Workspace::new`] and preserved by [`crate::workspace::persist`] on
     /// save/load. Doubles as the on-disk filename.
     pub(crate) uid: WorkspaceUid,
+    /// User-facing display name. Defaults to a deterministic
+    /// adjective+animal pair derived from [`Self::uid`] (see
+    /// [`crate::workspace::name::default_workspace_name`]). Empty string opts
+    /// the renderer into the `git_root.file_name()` fallback used by tests.
+    pub(crate) name: String,
     pub git_root: PathBuf,
     pub claude_chat: Option<ClaudeSessionId>,
     /// Protocol session UUID recovered from the persisted workspace state.
@@ -130,9 +136,13 @@ impl Workspace {
         let initial_focus = panes.focus();
         panes.pane_mut(initial_focus).view = View::Editor(editor_id);
 
+        let uid = WorkspaceUid::now();
+        let name = name::default_workspace_name(uid);
+
         Self {
             id: WorkspaceId::default(),
-            uid: WorkspaceUid::now(),
+            uid,
+            name,
             git_root,
             claude_chat: None,
             restored_claude_session_id: None,

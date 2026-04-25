@@ -95,12 +95,15 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         None
     };
 
-    let workspace_name = ws
-        .git_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("(unnamed)")
-        .to_string();
+    let workspace_name = if !ws.name.is_empty() {
+        ws.name.clone()
+    } else {
+        ws.git_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("(unnamed)")
+            .to_string()
+    };
 
     let frame = FrameCtx {
         workspace_name: &workspace_name,

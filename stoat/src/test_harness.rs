@@ -67,6 +67,7 @@ impl TestHarness {
         let fake_git = Arc::new(crate::host::FakeGit::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
+        stoat.active_workspace_mut().name = String::new();
         stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.set_fs_host(fake_fs.clone());
         stoat.set_git_host(fake_git.clone());
@@ -610,7 +611,9 @@ impl TestHarness {
     /// The new workspace is not automatically made active; call
     /// [`Self::set_active_workspace`] to switch.
     pub(crate) fn create_workspace(&mut self) -> crate::workspace::WorkspaceId {
-        let ws = crate::workspace::Workspace::new(std::path::PathBuf::new(), &self.stoat.executor);
+        let mut ws =
+            crate::workspace::Workspace::new(std::path::PathBuf::new(), &self.stoat.executor);
+        ws.name = String::new();
         let id = self.stoat.workspaces.insert(ws);
         self.stoat.workspaces[id].id = id;
         id

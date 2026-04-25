@@ -61,12 +61,15 @@ impl WorkspacePicker {
             .iter()
             .map(|(id, ws)| PickerEntry {
                 id,
-                basename: ws
-                    .git_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("(unnamed)")
-                    .to_string(),
+                basename: if !ws.name.is_empty() {
+                    ws.name.clone()
+                } else {
+                    ws.git_root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("(unnamed)")
+                        .to_string()
+                },
                 git_root: ws.git_root.clone(),
                 uid: ws.uid,
                 is_current: id == active,

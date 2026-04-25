@@ -65,6 +65,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// pre-field on-disk files readable.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// User-facing display name. Empty string on legacy files that predate
+    /// the field; restore regenerates a default from `uid` in that case.
+    #[serde(default)]
+    pub name: String,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -156,6 +160,7 @@ impl Workspace {
             rebase: self.rebase.clone(),
             rebase_active,
             claude_session_id,
+            name: self.name.clone(),
         }
     }
 
@@ -234,6 +239,11 @@ impl Workspace {
         self.rebase = state.rebase;
         self.rebase_active = state.rebase_active.map(ActiveRebaseSnap::into_active);
         self.restored_claude_session_id = state.claude_session_id;
+        self.name = if state.name.is_empty() {
+            super::name::default_workspace_name(state.uid)
+        } else {
+            state.name
+        };
     }
 }
 
@@ -763,6 +773,41 @@ mod tests {
         assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.uid, original_uid);
+    }
+
+    #[test]
+    fn user_name_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.name = "my workspace".to_string();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.name, "my workspace");
+    }
+
+    #[test]
+    fn legacy_empty_name_regenerates_default_from_uid() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.name = String::new();
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(
+            fresh.name,
+            crate::workspace::name::default_workspace_name(ws.uid)
+        );
     }
 
     #[test]

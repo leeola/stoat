@@ -1281,6 +1281,12 @@ mod tests {
     fn snapshot_workspace_picker_listing() {
         let mut h = Stoat::test();
         h.type_action("NewWorkspace()");
+        // NewWorkspace builds a Workspace via the production path, which
+        // generates a random uid-derived name. Clear it before opening
+        // the picker so the rendered snapshot is stable across runs.
+        for (_, ws) in h.stoat.workspaces.iter_mut() {
+            ws.name = String::new();
+        }
         h.type_action("SwitchWorkspace()");
         h.assert_snapshot("workspace_picker_listing");
     }
