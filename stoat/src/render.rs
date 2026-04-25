@@ -207,6 +207,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
     } else if stoat.help.is_some() {
+        let help = stoat.help.as_ref().expect("just checked");
+        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf);
         let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw
@@ -216,14 +218,54 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                 (key.as_str(), desc)
             })
             .collect();
-        let help = stoat.help.as_ref().expect("just checked");
-        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf, &bindings);
+        hints::render_hints(
+            "help",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
     } else if stoat.file_finder.is_some() {
         let finder = stoat.file_finder.as_mut().expect("just checked");
         file_finder::render_file_finder(finder, ws, &*stoat.fs_host, &stoat.theme, size, buf);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
+        let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
+        hints::render_hints(
+            "finder",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
     } else if stoat.command_palette.is_some() {
         let palette = stoat.command_palette.as_mut().expect("just checked");
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
+        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false);
+        let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
+        let bindings: Vec<_> = raw
+            .iter()
+            .map(|(key, actions)| {
+                let desc = actions.first().map(action_display_desc).unwrap_or_default();
+                (key.as_str(), desc)
+            })
+            .collect();
+        hints::render_hints(
+            "palette",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
     } else if let Some(picker) = &stoat.workspace_picker {
         workspace_picker::render_workspace_picker(picker, &stoat.theme, size, buf);
         let bindings = picker.hint_bindings();
