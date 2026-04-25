@@ -247,6 +247,27 @@ impl FsHost for FakeFs {
             )),
         }
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(entry) = state.entries.remove(from) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{}: not found", from.display()),
+            ));
+        };
+        state.ensure_ancestors(to);
+        let new_mtime = state.tick();
+        let entry = match entry {
+            FakeEntry::File { content, .. } => FakeEntry::File {
+                content,
+                mtime: new_mtime,
+            },
+            FakeEntry::Dir { .. } => FakeEntry::Dir { mtime: new_mtime },
+        };
+        state.entries.insert(to.to_path_buf(), entry);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -294,6 +315,27 @@ mod tests {
     fn metadata_nonexistent() {
         let fs = FakeFs::new();
         assert!(fs.metadata(Path::new("/nope")).unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_moves_file() {
+        let fs = FakeFs::new();
+        fs.insert_file("/from.txt", "payload");
+        fs.rename(Path::new("/from.txt"), Path::new("/to.txt"))
+            .unwrap();
+        assert!(!fs.exists(Path::new("/from.txt")));
+        let mut buf = Vec::new();
+        fs.read(Path::new("/to.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"payload");
+    }
+
+    #[test]
+    fn rename_missing_source_errors() {
+        let fs = FakeFs::new();
+        let err = fs
+            .rename(Path::new("/nope"), Path::new("/somewhere"))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]

@@ -370,7 +370,7 @@ impl Stoat {
     /// from the real state directory.
     pub fn load_active_workspace_state(&mut self) {
         let git_root = self.active_workspace().git_root.clone();
-        let files = match crate::workspace::list_workspace_files(&git_root) {
+        let files = match crate::workspace::list_workspace_files(&git_root, &*self.fs_host) {
             Ok(files) => files,
             Err(err) => {
                 tracing::warn!(?err, "could not resolve workspace state directory");
@@ -381,7 +381,11 @@ impl Stoat {
             return;
         };
         let executor = self.executor.clone();
-        if let Err(err) = self.active_workspace_mut().restore_state(&path, &executor) {
+        let fs_host = self.fs_host.clone();
+        if let Err(err) = self
+            .active_workspace_mut()
+            .restore_state(&path, &*fs_host, &executor)
+        {
             tracing::warn!(
                 ?path,
                 ?err,
@@ -404,14 +408,14 @@ impl Stoat {
         if ws.is_fresh() {
             return;
         }
-        let path = match crate::workspace::state_path_for(&ws.git_root, ws.uid) {
+        let path = match crate::workspace::state_path_for(&ws.git_root, ws.uid, &*self.fs_host) {
             Ok(p) => p,
             Err(err) => {
                 tracing::warn!(?err, "could not resolve workspace state path");
                 return;
             },
         };
-        if let Err(err) = ws.save_state(&path) {
+        if let Err(err) = ws.save_state(&path, &*self.fs_host) {
             tracing::warn!(?path, ?err, "failed to save workspace state");
         }
     }

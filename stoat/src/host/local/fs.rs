@@ -61,6 +61,10 @@ impl FsHost for LocalFs {
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
     }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +133,22 @@ mod tests {
         assert!(!entries[0].is_dir);
         assert_eq!(entries[1].name.as_str(), "sub");
         assert!(entries[1].is_dir);
+    }
+
+    #[test]
+    fn rename_moves_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        std::fs::write(&from, b"contents").unwrap();
+
+        let fs = LocalFs;
+        fs.rename(&from, &to).unwrap();
+
+        assert!(!fs.exists(&from));
+        let mut buf = Vec::new();
+        fs.read(&to, &mut buf).unwrap();
+        assert_eq!(buf, b"contents");
     }
 
     #[test]

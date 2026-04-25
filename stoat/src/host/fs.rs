@@ -51,6 +51,10 @@ pub trait FsHost: Send + Sync {
     /// Removes the file at `path`. Errors with `NotFound` if absent.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
 
+    /// Renames `from` to `to`. Errors with `NotFound` if `from` is absent.
+    /// Overwrites `to` if it already exists, matching `std::fs::rename`.
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+
     /// Returns whether `path` exists.
     fn exists(&self, path: &Path) -> bool {
         self.metadata(path).ok().flatten().is_some()

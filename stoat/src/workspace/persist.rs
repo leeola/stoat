@@ -23,6 +23,7 @@ use crate::{
     buffer_registry::BufferRegistrySnapshot,
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
+    host::FsHost,
     pane::{DockId, DockPanel, FocusTarget, PaneTree, View},
     rebase::RebaseState,
     workspace::{Workspace, WorkspaceUid},
@@ -31,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::{
     collections::HashMap,
-    fs, io,
+    io,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
 
@@ -70,9 +72,11 @@ pub(crate) struct WorkspaceStateV1 {
 /// by the workspace's [`WorkspaceUid`]. Canonical form of `git_root` is
 /// hashed with the stdlib's [`DefaultHasher`] (stable within a Rust release;
 /// acceptable here because a hash mismatch just falls back to a fresh session).
-pub(crate) fn workspace_dir_for(git_root: &Path) -> io::Result<PathBuf> {
+pub(crate) fn workspace_dir_for(git_root: &Path, fs: &dyn FsHost) -> io::Result<PathBuf> {
     use std::hash::{Hash, Hasher};
-    let canon = fs::canonicalize(git_root).unwrap_or_else(|_| git_root.to_path_buf());
+    let canon = fs
+        .canonicalize(git_root)
+        .unwrap_or_else(|_| git_root.to_path_buf());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut hasher);
     let name = format!("{:016x}", hasher.finish());
@@ -80,36 +84,41 @@ pub(crate) fn workspace_dir_for(git_root: &Path) -> io::Result<PathBuf> {
 }
 
 /// Resolve the on-disk state file path for a specific workspace.
-pub(crate) fn state_path_for(git_root: &Path, uid: WorkspaceUid) -> io::Result<PathBuf> {
-    Ok(workspace_dir_for(git_root)?.join(format!("{uid}.ron")))
+pub(crate) fn state_path_for(
+    git_root: &Path,
+    uid: WorkspaceUid,
+    fs: &dyn FsHost,
+) -> io::Result<PathBuf> {
+    Ok(workspace_dir_for(git_root, fs)?.join(format!("{uid}.ron")))
 }
 
 /// List every persisted workspace file for a git root, newest first by
 /// filesystem mtime. Returns an empty vec (not an error) if the directory
 /// does not exist.
-pub(crate) fn list_workspace_files(git_root: &Path) -> io::Result<Vec<PathBuf>> {
-    list_ron_files_by_mtime_desc(&workspace_dir_for(git_root)?)
+pub(crate) fn list_workspace_files(git_root: &Path, fs: &dyn FsHost) -> io::Result<Vec<PathBuf>> {
+    list_ron_files_by_mtime_desc(&workspace_dir_for(git_root, fs)?, fs)
 }
 
 /// Underlying directory scan for [`list_workspace_files`]. Factored so tests
 /// can exercise it against a tempdir without touching the real XDG path.
 /// Entries whose metadata cannot be read are treated as unix-epoch-old so
 /// they sort to the bottom rather than dropping out silently.
-fn list_ron_files_by_mtime_desc(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    if !dir.exists() {
+fn list_ron_files_by_mtime_desc(dir: &Path, fs: &dyn FsHost) -> io::Result<Vec<PathBuf>> {
+    if !fs.exists(dir) {
         return Ok(Vec::new());
     }
     let mut entries: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    for entry in fs.list_dir(dir)? {
+        let path = dir.join(entry.name.as_str());
         if path.extension().and_then(|s| s.to_str()) != Some("ron") {
             continue;
         }
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
+        let mtime = fs
+            .metadata(&path)
+            .ok()
+            .flatten()
+            .map(|m| m.modified)
+            .unwrap_or(UNIX_EPOCH);
         entries.push((path, mtime));
     }
     entries.sort_by(|a, b| b.1.cmp(&a.1));
@@ -152,24 +161,32 @@ impl Workspace {
 
     /// Serialize the current workspace state to RON and write it atomically
     /// to `path`. Parent directory is created if missing.
-    pub(crate) fn save_state(&self, path: &Path) -> io::Result<()> {
+    pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs.create_dir_all(parent)?;
         }
         let state = self.to_state();
         let body = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let tmp = path.with_extension("ron.tmp");
-        fs::write(&tmp, body)?;
-        fs::rename(&tmp, path)?;
+        fs.write(&tmp, body.as_bytes())?;
+        fs.rename(&tmp, path)?;
         Ok(())
     }
 
     /// Replace `self` with the persisted state at `path`. Returns an error if
     /// the file cannot be read or parsed; the caller is expected to log and
     /// continue with the default state rather than abort startup.
-    pub(crate) fn restore_state(&mut self, path: &Path, executor: &Executor) -> io::Result<()> {
-        let body = fs::read_to_string(path)?;
+    pub(crate) fn restore_state(
+        &mut self,
+        path: &Path,
+        fs: &dyn FsHost,
+        executor: &Executor,
+    ) -> io::Result<()> {
+        let mut buf = Vec::new();
+        fs.read(path, &mut buf)?;
+        let body = String::from_utf8(buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let state: WorkspaceStateV1 = ron::from_str(&body)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         self.apply_state(state, executor);
@@ -284,8 +301,11 @@ fn clone_docks(docks: &SlotMap<DockId, DockPanel>) -> SlotMap<DockId, DockPanel>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pane::{Axis, DockSide, DockVisibility, Placement};
-    use std::sync::Arc;
+    use crate::{
+        host::LocalFs,
+        pane::{Axis, DockSide, DockVisibility, Placement},
+    };
+    use std::{fs, sync::Arc};
     use stoat_scheduler::TestScheduler;
     use tempfile::TempDir;
 
@@ -331,10 +351,10 @@ mod tests {
         ws.focus = FocusTarget::SplitPane(right);
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(fresh.git_root, tmp.path());
         assert_eq!(fresh.panes.pane_count(), 2);
@@ -391,10 +411,10 @@ mod tests {
         let _ = dock_id;
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         for id in fresh.panes.split_pane_ids() {
             match &fresh.panes.pane(id).view {
@@ -423,10 +443,10 @@ mod tests {
         let count_before = ws.panes.pane_count();
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(fresh.panes.pane_count(), count_before);
         for id in fresh.panes.split_pane_ids() {
@@ -467,10 +487,10 @@ mod tests {
         );
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(
             fresh.restored_claude_session_id,
@@ -485,10 +505,10 @@ mod tests {
 
         let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(fresh.restored_claude_session_id, None);
     }
@@ -523,10 +543,10 @@ mod tests {
         assert!(buffer_is_dirty(&ws, id));
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), expected_text);
         assert!(buffer_is_dirty(&fresh, id));
@@ -548,10 +568,10 @@ mod tests {
         assert_eq!(buffer_text(&ws, id), "one two three\n");
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         let restored = fresh.buffers.get(id).expect("buffer missing");
         let mut guard = restored.write().expect("buffer poisoned");
@@ -602,10 +622,10 @@ mod tests {
         ws.panes.pane_mut(root).view = View::Editor(editor_id);
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         let restored_editor_id = fresh
             .panes
@@ -642,10 +662,10 @@ mod tests {
         assert!(!buffer_is_dirty(&ws, id));
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, id), "hello world\n");
         assert!(!buffer_is_dirty(&fresh, id));
@@ -678,10 +698,10 @@ mod tests {
         assert_eq!(buffer_text(&ws, scratch_id), "notes\nmore\n");
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
 
         assert_eq!(buffer_text(&fresh, scratch_id), "notes\nmore\n");
         let buffer = fresh.buffers.get(scratch_id).expect("scratch lost");
@@ -713,7 +733,7 @@ mod tests {
             .set_modified(base + Duration::from_secs(3600))
             .unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
         assert_eq!(listed, vec![newer, older]);
     }
 
@@ -724,7 +744,7 @@ mod tests {
         fs::write(tmp.path().join("skip.txt"), "").unwrap();
         fs::create_dir(tmp.path().join("subdir")).unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
         assert_eq!(listed, vec![tmp.path().join("ok.ron")]);
     }
 
@@ -732,7 +752,9 @@ mod tests {
     fn list_ron_files_missing_dir_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("nope");
-        assert!(list_ron_files_by_mtime_desc(&missing).unwrap().is_empty());
+        assert!(list_ron_files_by_mtime_desc(&missing, &LocalFs)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -744,11 +766,11 @@ mod tests {
         let original_uid = ws.uid;
 
         let state_path = tmp.path().join("state.ron");
-        ws.save_state(&state_path).unwrap();
+        ws.save_state(&state_path, &LocalFs).unwrap();
 
         let mut fresh = Workspace::new(tmp.path().to_path_buf(), &exec);
         assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
-        fresh.restore_state(&state_path, &exec).unwrap();
+        fresh.restore_state(&state_path, &LocalFs, &exec).unwrap();
         assert_eq!(fresh.uid, original_uid);
     }
 
@@ -759,10 +781,10 @@ mod tests {
 
         let ws = new_laid_out_workspace(tmp.path().to_path_buf(), &exec);
         let path = tmp.path().join(format!("{}.ron", ws.uid));
-        ws.save_state(&path).unwrap();
-        ws.save_state(&path).unwrap();
+        ws.save_state(&path, &LocalFs).unwrap();
+        ws.save_state(&path, &LocalFs).unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
         assert_eq!(listed, vec![path]);
     }
 
@@ -777,10 +799,10 @@ mod tests {
 
         let path_a = tmp.path().join(format!("{}.ron", ws_a.uid));
         let path_b = tmp.path().join(format!("{}.ron", ws_b.uid));
-        ws_a.save_state(&path_a).unwrap();
-        ws_b.save_state(&path_b).unwrap();
+        ws_a.save_state(&path_a, &LocalFs).unwrap();
+        ws_b.save_state(&path_b, &LocalFs).unwrap();
 
-        let listed = list_ron_files_by_mtime_desc(tmp.path()).unwrap();
+        let listed = list_ron_files_by_mtime_desc(tmp.path(), &LocalFs).unwrap();
         assert_eq!(listed.len(), 2);
     }
 }
