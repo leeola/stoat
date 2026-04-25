@@ -59,7 +59,7 @@ pub use defs::{
         ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
-    workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, SwitchWorkspace},
+    workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue};

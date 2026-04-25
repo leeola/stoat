@@ -1,4 +1,7 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+};
+use std::any::Any;
 
 define_action!(
     NewWorkspaceDef,
@@ -38,10 +41,64 @@ define_action!(
     "Close the active workspace, delete its persisted state, and switch to a sibling workspace. Refuses when only one workspace is open."
 );
 
+const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "name",
+    kind: ParamKind::String,
+    required: true,
+    description: "New display name for the active workspace. Empty string re-engages the default basename fallback.",
+}];
+
+#[derive(Debug)]
+pub struct RenameWorkspaceDef;
+
+impl ActionDef for RenameWorkspaceDef {
+    fn name(&self) -> &'static str {
+        "RenameWorkspace"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::RenameWorkspace
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        RENAME_WORKSPACE_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "rename this workspace"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Set a user-facing display name for the active workspace. The name is persisted with the workspace and shown in the workspace picker and pane footer. Pass an empty string to revert to the default `git_root.file_name()` fallback."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct RenameWorkspace {
+    pub name: String,
+}
+
+impl RenameWorkspace {
+    pub const DEF: &RenameWorkspaceDef = &RenameWorkspaceDef;
+}
+
+impl Action for RenameWorkspace {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Action;
 
     #[test]
     fn kinds_and_names() {
@@ -53,10 +110,15 @@ mod tests {
         assert_eq!(SwitchWorkspace.def().name(), "SwitchWorkspace");
         assert_eq!(CloseWorkspace.kind(), ActionKind::CloseWorkspace);
         assert_eq!(CloseWorkspace.def().name(), "CloseWorkspace");
+        let rename = RenameWorkspace {
+            name: "x".to_string(),
+        };
+        assert_eq!(rename.kind(), ActionKind::RenameWorkspace);
+        assert_eq!(rename.def().name(), "RenameWorkspace");
     }
 
     #[test]
-    fn all_zero_arg() {
+    fn zero_arg_actions_have_no_params() {
         assert!(NewWorkspace.def().params().is_empty());
         assert!(CopyWorkspace.def().params().is_empty());
         assert!(SwitchWorkspace.def().params().is_empty());
@@ -64,8 +126,26 @@ mod tests {
     }
 
     #[test]
+    fn rename_workspace_takes_name_param() {
+        let params = RenameWorkspaceDef.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "name");
+        assert_eq!(params[0].kind, ParamKind::String);
+        assert!(params[0].required);
+    }
+
+    #[test]
     fn downcast() {
         let action: Box<dyn Action> = Box::new(NewWorkspace);
         assert!(action.as_any().downcast_ref::<NewWorkspace>().is_some());
+
+        let rename: Box<dyn Action> = Box::new(RenameWorkspace {
+            name: "alpha".to_string(),
+        });
+        let recovered = rename
+            .as_any()
+            .downcast_ref::<RenameWorkspace>()
+            .expect("downcast");
+        assert_eq!(recovered.name, "alpha");
     }
 }

@@ -130,6 +130,7 @@ pub enum ActionKind {
     CopyWorkspace,
     SwitchWorkspace,
     CloseWorkspace,
+    RenameWorkspace,
     SubmitPromptInput,
     CancelPromptInput,
     PromptInsertNewline,

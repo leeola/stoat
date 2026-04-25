@@ -31,7 +31,7 @@ pub(crate) use review::install_review_session;
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, Run,
+    OpenReviewCommitRange, RenameWorkspace, Run,
 };
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
@@ -345,6 +345,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
+        ActionKind::RenameWorkspace => {
+            let action = action
+                .as_any()
+                .downcast_ref::<RenameWorkspace>()
+                .expect("RenameWorkspace action downcast");
+            workspace::rename_workspace(stoat, &action.name);
+            UpdateEffect::Redraw
+        },
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
@@ -427,8 +435,8 @@ mod tests {
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, Quit, QuitAll, SelectAll,
-        SplitNewRight, SplitRight,
+        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, Quit, QuitAll,
+        RenameWorkspace, SelectAll, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1332,6 +1340,37 @@ mod tests {
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, first);
         assert!(h.stoat.workspaces.get(second).is_none());
+    }
+
+    #[test]
+    fn rename_workspace_sets_active_workspace_name() {
+        let mut stoat = stoat();
+        dispatch(
+            &mut stoat,
+            &RenameWorkspace {
+                name: "alpha".to_string(),
+            },
+        );
+        assert_eq!(stoat.active_workspace().name, "alpha");
+    }
+
+    #[test]
+    fn rename_workspace_with_empty_name_clears_back_to_fallback() {
+        let mut stoat = stoat();
+        dispatch(
+            &mut stoat,
+            &RenameWorkspace {
+                name: "alpha".to_string(),
+            },
+        );
+        assert_eq!(stoat.active_workspace().name, "alpha");
+        dispatch(
+            &mut stoat,
+            &RenameWorkspace {
+                name: String::new(),
+            },
+        );
+        assert_eq!(stoat.active_workspace().name, "");
     }
 
     fn set_focused_viewport_rows(stoat: &mut Stoat, rows: Option<u32>) {

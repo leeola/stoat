@@ -84,3 +84,7 @@ pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
         Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
     }
 }
+
+pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
+    stoat.active_workspace_mut().name = name.to_string();
+}

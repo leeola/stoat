@@ -53,7 +53,9 @@ use crate::{
             ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
-        workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, SwitchWorkspace},
+        workspace::{
+            CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
+        },
     },
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
@@ -342,6 +344,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
     add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
     add(CloseWorkspace::DEF, |_| Ok(Box::new(CloseWorkspace)));
+    add(RenameWorkspace::DEF, |params| {
+        let raw = params
+            .first()
+            .ok_or(ParamError::Missing("name"))?
+            .as_string()
+            .ok_or(ParamError::WrongKind {
+                name: "name",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(RenameWorkspace {
+            name: raw.to_owned(),
+        }))
+    });
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
     add(PromptInsertNewline::DEF, |_| {
@@ -566,7 +581,7 @@ mod tests {
         // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
-        assert_eq!(all().count(), 145);
+        assert_eq!(all().count(), 146);
     }
 
     #[test]
