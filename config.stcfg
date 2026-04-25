@@ -320,6 +320,8 @@ on key {
         s -> [SplitRight(), SetMode(normal)];
         v -> [SplitDown(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
+        f -> OpenFileFinderHSplit();
+        F -> OpenFileFinderVSplit();
         q -> [ClosePane(), SetMode(normal)];
         o -> [CloseOtherPanes(), SetMode(normal)];
         w -> [FocusNext(), SetMode(normal)];

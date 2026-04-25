@@ -46,10 +46,26 @@ pub enum FinderScope {
     Modified,
 }
 
+/// What the finder should do with the selected file when the user submits.
+/// Set at open time; consumed by the submit handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenIntent {
+    /// Open the file in the focused pane, replacing its current view.
+    Replace,
+    /// Split the focused pane horizontally first, then open the file in
+    /// the new pane below.
+    HSplit,
+    /// Split the focused pane vertically first, then open the file in
+    /// the new pane to the right.
+    VSplit,
+}
+
 pub struct FileFinder {
     pub(crate) input: InputView,
     /// Mode to restore when the finder closes.
     pub(crate) previous_mode: String,
+    /// What submit should do with the selected file.
+    pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
     pub(crate) git_root: PathBuf,
     /// Absolute paths of every tracked file, captured once at open time.
@@ -80,6 +96,7 @@ impl FileFinder {
         ws: &mut Workspace,
         executor: Executor,
         previous_mode: String,
+        open_intent: OpenIntent,
         git_root: PathBuf,
         all_paths: Vec<PathBuf>,
         modified_paths: Vec<PathBuf>,
@@ -112,6 +129,7 @@ impl FileFinder {
         Self {
             input,
             previous_mode,
+            open_intent,
             scope,
             git_root,
             all_paths,
@@ -779,6 +797,44 @@ mod tests {
         assert!(
             frame.content.contains("loaded via finder"),
             "file content missing from pane:\n{}",
+            frame.content
+        );
+        assert!(h.stoat.file_finder.is_none());
+    }
+
+    #[test]
+    fn space_a_f_opens_finder_with_hsplit_intent() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
+        h.type_keys("space a f");
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        assert_eq!(finder.open_intent, OpenIntent::HSplit);
+        assert_eq!(h.snapshot().mode, "prompt");
+    }
+
+    #[test]
+    fn space_a_capital_f_opens_finder_with_vsplit_intent() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
+        h.type_keys("space a F");
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        assert_eq!(finder.open_intent, OpenIntent::VSplit);
+    }
+
+    #[test]
+    fn enter_with_hsplit_intent_creates_new_pane_and_opens_file() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
+        assert_eq!(h.snapshot().pane_count, 1);
+
+        h.type_keys("space a f");
+        h.type_keys("enter");
+
+        let frame = h.snapshot();
+        assert_eq!(frame.pane_count, 2, "split should create a second pane");
+        assert!(
+            frame.content.contains("loaded via finder"),
+            "file content missing from frame:\n{}",
             frame.content
         );
         assert!(h.stoat.file_finder.is_none());

@@ -23,6 +23,7 @@ use crate::{
         file::OpenFile,
         file_finder::{
             FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
+            OpenFileFinderHSplit, OpenFileFinderVSplit,
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
@@ -91,6 +92,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenCommandPalette))
     });
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
+    add(OpenFileFinderHSplit::DEF, |_| {
+        Ok(Box::new(OpenFileFinderHSplit))
+    });
+    add(OpenFileFinderVSplit::DEF, |_| {
+        Ok(Box::new(OpenFileFinderVSplit))
+    });
     add(FileFinderSelectPrev::DEF, |_| {
         Ok(Box::new(FileFinderSelectPrev))
     });
@@ -378,6 +385,8 @@ mod tests {
         "CloseOtherPanes",
         "OpenCommandPalette",
         "OpenFileFinder",
+        "OpenFileFinderHSplit",
+        "OpenFileFinderVSplit",
         "FileFinderSelectPrev",
         "FileFinderSelectNext",
         "FileFinderScopeToggle",
@@ -557,7 +566,7 @@ mod tests {
         // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
-        assert_eq!(all().count(), 143);
+        assert_eq!(all().count(), 145);
     }
 
     #[test]

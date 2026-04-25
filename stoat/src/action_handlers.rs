@@ -95,7 +95,15 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },
-        ActionKind::OpenFileFinder => file_finder::open_file_finder(stoat),
+        ActionKind::OpenFileFinder => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::Replace)
+        },
+        ActionKind::OpenFileFinderHSplit => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::HSplit)
+        },
+        ActionKind::OpenFileFinderVSplit => {
+            file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::VSplit)
+        },
         ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
         ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),

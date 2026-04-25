@@ -29,6 +29,7 @@ pub use defs::{
     file::OpenFile,
     file_finder::{
         FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
+        OpenFileFinderHSplit, OpenFileFinderVSplit,
     },
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,

@@ -1,9 +1,9 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    file_finder::FileFinder,
+    file_finder::{FileFinder, OpenIntent},
 };
 use std::path::PathBuf;
-use stoat_action::OpenFile;
+use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 
 /// Open the file finder. No-op if one is already open so that a second
 /// `space p` keystroke cannot stack modals or reset progress the user has
@@ -11,7 +11,7 @@ use stoat_action::OpenFile;
 /// list at open time. Always restores to normal mode on close: the finder
 /// is a top-level modal, so returning to a leader mode like `space`
 /// surfaces a confusing secondary menu instead of a clean editor state.
-pub(super) fn open_file_finder(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn open_file_finder(stoat: &mut Stoat, open_intent: OpenIntent) -> UpdateEffect {
     if stoat.file_finder.is_some() {
         return UpdateEffect::None;
     }
@@ -27,6 +27,7 @@ pub(super) fn open_file_finder(stoat: &mut Stoat) -> UpdateEffect {
         ws,
         executor,
         previous_mode,
+        open_intent,
         git_root,
         all_paths,
         modified_paths,
@@ -39,11 +40,20 @@ pub(super) fn open_file_finder(stoat: &mut Stoat) -> UpdateEffect {
 /// when the finder consumed the submission, `None` if no finder is open so
 /// the caller can fall through to other prompt consumers.
 pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
-    let path = {
+    let (path, intent) = {
         let finder = stoat.file_finder.as_ref()?;
-        finder.selected_path()?.to_path_buf()
+        (finder.selected_path()?.to_path_buf(), finder.open_intent)
     };
     close_file_finder(stoat);
+    match intent {
+        OpenIntent::Replace => {},
+        OpenIntent::HSplit => {
+            super::dispatch(stoat, &SplitNewDown);
+        },
+        OpenIntent::VSplit => {
+            super::dispatch(stoat, &SplitNewRight);
+        },
+    }
     Some(dispatch_open_file(stoat, path))
 }
 

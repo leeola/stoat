@@ -50,6 +50,102 @@ impl Action for OpenFileFinder {
 }
 
 #[derive(Debug)]
+pub struct OpenFileFinderHSplitDef;
+
+impl ActionDef for OpenFileFinderHSplitDef {
+    fn name(&self) -> &'static str {
+        "OpenFileFinderHSplit"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenFileFinderHSplit
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open file finder, split horizontally on select"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the file finder modal. When the user submits a file, split the \
+         focused pane horizontally and open the selected file in the new pane \
+         below."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenFileFinderHSplit;
+
+impl OpenFileFinderHSplit {
+    pub const DEF: &OpenFileFinderHSplitDef = &OpenFileFinderHSplitDef;
+}
+
+impl Action for OpenFileFinderHSplit {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenFileFinderVSplitDef;
+
+impl ActionDef for OpenFileFinderVSplitDef {
+    fn name(&self) -> &'static str {
+        "OpenFileFinderVSplit"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenFileFinderVSplit
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open file finder, split vertically on select"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the file finder modal. When the user submits a file, split the \
+         focused pane vertically and open the selected file in the new pane to \
+         the right."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenFileFinderVSplit;
+
+impl OpenFileFinderVSplit {
+    pub const DEF: &OpenFileFinderVSplitDef = &OpenFileFinderVSplitDef;
+}
+
+impl Action for OpenFileFinderVSplit {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct FileFinderSelectPrevDef;
 
 impl ActionDef for FileFinderSelectPrevDef {
@@ -201,6 +297,20 @@ mod tests {
         assert_eq!(OpenFileFinder.def().name(), "OpenFileFinder");
         assert!(OpenFileFinder.def().params().is_empty());
         assert!(OpenFileFinder.def().palette_visible());
+
+        assert_eq!(
+            OpenFileFinderHSplit.kind(),
+            ActionKind::OpenFileFinderHSplit
+        );
+        assert_eq!(OpenFileFinderHSplit.def().name(), "OpenFileFinderHSplit");
+        assert!(OpenFileFinderHSplit.def().palette_visible());
+
+        assert_eq!(
+            OpenFileFinderVSplit.kind(),
+            ActionKind::OpenFileFinderVSplit
+        );
+        assert_eq!(OpenFileFinderVSplit.def().name(), "OpenFileFinderVSplit");
+        assert!(OpenFileFinderVSplit.def().palette_visible());
 
         assert_eq!(
             FileFinderSelectPrev.kind(),
