@@ -110,7 +110,7 @@ fn run_tui(
         if continue_ {
             stoat.load_active_workspace_state();
         }
-        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new()));
+        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new(Arc::new(LocalFs))));
 
         match start {
             TuiStart::Review => stoat.open_review(),

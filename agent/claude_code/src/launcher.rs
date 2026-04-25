@@ -6,21 +6,35 @@
 use crate::{ClaudeCode, SessionConfig};
 use async_trait::async_trait;
 use std::{io, sync::Arc};
-use stoat::host::{ClaudeCodeHost, ClaudeCodeSession};
+use stoat::host::{ClaudeCodeHost, ClaudeCodeSession, FsHost};
 use stoat_log::TextProtoLog;
 
-#[derive(Debug, Default)]
 pub struct ClaudeCodeLauncher {
     default_config: SessionConfig,
+    fs_host: Arc<dyn FsHost>,
+}
+
+impl std::fmt::Debug for ClaudeCodeLauncher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCodeLauncher")
+            .field("default_config", &self.default_config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClaudeCodeLauncher {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(fs_host: Arc<dyn FsHost>) -> Self {
+        Self {
+            default_config: SessionConfig::default(),
+            fs_host,
+        }
     }
 
-    pub fn with_config(default_config: SessionConfig) -> Self {
-        Self { default_config }
+    pub fn with_config(default_config: SessionConfig, fs_host: Arc<dyn FsHost>) -> Self {
+        Self {
+            default_config,
+            fs_host,
+        }
     }
 }
 
@@ -33,7 +47,7 @@ impl ClaudeCodeHost for ClaudeCodeLauncher {
             .session_id
             .unwrap_or_else(uuid::Uuid::new_v4);
 
-        let (tx_log, rx_log) = open_session_logs(session_id);
+        let (tx_log, rx_log) = open_session_logs(session_id, &*self.fs_host);
 
         let mut config = self.default_config.clone();
         config.session_id = Some(session_id);
@@ -54,6 +68,7 @@ impl ClaudeCodeHost for ClaudeCodeLauncher {
 
 fn open_session_logs(
     session_id: uuid::Uuid,
+    fs: &dyn FsHost,
 ) -> (Option<Arc<TextProtoLog>>, Option<Arc<TextProtoLog>>) {
     let dir = match stoat_log::log_dir() {
         Ok(d) => d,
@@ -62,7 +77,7 @@ fn open_session_logs(
             return (None, None);
         },
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    if let Err(e) = fs.create_dir_all(&dir) {
         tracing::warn!("create log dir {}: {e}", dir.display());
         return (None, None);
     }
