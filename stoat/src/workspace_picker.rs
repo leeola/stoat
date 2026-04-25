@@ -174,7 +174,7 @@ fn move_selection(len: usize, selected: &mut usize, delta: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::Workspace;
+    use crate::{test_harness::keys, workspace::Workspace};
     use std::sync::Arc;
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -189,14 +189,6 @@ mod tests {
         let b = workspaces.insert(Workspace::new(PathBuf::from("/tmp/beta"), exec));
         workspaces[b].id = b;
         (workspaces, a)
-    }
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[test]
@@ -219,13 +211,13 @@ mod tests {
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
-        picker.handle_key(key(KeyCode::Down));
+        picker.handle_key(keys::key(KeyCode::Down));
         assert_eq!(picker.selected(), 1);
-        picker.handle_key(key(KeyCode::Down));
+        picker.handle_key(keys::key(KeyCode::Down));
         assert_eq!(picker.selected(), 1);
-        picker.handle_key(key(KeyCode::Up));
+        picker.handle_key(keys::key(KeyCode::Up));
         assert_eq!(picker.selected(), 0);
-        picker.handle_key(key(KeyCode::Up));
+        picker.handle_key(keys::key(KeyCode::Up));
         assert_eq!(picker.selected(), 0);
     }
 
@@ -235,9 +227,9 @@ mod tests {
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
-        picker.handle_key(ctrl('n'));
+        picker.handle_key(keys::ctrl('n'));
         assert_eq!(picker.selected(), 1);
-        picker.handle_key(ctrl('p'));
+        picker.handle_key(keys::ctrl('p'));
         assert_eq!(picker.selected(), 0);
     }
 
@@ -247,9 +239,9 @@ mod tests {
         let (workspaces, active) = slotmap_with_two(&exec);
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
-        picker.handle_key(key(KeyCode::Down));
+        picker.handle_key(keys::key(KeyCode::Down));
         let sibling_id = picker.entries()[1].id;
-        match picker.handle_key(key(KeyCode::Enter)) {
+        match picker.handle_key(keys::key(KeyCode::Enter)) {
             PickerOutcome::Select(id) => assert_eq!(id, sibling_id),
             _ => panic!("expected Select outcome"),
         }
@@ -262,7 +254,7 @@ mod tests {
         let mut picker = WorkspacePicker::new(&workspaces, active);
 
         assert!(matches!(
-            picker.handle_key(key(KeyCode::Esc)),
+            picker.handle_key(keys::key(KeyCode::Esc)),
             PickerOutcome::Close
         ));
     }

@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn command_palette_opens_file_end_to_end() {
         let mut h = crate::Stoat::test();
-        let path = crate::test_harness::write_file(&h, "palette_target.txt", "loaded via palette");
+        let path = h.write_file("palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
         h.type_text(":OpenFile");

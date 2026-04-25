@@ -139,6 +139,31 @@ impl<'a> ClaudeSessionHandle<'a> {
         ToolUseHandle::new(self, tool_id, ToolKind::Read)
     }
 
+    /// Inject a `Read` tool use targeting `path` starting at the given
+    /// 1-indexed `line`. Mirrors [`Self::read`] but populates the JSON
+    /// `offset` field and the [`ToolCallLocation::line`].
+    pub fn read_at(&mut self, path: impl Into<PathBuf>, line: u32) -> ToolUseHandle<'_, 'a> {
+        let path = path.into();
+        let path_str = path.display().to_string();
+        let tool_id = self.next_tool_id();
+        let input = serde_json::json!({ "file_path": path_str, "offset": line }).to_string();
+        let title = truncate_title(format!("Read {path_str} (from {line})"));
+        let locations = vec![ToolCallLocation {
+            path: path.clone(),
+            line: Some(line),
+        }];
+        self.raw(AgentMessage::ToolUse {
+            id: tool_id.clone(),
+            name: "Read".into(),
+            input,
+            kind: ToolKind::Read,
+            title,
+            content: vec![],
+            locations,
+        });
+        ToolUseHandle::new(self, tool_id, ToolKind::Read)
+    }
+
     pub fn write(
         &mut self,
         path: impl Into<PathBuf>,

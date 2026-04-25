@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 pub(crate) mod claude;
+pub(crate) mod editor;
+pub(crate) mod keys;
 
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -625,6 +627,69 @@ impl TestHarness {
         claude::ClaudeHarness::new(self)
     }
 
+    /// Seed a file in the harness' fake filesystem under `/test/<name>`
+    /// and return its absolute path. All open-file / read paths through
+    /// [`Stoat`] route through [`crate::host::FakeFs`].
+    pub(crate) fn write_file(&self, name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from("/test").join(name);
+        self.fake_fs.insert_file(&path, content.as_bytes());
+        path
+    }
+
+    /// Seed an N-line text file (`line 001`, `line 002`, ...) into the
+    /// fake filesystem at `/test/<name>`. Convenient for scenarios that
+    /// need a file long enough to scroll.
+    pub(crate) fn seed_long_file(&self, name: &str, lines: usize) -> std::path::PathBuf {
+        let content: String = (1..=lines)
+            .map(|i| format!("line {i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.write_file(name, &content)
+    }
+
+    /// Seed a linear chain of commits into the fake git repo at `workdir`.
+    /// Each entry is `(sha, message, files)` where `files` is a list of
+    /// `(rel_path, content)`. Each commit's parent is the previous entry.
+    pub(crate) fn seed_linear_history(
+        &self,
+        workdir: &str,
+        commits: &[(&str, &str, &[(&str, &str)])],
+    ) {
+        let mut builder = self.fake_git.add_repo(workdir);
+        let mut prev: Option<&str> = None;
+        for (sha, message, files) in commits {
+            match prev {
+                None => builder.commit_with_message(sha, message, files),
+                Some(parent) => builder.commit_with_parent_message(sha, parent, message, files),
+            };
+            prev = Some(sha);
+        }
+    }
+
+    /// Append `text` at offset 0 in the focused editor's buffer. Panics
+    /// if the focused pane is not an editor.
+    pub(crate) fn seed_focused_buffer(&mut self, text: &str) {
+        editor::seed_focused_buffer(&mut self.stoat, text);
+    }
+
+    /// Resolved byte offsets for each selection's head in the focused
+    /// editor.
+    pub(crate) fn head_offsets(&mut self) -> Vec<usize> {
+        editor::head_offsets(&mut self.stoat)
+    }
+
+    /// Resolved `(start, end, reversed)` byte offsets for each selection
+    /// in the focused editor.
+    pub(crate) fn selection_spans(&mut self) -> Vec<(usize, usize, bool)> {
+        editor::selection_spans(&mut self.stoat)
+    }
+
+    /// Display-grid `(row, column)` for each selection's head in the
+    /// focused editor.
+    pub(crate) fn cursor_display_positions(&mut self) -> Vec<(u32, u32)> {
+        editor::cursor_display_positions(&mut self.stoat)
+    }
+
     pub(crate) fn capture(&mut self, action: &str) {
         // First render spawns any pending parse jobs. Settling the test
         // scheduler runs them to completion. The second render polls the
@@ -936,16 +1001,6 @@ fn key_description(event: &KeyEvent) -> String {
     };
     parts.push(key_name);
     parts.join("-")
-}
-
-/// Seed a file in the harness' fake filesystem and return its path.
-/// Replaces the old tempdir-plus-real-fs helper; all tests that went
-/// through the old helper now exercise the same IO boundary that
-/// production code uses in tests ([`crate::host::FakeFs`]).
-pub(crate) fn write_file(h: &TestHarness, name: &str, content: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from("/test").join(name);
-    h.fake_fs.insert_file(&path, content.as_bytes());
-    path
 }
 
 /// Two hunks separated by unchanged context; cursor defaults to the

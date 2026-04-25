@@ -174,29 +174,25 @@ mod tests {
     /// Three-commit linear history for the working-directory path
     /// `/repo` with the oldest commit at the bottom, matching git's
     /// top-down newest-first log ordering.
-    fn seed_history(h: &mut crate::test_harness::TestHarness) {
-        h.fake_git()
-            .add_repo("/repo")
-            .commit_with_message("c1000001", "feat: add a.rs", &[("a.rs", "fn a() {}\n")])
-            .commit_with_parent_message(
-                "c1000002",
-                "c1000001",
-                "chore: tweak a",
-                &[("a.rs", "fn a() {}\nfn a2() {}\n")],
-            )
-            .commit_with_parent_message(
-                "c1000003",
-                "c1000002",
-                "feat: add b.rs",
-                &[("a.rs", "fn a() {}\nfn a2() {}\n"), ("b.rs", "fn b() {}\n")],
-            );
-    }
+    const HISTORY: &[(&str, &str, &[(&str, &str)])] = &[
+        ("c1000001", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+        (
+            "c1000002",
+            "chore: tweak a",
+            &[("a.rs", "fn a() {}\nfn a2() {}\n")],
+        ),
+        (
+            "c1000003",
+            "feat: add b.rs",
+            &[("a.rs", "fn a() {}\nfn a2() {}\n"), ("b.rs", "fn b() {}\n")],
+        ),
+    ];
 
     #[test]
     fn snapshot_commits_open() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.assert_snapshot("commits_open");
     }
@@ -205,7 +201,7 @@ mod tests {
     fn snapshot_commits_navigate_next() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("j");
         h.assert_snapshot("commits_navigate_next");
@@ -215,7 +211,7 @@ mod tests {
     fn snapshot_commits_navigate_last() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("G");
         h.assert_snapshot("commits_navigate_last");
@@ -234,7 +230,7 @@ mod tests {
     fn open_commits_selects_head_by_default() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         let state = h
             .stoat
@@ -255,7 +251,7 @@ mod tests {
     fn snapshot_commits_open_review_readonly() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("o");
         h.assert_snapshot("commits_open_review_readonly");
@@ -265,7 +261,7 @@ mod tests {
     fn close_review_from_commits_returns_to_commits_mode() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("j"); // select second commit
         h.type_keys("o"); // open review of it
@@ -476,7 +472,7 @@ mod tests {
     fn review_apply_staged_is_noop_for_commit_source() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("o");
         assert_eq!(h.stoat.mode, "review");
@@ -493,7 +489,7 @@ mod tests {
     fn navigate_caches_selected_preview() {
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_history(&mut h);
+        h.seed_linear_history("/repo", HISTORY);
         h.open_commits("/repo");
         h.type_keys("j");
         let state = h

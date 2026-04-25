@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn snapshot_add_selection_below() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+        let path = h.write_file("sample.txt", "abcd\nefgh\nijkl\n");
 
         h.open_file(&path);
         h.type_keys("C");
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn snapshot_shift_c_adds_selection_below_styled() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "sample.txt", "abcd\nefgh\nijkl\n");
+        let path = h.write_file("sample.txt", "abcd\nefgh\nijkl\n");
 
         h.open_file(&path);
         h.type_keys("shift-C");
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn snapshot_move_right() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "hello world\n");
+        let path = h.write_file("s.txt", "hello world\n");
         h.open_file(&path);
         h.type_keys("l l l");
         h.assert_snapshot("snapshot_move_right");
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn snapshot_move_down() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j");
         h.assert_snapshot("snapshot_move_down");
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn snapshot_word_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w");
         h.assert_snapshot("snapshot_word_forward");
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn snapshot_word_end() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("e");
         h.assert_snapshot("snapshot_word_end");
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn snapshot_word_backward() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("l l l l l l l");
         h.type_keys("b");
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn snapshot_word_forward_repeated() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         h.assert_snapshot("snapshot_word_forward_repeated");
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn snapshot_multi_cursor_move_right() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("C l l");
         h.assert_snapshot("snapshot_multi_cursor_move_right");
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn snapshot_goto_line_start() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         h.type_keys("home");
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn snapshot_goto_line_end() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("end");
         h.assert_snapshot("snapshot_goto_line_end");
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn snapshot_goto_line_end_empty_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\n\nxyz\n");
+        let path = h.write_file("s.txt", "abc\n\nxyz\n");
         h.open_file(&path);
         h.type_keys("j");
         h.type_keys("end");
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn snapshot_goto_file_start() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j l l");
         h.type_keys("g k");
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn snapshot_goto_last_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("g j");
         h.assert_snapshot("snapshot_goto_last_line");
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn snapshot_goto_first_nonwhitespace() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "    foo bar\n");
+        let path = h.write_file("s.txt", "    foo bar\n");
         h.open_file(&path);
         h.type_keys("g i");
         h.assert_snapshot("snapshot_goto_first_nonwhitespace");
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn snapshot_goto_first_nonwhitespace_empty_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\n\nxyz\n");
+        let path = h.write_file("s.txt", "abc\n\nxyz\n");
         h.open_file(&path);
         h.type_keys("j");
         h.type_keys("g i");
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn snapshot_extend_to_line_start() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineStart);
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn snapshot_extend_to_line_end() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLineEnd);
         h.assert_snapshot("snapshot_extend_to_line_end");
@@ -551,7 +551,7 @@ mod tests {
     #[test]
     fn snapshot_extend_to_file_start() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("j j l l");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToFileStart);
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn snapshot_extend_to_last_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendToLastLine);
         h.assert_snapshot("snapshot_extend_to_last_line");
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn snapshot_collapse_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w w");
         h.type_keys(";");
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn snapshot_flip_selections() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "foo bar baz\n");
+        let path = h.write_file("s.txt", "foo bar baz\n");
         h.open_file(&path);
         h.type_keys("w");
         h.type_keys("alt-;");
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn snapshot_select_all() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\n");
+        let path = h.write_file("s.txt", "abc\ndef\n");
         h.open_file(&path);
         h.type_keys("%");
         h.assert_snapshot("snapshot_select_all");
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn snapshot_select_line_below_snaps_to_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("x");
         h.assert_snapshot("snapshot_select_line_below_snaps_to_line");
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn snapshot_select_line_below_extends_on_repeat() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("x x");
         h.assert_snapshot("snapshot_select_line_below_extends_on_repeat");
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn snapshot_keep_primary_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 6);
-        let path = crate::test_harness::write_file(&h, "s.txt", "abc\ndef\nghi\n");
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
         h.open_file(&path);
         h.type_keys("C");
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn snapshot_page_down_scrolls_and_moves_cursor() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
         h.type_keys("ctrl-f");
         h.assert_snapshot("snapshot_page_down_scrolls_and_moves_cursor");
@@ -640,7 +640,7 @@ mod tests {
     #[test]
     fn snapshot_page_up_after_page_down_returns_to_top() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
         h.type_keys("ctrl-f ctrl-b");
         h.assert_snapshot("snapshot_page_up_after_page_down_returns_to_top");
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn snapshot_half_page_down() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
         h.type_keys("ctrl-d");
         h.assert_snapshot("snapshot_half_page_down");
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn snapshot_half_page_up_from_bottom() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
         h.type_keys("ctrl-f ctrl-f ctrl-u");
         h.assert_snapshot("snapshot_half_page_up_from_bottom");
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn snapshot_page_down_clamps_at_last_line() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", "a\nb\nc\n");
+        let path = h.write_file("s.txt", "a\nb\nc\n");
         h.open_file(&path);
         h.type_keys("ctrl-f");
         h.assert_snapshot("snapshot_page_down_clamps_at_last_line");
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn snapshot_page_up_at_top_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
-        let path = crate::test_harness::write_file(&h, "s.txt", &page_scratch_content());
+        let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
         h.type_keys("ctrl-b");
         h.assert_snapshot("snapshot_page_up_at_top_is_noop");

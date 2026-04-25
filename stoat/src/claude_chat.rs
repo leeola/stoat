@@ -605,40 +605,9 @@ mod tests {
         h.assert_snapshot("claude_pane_normal_mode");
     }
 
-    fn inject_read_tool_use(
-        h: &mut TestHarness,
-        id: ClaudeSessionId,
-        path: &std::path::Path,
-        line: u32,
-    ) {
-        use crate::host::{AgentMessage, ToolCallLocation, ToolKind};
-        let path_str = path.display().to_string();
-        let input = serde_json::json!({
-            "file_path": path_str,
-            "offset": line,
-        })
-        .to_string();
-        h.claude().get_session(id).raw(AgentMessage::ToolUse {
-            id: "toolu_follow_test".into(),
-            name: "Read".into(),
-            input,
-            kind: ToolKind::Read,
-            title: format!("Read {path_str} (from {line})"),
-            content: vec![],
-            locations: vec![ToolCallLocation {
-                path: path.to_path_buf(),
-                line: Some(line),
-            }],
-        });
-    }
-
     fn seed_follow_scenario(h: &mut TestHarness) -> (ClaudeSessionId, std::path::PathBuf) {
         h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/test");
-        let content: String = (1..=80)
-            .map(|i| format!("line {i:03}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let path = crate::test_harness::write_file(h, "long.txt", &content);
+        let path = h.seed_long_file("long.txt", 80);
         h.stoat.open_file(&path);
         h.type_keys("escape");
         h.type_action("SplitRight()");
@@ -656,7 +625,7 @@ mod tests {
         let (id, path) = seed_follow_scenario(&mut h);
 
         toggle_follow(&mut h);
-        inject_read_tool_use(&mut h, id, &path, 50);
+        h.claude().get_session(id).read_at(&path, 50);
 
         h.assert_snapshot("claude_follow_reads_to_line_50");
     }
@@ -666,7 +635,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 24);
         let (id, path) = seed_follow_scenario(&mut h);
 
-        inject_read_tool_use(&mut h, id, &path, 50);
+        h.claude().get_session(id).read_at(&path, 50);
 
         let editor_rows: Vec<u32> = h
             .stoat
@@ -688,7 +657,7 @@ mod tests {
         toggle_follow(&mut h);
 
         let outside = std::path::PathBuf::from("/etc/passwd");
-        inject_read_tool_use(&mut h, id, &outside, 10);
+        h.claude().get_session(id).read_at(&outside, 10);
 
         let editor_rows: Vec<u32> = h
             .stoat
@@ -718,13 +687,13 @@ mod tests {
             .map(|(pid, _)| pid)
             .expect("follow scenario should seed an editor pane");
 
-        inject_read_tool_use(&mut h, id, &path, 30);
+        h.claude().get_session(id).read_at(&path, 30);
         let first = match h.stoat.active_workspace().panes.pane(editor_pane).view {
             View::Editor(eid) => eid,
             _ => panic!("pane should still hold an editor"),
         };
 
-        inject_read_tool_use(&mut h, id, &path, 50);
+        h.claude().get_session(id).read_at(&path, 50);
         let second = match h.stoat.active_workspace().panes.pane(editor_pane).view {
             View::Editor(eid) => eid,
             _ => panic!("pane should still hold an editor"),
@@ -745,11 +714,7 @@ mod tests {
 
     fn seed_chat_only_scenario(h: &mut TestHarness) -> (ClaudeSessionId, std::path::PathBuf) {
         h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/test");
-        let content: String = (1..=80)
-            .map(|i| format!("line {i:03}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let path = crate::test_harness::write_file(h, "long.txt", &content);
+        let path = h.seed_long_file("long.txt", 80);
         let id = h.claude().open();
         (id, path)
     }
@@ -765,7 +730,7 @@ mod tests {
         );
         toggle_follow(&mut h);
 
-        inject_read_tool_use(&mut h, id, &path, 50);
+        h.claude().get_session(id).read_at(&path, 50);
 
         let ws = h.stoat.active_workspace();
         assert_eq!(

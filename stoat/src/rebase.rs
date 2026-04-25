@@ -186,24 +186,17 @@ mod tests {
     use super::RebasePause;
     use crate::app::Stoat;
 
-    fn seed_three(h: &mut crate::test_harness::TestHarness) {
-        h.fake_git()
-            .add_repo("/repo")
-            .commit_with_message("c1", "c1: root", &[("a.rs", "line1\n")])
-            .commit_with_parent_message("c2", "c1", "c2: middle", &[("a.rs", "line1\nline2\n")])
-            .commit_with_parent_message(
-                "c3",
-                "c2",
-                "c3: tip",
-                &[("a.rs", "line1\nline2\nline3\n")],
-            );
-    }
+    const THREE_COMMITS: &[(&str, &str, &[(&str, &str)])] = &[
+        ("c1", "c1: root", &[("a.rs", "line1\n")]),
+        ("c2", "c2: middle", &[("a.rs", "line1\nline2\n")]),
+        ("c3", "c3: tip", &[("a.rs", "line1\nline2\nline3\n")]),
+    ];
 
     #[test]
     fn snapshot_rebase_open_todo() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         // Navigate to oldest commit (c1) so todo = [c2, c3] onto c1.
         h.type_keys("G");
@@ -216,7 +209,7 @@ mod tests {
     fn snapshot_rebase_set_ops() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -231,7 +224,7 @@ mod tests {
     fn snapshot_rebase_reorder() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -244,7 +237,7 @@ mod tests {
     fn enter_rebase_at_head_refuses() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         // Cursor defaults to selected=0 (HEAD). `i` should refuse.
         h.type_keys("i");
@@ -263,7 +256,7 @@ mod tests {
     fn enter_rebase_at_middle_commit_uses_cursor_as_onto() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         // Move down once: selected = 1 (c2).
         h.type_keys("j");
@@ -281,7 +274,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -304,7 +297,7 @@ mod tests {
     fn conflict_on_execute_enters_conflict_mode() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -330,7 +323,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -370,7 +363,7 @@ mod tests {
     fn reword_submode_transitions() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -389,7 +382,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -420,7 +413,7 @@ mod tests {
     fn reword_escape_from_normal_aborts() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -441,7 +434,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -483,7 +476,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 16);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -525,7 +518,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 14);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -552,7 +545,7 @@ mod tests {
 
         let mut h = Stoat::test();
         h.resize(90, 14);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -573,7 +566,7 @@ mod tests {
     fn conflict_abort_drops_rebase_state() {
         let mut h = Stoat::test();
         h.resize(90, 14);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -589,7 +582,7 @@ mod tests {
     fn snapshot_rebase_reword_mode_ui() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");
@@ -603,7 +596,7 @@ mod tests {
     fn snapshot_rebase_conflict_mode_ui() {
         let mut h = Stoat::test();
         h.resize(100, 18);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
         h.open_commits("/repo");
         h.type_keys("G");
@@ -617,7 +610,7 @@ mod tests {
     fn abort_discards_rebase_state() {
         let mut h = Stoat::test();
         h.resize(90, 12);
-        seed_three(&mut h);
+        h.seed_linear_history("/repo", THREE_COMMITS);
         h.open_commits("/repo");
         h.type_keys("G");
         h.type_keys("i");

@@ -406,16 +406,8 @@ pub fn format_arg(arg: &ResolvedArg) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::TestHarness;
+    use crate::test_harness::{keys, TestHarness};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn ctrl(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-    }
 
     fn active_binding(label: &str, action_name: &str) -> (String, Vec<ResolvedAction>) {
         (
@@ -475,7 +467,7 @@ mod tests {
 
     fn type_str(h: &mut TestHarness, s: &str) {
         for ch in s.chars() {
-            send_key(h, key(KeyCode::Char(ch)));
+            send_key(h, keys::key(KeyCode::Char(ch)));
         }
     }
 
@@ -521,7 +513,7 @@ mod tests {
     fn new_all_scope_after_toggle_lists_palette_visible_actions() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         assert_eq!(help_ref(&h).scope(), HelpScope::All);
         let names = filtered_names(&h);
         assert!(names.contains(&"Quit"));
@@ -534,7 +526,7 @@ mod tests {
     fn typing_filters_by_name_prefix() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "Foc");
         let names = filtered_names(&h);
         assert!(!names.is_empty());
@@ -549,7 +541,7 @@ mod tests {
     fn typing_filters_by_short_desc_substring() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "exit stoat");
         assert_eq!(filtered_names(&h), vec!["QuitAll"]);
     }
@@ -567,9 +559,9 @@ mod tests {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
         assert_eq!(help_ref(&h).scope(), HelpScope::Active);
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         assert_eq!(help_ref(&h).scope(), HelpScope::All);
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         assert_eq!(help_ref(&h).scope(), HelpScope::Active);
     }
 
@@ -578,11 +570,11 @@ mod tests {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
         h.stoat.help.as_mut().unwrap().detail_scroll = 7;
-        send_key(&mut h, key(KeyCode::Down));
+        send_key(&mut h, keys::key(KeyCode::Down));
         assert_eq!(help_ref(&h).selected(), 1);
         assert_eq!(help_ref(&h).detail_scroll(), 0);
         h.stoat.help.as_mut().unwrap().detail_scroll = 3;
-        send_key(&mut h, key(KeyCode::Up));
+        send_key(&mut h, keys::key(KeyCode::Up));
         assert_eq!(help_ref(&h).selected(), 0);
         assert_eq!(help_ref(&h).detail_scroll(), 0);
     }
@@ -591,11 +583,11 @@ mod tests {
     fn ctrl_d_scrolls_detail_forward_ctrl_u_scrolls_back() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, ctrl('d'));
+        send_key(&mut h, keys::ctrl('d'));
         assert_eq!(help_ref(&h).detail_scroll(), 5);
-        send_key(&mut h, ctrl('d'));
+        send_key(&mut h, keys::ctrl('d'));
         assert_eq!(help_ref(&h).detail_scroll(), 10);
-        send_key(&mut h, ctrl('u'));
+        send_key(&mut h, keys::ctrl('u'));
         assert_eq!(help_ref(&h).detail_scroll(), 5);
     }
 
@@ -604,7 +596,7 @@ mod tests {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
         assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
-        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Esc));
         assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Normal);
     }
 
@@ -612,8 +604,8 @@ mod tests {
     fn esc_in_normal_closes_help() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Esc));
-        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Esc));
         assert!(h.stoat.help.is_none());
     }
 
@@ -621,8 +613,8 @@ mod tests {
     fn i_returns_to_insert_from_normal() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Esc));
-        send_key(&mut h, key(KeyCode::Char('i')));
+        send_key(&mut h, keys::key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Char('i')));
         assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
     }
 
@@ -630,10 +622,10 @@ mod tests {
     fn normal_mode_j_k_navigate() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Esc));
-        send_key(&mut h, key(KeyCode::Char('j')));
+        send_key(&mut h, keys::key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Char('j')));
         assert_eq!(help_ref(&h).selected(), 1);
-        send_key(&mut h, key(KeyCode::Char('k')));
+        send_key(&mut h, keys::key(KeyCode::Char('k')));
         assert_eq!(help_ref(&h).selected(), 0);
     }
 
@@ -641,10 +633,10 @@ mod tests {
     fn normal_mode_g_jumps_to_top() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Down));
-        send_key(&mut h, key(KeyCode::Down));
-        send_key(&mut h, key(KeyCode::Esc));
-        send_key(&mut h, key(KeyCode::Char('g')));
+        send_key(&mut h, keys::key(KeyCode::Down));
+        send_key(&mut h, keys::key(KeyCode::Down));
+        send_key(&mut h, keys::key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Char('g')));
         assert_eq!(help_ref(&h).selected(), 0);
     }
 
@@ -652,7 +644,7 @@ mod tests {
     fn normal_mode_shift_g_jumps_to_bottom() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Esc));
+        send_key(&mut h, keys::key(KeyCode::Esc));
         send_key(
             &mut h,
             KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
@@ -667,7 +659,7 @@ mod tests {
         open_help_with(&mut h, sample_active());
         type_str(&mut h, "Quit");
         assert_eq!(selected_name(&h), Some("Quit"));
-        send_key(&mut h, key(KeyCode::Enter));
+        send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(h.stoat.help.is_none(), "Dispatch should close help");
     }
 
@@ -680,7 +672,7 @@ mod tests {
         )];
         let mut h = TestHarness::default();
         open_help_with(&mut h, active);
-        send_key(&mut h, key(KeyCode::Enter));
+        send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(h.stoat.help.is_none(), "Dispatch should close help");
     }
 
@@ -688,10 +680,10 @@ mod tests {
     fn enter_unbound_param_action_is_noop() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, Vec::new());
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "OpenFile");
         assert_eq!(selected_name(&h), Some("OpenFile"));
-        send_key(&mut h, key(KeyCode::Enter));
+        send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(
             h.stoat.help.is_some(),
             "unbound param action should stay open"
@@ -702,8 +694,8 @@ mod tests {
     fn selection_clamps_after_narrowing_filter() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Down));
-        send_key(&mut h, key(KeyCode::Down));
+        send_key(&mut h, keys::key(KeyCode::Down));
+        send_key(&mut h, keys::key(KeyCode::Down));
         type_str(&mut h, "Quit");
         assert_eq!(help_ref(&h).selected(), 0);
     }
@@ -712,9 +704,9 @@ mod tests {
     fn utf8_query_safe() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::Char('é')));
+        send_key(&mut h, keys::key(KeyCode::Char('é')));
         assert_eq!(input_text(&mut h), "é");
-        send_key(&mut h, key(KeyCode::Backspace));
+        send_key(&mut h, keys::key(KeyCode::Backspace));
         assert_eq!(input_text(&mut h), "");
     }
 
@@ -722,11 +714,11 @@ mod tests {
     fn backspace_refilters() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        send_key(&mut h, key(KeyCode::BackTab));
+        send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "Focus");
         let narrow = help_ref(&h).filtered().len();
         for _ in 0..5 {
-            send_key(&mut h, key(KeyCode::Backspace));
+            send_key(&mut h, keys::key(KeyCode::Backspace));
         }
         assert_eq!(input_text(&mut h), "");
         assert!(help_ref(&h).filtered().len() > narrow);

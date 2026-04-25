@@ -431,83 +431,7 @@ mod tests {
         stoat
     }
 
-    fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        let buffer_id = ws.editors[editor_id].buffer_id;
-        let buffer = ws.buffers.get(buffer_id).expect("buffer exists");
-        let mut guard = buffer.write().expect("buffer poisoned");
-        guard.edit(0..0, text);
-    }
-
-    fn head_offsets(stoat: &mut Stoat) -> Vec<usize> {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        editor
-            .selections
-            .all_anchors()
-            .iter()
-            .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
-            .collect()
-    }
-
-    fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        editor
-            .selections
-            .all_anchors()
-            .iter()
-            .map(|sel| {
-                (
-                    buffer_snapshot.resolve_anchor(&sel.start),
-                    buffer_snapshot.resolve_anchor(&sel.end),
-                    sel.reversed,
-                )
-            })
-            .collect()
-    }
-
-    fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
-        let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => panic!("focused pane is not an editor"),
-        };
-        let editor = ws.editors.get_mut(editor_id).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = snapshot.buffer_snapshot();
-        editor
-            .selections
-            .all_anchors()
-            .iter()
-            .map(|sel| {
-                let head = sel.head();
-                let point = buffer_snapshot.point_for_anchor(&head);
-                let display = snapshot.buffer_to_display(point);
-                (display.row, display.column)
-            })
-            .collect()
-    }
+    use crate::test_harness::editor;
 
     #[test]
     fn dispatch_quit() {
@@ -535,191 +459,191 @@ mod tests {
     #[test]
     fn move_left_at_start_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "hello");
+        editor::seed_focused_buffer(&mut stoat, "hello");
         dispatch(&mut stoat, &MoveLeft);
-        assert_eq!(head_offsets(&mut stoat), vec![0]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0]);
     }
 
     #[test]
     fn move_right_advances_one_grapheme() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![1]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![1]);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![2]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
     }
 
     #[test]
     fn move_right_at_end_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
     fn move_right_across_newline() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "ab\ncd");
+        editor::seed_focused_buffer(&mut stoat, "ab\ncd");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
     fn move_right_multibyte() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "héllo");
+        editor::seed_focused_buffer(&mut stoat, "héllo");
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![1]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![1]);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
     fn move_down_advances_one_row() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
         dispatch(&mut stoat, &MoveDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
     }
 
     #[test]
     fn move_up_at_first_row_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef");
         dispatch(&mut stoat, &MoveUp);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
     }
 
     #[test]
     fn move_down_at_last_row_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &MoveDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
     }
 
     #[test]
     fn move_down_preserves_goal_column() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+        editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
         for _ in 0..7 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 7)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
         dispatch(&mut stoat, &MoveDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 2)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 2)]);
         dispatch(&mut stoat, &MoveDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(2, 7)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
     }
 
     #[test]
     fn move_next_word_start_creates_selection() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
     }
 
     #[test]
     fn move_next_word_start_repeated_snaps_tail() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar baz");
+        editor::seed_focused_buffer(&mut stoat, "foo bar baz");
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(3, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, false)]);
     }
 
     #[test]
     fn move_next_word_end_creates_selection() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveNextWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
     }
 
     #[test]
     fn move_next_word_end_at_eof_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo");
+        editor::seed_focused_buffer(&mut stoat, "foo");
         for _ in 0..3 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(head_offsets(&mut stoat), vec![3]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![3]);
         dispatch(&mut stoat, &MoveNextWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(3, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 3, false)]);
     }
 
     #[test]
     fn move_prev_word_start_creates_reversed_selection() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(head_offsets(&mut stoat), vec![6]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![6]);
         dispatch(&mut stoat, &MovePrevWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(4, 7, true)]);
-        assert_eq!(head_offsets(&mut stoat), vec![4]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![4]);
     }
 
     #[test]
     fn move_prev_word_start_at_start_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MovePrevWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
     }
 
     #[test]
     fn move_prev_word_end_lands_on_last_char_of_prev_word() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(head_offsets(&mut stoat), vec![6]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![6]);
         dispatch(&mut stoat, &MovePrevWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 7, true)]);
-        assert_eq!(head_offsets(&mut stoat), vec![2]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 7, true)]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![2]);
     }
 
     #[test]
     fn move_prev_word_end_at_start_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MovePrevWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
     }
 
     #[test]
     fn move_right_with_multiple_cursors_advances_each() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
         dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(head_offsets(&mut stoat), vec![1, 5]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![1, 5]);
     }
 
     #[test]
     fn move_next_word_start_multi_cursor_independent() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar\nbaz qux\n");
+        editor::seed_focused_buffer(&mut stoat, "foo bar\nbaz qux\n");
         dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(head_offsets(&mut stoat), vec![0, 8]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0, 8]);
         dispatch(&mut stoat, &MoveNextWordStart);
         assert_eq!(
-            selection_spans(&mut stoat),
+            editor::selection_spans(&mut stoat),
             vec![(0, 3, false), (8, 11, false)]
         );
     }
@@ -738,30 +662,30 @@ mod tests {
     #[test]
     fn add_selection_below_adds_cursor_on_next_display_row() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
 
         assert_eq!(
             dispatch(&mut stoat, &AddSelectionBelow),
             UpdateEffect::Redraw
         );
 
-        let positions = cursor_display_positions(&mut stoat);
+        let positions = editor::cursor_display_positions(&mut stoat);
         assert_eq!(positions, vec![(0, 0), (1, 0)]);
     }
 
     #[test]
     fn add_selection_below_at_last_row_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
 
         assert_eq!(dispatch(&mut stoat, &AddSelectionBelow), UpdateEffect::None);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 0)]);
     }
 
     #[test]
     fn add_selection_below_preserves_goal_column_on_short_line() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+        editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
 
         {
             let ws = stoat.active_workspace_mut();
@@ -784,155 +708,155 @@ mod tests {
             dispatch(&mut stoat, &AddSelectionBelow),
             UpdateEffect::Redraw
         );
-        let after_one = cursor_display_positions(&mut stoat);
+        let after_one = editor::cursor_display_positions(&mut stoat);
         assert_eq!(after_one, vec![(0, 0), (0, 7), (1, 2)]);
 
         assert_eq!(
             dispatch(&mut stoat, &AddSelectionBelow),
             UpdateEffect::Redraw
         );
-        let after_two = cursor_display_positions(&mut stoat);
+        let after_two = editor::cursor_display_positions(&mut stoat);
         assert_eq!(after_two, vec![(0, 0), (0, 7), (1, 2), (2, 7)]);
     }
 
     #[test]
     fn extend_right_grows_selection_from_cursor() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 1, false)]);
     }
 
     #[test]
     fn extend_right_further_keeps_tail() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abcdef");
+        editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
     }
 
     #[test]
     fn extend_right_at_end_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "ab");
+        editor::seed_focused_buffer(&mut stoat, "ab");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
     }
 
     #[test]
     fn extend_left_across_tail_flips_reversed() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abcdef");
+        editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 4, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 4, false)]);
         dispatch(&mut stoat, &ExtendLeft);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 3, false)]);
         dispatch(&mut stoat, &ExtendLeft);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
         dispatch(&mut stoat, &ExtendLeft);
-        assert_eq!(selection_spans(&mut stoat), vec![(1, 2, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 2, true)]);
     }
 
     #[test]
     fn extend_down_preserves_goal_column() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
+        editor::seed_focused_buffer(&mut stoat, "long line\nxx\nlong line\n");
         for _ in 0..7 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(0, 7)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(0, 7)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 2)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 2)]);
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(2, 7)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(2, 7)]);
     }
 
     #[test]
     fn extend_down_at_last_row_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &ExtendDown);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
     }
 
     #[test]
     fn extend_up_from_second_line_grows_backward() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
         dispatch(&mut stoat, &MoveDown);
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(5, 5, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(5, 5, false)]);
         dispatch(&mut stoat, &ExtendUp);
-        assert_eq!(selection_spans(&mut stoat), vec![(1, 5, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 5, true)]);
     }
 
     #[test]
     fn extend_next_word_start_grows_selection_from_cursor() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
     }
 
     #[test]
     fn extend_next_word_start_repeated_keeps_tail() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar baz");
+        editor::seed_focused_buffer(&mut stoat, "foo bar baz");
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &ExtendNextWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 7, false)]);
     }
 
     #[test]
     fn extend_next_word_end_grows_selection_from_cursor() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &ExtendNextWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
     }
 
     #[test]
     fn extend_prev_word_start_keeps_tail_at_cursor() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(selection_spans(&mut stoat), vec![(6, 6, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 6, false)]);
         dispatch(&mut stoat, &ExtendPrevWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(4, 6, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 6, true)]);
     }
 
     #[test]
     fn extend_prev_word_end_keeps_tail_at_cursor() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
-        assert_eq!(selection_spans(&mut stoat), vec![(6, 6, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(6, 6, false)]);
         dispatch(&mut stoat, &ExtendPrevWordEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 6, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 6, true)]);
     }
 
     #[test]
     fn extend_right_with_multiple_cursors_grows_each() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
         dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
         dispatch(&mut stoat, &ExtendRight);
         assert_eq!(
-            selection_spans(&mut stoat),
+            editor::selection_spans(&mut stoat),
             vec![(0, 1, false), (4, 5, false)]
         );
     }
@@ -940,78 +864,78 @@ mod tests {
     #[test]
     fn extend_to_line_end_grows_forward() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &ExtendToLineEnd);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 7, false)]);
     }
 
     #[test]
     fn extend_to_line_start_from_mid_reverses() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendToLineStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
     }
 
     #[test]
     fn extend_to_last_line_grows_forward() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
         dispatch(&mut stoat, &ExtendToLastLine);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 8, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
     }
 
     #[test]
     fn extend_to_file_start_reverses_from_end() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abcdef");
+        editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &MoveRight);
         dispatch(&mut stoat, &ExtendToFileStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 3, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, true)]);
     }
 
     #[test]
     fn collapse_selection_shrinks_to_head() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abcdef");
+        editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
         dispatch(&mut stoat, &CollapseSelection);
-        assert_eq!(selection_spans(&mut stoat), vec![(2, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(2, 2, false)]);
     }
 
     #[test]
     fn collapse_selection_preserves_reversed_head() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "foo bar");
+        editor::seed_focused_buffer(&mut stoat, "foo bar");
         for _ in 0..6 {
             dispatch(&mut stoat, &MoveRight);
         }
         dispatch(&mut stoat, &MovePrevWordStart);
-        assert_eq!(selection_spans(&mut stoat), vec![(4, 7, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, true)]);
         dispatch(&mut stoat, &CollapseSelection);
-        assert_eq!(selection_spans(&mut stoat), vec![(4, 4, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 4, false)]);
     }
 
     #[test]
     fn collapse_selection_multi_cursor_collapses_each() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\nghi\n");
         dispatch(&mut stoat, &AddSelectionBelow);
         dispatch(&mut stoat, &ExtendRight);
         assert_eq!(
-            selection_spans(&mut stoat),
+            editor::selection_spans(&mut stoat),
             vec![(0, 1, false), (4, 5, false)]
         );
         dispatch(&mut stoat, &CollapseSelection);
         assert_eq!(
-            selection_spans(&mut stoat),
+            editor::selection_spans(&mut stoat),
             vec![(1, 1, false), (5, 5, false)]
         );
     }
@@ -1019,41 +943,41 @@ mod tests {
     #[test]
     fn flip_selections_toggles_reversed() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abcdef");
+        editor::seed_focused_buffer(&mut stoat, "abcdef");
         dispatch(&mut stoat, &ExtendRight);
         dispatch(&mut stoat, &ExtendRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, true)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, true)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 2, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 2, false)]);
     }
 
     #[test]
     fn flip_selections_empty_is_noop() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc");
+        editor::seed_focused_buffer(&mut stoat, "abc");
         dispatch(&mut stoat, &MoveRight);
-        assert_eq!(selection_spans(&mut stoat), vec![(1, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 1, false)]);
         dispatch(&mut stoat, &FlipSelections);
-        assert_eq!(selection_spans(&mut stoat), vec![(1, 1, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(1, 1, false)]);
     }
 
     #[test]
     fn select_all_replaces_all_selections() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "abc\ndef\n");
+        editor::seed_focused_buffer(&mut stoat, "abc\ndef\n");
         dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(head_offsets(&mut stoat), vec![0, 4]);
+        assert_eq!(editor::head_offsets(&mut stoat), vec![0, 4]);
         dispatch(&mut stoat, &SelectAll);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 8, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 8, false)]);
     }
 
     #[test]
     fn select_all_on_empty_buffer() {
         let mut stoat = stoat();
         dispatch(&mut stoat, &SelectAll);
-        assert_eq!(selection_spans(&mut stoat), vec![(0, 0, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 0, false)]);
     }
 
     #[test]
@@ -1101,7 +1025,7 @@ mod tests {
     #[test]
     fn open_file_shows_in_focused_pane() {
         let mut h = Stoat::test();
-        let path = crate::test_harness::write_file(&h, "test.txt", "hello world");
+        let path = h.write_file("test.txt", "hello world");
 
         h.open_file(&path);
         let frame = h.snapshot();
@@ -1112,8 +1036,8 @@ mod tests {
     #[test]
     fn open_file_replaces_focused_pane_does_not_split() {
         let mut h = Stoat::test();
-        let a = crate::test_harness::write_file(&h, "a.txt", "file A");
-        let b = crate::test_harness::write_file(&h, "b.txt", "file B");
+        let a = h.write_file("a.txt", "file A");
+        let b = h.write_file("b.txt", "file B");
 
         h.open_file(&a);
         h.open_file(&b);
@@ -1125,9 +1049,9 @@ mod tests {
     #[test]
     fn split_then_open_creates_multi_pane_layout() {
         let mut h = Stoat::test();
-        let a = crate::test_harness::write_file(&h, "a.txt", "AAA");
-        let b = crate::test_harness::write_file(&h, "b.txt", "BBB");
-        let c = crate::test_harness::write_file(&h, "c.txt", "CCC");
+        let a = h.write_file("a.txt", "AAA");
+        let b = h.write_file("b.txt", "BBB");
+        let c = h.write_file("c.txt", "CCC");
 
         h.open_file(&a);
         h.type_action("SplitRight()");
@@ -1371,34 +1295,34 @@ mod tests {
     fn page_down_with_unrendered_editor_uses_default_viewport() {
         let mut stoat = stoat();
         let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        seed_focused_buffer(&mut stoat, &text);
+        editor::seed_focused_buffer(&mut stoat, &text);
         set_focused_viewport_rows(&mut stoat, None);
         dispatch(&mut stoat, &PageDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(20, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(20, 0)]);
     }
 
     #[test]
     fn half_page_down_rounds_up_for_one_row_viewport() {
         let mut stoat = stoat();
-        seed_focused_buffer(&mut stoat, "a\nb\nc\n");
+        editor::seed_focused_buffer(&mut stoat, "a\nb\nc\n");
         set_focused_viewport_rows(&mut stoat, Some(1));
         dispatch(&mut stoat, &HalfPageDown);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(1, 0)]);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(1, 0)]);
     }
 
     #[test]
     fn page_down_collapses_multi_cursors_to_one() {
         let mut stoat = stoat();
         let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        seed_focused_buffer(&mut stoat, &text);
+        editor::seed_focused_buffer(&mut stoat, &text);
         set_focused_viewport_rows(&mut stoat, Some(10));
         dispatch(&mut stoat, &AddSelectionBelow);
-        assert_eq!(head_offsets(&mut stoat).len(), 2);
+        assert_eq!(editor::head_offsets(&mut stoat).len(), 2);
         dispatch(&mut stoat, &PageDown);
         // AddSelectionBelow makes row 1 the primary cursor; PageDown from
         // row 1 with viewport=10 lands on row 11. Both cursors collapse to
         // the same target via the transform dedupe.
-        assert_eq!(head_offsets(&mut stoat).len(), 1);
-        assert_eq!(cursor_display_positions(&mut stoat), vec![(11, 0)]);
+        assert_eq!(editor::head_offsets(&mut stoat).len(), 1);
+        assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(11, 0)]);
     }
 }
