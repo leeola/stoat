@@ -96,11 +96,15 @@ pub fn is_remote_environment() -> bool {
 
 /// List the auth methods appropriate for the current environment.
 ///
-/// `support_gateway` toggles the `Gateway` option (enabled when the
-/// host has a custom Anthropic-compatible endpoint configured);
-/// `support_terminal_auth` toggles the terminal-driven login flows
-/// (enabled when the host can spawn a child terminal for the user).
+/// `is_remote` indicates the host is running in a remote/headless
+/// environment; the caller supplies this so the function stays pure
+/// (typically by reading [`is_remote_environment`]). `support_gateway`
+/// toggles the `Gateway` option (enabled when the host has a custom
+/// Anthropic-compatible endpoint configured); `support_terminal_auth`
+/// toggles the terminal-driven login flows (enabled when the host can
+/// spawn a child terminal for the user).
 pub fn available_auth_methods(
+    is_remote: bool,
     support_gateway: bool,
     support_terminal_auth: bool,
 ) -> Vec<AuthMethod> {
@@ -110,7 +114,7 @@ pub fn available_auth_methods(
             protocol: "anthropic".into(),
         });
     }
-    if is_remote_environment() {
+    if is_remote {
         methods.push(AuthMethod::ClaudeLogin {
             args: vec!["--cli".into()],
             meta: support_terminal_auth.then(|| TerminalAuthMeta {
@@ -191,18 +195,23 @@ mod tests {
     }
 
     #[test]
-    fn available_methods_without_gateway() {
-        // unsafe: modifying env for test scope only
-        unsafe {
-            std::env::remove_var("SSH_CONNECTION");
-            std::env::remove_var("SSH_CLIENT");
-            std::env::remove_var("SSH_TTY");
-            std::env::remove_var("NO_BROWSER");
-        }
-        let methods = available_auth_methods(false, false);
+    fn available_methods_local_without_gateway() {
+        let methods = available_auth_methods(false, false, false);
         let ids: Vec<&str> = methods.iter().map(|m| m.id()).collect();
-        assert!(ids.contains(&"claude-ai-login"));
-        assert!(ids.contains(&"console-login"));
-        assert!(!ids.contains(&"gateway"));
+        assert_eq!(ids, vec!["claude-ai-login", "console-login"]);
+    }
+
+    #[test]
+    fn available_methods_remote_without_gateway() {
+        let methods = available_auth_methods(true, false, false);
+        let ids: Vec<&str> = methods.iter().map(|m| m.id()).collect();
+        assert_eq!(ids, vec!["claude-login"]);
+    }
+
+    #[test]
+    fn available_methods_local_with_gateway() {
+        let methods = available_auth_methods(false, true, false);
+        let ids: Vec<&str> = methods.iter().map(|m| m.id()).collect();
+        assert_eq!(ids, vec!["gateway", "claude-ai-login", "console-login"]);
     }
 }
