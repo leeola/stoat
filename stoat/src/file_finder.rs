@@ -8,7 +8,7 @@ use crate::{
 };
 use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
-    WalkBuilder,
+    Match,
 };
 use nucleo::{
     pattern::{Atom, AtomKind, CaseMatching, Normalization},
@@ -275,38 +275,99 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
     }
 }
 
-/// Enumerate every non-ignored file under `git_root`. Respects `.gitignore`,
-/// `.git/info/exclude`, the global gitignore, a per-repo `.stoatignore`,
-/// and the baked-in [`DEFAULT_STOATIGNORE`] patterns. Does not require
-/// `git_root` to be a git repo.
-pub(crate) fn walk_workspace_files(git_root: &Path) -> Vec<PathBuf> {
+/// Enumerate every non-ignored file under `git_root`, reading the tree
+/// through `fs` so test runs and remote-FS implementations can plug in
+/// their own backing store. Respects per-directory `.gitignore` and
+/// `.stoatignore` files (gitignore semantics, last-match-wins, inner
+/// negations override outer ignores) plus the baked-in
+/// [`DEFAULT_STOATIGNORE`] patterns, which are an unconditional filter
+/// users cannot negate. Does not require `git_root` to be a git repo,
+/// and does not consult global / `$HOME` ignore files.
+pub(crate) fn walk_workspace_files(fs: &dyn FsHost, git_root: &Path) -> Vec<PathBuf> {
     let defaults = build_default_ignore(git_root);
-
+    let mut stack: Vec<Gitignore> = Vec::new();
     let mut out = Vec::new();
-    let walker = WalkBuilder::new(git_root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .require_git(false)
-        .add_custom_ignore_filename(".stoatignore")
-        .filter_entry(move |dent| {
-            let is_dir = dent.file_type().is_some_and(|ft| ft.is_dir());
-            !defaults.matched(dent.path(), is_dir).is_ignore()
-        })
-        .build();
-    for entry in walker.flatten() {
-        let ft = match entry.file_type() {
-            Some(ft) => ft,
-            None => continue,
-        };
-        if !ft.is_file() {
-            continue;
-        }
-        out.push(entry.path().to_path_buf());
-    }
+    walk_dir(fs, git_root, &defaults, &mut stack, &mut out);
     out.sort();
     out
+}
+
+fn walk_dir(
+    fs: &dyn FsHost,
+    dir: &Path,
+    defaults: &Gitignore,
+    stack: &mut Vec<Gitignore>,
+    out: &mut Vec<PathBuf>,
+) {
+    let pushed = push_dir_ignores(fs, dir, stack);
+
+    let entries = match fs.list_dir(dir) {
+        Ok(e) => e,
+        Err(_) => {
+            stack.truncate(stack.len() - pushed);
+            return;
+        },
+    };
+
+    for entry in entries {
+        let path = dir.join(entry.name.as_str());
+        if path_is_ignored(defaults, stack, &path, entry.is_dir) {
+            continue;
+        }
+        if entry.is_dir {
+            walk_dir(fs, &path, defaults, stack, out);
+        } else {
+            out.push(path);
+        }
+    }
+
+    stack.truncate(stack.len() - pushed);
+}
+
+/// Read any per-directory ignore files (`.gitignore`, `.stoatignore`) and
+/// push their matchers onto `stack`. Returns the number of matchers pushed
+/// so the caller can pop them on the way back up the tree.
+fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
+    const NAMES: &[&str] = &[".gitignore", ".stoatignore"];
+    let mut pushed = 0;
+    for name in NAMES {
+        if let Some(matcher) = read_ignore_file(fs, dir, name) {
+            stack.push(matcher);
+            pushed += 1;
+        }
+    }
+    pushed
+}
+
+fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore> {
+    let path = dir.join(name);
+    let mut buf = Vec::new();
+    fs.read(&path, &mut buf).ok()?;
+    let text = std::str::from_utf8(&buf).ok()?;
+    let mut builder = GitignoreBuilder::new(dir);
+    for line in text.lines() {
+        let _ = builder.add_line(None, line);
+    }
+    builder.build().ok()
+}
+
+/// Combine the baked-in defaults with the stack of per-directory matchers.
+/// Defaults are an unconditional hard filter; the stack uses standard
+/// gitignore precedence (last match wins, inner negations override outer
+/// ignores).
+fn path_is_ignored(defaults: &Gitignore, stack: &[Gitignore], path: &Path, is_dir: bool) -> bool {
+    if defaults.matched(path, is_dir).is_ignore() {
+        return true;
+    }
+    let mut decision: Option<bool> = None;
+    for matcher in stack {
+        match matcher.matched(path, is_dir) {
+            Match::Ignore(_) => decision = Some(true),
+            Match::Whitelist(_) => decision = Some(false),
+            Match::None => {},
+        }
+    }
+    decision.unwrap_or(false)
 }
 
 fn build_default_ignore(git_root: &Path) -> Gitignore {
@@ -528,105 +589,120 @@ mod tests {
         );
     }
 
-    #[test]
-    fn walk_workspace_files_returns_files_not_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
-        std::fs::write(tmp.path().join("a.rs"), "a").unwrap();
-        std::fs::write(tmp.path().join("sub/b.rs"), "b").unwrap();
-        let files = walk_workspace_files(tmp.path());
-        // All returned entries must be regular files.
-        assert!(files.iter().all(|p| p.is_file()));
-        assert!(files.iter().any(|p| p.ends_with("a.rs")));
-        assert!(files.iter().any(|p| p.ends_with("sub/b.rs")));
+    /// Path used as the workspace root in walker unit tests. Every entry
+    /// inserted into the FakeFs lives under this prefix; the helper below
+    /// strips it so assertions compare repo-relative paths.
+    const WALK_ROOT: &str = "/repo";
+
+    fn seeded_fake_fs(files: &[(&str, &str)]) -> crate::host::FakeFs {
+        let fs = crate::host::FakeFs::new();
+        let root = Path::new(WALK_ROOT);
+        fs.insert_files(
+            files
+                .iter()
+                .map(|(rel, content)| (root.join(rel), content.as_bytes())),
+        );
+        fs
     }
 
-    fn seed_fs(base: &Path, files: &[(&str, &str)]) {
-        for (rel, content) in files {
-            let abs = base.join(rel);
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&abs, content).unwrap();
-        }
-    }
-
-    fn walked_rels(base: &Path) -> Vec<String> {
-        let mut rels: Vec<String> = walk_workspace_files(base)
+    fn walked_rels(fs: &dyn FsHost) -> Vec<String> {
+        let root = Path::new(WALK_ROOT);
+        let mut rels: Vec<String> = walk_workspace_files(fs, root)
             .iter()
-            .map(|p| p.strip_prefix(base).unwrap().to_string_lossy().into_owned())
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
             .collect();
         rels.sort();
         rels
     }
 
     #[test]
+    fn walk_workspace_files_returns_files_not_dirs() {
+        let fs = seeded_fake_fs(&[("a.rs", "a"), ("sub/b.rs", "b")]);
+        assert_eq!(walked_rels(&fs), vec!["a.rs", "sub/b.rs"]);
+    }
+
+    #[test]
     fn walk_workspace_files_ignores_dot_git() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed_fs(
-            tmp.path(),
-            &[
-                (".git/HEAD", "ref: refs/heads/main"),
-                (".git/config", "[core]"),
-                (".git/refs/heads/main", "deadbeef"),
-                ("src/main.rs", "fn main() {}"),
-            ],
-        );
-        assert_eq!(walked_rels(tmp.path()), vec!["src/main.rs"]);
+        let fs = seeded_fake_fs(&[
+            (".git/HEAD", "ref: refs/heads/main"),
+            (".git/config", "[core]"),
+            (".git/refs/heads/main", "deadbeef"),
+            ("src/main.rs", "fn main() {}"),
+        ]);
+        assert_eq!(walked_rels(&fs), vec!["src/main.rs"]);
     }
 
     #[test]
     fn walk_workspace_files_ignores_baked_in_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed_fs(
-            tmp.path(),
-            &[
-                ("target/debug/foo", "bin"),
-                ("node_modules/pkg/index.js", "module.exports = {}"),
-                ("src/main.rs", "fn main() {}"),
-            ],
-        );
-        assert_eq!(walked_rels(tmp.path()), vec!["src/main.rs"]);
+        let fs = seeded_fake_fs(&[
+            ("target/debug/foo", "bin"),
+            ("node_modules/pkg/index.js", "module.exports = {}"),
+            ("src/main.rs", "fn main() {}"),
+        ]);
+        assert_eq!(walked_rels(&fs), vec!["src/main.rs"]);
     }
 
     #[test]
     fn walk_workspace_files_honors_stoatignore() {
-        let tmp = tempfile::tempdir().unwrap();
-        seed_fs(
-            tmp.path(),
-            &[
-                (".stoatignore", "vendor/\n"),
-                ("vendor/blob.rs", "// generated"),
-                ("src/main.rs", "fn main() {}"),
-            ],
-        );
+        let fs = seeded_fake_fs(&[
+            (".stoatignore", "vendor/\n"),
+            ("vendor/blob.rs", "// generated"),
+            ("src/main.rs", "fn main() {}"),
+        ]);
         assert_eq!(
-            walked_rels(tmp.path()),
+            walked_rels(&fs),
             vec![".stoatignore".to_string(), "src/main.rs".to_string()],
         );
     }
 
     #[test]
-    fn walk_workspace_files_still_walks_non_git_dotfiles() {
-        // Synthetic dotfile names so the test doesn't depend on the user's
-        // global gitignore (which on real machines often excludes `.claude`,
-        // `.vscode`, etc.). Confirms that disabling `hidden(false)` keeps
-        // ordinary dotfiles visible -- only the baked-in defaults filter
-        // them out.
-        let tmp = tempfile::tempdir().unwrap();
-        seed_fs(
-            tmp.path(),
-            &[
-                (".stoat_test_alpha/data", "{}"),
-                (".stoat_test_betarc", ""),
-                ("src/main.rs", "fn main() {}"),
+    fn walk_workspace_files_honors_nested_gitignore() {
+        let fs = seeded_fake_fs(&[
+            ("src/main.rs", "fn main() {}"),
+            ("src/generated/.gitignore", "*.rs\n"),
+            ("src/generated/auto.rs", "// auto"),
+            ("src/generated/keep.txt", "keep"),
+        ]);
+        assert_eq!(
+            walked_rels(&fs),
+            vec![
+                "src/generated/.gitignore".to_string(),
+                "src/generated/keep.txt".to_string(),
+                "src/main.rs".to_string(),
             ],
         );
+    }
+
+    #[test]
+    fn walk_workspace_files_inner_negation_overrides_outer_ignore() {
+        let fs = seeded_fake_fs(&[
+            (".gitignore", "*.log\n"),
+            ("trace.log", "outer"),
+            ("logs/.gitignore", "!*.log\n"),
+            ("logs/trace.log", "inner"),
+        ]);
         assert_eq!(
-            walked_rels(tmp.path()),
+            walked_rels(&fs),
             vec![
-                ".stoat_test_alpha/data".to_string(),
-                ".stoat_test_betarc".to_string(),
+                ".gitignore".to_string(),
+                "logs/.gitignore".to_string(),
+                "logs/trace.log".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn walk_workspace_files_still_walks_non_git_dotfiles() {
+        let fs = seeded_fake_fs(&[
+            (".claude/settings.json", "{}"),
+            (".vscode/launch.json", "{}"),
+            ("src/main.rs", "fn main() {}"),
+        ]);
+        assert_eq!(
+            walked_rels(&fs),
+            vec![
+                ".claude/settings.json".to_string(),
+                ".vscode/launch.json".to_string(),
                 "src/main.rs".to_string(),
             ],
         );
@@ -636,28 +712,25 @@ mod tests {
 
     use crate::test_harness::TestHarness;
 
-    /// Seed a tempdir with `files`, mirror them into the harness' FakeFs so
-    /// preview reads find the same content, and point the active workspace
-    /// at the tempdir. The returned [`tempfile::TempDir`] must stay alive
-    /// for the duration of the test; drop on scope exit cleans up.
-    fn seed_finder_workspace(h: &mut TestHarness, files: &[(&str, &str)]) -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        for (rel, content) in files {
-            let abs = tmp.path().join(rel);
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir parent");
-            }
-            std::fs::write(&abs, content).expect("write real file");
-            h.fake_fs().insert_file(&abs, content.as_bytes());
-        }
-        h.stoat.active_workspace_mut().git_root = tmp.path().to_path_buf();
-        tmp
+    /// Insert `files` into the harness' [`crate::host::FakeFs`] under a
+    /// fixed virtual root and point the active workspace at it. Returns the
+    /// virtual root so callers that need to seed extra git state (or assert
+    /// on absolute paths) can join against it.
+    fn seed_finder_workspace(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
+        let root = PathBuf::from("/stoat-finder-test");
+        h.fake_fs().insert_files(
+            files
+                .iter()
+                .map(|(rel, content)| (root.join(rel), content.as_bytes())),
+        );
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        root
     }
 
     #[test]
     fn space_p_opens_finder_and_switches_to_prompt_mode() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
+        seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}")]);
         h.type_keys("space p");
         assert!(h.stoat.file_finder.is_some(), "finder not opened");
         assert_eq!(h.snapshot().mode, "prompt");
@@ -666,7 +739,7 @@ mod tests {
     #[test]
     fn escape_closes_finder_and_restores_mode() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
         h.type_keys("space p");
         h.type_keys("escape");
         assert!(h.stoat.file_finder.is_none(), "finder still open");
@@ -676,7 +749,7 @@ mod tests {
     #[test]
     fn ctrl_c_closes_finder() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
         h.type_keys("space p");
         h.type_keys("Ctrl-c");
         assert!(h.stoat.file_finder.is_none());
@@ -686,7 +759,7 @@ mod tests {
     #[test]
     fn second_open_is_noop() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
         h.type_keys("space p");
         let ptr_before = h.stoat.file_finder.as_ref().unwrap() as *const FileFinder;
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
@@ -697,7 +770,7 @@ mod tests {
     #[test]
     fn enter_dispatches_open_file_for_selected_path() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
+        seed_finder_workspace(&mut h, &[("target.txt", "loaded via finder")]);
         h.type_keys("space p");
         // Only one file in the workspace, so it is the selected row.
         h.type_keys("enter");
@@ -713,22 +786,18 @@ mod tests {
 
     #[test]
     fn backtab_toggles_scope_to_modified() {
-        use std::path::PathBuf;
         let mut h = crate::Stoat::test();
-        let tmp = seed_finder_workspace(
+        let root = seed_finder_workspace(
             &mut h,
             &[("a.rs", "v1\n"), ("b.rs", "v1\n"), ("c.rs", "v1\n")],
         );
         // Seed the fake git repo so only b.rs is reported as modified.
         {
-            let mut builder = h.fake_git().add_repo(tmp.path()).with_fs(h.fake_fs());
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
             builder.head_file("a.rs", "v1\n");
             builder.modified("b.rs", "v1\n", "v2\n");
             builder.head_file("c.rs", "v1\n");
         }
-        // Also mirror the "modified" content into the real fs so the
-        // walker's picture matches the git modification state.
-        std::fs::write(tmp.path().join("b.rs"), "v2\n").unwrap();
 
         h.type_keys("space p");
         {
@@ -750,7 +819,7 @@ mod tests {
     #[test]
     fn typing_narrows_filtered_list() {
         let mut h = crate::Stoat::test();
-        let _tmp = seed_finder_workspace(
+        seed_finder_workspace(
             &mut h,
             &[("alpha.rs", ""), ("beta.rs", ""), ("gamma.rs", "")],
         );

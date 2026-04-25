@@ -88,6 +88,20 @@ impl FakeFs {
         );
     }
 
+    /// Bulk variant of [`Self::insert_file`]. Iteration order is preserved
+    /// so timestamps match the input order, which matters for the few
+    /// tests that compare modification times.
+    pub fn insert_files<P, C, I>(&self, files: I)
+    where
+        P: AsRef<Path>,
+        C: AsRef<[u8]>,
+        I: IntoIterator<Item = (P, C)>,
+    {
+        for (path, content) in files {
+            self.insert_file(path, content);
+        }
+    }
+
     pub fn insert_dir(&self, path: impl AsRef<Path>) {
         let mut state = self.state.lock().unwrap();
         let path = path.as_ref();

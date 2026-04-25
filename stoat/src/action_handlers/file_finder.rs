@@ -19,7 +19,7 @@ pub(super) fn open_file_finder(stoat: &mut Stoat) -> UpdateEffect {
     let previous_mode = "normal".to_string();
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
-    let all_paths = crate::file_finder::walk_workspace_files(&git_root);
+    let all_paths = crate::file_finder::walk_workspace_files(&*stoat.fs_host, &git_root);
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
 
     let ws = stoat.active_workspace_mut();
