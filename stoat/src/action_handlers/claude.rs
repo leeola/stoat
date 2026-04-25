@@ -358,9 +358,14 @@ fn resolve_follow_target(
             ws.git_root.join(path)
         };
 
-        let canonical_abs = std::fs::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
-        let canonical_root =
-            std::fs::canonicalize(&ws.git_root).unwrap_or_else(|_| ws.git_root.clone());
+        let canonical_abs = stoat
+            .fs_host
+            .canonicalize(&absolute)
+            .unwrap_or_else(|_| absolute.clone());
+        let canonical_root = stoat
+            .fs_host
+            .canonicalize(&ws.git_root)
+            .unwrap_or_else(|_| ws.git_root.clone());
         if !canonical_abs.starts_with(&canonical_root) {
             return None;
         }

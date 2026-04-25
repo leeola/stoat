@@ -1,5 +1,9 @@
 use compact_str::CompactString;
-use std::{io, path::Path, time::SystemTime};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct FsMetadata {
@@ -38,6 +42,14 @@ pub trait FsHost: Send + Sync {
 
     /// Creates `path` and all missing parent directories.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+
+    /// Resolves `path` to an absolute, symlink-free form. Errors with
+    /// `NotFound` if the path doesn't exist (matches
+    /// [`std::fs::canonicalize`] semantics).
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+
+    /// Removes the file at `path`. Errors with `NotFound` if absent.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
 
     /// Returns whether `path` exists.
     fn exists(&self, path: &Path) -> bool {

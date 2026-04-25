@@ -20,7 +20,7 @@ pub(crate) fn open_file_in_pane(
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_default().join(path)
+        stoat.active_workspace().git_root.join(path)
     };
     let content = match read_string_via_host(&*stoat.fs_host, &absolute) {
         Ok(c) => c,

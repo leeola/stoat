@@ -50,8 +50,8 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
         let ws = &stoat.workspaces[active_id];
         stoat.save_workspace(ws);
         if let Ok(path) = crate::workspace::state_path_for(&ws.git_root, ws.uid) {
-            if path.exists() {
-                if let Err(err) = std::fs::remove_file(&path) {
+            if stoat.fs_host.exists(&path) {
+                if let Err(err) = stoat.fs_host.remove_file(&path) {
                     tracing::warn!(?path, ?err, "failed to delete workspace state file");
                 }
             }

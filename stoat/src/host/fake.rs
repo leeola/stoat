@@ -217,6 +217,36 @@ impl FsHost for FakeFs {
         }
         Ok(())
     }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        let state = self.state.lock().unwrap();
+        if state.entries.contains_key(path) {
+            Ok(path.to_path_buf())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{}: not found", path.display()),
+            ))
+        }
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        match state.entries.get(path) {
+            Some(FakeEntry::File { .. }) => {
+                state.entries.remove(path);
+                Ok(())
+            },
+            Some(FakeEntry::Dir { .. }) => Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                "is a directory",
+            )),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{}: not found", path.display()),
+            )),
+        }
+    }
 }
 
 #[cfg(test)]

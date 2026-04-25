@@ -1,6 +1,10 @@
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
 use compact_str::CompactString;
-use std::{io, io::Read, path::Path};
+use std::{
+    io,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 pub struct LocalFs;
 
@@ -48,6 +52,14 @@ impl FsHost for LocalFs {
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        std::fs::canonicalize(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
     }
 }
 
