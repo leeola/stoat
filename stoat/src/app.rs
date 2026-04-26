@@ -9,7 +9,7 @@ use crate::{
     help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-        FsHost, GitHost, LocalFs, LocalGit,
+        EnvHost, FsHost, GitHost, LocalEnv, LocalFs, LocalGit,
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_letter, resolve_action, StoatKeymapState},
@@ -82,6 +82,9 @@ pub struct Stoat {
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
+    /// Environment-variable lookups go through this trait so tests can
+    /// install [`crate::host::FakeEnv`] without leaking real env state.
+    pub(crate) env_host: Arc<dyn EnvHost>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -196,6 +199,7 @@ impl Stoat {
             render_tick: 0,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
+            env_host: Arc::new(LocalEnv),
         }
     }
 
@@ -211,6 +215,18 @@ impl Stoat {
     /// without a real repository.
     pub fn set_git_host(&mut self, host: Arc<dyn GitHost>) {
         self.git_host = host;
+    }
+
+    /// Swap in an alternative [`EnvHost`]. The default is [`LocalEnv`];
+    /// the test harness installs [`crate::host::FakeEnv`] so env-var
+    /// reads do not pull in real process state.
+    pub fn set_env_host(&mut self, host: Arc<dyn EnvHost>) {
+        self.env_host = host;
+    }
+
+    /// Returns the active [`EnvHost`].
+    pub fn env_host(&self) -> &Arc<dyn EnvHost> {
+        &self.env_host
     }
 
     pub fn active_workspace(&self) -> &Workspace {

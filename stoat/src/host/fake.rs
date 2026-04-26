@@ -1,10 +1,12 @@
 mod claude_code;
+mod env;
 mod git;
 mod lsp;
 pub mod terminal;
 
 pub use self::{
     claude_code::{FakeClaudeCode, FakeClaudeCodeHost},
+    env::FakeEnv,
     git::{FakeGit, FakeGitRepo, FakeRepoBuilder},
     lsp::{
         change_params, completion_params, definition_params, document_highlight_params,

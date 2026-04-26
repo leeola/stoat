@@ -124,7 +124,7 @@ fn run_tui(
             },
         }
 
-        if let Ok(raw) = std::env::var("STOAT_DUMP_LOAD") {
+        if let Some(raw) = stoat.env_host().var("STOAT_DUMP_LOAD") {
             let dump_path = PathBuf::from(&raw);
             if dump_path.exists() {
                 match stoat::dump::hydrate(&mut stoat, &dump_path, &LocalFs) {

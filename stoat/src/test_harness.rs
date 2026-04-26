@@ -51,6 +51,7 @@ pub struct TestHarness {
     pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_git: Arc<crate::host::FakeGit>,
+    pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) claude_fakes: HashMap<ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
     pub(crate) claude_tool_id_counter: u64,
     frames: Vec<Frame>,
@@ -70,12 +71,14 @@ impl TestHarness {
         let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
         let fake_fs = Arc::new(crate::host::FakeFs::new());
         let fake_git = Arc::new(crate::host::FakeGit::new());
+        let fake_env = Arc::new(crate::host::FakeEnv::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         stoat.active_workspace_mut().name = String::new();
         stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.set_fs_host(fake_fs.clone());
         stoat.set_git_host(fake_git.clone());
+        stoat.set_env_host(fake_env.clone());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -84,6 +87,7 @@ impl TestHarness {
             fake_claude_host,
             fake_fs,
             fake_git,
+            fake_env,
             claude_fakes: HashMap::new(),
             claude_tool_id_counter: 0,
             frames: Vec::new(),
@@ -116,6 +120,13 @@ impl TestHarness {
     /// working-tree state for review-mode tests.
     pub fn fake_git(&self) -> &Arc<crate::host::FakeGit> {
         &self.fake_git
+    }
+
+    /// Expose the [`crate::host::FakeEnv`] backing this harness so tests
+    /// can seed env-var values before driving code that reads them
+    /// through `stoat.env_host()`.
+    pub fn fake_env(&self) -> &Arc<crate::host::FakeEnv> {
+        &self.fake_env
     }
 
     /// Stage a working-tree review scenario in one call.
