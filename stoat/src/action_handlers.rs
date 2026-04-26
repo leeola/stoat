@@ -183,6 +183,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::AlignViewTop => movement::align_view(stoat, movement::ViewAlign::Top),
         ActionKind::AlignViewCenter => movement::align_view(stoat, movement::ViewAlign::Center),
         ActionKind::AlignViewBottom => movement::align_view(stoat, movement::ViewAlign::Bottom),
+        ActionKind::ScrollUp => movement::scroll_view(stoat, movement::ScrollDir::Up),
+        ActionKind::ScrollDown => movement::scroll_view(stoat, movement::ScrollDir::Down),
         ActionKind::ExtendToLineStart => movement::goto_line_start(stoat, true),
         ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
         ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),

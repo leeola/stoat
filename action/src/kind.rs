@@ -56,6 +56,8 @@ pub enum ActionKind {
     AlignViewTop,
     AlignViewCenter,
     AlignViewBottom,
+    ScrollUp,
+    ScrollDown,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

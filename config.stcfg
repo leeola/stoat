@@ -186,6 +186,8 @@ on key {
         z -> [AlignViewCenter(), SetMode(normal)];
         t -> [AlignViewTop(), SetMode(normal)];
         b -> [AlignViewBottom(), SetMode(normal)];
+        j -> [ScrollDown(), SetMode(normal)];
+        k -> [ScrollUp(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {

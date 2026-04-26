@@ -18,8 +18,8 @@ use crate::{
             GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
             GotoWindowTop, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
             MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
-            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll,
-            SelectLineBelow, TrimSelections,
+            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
+            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -228,6 +228,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(AlignViewTop::DEF, |_| Ok(Box::new(AlignViewTop)));
     add(AlignViewCenter::DEF, |_| Ok(Box::new(AlignViewCenter)));
     add(AlignViewBottom::DEF, |_| Ok(Box::new(AlignViewBottom)));
+    add(ScrollUp::DEF, |_| Ok(Box::new(ScrollUp)));
+    add(ScrollDown::DEF, |_| Ok(Box::new(ScrollDown)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -590,7 +592,8 @@ mod tests {
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
         // + 3 window-relative gotos (GotoWindowTop/Center/Bottom).
         // + 3 view-alignment ops (AlignViewTop/Center/Bottom).
-        assert_eq!(all().count(), 152);
+        // + 2 view-scroll ops (ScrollUp/Down).
+        assert_eq!(all().count(), 154);
     }
 
     #[test]

@@ -761,6 +761,34 @@ pub(super) enum ViewAlign {
     Bottom,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ScrollDir {
+    Up,
+    Down,
+}
+
+pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let max_row = buffer_snapshot.rope().max_point().row;
+    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+
+    let new_scroll = match dir {
+        ScrollDir::Up => editor.scroll_row.saturating_sub(1),
+        ScrollDir::Down => editor.scroll_row.saturating_add(1).min(max_scroll),
+    };
+    if new_scroll == editor.scroll_row {
+        return UpdateEffect::None;
+    }
+    editor.scroll_row = new_scroll;
+    UpdateEffect::Redraw
+}
+
 pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

@@ -988,4 +988,62 @@ mod tests {
             "buffer shorter than viewport must clamp scroll_row to 0"
         );
     }
+
+    #[test]
+    fn scroll_down_increments_scroll_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        let head_before = h.cursor_display_positions();
+        let scroll_before = h.editor_scroll_rows()[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ScrollDown);
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before + 1);
+        assert_eq!(
+            h.cursor_display_positions(),
+            head_before,
+            "cursor must not move"
+        );
+    }
+
+    #[test]
+    fn scroll_up_decrements_scroll_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows()[0];
+        assert!(scroll_before > 0);
+        let head_before = h.cursor_display_positions();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ScrollUp);
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before - 1);
+        assert_eq!(
+            h.cursor_display_positions(),
+            head_before,
+            "cursor must not move"
+        );
+    }
+
+    #[test]
+    fn scroll_up_at_top_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ScrollUp);
+        assert_eq!(h.editor_scroll_rows()[0], 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_at_max_scroll() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        for _ in 0..5 {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ScrollDown);
+        }
+        assert_eq!(
+            h.editor_scroll_rows()[0],
+            0,
+            "buffer shorter than viewport keeps scroll_row at 0"
+        );
+    }
 }

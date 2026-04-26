@@ -321,6 +321,26 @@ define_action!(
 );
 
 define_action!(
+    ScrollUpDef,
+    ScrollUp,
+    "ScrollUp",
+    ActionKind::ScrollUp,
+    "scroll view up",
+    "Scroll the focused editor up by one line. The cursor stays at its buffer position; pressing again brings the view back over it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ScrollDownDef,
+    ScrollDown,
+    "ScrollDown",
+    ActionKind::ScrollDown,
+    "scroll view down",
+    "Scroll the focused editor down by one line. The cursor stays at its buffer position; pressing again brings the view back over it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToLineStartDef,
     ExtendToLineStart,
     "ExtendToLineStart",
