@@ -20,6 +20,7 @@ pub struct FakeClaudeCode {
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<AgentMessage>>,
     sent: Mutex<Vec<String>>,
     next_send_failure: Mutex<Option<io::ErrorKind>>,
+    disconnect_on_recv: Mutex<Option<usize>>,
 }
 
 impl Default for FakeClaudeCode {
@@ -36,6 +37,7 @@ impl FakeClaudeCode {
             rx: tokio::sync::Mutex::new(rx),
             sent: Mutex::new(Vec::new()),
             next_send_failure: Mutex::new(None),
+            disconnect_on_recv: Mutex::new(None),
         }
     }
 
@@ -229,6 +231,17 @@ impl FakeClaudeCode {
         *self.next_send_failure.lock().unwrap() = Some(kind);
     }
 
+    /// Arm a delayed disconnect on the recv path. The next `n` calls to
+    /// [`ClaudeCodeSession::recv`] deliver normally; the call after
+    /// that closes the channel and returns `None`, simulating a
+    /// mid-conversation disconnect. `n == 0` disconnects on the next
+    /// recv, dropping any messages still queued. Closing the channel
+    /// also flips [`ClaudeCodeSession::is_alive`] to `false` and
+    /// makes subsequent recvs return `None`.
+    pub fn disconnect_on_recv(&self, n: usize) {
+        *self.disconnect_on_recv.lock().unwrap() = Some(n);
+    }
+
     // --- Assertion helpers ---
 
     pub fn sent_messages(&self) -> Vec<String> {
@@ -261,6 +274,17 @@ impl ClaudeCodeSession for FakeClaudeCode {
     }
 
     async fn recv(&self) -> Option<AgentMessage> {
+        {
+            let mut counter = self.disconnect_on_recv.lock().unwrap();
+            if let Some(remaining) = counter.as_mut() {
+                if *remaining == 0 {
+                    *counter = None;
+                    self.tx.lock().unwrap().take();
+                    return None;
+                }
+                *remaining -= 1;
+            }
+        }
         self.rx.lock().await.recv().await
     }
 
@@ -494,6 +518,51 @@ mod tests {
             let _ = agent.send("attempt").await;
 
             assert_eq!(agent.sent_messages(), ["attempt"]);
+        });
+    }
+
+    #[test]
+    fn disconnect_on_recv_zero_returns_none_immediately() {
+        rt().block_on(async {
+            let agent = FakeClaudeCode::new();
+            agent.push_text("dropped");
+            agent.disconnect_on_recv(0);
+
+            assert!(agent.recv().await.is_none());
+            assert!(!agent.is_alive());
+        });
+    }
+
+    #[test]
+    fn disconnect_on_recv_n_delivers_n_then_disconnects() {
+        rt().block_on(async {
+            let agent = FakeClaudeCode::new();
+            agent.push_text("first");
+            agent.push_text("second");
+            agent.push_text("third");
+            agent.push_text("fourth");
+            agent.disconnect_on_recv(2);
+
+            for expected in ["first", "second"] {
+                match agent.recv().await {
+                    Some(AgentMessage::Text { text }) => assert_eq!(text, expected),
+                    other => panic!("expected Text({expected:?}), got {other:?}"),
+                }
+            }
+            assert!(agent.recv().await.is_none());
+            assert!(!agent.is_alive());
+        });
+    }
+
+    #[test]
+    fn disconnect_on_recv_subsequent_recvs_stay_none() {
+        rt().block_on(async {
+            let agent = FakeClaudeCode::new();
+            agent.disconnect_on_recv(0);
+
+            assert!(agent.recv().await.is_none());
+            assert!(agent.recv().await.is_none());
+            assert!(agent.recv().await.is_none());
         });
     }
 
