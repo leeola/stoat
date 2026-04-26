@@ -88,6 +88,10 @@ struct FakeState {
     /// One-shot read failures keyed by input path. Drained on the next
     /// matching `read` call, irrespective of symlink resolution.
     read_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot mid-read partial failures keyed by input path. The
+    /// usize is the number of bytes copied into the caller's buffer
+    /// before the injected error fires; capped at the file's length.
+    read_partial_failures: HashMap<PathBuf, (usize, io::ErrorKind)>,
     /// Sticky write failures keyed by input path. Returned from every
     /// matching `write` call until the entry is cleared; this commit
     /// has no removal API, matching the short-lived test fakes.
@@ -152,6 +156,7 @@ impl FakeFs {
                 entries: BTreeMap::new(),
                 clock: 0,
                 read_failures: HashMap::new(),
+                read_partial_failures: HashMap::new(),
                 write_failures: HashMap::new(),
                 metadata_failures: HashMap::new(),
                 list_dir_failures: HashMap::new(),
@@ -230,6 +235,27 @@ impl FakeFs {
         state
             .read_failures
             .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot mid-read partial failure for `path`. The next
+    /// [`FsHost::read`] call whose input path equals `path` copies up
+    /// to `n_bytes` from the resolved file's content into the
+    /// caller's buffer (capped at the file's length) and then returns
+    /// `io::Error::new(kind, ...)`. The arm clears after firing.
+    /// `fail_next_read` takes precedence when both are armed for the
+    /// same path. If the path resolves to a missing or non-file
+    /// entry, the buffer is left empty and the injected error still
+    /// fires.
+    pub fn fail_next_read_after(
+        &self,
+        path: impl AsRef<Path>,
+        n_bytes: usize,
+        kind: io::ErrorKind,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .read_partial_failures
+            .insert(path.as_ref().to_path_buf(), (n_bytes, kind));
     }
 
     /// Arm a sticky write failure for `path`. Every [`FsHost::write`]
@@ -335,6 +361,22 @@ impl FsHost for FakeFs {
             return Err(io::Error::new(
                 kind,
                 format!("{}: injected read failure", path.display()),
+            ));
+        }
+        if let Some((n_bytes, kind)) = state.read_partial_failures.remove(path) {
+            buf.clear();
+            let resolved = resolve_symlink(&state, path)?;
+            if let Some(FakeEntry::File { content, .. }) = state.entries.get(&resolved) {
+                let cap = n_bytes.min(content.len());
+                buf.extend_from_slice(&content[..cap]);
+            }
+            return Err(io::Error::new(
+                kind,
+                format!(
+                    "{}: injected partial read failure after {} bytes",
+                    path.display(),
+                    n_bytes,
+                ),
             ));
         }
         let resolved = resolve_symlink(&state, path)?;
@@ -779,6 +821,53 @@ mod tests {
         assert_eq!(buf, b"bb");
         let err = fs.read(Path::new("/a"), &mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn fail_next_read_after_yields_partial_then_errors() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hello");
+        fs.fail_next_read_after("/x.txt", 2, io::ErrorKind::Interrupted);
+        let mut buf = Vec::new();
+        let err = fs.read(Path::new("/x.txt"), &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(buf, b"he");
+    }
+
+    #[test]
+    fn fail_next_read_after_caps_at_content_length() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hi");
+        fs.fail_next_read_after("/x.txt", 50, io::ErrorKind::Interrupted);
+        let mut buf = Vec::new();
+        let err = fs.read(Path::new("/x.txt"), &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(buf, b"hi");
+    }
+
+    #[test]
+    fn fail_next_read_after_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hello");
+        fs.fail_next_read_after("/x.txt", 2, io::ErrorKind::Interrupted);
+        let mut buf = Vec::new();
+        let _ = fs.read(Path::new("/x.txt"), &mut buf);
+        fs.read(Path::new("/x.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn fail_next_read_after_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x", "ok");
+        fs.fail_next_read_after("/x", 1, io::ErrorKind::Interrupted);
+        let _ = fs.read(Path::new("/x"), &mut Vec::new());
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::Read {
+                path: PathBuf::from("/x"),
+            }]
+        );
     }
 
     #[test]
