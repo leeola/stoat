@@ -15,7 +15,7 @@ pub use self::{
 use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
 use compact_str::CompactString;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -66,6 +66,13 @@ pub struct FakeFs {
 struct FakeState {
     entries: BTreeMap<PathBuf, FakeEntry>,
     clock: u64,
+    /// One-shot read failures keyed by input path. Drained on the next
+    /// matching `read` call, irrespective of symlink resolution.
+    read_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// Sticky write failures keyed by input path. Returned from every
+    /// matching `write` call until the entry is cleared; this commit
+    /// has no removal API, matching the short-lived test fakes.
+    write_failures: HashMap<PathBuf, io::ErrorKind>,
 }
 
 impl FakeState {
@@ -102,6 +109,8 @@ impl FakeFs {
             state: Mutex::new(FakeState {
                 entries: BTreeMap::new(),
                 clock: 0,
+                read_failures: HashMap::new(),
+                write_failures: HashMap::new(),
             }),
         }
     }
@@ -161,11 +170,40 @@ impl FakeFs {
             },
         );
     }
+
+    /// Arm a one-shot read failure for `path`. The next [`FsHost::read`]
+    /// call whose input path equals `path` returns
+    /// `io::Error::new(kind, ...)` and clears the arm; subsequent reads
+    /// behave normally. Matched before symlink resolution, so callers
+    /// inject for the path they invoke with.
+    pub fn fail_next_read(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .read_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a sticky write failure for `path`. Every [`FsHost::write`]
+    /// call whose input path equals `path` returns
+    /// `io::Error::new(kind, ...)` until the entry is cleared. Matched
+    /// before symlink resolution.
+    pub fn fail_writes_to(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .write_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
 }
 
 impl FsHost for FakeFs {
     fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        if let Some(kind) = state.read_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected read failure", path.display()),
+            ));
+        }
         let resolved = resolve_symlink(&state, path)?;
         match state.entries.get(&resolved) {
             Some(FakeEntry::File { content, .. }) => {
@@ -187,6 +225,12 @@ impl FsHost for FakeFs {
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        if let Some(kind) = state.write_failures.get(path) {
+            return Err(io::Error::new(
+                *kind,
+                format!("{}: injected write failure", path.display()),
+            ));
+        }
         let resolved = resolve_symlink(&state, path)?;
         state.ensure_ancestors(&resolved);
         let mtime = state.tick();
@@ -514,5 +558,41 @@ mod tests {
         fs.remove_file(Path::new("/link")).unwrap();
         assert!(!fs.exists(Path::new("/link")));
         assert!(fs.exists(Path::new("/target")));
+    }
+
+    #[test]
+    fn fail_next_read_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hi");
+        fs.fail_next_read("/x.txt", io::ErrorKind::PermissionDenied);
+        let mut buf = Vec::new();
+        let err = fs.read(Path::new("/x.txt"), &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        fs.read(Path::new("/x.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"hi");
+    }
+
+    #[test]
+    fn fail_next_read_distinct_paths() {
+        let fs = FakeFs::new();
+        fs.insert_file("/a", "aa");
+        fs.insert_file("/b", "bb");
+        fs.fail_next_read("/a", io::ErrorKind::PermissionDenied);
+        let mut buf = Vec::new();
+        fs.read(Path::new("/b"), &mut buf).unwrap();
+        assert_eq!(buf, b"bb");
+        let err = fs.read(Path::new("/a"), &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn fail_writes_to_is_sticky() {
+        let fs = FakeFs::new();
+        fs.fail_writes_to("/locked", io::ErrorKind::PermissionDenied);
+        let first = fs.write(Path::new("/locked"), b"a").unwrap_err();
+        let second = fs.write(Path::new("/locked"), b"b").unwrap_err();
+        assert_eq!(first.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(second.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!fs.exists(Path::new("/locked")));
     }
 }
