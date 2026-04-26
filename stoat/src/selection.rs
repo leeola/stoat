@@ -1333,4 +1333,47 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
         assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n\tghi\n");
     }
+
+    #[test]
+    fn align_selections_pads_shorter_lines_to_match_longest_head() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndefgh\nij\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+        assert_eq!(focused_buffer_text(&mut h), "  abc\ndefgh\n   ij\n");
+    }
+
+    #[test]
+    fn align_selections_already_aligned_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
+
+    #[test]
+    fn align_selections_single_selection_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
+
+    #[test]
+    fn align_selections_skips_multi_line_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndefgh\nij\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
 }

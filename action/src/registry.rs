@@ -11,19 +11,19 @@ use crate::{
         },
         dump::Dump,
         editor::{
-            AddSelectionAbove, AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop,
-            CollapseSelection, Decrement, DeleteSelection, ExtendDown, ExtendLeft,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart,
-            ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
-            GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, KeepPrimarySelection, MoveDown,
-            MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, RotateSelectionsBackward,
-            RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll, SelectLineBelow,
-            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TrimSelections, UnindentSelection,
+            AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
+            AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
+            ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
+            ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace,
+            GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
+            GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
+            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
+            RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
+            SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TrimSelections, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -276,6 +276,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SplitSelectionOnNewline::DEF, |_| {
         Ok(Box::new(SplitSelectionOnNewline))
     });
+    add(AlignSelections::DEF, |_| Ok(Box::new(AlignSelections)));
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -629,7 +630,8 @@ mod tests {
         // + 2 number ops (Increment/Decrement).
         // + 1 DeleteSelection.
         // + 2 line indent ops (IndentSelection/UnindentSelection).
-        assert_eq!(all().count(), 168);
+        // + 1 AlignSelections.
+        assert_eq!(all().count(), 169);
     }
 
     #[test]

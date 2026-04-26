@@ -550,6 +550,135 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let entries: Vec<AlignEntry> = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+
+        let mut out = Vec::with_capacity(editor.selections.all_anchors().len());
+        for sel in editor.selections.all_anchors() {
+            let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+            let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+            let start_pt = rope.offset_to_point(start_offset);
+            let end_pt = rope.offset_to_point(end_offset);
+            if start_pt.row != end_pt.row {
+                return UpdateEffect::None;
+            }
+            let head_pt = if sel.reversed { start_pt } else { end_pt };
+            let head_display = display_snapshot.buffer_to_display(head_pt);
+            out.push(AlignEntry {
+                insert_offset: start_offset,
+                head_col: head_display.column,
+                head_row: head_display.row,
+            });
+        }
+        out
+    };
+
+    if entries.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    let mut row_indices: Vec<u32> = Vec::new();
+    let row_index_for = |row_indices: &mut Vec<u32>, row: u32| -> usize {
+        match row_indices.iter().position(|r| *r == row) {
+            Some(i) => i,
+            None => {
+                row_indices.push(row);
+                row_indices.len() - 1
+            },
+        }
+    };
+
+    let mut ranked: Vec<RankedEntry> = Vec::with_capacity(entries.len());
+    let mut last_row: Option<u32> = None;
+    let mut rank: usize = 0;
+    for entry in entries {
+        if Some(entry.head_row) == last_row {
+            rank += 1;
+        } else {
+            rank = 0;
+            last_row = Some(entry.head_row);
+        }
+        let row_idx = row_index_for(&mut row_indices, entry.head_row);
+        ranked.push(RankedEntry {
+            insert_offset: entry.insert_offset,
+            head_col: entry.head_col,
+            row_idx,
+            rank,
+        });
+    }
+
+    let max_rank = ranked
+        .iter()
+        .map(|e| e.rank)
+        .max()
+        .expect("entries non-empty");
+    let mut offs = vec![0u32; row_indices.len()];
+    let mut edits: Vec<(usize, String)> = Vec::new();
+
+    for current_rank in 0..=max_rank {
+        let max_col = ranked
+            .iter()
+            .filter(|e| e.rank == current_rank)
+            .map(|e| e.head_col + offs[e.row_idx])
+            .max();
+        let Some(max_col) = max_col else { continue };
+
+        for entry in ranked.iter().filter(|e| e.rank == current_rank) {
+            let actual = entry.head_col + offs[entry.row_idx];
+            if max_col > actual {
+                let pad = (max_col - actual) as usize;
+                edits.push((entry.insert_offset, " ".repeat(pad)));
+                offs[entry.row_idx] += pad as u32;
+            }
+        }
+    }
+
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    edits.sort_by_key(|(offset, _)| *offset);
+
+    let buffer_id = ws.editors.get_mut(editor_id).expect("editor").buffer_id;
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (offset, text) in edits.iter().rev() {
+            guard.edit(*offset..*offset, text);
+        }
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| sel.clone());
+    UpdateEffect::Redraw
+}
+
+struct AlignEntry {
+    insert_offset: usize,
+    head_col: u32,
+    head_row: u32,
+}
+
+struct RankedEntry {
+    insert_offset: usize,
+    head_col: u32,
+    row_idx: usize,
+    rank: usize,
+}
+
 pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

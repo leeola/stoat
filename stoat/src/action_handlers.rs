@@ -138,6 +138,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
+        ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),
         ActionKind::DeleteSelection => movement::delete_selection(stoat),

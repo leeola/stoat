@@ -31,6 +31,16 @@ define_action!(
 );
 
 define_action!(
+    AlignSelectionsDef,
+    AlignSelections,
+    "AlignSelections",
+    ActionKind::AlignSelections,
+    "align selections in column",
+    "Insert spaces at the start of each selection so every selection's head sits in the same display column. Selections that span multiple display rows are rejected and the action is a no-op. When several selections live on the same line, the n-th selection on each line aligns with the n-th selection on every other line.",
+    ActionPriority::Rare
+);
+
+define_action!(
     IncrementDef,
     Increment,
     "Increment",
