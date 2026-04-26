@@ -1,4 +1,5 @@
 use ratatui::style::{Color, Modifier};
+use std::ops::Range;
 
 #[derive(Clone)]
 pub struct StyledCell {
@@ -59,6 +60,34 @@ impl VtermGrid {
 
     pub fn width(&self) -> u16 {
         self.width
+    }
+
+    /// Extract the characters within a column/row rect as a string. Both
+    /// ranges are clamped to grid bounds, trailing whitespace is trimmed
+    /// per row, and rows are joined with `\n` with no trailing newline.
+    /// Out-of-bounds or inverted ranges produce `""`.
+    pub fn text_in(&self, cols: Range<usize>, rows: Range<usize>) -> String {
+        let row_start = rows.start.min(self.cells.len());
+        let row_end = rows.end.min(self.cells.len());
+        if row_start >= row_end {
+            return String::new();
+        }
+
+        let width = self.width as usize;
+        let col_start = cols.start.min(width);
+        let col_end = cols.end.min(width);
+
+        let mut lines: Vec<String> = Vec::with_capacity(row_end - row_start);
+        for row in &self.cells[row_start..row_end] {
+            let slice_end = col_end.min(row.len());
+            let raw: String = if col_start >= slice_end {
+                String::new()
+            } else {
+                row[col_start..slice_end].iter().map(|c| c.ch).collect()
+            };
+            lines.push(raw.trim_end().to_string());
+        }
+        lines.join("\n")
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {

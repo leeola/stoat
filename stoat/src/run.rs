@@ -158,4 +158,39 @@ mod tests {
         assert_eq!(row[0].ch, 'R');
         assert_eq!(row[0].fg, Some(Color::Red));
     }
+
+    #[test]
+    fn text_in_extracts_simple_rect() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hello\r\nworld");
+        assert_eq!(grid.text_in(0..5, 0..2), "hello\nworld");
+    }
+
+    #[test]
+    fn text_in_trims_trailing_spaces() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hi");
+        assert_eq!(grid.text_in(0..10, 0..1), "hi");
+    }
+
+    #[test]
+    fn text_in_joins_rows_with_newline() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"a\r\nb\r\nc");
+        assert_eq!(grid.text_in(0..1, 0..3), "a\nb\nc");
+    }
+
+    #[test]
+    fn text_in_clamps_oversize_ranges() {
+        let mut grid = VtermGrid::new(5);
+        grid.feed(b"abc\r\ndef");
+        assert_eq!(grid.text_in(0..100, 0..100), "abc\ndef");
+    }
+
+    #[test]
+    fn text_in_returns_empty_for_out_of_bounds_rows() {
+        let mut grid = VtermGrid::new(5);
+        grid.feed(b"abc");
+        assert_eq!(grid.text_in(0..5, 5..10), "");
+    }
 }
