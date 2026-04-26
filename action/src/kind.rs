@@ -25,6 +25,7 @@ pub enum ActionKind {
     OpenHelp,
     OpenReview,
     AddSelectionBelow,
+    AddSelectionAbove,
     MoveLeft,
     MoveRight,
     MoveUp,

@@ -11,6 +11,16 @@ define_action!(
 );
 
 define_action!(
+    AddSelectionAboveDef,
+    AddSelectionAbove,
+    "AddSelectionAbove",
+    ActionKind::AddSelectionAbove,
+    "add cursor above",
+    "Add a new cursor on the line above the newest cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

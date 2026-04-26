@@ -11,17 +11,17 @@ use crate::{
         },
         dump::Dump,
         editor::{
-            AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop, CollapseSelection,
-            ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
-            ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
-            ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace,
-            GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
-            GotoWindowTop, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
-            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
-            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TrimSelections,
+            AddSelectionAbove, AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop,
+            CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
+            ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
+            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
+            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp,
+            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
+            RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
+            SelectLineBelow, SwitchCase, SwitchToLowercase, SwitchToUppercase, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -193,6 +193,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         }))
     });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
+    add(AddSelectionAbove::DEF, |_| Ok(Box::new(AddSelectionAbove)));
     add(MoveLeft::DEF, |_| Ok(Box::new(MoveLeft)));
     add(MoveRight::DEF, |_| Ok(Box::new(MoveRight)));
     add(MoveUp::DEF, |_| Ok(Box::new(MoveUp)));
@@ -613,7 +614,8 @@ mod tests {
         // + 1 case toggle (SwitchCase).
         // + 2 case-force (SwitchToUppercase/Lowercase).
         // + 4 long-word motions (MoveNextLongWordStart/End, MovePrevLongWordStart/End).
-        assert_eq!(all().count(), 161);
+        // + 1 AddSelectionAbove (mirror of AddSelectionBelow).
+        assert_eq!(all().count(), 162);
     }
 
     #[test]

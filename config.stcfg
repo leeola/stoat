@@ -139,6 +139,7 @@ on key {
         : -> OpenCommandPalette();
         i -> SetMode(insert);
         C -> AddSelectionBelow();
+        Alt-C -> AddSelectionAbove();
         h -> MoveLeft();
         j -> MoveDown();
         k -> MoveUp();

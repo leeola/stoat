@@ -136,6 +136,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
+        ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),

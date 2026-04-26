@@ -144,6 +144,20 @@ pub(super) enum WordTarget {
 }
 
 pub(super) fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
+    add_selection_in_direction(stoat, AddDirection::Below)
+}
+
+pub(super) fn add_selection_above(stoat: &mut Stoat) -> UpdateEffect {
+    add_selection_in_direction(stoat, AddDirection::Above)
+}
+
+#[derive(Copy, Clone)]
+enum AddDirection {
+    Above,
+    Below,
+}
+
+fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -163,10 +177,20 @@ pub(super) fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
     let max_row = display_snapshot.max_point().row;
     let mut row = source_display.row;
     let target = loop {
-        if row >= max_row {
-            return UpdateEffect::None;
+        match dir {
+            AddDirection::Below => {
+                if row >= max_row {
+                    return UpdateEffect::None;
+                }
+                row += 1;
+            },
+            AddDirection::Above => {
+                if row == 0 {
+                    return UpdateEffect::None;
+                }
+                row -= 1;
+            },
         }
-        row += 1;
         let clamped_col = goal_col.min(display_snapshot.line_len(row));
         let raw = DisplayPoint::new(row, clamped_col);
         let clipped = display_snapshot.clip_point(raw, Bias::Left);
