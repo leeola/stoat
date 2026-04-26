@@ -106,6 +106,10 @@ struct FakeState {
     /// on the next matching `create_dir_all` call, before symlink
     /// resolution.
     create_dir_all_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot remove_file failures keyed by input path. Drained on
+    /// the next matching `remove_file` call, before symlink
+    /// resolution.
+    remove_file_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -149,6 +153,7 @@ impl FakeFs {
                 list_dir_failures: HashMap::new(),
                 canonicalize_failures: HashMap::new(),
                 create_dir_all_failures: HashMap::new(),
+                remove_file_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -278,6 +283,18 @@ impl FakeFs {
         let mut state = self.state.lock().unwrap();
         state
             .create_dir_all_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot remove_file failure for `path`. The next
+    /// [`FsHost::remove_file`] call whose input path equals `path`
+    /// returns `io::Error::new(kind, ...)` and clears the arm;
+    /// subsequent calls behave normally. Matched before symlink
+    /// resolution, so callers inject for the path they invoke with.
+    pub fn fail_next_remove_file(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .remove_file_failures
             .insert(path.as_ref().to_path_buf(), kind);
     }
 
@@ -478,6 +495,12 @@ impl FsHost for FakeFs {
         state.ops.push(FakeFsOp::RemoveFile {
             path: path.to_path_buf(),
         });
+        if let Some(kind) = state.remove_file_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected remove_file failure", path.display()),
+            ));
+        }
         match state.entries.get(path) {
             Some(FakeEntry::File { .. } | FakeEntry::Symlink { .. }) => {
                 state.entries.remove(path);
@@ -841,6 +864,32 @@ mod tests {
             fs.ops(),
             [FakeFsOp::CreateDirAll {
                 path: PathBuf::from("/d"),
+            }]
+        );
+    }
+
+    #[test]
+    fn fail_next_remove_file_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hi");
+        fs.fail_next_remove_file("/x.txt", io::ErrorKind::PermissionDenied);
+        let err = fs.remove_file(Path::new("/x.txt")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(fs.exists(Path::new("/x.txt")));
+        fs.remove_file(Path::new("/x.txt")).unwrap();
+        assert!(!fs.exists(Path::new("/x.txt")));
+    }
+
+    #[test]
+    fn fail_next_remove_file_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x", "");
+        fs.fail_next_remove_file("/x", io::ErrorKind::PermissionDenied);
+        let _ = fs.remove_file(Path::new("/x"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::RemoveFile {
+                path: PathBuf::from("/x"),
             }]
         );
     }
