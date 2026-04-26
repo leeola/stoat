@@ -102,6 +102,10 @@ struct FakeState {
     /// the next matching `canonicalize` call, before symlink
     /// resolution.
     canonicalize_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot create_dir_all failures keyed by input path. Drained
+    /// on the next matching `create_dir_all` call, before symlink
+    /// resolution.
+    create_dir_all_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -144,6 +148,7 @@ impl FakeFs {
                 metadata_failures: HashMap::new(),
                 list_dir_failures: HashMap::new(),
                 canonicalize_failures: HashMap::new(),
+                create_dir_all_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -261,6 +266,18 @@ impl FakeFs {
         let mut state = self.state.lock().unwrap();
         state
             .canonicalize_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot create_dir_all failure for `path`. The next
+    /// [`FsHost::create_dir_all`] call whose input path equals `path`
+    /// returns `io::Error::new(kind, ...)` and clears the arm;
+    /// subsequent calls behave normally. Matched before symlink
+    /// resolution, so callers inject for the path they invoke with.
+    pub fn fail_next_create_dir_all(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .create_dir_all_failures
             .insert(path.as_ref().to_path_buf(), kind);
     }
 
@@ -419,6 +436,12 @@ impl FsHost for FakeFs {
         state.ops.push(FakeFsOp::CreateDirAll {
             path: path.to_path_buf(),
         });
+        if let Some(kind) = state.create_dir_all_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected create_dir_all failure", path.display()),
+            ));
+        }
         let resolved = resolve_symlink(&state, path)?;
         state.ensure_ancestors(&resolved);
         if !state.entries.contains_key(&resolved) {
@@ -793,6 +816,31 @@ mod tests {
             fs.ops(),
             [FakeFsOp::Canonicalize {
                 path: PathBuf::from("/x"),
+            }]
+        );
+    }
+
+    #[test]
+    fn fail_next_create_dir_all_fires_once() {
+        let fs = FakeFs::new();
+        fs.fail_next_create_dir_all("/d", io::ErrorKind::PermissionDenied);
+        let err = fs.create_dir_all(Path::new("/d")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(!fs.exists(Path::new("/d")));
+        fs.create_dir_all(Path::new("/d")).unwrap();
+        let m = fs.metadata(Path::new("/d")).unwrap().unwrap();
+        assert!(m.is_dir);
+    }
+
+    #[test]
+    fn fail_next_create_dir_all_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.fail_next_create_dir_all("/d", io::ErrorKind::PermissionDenied);
+        let _ = fs.create_dir_all(Path::new("/d"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::CreateDirAll {
+                path: PathBuf::from("/d"),
             }]
         );
     }
