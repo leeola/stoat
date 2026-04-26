@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 chumsky = "0.9"
-ariadne = "0.4"
+ariadne = "0.6"
 
 [lints]
 workspace = true

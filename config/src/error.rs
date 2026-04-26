@@ -27,10 +27,11 @@ pub fn format_errors(source: &str, errors: &[ParseError]) -> String {
     let mut output = Vec::new();
 
     for error in errors {
+        let span = ((), error.span.clone());
         let mut report =
-            Report::build(ReportKind::Error, (), error.span.start).with_message(&error.message);
+            Report::build(ReportKind::Error, span.clone()).with_message(&error.message);
 
-        let mut label = Label::new(error.span.clone()).with_color(Color::Red);
+        let mut label = Label::new(span).with_color(Color::Red);
         if let Some(ref label_text) = error.label {
             label = label.with_message(label_text);
         }
