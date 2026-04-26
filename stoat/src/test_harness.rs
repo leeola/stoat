@@ -40,6 +40,10 @@ pub struct Frame {
 const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 
+/// `(sha, message, files)` triple consumed by [`TestHarness::seed_linear_history`].
+/// `files` is itself a slice of `(rel_path, content)` pairs.
+pub(crate) type CommitSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+
 pub struct TestHarness {
     pub(crate) stoat: Stoat,
     #[allow(dead_code)]
@@ -664,11 +668,7 @@ impl TestHarness {
     /// Seed a linear chain of commits into the fake git repo at `workdir`.
     /// Each entry is `(sha, message, files)` where `files` is a list of
     /// `(rel_path, content)`. Each commit's parent is the previous entry.
-    pub(crate) fn seed_linear_history(
-        &self,
-        workdir: &str,
-        commits: &[(&str, &str, &[(&str, &str)])],
-    ) {
+    pub(crate) fn seed_linear_history(&self, workdir: &str, commits: &[CommitSpec<'_>]) {
         let mut builder = self.fake_git.add_repo(workdir);
         let mut prev: Option<&str> = None;
         for (sha, message, files) in commits {

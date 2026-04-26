@@ -169,12 +169,12 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, host::GitHost};
+    use crate::{app::Stoat, host::GitHost, test_harness::CommitSpec};
 
     /// Three-commit linear history for the working-directory path
     /// `/repo` with the oldest commit at the bottom, matching git's
     /// top-down newest-first log ordering.
-    const HISTORY: &[(&str, &str, &[(&str, &str)])] = &[
+    const HISTORY: &[CommitSpec<'static>] = &[
         ("c1000001", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
         (
             "c1000002",

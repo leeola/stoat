@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn command_palette_opens_file_end_to_end() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         let path = h.write_file("palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn command_palette_escape_cancels() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":Open");
         h.type_keys("escape");
         let frame = h.snapshot();
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn command_palette_filter_narrows_on_typing() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":quit");
         h.type_keys("enter");
         let frame = h.snapshot();
@@ -772,7 +772,7 @@ mod tests {
 
     #[test]
     fn command_palette_down_then_enter_dispatches_selection() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":Focus");
         h.type_keys("down enter");
         assert!(h.stoat.command_palette.is_none());
@@ -780,14 +780,14 @@ mod tests {
 
     #[test]
     fn snapshot_command_palette_filter_empty() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":");
         h.assert_snapshot("command_palette_filter_empty");
     }
 
     #[test]
     fn snapshot_command_palette_scope_all_after_backtab() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":");
         h.type_keys("backtab");
         h.assert_snapshot("command_palette_scope_all_after_backtab");
@@ -795,7 +795,7 @@ mod tests {
 
     #[test]
     fn backtab_toggles_scope_to_all_and_back() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":");
         assert_eq!(
             h.stoat.command_palette.as_ref().unwrap().scope(),
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn abort_rebase_hidden_by_default_visible_after_backtab() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":Abort");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
@@ -838,21 +838,21 @@ mod tests {
 
     #[test]
     fn snapshot_command_palette_filter_typing() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":Foc");
         h.assert_snapshot("command_palette_filter_typing");
     }
 
     #[test]
     fn snapshot_command_palette_filter_narrows_to_one() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":quitA");
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 
     #[test]
     fn snapshot_command_palette_collect_args_empty() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":OpenFile");
         h.type_keys("enter");
         h.assert_snapshot("command_palette_collect_args_empty");
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn snapshot_command_palette_collect_args_typing() {
-        let mut h = crate::Stoat::test();
+        let mut h = Stoat::test();
         h.type_text(":OpenFile");
         h.type_keys("enter");
         h.type_text("/tmp/example.rs");

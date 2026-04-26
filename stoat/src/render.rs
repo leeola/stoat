@@ -209,8 +209,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         if let Some(run_state) = ws.runs.get(run_id) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
-    } else if stoat.help.is_some() {
-        let help = stoat.help.as_ref().expect("just checked");
+    } else if let Some(help) = &stoat.help {
         help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf);
         let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
@@ -229,8 +228,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             hints_overlay_area(size),
             buf,
         );
-    } else if stoat.file_finder.is_some() {
-        let finder = stoat.file_finder.as_mut().expect("just checked");
+    } else if let Some(finder) = &mut stoat.file_finder {
         file_finder::render_file_finder(finder, ws, &*stoat.fs_host, &stoat.theme, size, buf);
         let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
@@ -249,8 +247,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             hints_overlay_area(size),
             buf,
         );
-    } else if stoat.command_palette.is_some() {
-        let palette = stoat.command_palette.as_mut().expect("just checked");
+    } else if let Some(palette) = &mut stoat.command_palette {
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
         let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "palette_open");

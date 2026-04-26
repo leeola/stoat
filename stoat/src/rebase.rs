@@ -184,9 +184,9 @@ impl ActiveRebase {
 #[cfg(test)]
 mod tests {
     use super::RebasePause;
-    use crate::app::Stoat;
+    use crate::{app::Stoat, test_harness::CommitSpec};
 
-    const THREE_COMMITS: &[(&str, &str, &[(&str, &str)])] = &[
+    const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
         ("c2", "c2: middle", &[("a.rs", "line1\nline2\n")]),
         ("c3", "c3: tip", &[("a.rs", "line1\nline2\nline3\n")]),
