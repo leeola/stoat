@@ -3,13 +3,14 @@
 //! rebase or other transient workspace configuration so bugs can be
 //! reproduced in isolation.
 //!
-//! The save path writes a compressed tarball to
-//! `<XDG_DATA_HOME>/stoat/dumps/<id>.tar.zst` containing the working tree
-//! (respecting `.gitignore`, always including `.git/` and `.stoat/`) and a
-//! `.stoat/dump.ron` file carrying the dump metadata. The load path
-//! (`stoat dump open <id>`) extracts the tarball to a fresh tempdir so
+//! The save path writes a single bundle file to
+//! `<XDG_DATA_HOME>/stoat/dumps/<id>.dump` containing the working tree
+//! (respecting `.gitignore`, always including `.git/` and `.stoat/`) plus
+//! the dump metadata in a framed binary format. The load path
+//! (`stoat dump open <id>`) extracts the bundle to a fresh tempdir so
 //! the original is never mutated.
 
+mod bundle;
 pub mod meta;
 mod save;
 pub(crate) mod snapshot;
@@ -18,7 +19,7 @@ use crate::host::FsHost;
 pub use meta::DumpMeta;
 pub use save::save_at;
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -34,7 +35,7 @@ const MAX_NAME_LEN: usize = 64;
 
 const DUMPS_SUBDIR: &str = "dumps";
 
-const ARCHIVE_SUFFIX: &str = ".tar.zst";
+const ARCHIVE_SUFFIX: &str = ".dump";
 
 /// Stable identifier for a dump. Format: `<YYYY-MM-DD_HH-MM-SS>_<sanitized-name>`.
 /// Sortable as a plain string in chronological order.
@@ -61,7 +62,7 @@ impl DumpId {
     }
 
     /// Parse an id out of an archive filename (accepts the full
-    /// `<id>.tar.zst` name).
+    /// `<id>.dump` name).
     pub fn from_filename(filename: &str) -> Option<Self> {
         filename
             .strip_suffix(ARCHIVE_SUFFIX)
@@ -276,25 +277,43 @@ pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpE
     Ok(removed)
 }
 
-/// Extract a dump archive into `dest`. `dest` must already exist and
-/// be empty. The archive is streamed through zstd decoding + tar
-/// extraction; no intermediate staging occurs.
+/// Extract a dump bundle into `dest`. `dest` must already exist.
+/// Reads the bundle through `FsHost::read` and re-materialises every
+/// captured file through `FsHost::write`, plus a `.stoat/dump.ron` file
+/// rebuilt from the bundle header.
 pub fn extract(id: &DumpId, dest: &Path, fs: &dyn FsHost) -> Result<(), DumpError> {
     let archive = dumps_dir()?.join(id.filename());
     if !fs.exists(&archive) {
         return Err(DumpError::NotFound(id.as_str().to_string()));
     }
-    read_archive(&archive, dest)
+    read_archive(&archive, dest, fs)
 }
 
-/// Low-level reader: extract the archive at exactly `archive_path` into
+/// Low-level reader: extract the bundle at exactly `archive_path` into
 /// `dest`. Callers that already know the archive path (tests, internal
 /// replay tooling) bypass [`dumps_dir`] via this entry point.
-pub(crate) fn read_archive(archive_path: &Path, dest: &Path) -> Result<(), DumpError> {
-    let file = fs::File::open(archive_path)?;
-    let decoder = zstd::Decoder::new(file).map_err(DumpError::Io)?;
-    let mut tar = tar::Archive::new(decoder);
-    tar.unpack(dest).map_err(DumpError::Io)?;
+pub(crate) fn read_archive(
+    archive_path: &Path,
+    dest: &Path,
+    fs: &dyn FsHost,
+) -> Result<(), DumpError> {
+    let mut buf = Vec::new();
+    fs.read(archive_path, &mut buf)?;
+    let (meta_ron, entries) = bundle::deserialize(&buf)?;
+
+    for (rel, content) in &entries {
+        let target = dest.join(rel);
+        if let Some(parent) = target.parent() {
+            fs.create_dir_all(parent)?;
+        }
+        fs.write(&target, content)?;
+    }
+
+    let meta_target = dest.join(meta::META_PATH_IN_ARCHIVE);
+    if let Some(parent) = meta_target.parent() {
+        fs.create_dir_all(parent)?;
+    }
+    fs.write(&meta_target, meta_ron.as_bytes())?;
     Ok(())
 }
 
@@ -420,7 +439,7 @@ mod tests {
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
         let id = DumpId::new("my bug", at).unwrap();
         assert_eq!(id.as_str(), "2026-04-19_14-23-11_my-bug");
-        assert_eq!(id.filename(), "2026-04-19_14-23-11_my-bug.tar.zst");
+        assert_eq!(id.filename(), "2026-04-19_14-23-11_my-bug.dump");
         assert_eq!(id.name(), Some("my-bug"));
     }
 
@@ -490,15 +509,15 @@ mod tests {
         assert_eq!(rebase.selected, 2);
     }
 
-    /// Intentional real-`std::fs` test: `write_archive` and
-    /// `read_archive` stream through `tar` + `zstd` against real
-    /// `std::fs::File` handles, which `FsHost`'s buffer-based
-    /// `read` / `write` API cannot replace without holding the full
-    /// archive in memory. `TempDir` scopes the workspace and archive
-    /// roots so cleanup is automatic.
+    /// Bundle write goes through `FsHost`, but the working-tree gather
+    /// in `write_archive` still uses `WalkBuilder` against real disk,
+    /// so the source workspace lives in `TempDir`. `LocalFs` is passed
+    /// to `write_archive` / `read_archive` to drive the actual bundle
+    /// IO; once the gather routes through `FsHost::list_dir` the test
+    /// can move to `FakeFs` (TODO line 56).
     #[test]
     fn save_extract_roundtrip() {
-        use crate::workspace::Workspace;
+        use crate::{host::LocalFs, workspace::Workspace};
         use std::{fs as stdfs, sync::Arc};
         use stoat_scheduler::TestScheduler;
         use tempfile::TempDir;
@@ -519,13 +538,13 @@ mod tests {
         let workspace = Workspace::new(root.to_path_buf(), &executor);
 
         let archive_dir = TempDir::new().unwrap();
-        let archive_path = archive_dir.path().join("test.tar.zst");
+        let archive_path = archive_dir.path().join("test.dump");
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
         let id = DumpId::new("roundtrip-test", at).unwrap();
-        save::write_archive(&workspace, "normal", &id, at, &archive_path).unwrap();
+        save::write_archive(&workspace, "normal", &id, at, &archive_path, &LocalFs).unwrap();
 
         let dest = TempDir::new().unwrap();
-        read_archive(&archive_path, dest.path()).unwrap();
+        read_archive(&archive_path, dest.path(), &LocalFs).unwrap();
 
         assert_eq!(
             stdfs::read(dest.path().join("README.md")).unwrap(),
