@@ -92,6 +92,9 @@ struct FakeState {
     /// matching `write` call until the entry is cleared; this commit
     /// has no removal API, matching the short-lived test fakes.
     write_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot metadata failures keyed by input path. Drained on the
+    /// next matching `metadata` call, before symlink resolution.
+    metadata_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -131,6 +134,7 @@ impl FakeFs {
                 clock: 0,
                 read_failures: HashMap::new(),
                 write_failures: HashMap::new(),
+                metadata_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -215,6 +219,18 @@ impl FakeFs {
             .insert(path.as_ref().to_path_buf(), kind);
     }
 
+    /// Arm a one-shot metadata failure for `path`. The next
+    /// [`FsHost::metadata`] call whose input path equals `path` returns
+    /// `io::Error::new(kind, ...)` and clears the arm; subsequent calls
+    /// behave normally. Matched before symlink resolution, so callers
+    /// inject for the path they invoke with.
+    pub fn fail_next_metadata(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .metadata_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
     /// Snapshot of every [`FsHost`] method invoked on this fake, in
     /// call order. Recorded against the input path before symlink
     /// resolution and before error-injection checks, so failed and
@@ -286,6 +302,12 @@ impl FsHost for FakeFs {
         state.ops.push(FakeFsOp::Metadata {
             path: path.to_path_buf(),
         });
+        if let Some(kind) = state.metadata_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected metadata failure", path.display()),
+            ));
+        }
         Ok(state.entries.get(path).map(|entry| match entry {
             FakeEntry::File { content, mtime } => FsMetadata {
                 len: content.len() as u64,
@@ -650,6 +672,31 @@ mod tests {
         assert_eq!(first.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(second.kind(), io::ErrorKind::PermissionDenied);
         assert!(!fs.exists(Path::new("/locked")));
+    }
+
+    #[test]
+    fn fail_next_metadata_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x.txt", "hi");
+        fs.fail_next_metadata("/x.txt", io::ErrorKind::PermissionDenied);
+        let err = fs.metadata(Path::new("/x.txt")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let m = fs.metadata(Path::new("/x.txt")).unwrap().unwrap();
+        assert_eq!(m.len, 2);
+    }
+
+    #[test]
+    fn fail_next_metadata_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x", "ok");
+        fs.fail_next_metadata("/x", io::ErrorKind::PermissionDenied);
+        let _ = fs.metadata(Path::new("/x"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::Metadata {
+                path: PathBuf::from("/x"),
+            }]
+        );
     }
 
     #[test]
