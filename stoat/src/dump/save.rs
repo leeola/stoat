@@ -2,18 +2,11 @@ use super::{
     bundle, dumps_dir,
     meta::DumpMeta,
     snapshot::{ActiveRebaseSnap, WorkspaceSnapshot},
-    DumpError, DumpId,
+    walker, DumpError, DumpId,
 };
 use crate::{app::Stoat, host::FsHost, workspace::Workspace};
-use ignore::WalkBuilder;
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 use time::OffsetDateTime;
-use walkdir::WalkDir;
-
-const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 
 /// Write a dump bundle to `<XDG_DATA_HOME>/stoat/dumps/<id>.dump`.
 ///
@@ -47,10 +40,6 @@ pub fn save_at(
 /// the IO-bound work out of [`save_at`] so callers that already know
 /// where the bundle should go (tests, internal replay tooling) can
 /// bypass [`dumps_dir`].
-///
-/// The working-tree gather still uses real `std::fs` via `WalkBuilder`
-/// / `WalkDir`; only the bundle write goes through `FsHost`. Routing
-/// the gather through `FsHost::list_dir` is tracked separately.
 pub(crate) fn write_archive(
     workspace: &Workspace,
     mode: &str,
@@ -76,60 +65,7 @@ pub(crate) fn write_archive(
     };
     let meta_ron = meta.to_ron().map_err(|e| DumpError::Ron(e.to_string()))?;
 
-    let mut entries: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
-    let mut added: HashSet<PathBuf> = HashSet::new();
-
-    let walker = WalkBuilder::new(&git_root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .require_git(false)
-        .build();
-    for entry in walker.flatten() {
-        let path = entry.path();
-        if path == git_root {
-            continue;
-        }
-        let rel = match path.strip_prefix(&git_root) {
-            Ok(r) => r.to_path_buf(),
-            Err(_) => continue,
-        };
-        if FORCE_INCLUDE_DIRS.iter().any(|top| rel.starts_with(top)) {
-            continue;
-        }
-        let ft = match entry.file_type() {
-            Some(ft) => ft,
-            None => continue,
-        };
-        if ft.is_file() && !added.contains(&rel) {
-            let bytes = std::fs::read(path)?;
-            entries.insert(rel.clone(), bytes);
-            added.insert(rel);
-        }
-    }
-
-    for top in FORCE_INCLUDE_DIRS {
-        let src = git_root.join(top);
-        if !src.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(&src).follow_links(false).into_iter().flatten() {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = match entry.path().strip_prefix(&git_root) {
-                Ok(r) => r.to_path_buf(),
-                Err(_) => continue,
-            };
-            if added.contains(&rel) {
-                continue;
-            }
-            let bytes = std::fs::read(entry.path())?;
-            entries.insert(rel.clone(), bytes);
-            added.insert(rel);
-        }
-    }
+    let entries = walker::gather_workspace_files(fs, &git_root)?;
 
     let bundle_bytes = bundle::serialize(&meta_ron, &entries)?;
     fs.write(archive_path, &bundle_bytes)?;

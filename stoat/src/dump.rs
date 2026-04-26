@@ -14,6 +14,12 @@ mod bundle;
 pub mod meta;
 mod save;
 pub(crate) mod snapshot;
+mod walker;
+
+/// Top-level workspace directories that bypass `.gitignore` checks
+/// when capturing a dump. These hold repo + editor metadata that the
+/// load path needs even when a user has gitignored them.
+const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 
 use crate::host::FsHost;
 pub use meta::DumpMeta;
@@ -509,60 +515,49 @@ mod tests {
         assert_eq!(rebase.selected, 2);
     }
 
-    /// Bundle write goes through `FsHost`, but the working-tree gather
-    /// in `write_archive` still uses `WalkBuilder` against real disk,
-    /// so the source workspace lives in `TempDir`. `LocalFs` is passed
-    /// to `write_archive` / `read_archive` to drive the actual bundle
-    /// IO; once the gather routes through `FsHost::list_dir` the test
-    /// can move to `FakeFs` (TODO line 56).
     #[test]
     fn save_extract_roundtrip() {
-        use crate::{host::LocalFs, workspace::Workspace};
-        use std::{fs as stdfs, sync::Arc};
+        use crate::{host::FakeFs, workspace::Workspace};
+        use std::sync::Arc;
         use stoat_scheduler::TestScheduler;
-        use tempfile::TempDir;
 
-        let src = TempDir::new().unwrap();
-        let root = src.path();
-        stdfs::write(root.join("README.md"), b"hello").unwrap();
-        stdfs::create_dir_all(root.join("src")).unwrap();
-        stdfs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
-        stdfs::create_dir_all(root.join(".git/refs")).unwrap();
-        stdfs::write(root.join(".git/HEAD"), b"ref: refs/heads/main").unwrap();
-        stdfs::write(root.join(".gitignore"), b"ignored/\n").unwrap();
-        stdfs::create_dir_all(root.join("ignored")).unwrap();
-        stdfs::write(root.join("ignored/secret"), b"dont-include-me").unwrap();
+        let fake = FakeFs::new();
+        let root = PathBuf::from("/ws");
+        fake.insert_file("/ws/README.md", "hello");
+        fake.insert_file("/ws/src/main.rs", "fn main() {}");
+        fake.insert_file("/ws/.git/HEAD", "ref: refs/heads/main");
+        fake.insert_file("/ws/.gitignore", "ignored/\n");
+        fake.insert_file("/ws/ignored/secret", "dont-include-me");
 
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
-        let workspace = Workspace::new(root.to_path_buf(), &executor);
+        let workspace = Workspace::new(root.clone(), &executor);
 
-        let archive_dir = TempDir::new().unwrap();
-        let archive_path = archive_dir.path().join("test.dump");
+        let archive_path = PathBuf::from("/dumps/test.dump");
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
         let id = DumpId::new("roundtrip-test", at).unwrap();
-        save::write_archive(&workspace, "normal", &id, at, &archive_path, &LocalFs).unwrap();
+        save::write_archive(&workspace, "normal", &id, at, &archive_path, &fake).unwrap();
 
-        let dest = TempDir::new().unwrap();
-        read_archive(&archive_path, dest.path(), &LocalFs).unwrap();
+        let dest = PathBuf::from("/extracted");
+        read_archive(&archive_path, &dest, &fake).unwrap();
 
-        assert_eq!(
-            stdfs::read(dest.path().join("README.md")).unwrap(),
-            b"hello"
-        );
-        assert_eq!(
-            stdfs::read(dest.path().join("src/main.rs")).unwrap(),
-            b"fn main() {}"
-        );
-        assert_eq!(
-            stdfs::read(dest.path().join(".git/HEAD")).unwrap(),
-            b"ref: refs/heads/main"
-        );
+        let mut buf = Vec::new();
+        fake.read(&dest.join("README.md"), &mut buf).unwrap();
+        assert_eq!(buf, b"hello");
+        buf.clear();
+        fake.read(&dest.join("src/main.rs"), &mut buf).unwrap();
+        assert_eq!(buf, b"fn main() {}");
+        buf.clear();
+        fake.read(&dest.join(".git/HEAD"), &mut buf).unwrap();
+        assert_eq!(buf, b"ref: refs/heads/main");
         assert!(
-            !dest.path().join("ignored/secret").exists(),
+            !fake.exists(&dest.join("ignored/secret")),
             "gitignored path should be excluded"
         );
-        let meta_ron = stdfs::read_to_string(dest.path().join(".stoat/dump.ron")).unwrap();
+
+        buf.clear();
+        fake.read(&dest.join(".stoat/dump.ron"), &mut buf).unwrap();
+        let meta_ron = String::from_utf8(buf).unwrap();
         let meta = DumpMeta::from_ron(&meta_ron).unwrap();
         assert_eq!(meta.name, "roundtrip-test");
         assert_eq!(meta.git_root, root);
