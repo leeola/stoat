@@ -102,6 +102,15 @@ impl TestHarness {
         &self.fake_fs
     }
 
+    /// Seed a fixture file into the fake filesystem at `path` with the
+    /// given `contents`. Convenience over `fake_fs().insert_file(...)` for
+    /// the common test pattern of pre-populating one file before driving
+    /// the harness; see [`crate::host::FakeFs::insert_file`] for the
+    /// underlying semantics including ancestor-directory creation.
+    pub fn seed_fixture(&self, path: impl AsRef<std::path::Path>, contents: impl AsRef<[u8]>) {
+        self.fake_fs.insert_file(path, contents);
+    }
+
     /// Expose the [`crate::host::FakeGit`] backing this harness. Use its
     /// `add_repo(...).with_fs(&self.fake_fs)` to populate a repository plus
     /// working-tree state for review-mode tests.
