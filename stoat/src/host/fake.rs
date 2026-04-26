@@ -95,6 +95,9 @@ struct FakeState {
     /// One-shot metadata failures keyed by input path. Drained on the
     /// next matching `metadata` call, before symlink resolution.
     metadata_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot list_dir failures keyed by input path. Drained on the
+    /// next matching `list_dir` call, before symlink resolution.
+    list_dir_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -135,6 +138,7 @@ impl FakeFs {
                 read_failures: HashMap::new(),
                 write_failures: HashMap::new(),
                 metadata_failures: HashMap::new(),
+                list_dir_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -228,6 +232,18 @@ impl FakeFs {
         let mut state = self.state.lock().unwrap();
         state
             .metadata_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot list_dir failure for `path`. The next
+    /// [`FsHost::list_dir`] call whose input path equals `path` returns
+    /// `io::Error::new(kind, ...)` and clears the arm; subsequent calls
+    /// behave normally. Matched before symlink resolution, so callers
+    /// inject for the path they invoke with.
+    pub fn fail_next_list_dir(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .list_dir_failures
             .insert(path.as_ref().to_path_buf(), kind);
     }
 
@@ -335,6 +351,12 @@ impl FsHost for FakeFs {
         state.ops.push(FakeFsOp::ListDir {
             path: path.to_path_buf(),
         });
+        if let Some(kind) = state.list_dir_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected list_dir failure", path.display()),
+            ));
+        }
         let resolved = resolve_symlink(&state, path)?;
         match state.entries.get(&resolved) {
             Some(FakeEntry::Dir { .. }) => {},
@@ -695,6 +717,33 @@ mod tests {
             fs.ops(),
             [FakeFsOp::Metadata {
                 path: PathBuf::from("/x"),
+            }]
+        );
+    }
+
+    #[test]
+    fn fail_next_list_dir_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/d");
+        fs.insert_file("/d/a", "");
+        fs.fail_next_list_dir("/d", io::ErrorKind::PermissionDenied);
+        let err = fs.list_dir(Path::new("/d")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let entries = fs.list_dir(Path::new("/d")).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a"]);
+    }
+
+    #[test]
+    fn fail_next_list_dir_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/d");
+        fs.fail_next_list_dir("/d", io::ErrorKind::PermissionDenied);
+        let _ = fs.list_dir(Path::new("/d"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::ListDir {
+                path: PathBuf::from("/d"),
             }]
         );
     }
