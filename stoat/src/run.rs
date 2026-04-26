@@ -148,4 +148,14 @@ mod tests {
         assert_eq!(row[1].ch, 'N');
         assert_eq!(row[1].fg, None);
     }
+
+    #[test]
+    fn grid_escape_sequence_spans_feed_calls() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"\x1b[31");
+        grid.feed(b"mR");
+        let row = grid.row(0);
+        assert_eq!(row[0].ch, 'R');
+        assert_eq!(row[0].fg, Some(Color::Red));
+    }
 }

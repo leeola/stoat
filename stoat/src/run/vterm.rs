@@ -28,6 +28,10 @@ pub struct VtermGrid {
     pen_bg: Option<Color>,
     pen_modifiers: Modifier,
     pub alt_screen_detected: bool,
+    /// Persisted across `feed` calls so escape sequences whose bytes
+    /// straddle two PTY reads finish parsing on the second call instead
+    /// of being dropped at the chunk boundary.
+    parser: vte::Parser,
 }
 
 impl VtermGrid {
@@ -41,6 +45,7 @@ impl VtermGrid {
             pen_bg: None,
             pen_modifiers: Modifier::empty(),
             alt_screen_detected: false,
+            parser: vte::Parser::new(),
         }
     }
 
@@ -57,12 +62,11 @@ impl VtermGrid {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        let mut parser = vte::Parser::new();
-        // FIXME: reusing a single parser across feed() calls would preserve
-        // escape sequence state spanning chunk boundaries.
+        let mut parser = std::mem::take(&mut self.parser);
         for &byte in bytes {
             parser.advance(self, byte);
         }
+        self.parser = parser;
     }
 
     fn ensure_row(&mut self, row: usize) {
