@@ -1247,4 +1247,34 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToLowercase);
         assert_eq!(focused_buffer_text(&mut h), "hello world!\n");
     }
+
+    #[test]
+    fn delete_selection_removes_full_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello world\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(focused_buffer_text(&mut h), "");
+    }
+
+    #[test]
+    fn delete_selection_empty_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
+
+    #[test]
+    fn delete_selection_removes_each_split_cursor_range() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(focused_buffer_text(&mut h), "\n\n\n");
+    }
 }

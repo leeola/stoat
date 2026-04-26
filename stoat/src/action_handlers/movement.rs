@@ -736,6 +736,72 @@ fn apply_decimal_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, mut deletions) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let deletions: Vec<(usize, usize, usize)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let s = buffer_snapshot.resolve_anchor(&sel.start);
+                let e = buffer_snapshot.resolve_anchor(&sel.end);
+                if s != e {
+                    Some((sel.id, s, e))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        (buffer_id, deletions)
+    };
+
+    if deletions.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    deletions.sort_by_key(|(_, s, _)| *s);
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (_, s, e) in deletions.iter().rev() {
+            guard.edit(*s..*e, "");
+        }
+    }
+
+    let deleted_ids: std::collections::HashSet<usize> =
+        deletions.iter().map(|(id, _, _)| *id).collect();
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if deleted_ids.contains(&sel.id) {
+            let post_offset = new_buf.resolve_anchor(&sel.start);
+            let anchor = new_buf.anchor_at(post_offset, Bias::Left);
+            new.start = anchor;
+            new.end = anchor;
+            new.reversed = false;
+            new.goal = SelectionGoal::None;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 fn toggle_case(s: &str) -> String {
     s.chars()
         .flat_map(|c| {

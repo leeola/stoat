@@ -51,6 +51,16 @@ define_action!(
 );
 
 define_action!(
+    DeleteSelectionDef,
+    DeleteSelection,
+    "DeleteSelection",
+    ActionKind::DeleteSelection,
+    "delete selected text",
+    "Delete the contents of every non-empty selection and collapse each to a cursor at the deletion start. Cursor-only selections (empty ranges) are left as-is.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

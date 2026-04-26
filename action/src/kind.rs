@@ -68,6 +68,7 @@ pub enum ActionKind {
     SwitchToLowercase,
     Increment,
     Decrement,
+    DeleteSelection,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

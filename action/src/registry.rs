@@ -12,17 +12,17 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionAbove, AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop,
-            CollapseSelection, Decrement, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-            FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
-            GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown,
-            HalfPageUp, Increment, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd,
-            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
-            PageUp, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp,
-            SelectAll, SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TrimSelections,
+            CollapseSelection, Decrement, DeleteSelection, ExtendDown, ExtendLeft,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart,
+            ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            HalfPageDown, HalfPageUp, Increment, KeepPrimarySelection, MoveDown, MoveLeft,
+            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
+            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SplitSelectionOnNewline, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -251,6 +251,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SwitchToLowercase::DEF, |_| Ok(Box::new(SwitchToLowercase)));
     add(Increment::DEF, |_| Ok(Box::new(Increment)));
     add(Decrement::DEF, |_| Ok(Box::new(Decrement)));
+    add(DeleteSelection::DEF, |_| Ok(Box::new(DeleteSelection)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -623,7 +624,8 @@ mod tests {
         // + 1 AddSelectionAbove (mirror of AddSelectionBelow).
         // + 1 SplitSelectionOnNewline.
         // + 2 number ops (Increment/Decrement).
-        assert_eq!(all().count(), 165);
+        // + 1 DeleteSelection.
+        assert_eq!(all().count(), 166);
     }
 
     #[test]
