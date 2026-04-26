@@ -92,7 +92,7 @@ impl UndoMap {
         undo_count % 2 == 1
     }
 
-    fn undo_count(&self, edit_id: u64) -> u32 {
+    pub fn undo_count(&self, edit_id: u64) -> u32 {
         let mut cursor = self.0.cursor::<UndoMapKey>(());
         cursor.seek(
             &UndoMapKey {

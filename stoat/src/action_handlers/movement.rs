@@ -932,6 +932,17 @@ pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
+    apply_buffer_history(stoat, |buf| buf.undo())
+}
+
+pub(super) fn redo(stoat: &mut Stoat) -> UpdateEffect {
+    apply_buffer_history(stoat, |buf| buf.redo())
+}
+
+fn apply_buffer_history<F>(stoat: &mut Stoat, op: F) -> UpdateEffect
+where
+    F: FnOnce(&mut crate::buffer::TextBuffer) -> bool,
+{
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -941,13 +952,13 @@ pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
-    let did_undo = {
+    let did_change = {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        guard.undo()
+        op(&mut guard)
     };
 
-    if !did_undo {
+    if !did_change {
         return UpdateEffect::None;
     }
 

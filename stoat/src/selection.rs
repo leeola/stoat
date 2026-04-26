@@ -1415,4 +1415,28 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
         assert_eq!(focused_buffer_text(&mut h), after_initial_undo);
     }
+
+    #[test]
+    fn redo_after_undo_restores_edit() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(focused_buffer_text(&mut h), "");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "hello\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Redo);
+        assert_eq!(focused_buffer_text(&mut h), "");
+    }
+
+    #[test]
+    fn redo_with_empty_redo_stack_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Redo);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
 }

@@ -18,6 +18,10 @@ pub struct TextBuffer {
     /// Pushed on `edit()`, popped on `undo()`. Independent of [`Self::ops`],
     /// which records both edits and undos for replay.
     edit_history: Vec<u64>,
+    /// Stack of edit timestamps that have been undone and are eligible to be
+    /// the target of the next `redo()`. Pushed on `undo()`, popped on
+    /// `redo()`, cleared on any new `edit()` per standard undo/redo semantics.
+    redo_history: Vec<u64>,
     /// Chronological log of user-driven mutations. Replaying this on a fresh
     /// [`TextBuffer`] reconstructs an identical fragment tree, anchors, and
     /// undo map, which is how workspace save/restore preserves selections and
@@ -27,11 +31,12 @@ pub struct TextBuffer {
 
 /// A single replayable mutation on a [`TextBuffer`]. Edits record the `(range,
 /// text)` inputs; undos target the top of the edit history the same way
-/// interactive `u` does.
+/// interactive `u` does; redos target the top of the redo history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BufferOp {
     Edit { old: Range<usize>, text: String },
     Undo,
+    Redo,
 }
 
 /// Serializable buffer state: the op log plus the `dirty` flag. Replay via
@@ -86,6 +91,7 @@ impl TextBuffer {
             next_timestamp: 1,
             buffer_id,
             edit_history: Vec::new(),
+            redo_history: Vec::new(),
             ops: Vec::new(),
         }
     }
@@ -100,6 +106,7 @@ impl TextBuffer {
     }
 
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        self.redo_history.clear();
         self.ops.push(BufferOp::Edit {
             old: range.clone(),
             text: text.to_owned(),
@@ -335,26 +342,35 @@ impl TextBuffer {
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(&edit_timestamp) = self.edit_history.last() else {
+        let Some(edit_timestamp) = self.edit_history.pop() else {
             return false;
         };
+        self.apply_undo_toggle(edit_timestamp, BufferOp::Undo);
+        self.redo_history.push(edit_timestamp);
+        true
+    }
 
-        self.ops.push(BufferOp::Undo);
+    pub fn redo(&mut self) -> bool {
+        let Some(edit_timestamp) = self.redo_history.pop() else {
+            return false;
+        };
+        self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
+        self.edit_history.push(edit_timestamp);
+        true
+    }
+
+    fn apply_undo_toggle(&mut self, edit_timestamp: u64, op: BufferOp) {
+        self.ops.push(op);
         let undo_timestamp = self.next_timestamp;
         self.next_timestamp += 1;
 
-        let current_count = if self.snapshot.undo_map.is_undone(edit_timestamp) {
-            2
-        } else {
-            1
-        };
+        let new_count = self.snapshot.undo_map.undo_count(edit_timestamp) + 1;
 
         self.snapshot.undo_map.insert(&UndoOperation {
             timestamp: undo_timestamp,
-            counts: HashMap::from([(edit_timestamp, current_count)]),
+            counts: HashMap::from([(edit_timestamp, new_count)]),
         });
 
-        // Rebuild fragment visibility and ropes
         let cx = &None;
         let old_fragments = std::mem::replace(&mut self.snapshot.fragments, SumTree::new(cx));
         let mut new_fragments = SumTree::new(cx);
@@ -404,12 +420,6 @@ impl TextBuffer {
         self.snapshot.visible_text = new_visible;
         self.snapshot.deleted_text = new_deleted;
         self.snapshot.version = undo_timestamp;
-
-        if current_count % 2 == 1 {
-            self.edit_history.pop();
-        }
-
-        true
     }
 
     pub fn anchor_at(&self, offset: usize, bias: Bias) -> Anchor {
@@ -459,6 +469,9 @@ impl TextBuffer {
                 BufferOp::Edit { old, text } => buf.edit(old.clone(), text),
                 BufferOp::Undo => {
                     buf.undo();
+                },
+                BufferOp::Redo => {
+                    buf.redo();
                 },
             }
         }
@@ -949,5 +962,44 @@ mod tests {
         b.undo();
         assert!(b.snapshot.is_anchor_valid(&a));
         assert_eq!(b.resolve_anchor(&a), 8);
+    }
+
+    #[test]
+    fn redo_after_undo_restores_edit() {
+        let mut b = buf("hello");
+        b.edit(5..5, " world");
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello world");
+        assert!(b.undo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+        assert!(b.redo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello world");
+    }
+
+    #[test]
+    fn redo_walks_back_through_a_full_cycle() {
+        let mut b = buf("a");
+        b.edit(1..1, "b");
+        b.edit(2..2, "c");
+        assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+        assert!(b.undo());
+        assert!(b.undo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "a");
+        assert!(b.redo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "ab");
+        assert!(b.redo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "abc");
+    }
+
+    #[test]
+    fn new_edit_clears_redo_stack() {
+        let mut b = buf("a");
+        b.edit(1..1, "b");
+        assert_eq!(b.snapshot.visible_text.to_string(), "ab");
+        assert!(b.undo());
+        assert_eq!(b.snapshot.visible_text.to_string(), "a");
+        b.edit(1..1, "X");
+        assert_eq!(b.snapshot.visible_text.to_string(), "aX");
+        assert!(!b.redo(), "redo stack cleared by new edit");
+        assert_eq!(b.snapshot.visible_text.to_string(), "aX");
     }
 }

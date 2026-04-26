@@ -20,7 +20,7 @@ use crate::{
             GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
             KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
             MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo,
             RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
             SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
@@ -254,6 +254,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Decrement::DEF, |_| Ok(Box::new(Decrement)));
     add(DeleteSelection::DEF, |_| Ok(Box::new(DeleteSelection)));
     add(Undo::DEF, |_| Ok(Box::new(Undo)));
+    add(Redo::DEF, |_| Ok(Box::new(Redo)));
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
@@ -633,7 +634,8 @@ mod tests {
         // + 2 line indent ops (IndentSelection/UnindentSelection).
         // + 1 AlignSelections.
         // + 1 Undo.
-        assert_eq!(all().count(), 170);
+        // + 1 Redo.
+        assert_eq!(all().count(), 171);
     }
 
     #[test]

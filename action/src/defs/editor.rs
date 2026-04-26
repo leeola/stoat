@@ -81,6 +81,16 @@ define_action!(
 );
 
 define_action!(
+    RedoDef,
+    Redo,
+    "Redo",
+    ActionKind::Redo,
+    "redo last undone edit",
+    "Re-apply the most recently undone edit on the focused buffer. Repeat to walk forward through the redo stack; no-ops once it is empty. Any new edit clears the redo stack per standard undo/redo semantics.",
+    ActionPriority::Common
+);
+
+define_action!(
     IndentSelectionDef,
     IndentSelection,
     "IndentSelection",

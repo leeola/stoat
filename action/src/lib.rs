@@ -25,7 +25,7 @@ pub use defs::{
         GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp,
         IndentSelection, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
         MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
-        RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
+        Redo, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
         SelectLineBelow, SwitchCase, SwitchToLowercase, SwitchToUppercase, TrimSelections, Undo,
         UnindentSelection,
     },
