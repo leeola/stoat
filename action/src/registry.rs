@@ -17,8 +17,9 @@ use crate::{
             ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace,
             GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
             GotoWindowTop, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
-            MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
-            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
+            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
             ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TrimSelections,
         },
@@ -204,6 +205,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(MoveNextWordEnd::DEF, |_| Ok(Box::new(MoveNextWordEnd)));
     add(MovePrevWordStart::DEF, |_| Ok(Box::new(MovePrevWordStart)));
     add(MovePrevWordEnd::DEF, |_| Ok(Box::new(MovePrevWordEnd)));
+    add(MoveNextLongWordStart::DEF, |_| {
+        Ok(Box::new(MoveNextLongWordStart))
+    });
+    add(MoveNextLongWordEnd::DEF, |_| {
+        Ok(Box::new(MoveNextLongWordEnd))
+    });
+    add(MovePrevLongWordStart::DEF, |_| {
+        Ok(Box::new(MovePrevLongWordStart))
+    });
+    add(MovePrevLongWordEnd::DEF, |_| {
+        Ok(Box::new(MovePrevLongWordEnd))
+    });
     add(ExtendLeft::DEF, |_| Ok(Box::new(ExtendLeft)));
     add(ExtendRight::DEF, |_| Ok(Box::new(ExtendRight)));
     add(ExtendUp::DEF, |_| Ok(Box::new(ExtendUp)));
@@ -599,7 +612,8 @@ mod tests {
         // + 2 view-scroll ops (ScrollUp/Down).
         // + 1 case toggle (SwitchCase).
         // + 2 case-force (SwitchToUppercase/Lowercase).
-        assert_eq!(all().count(), 157);
+        // + 4 long-word motions (MoveNextLongWordStart/End, MovePrevLongWordStart/End).
+        assert_eq!(all().count(), 161);
     }
 
     #[test]

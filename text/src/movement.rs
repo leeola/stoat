@@ -31,11 +31,29 @@ fn char_is_word(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
-fn is_word_boundary(a: char, b: char) -> bool {
-    categorize_char(a) != categorize_char(b)
+fn long_word_category(ch: char) -> CharCategory {
+    if char_is_line_ending(ch) {
+        CharCategory::Eol
+    } else if ch.is_whitespace() {
+        CharCategory::Whitespace
+    } else {
+        CharCategory::Word
+    }
 }
 
 pub fn next_word_start(rope: &Rope, from: usize) -> usize {
+    next_word_start_with(rope, from, categorize_char)
+}
+
+pub fn next_long_word_start(rope: &Rope, from: usize) -> usize {
+    next_word_start_with(rope, from, long_word_category)
+}
+
+fn next_word_start_with<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    from: usize,
+    category: F,
+) -> usize {
     let mut chars = rope.chars_at(from);
     let Some(first_char) = chars.next() else {
         return from;
@@ -48,7 +66,7 @@ pub fn next_word_start(rope: &Rope, from: usize) -> usize {
         let Some(ch) = chars.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (char_is_line_ending(ch) || !ch.is_whitespace());
         if target && head != head_start {
             return head;
@@ -59,6 +77,14 @@ pub fn next_word_start(rope: &Rope, from: usize) -> usize {
 }
 
 pub fn next_word_end(rope: &Rope, from: usize) -> usize {
+    next_word_end_with(rope, from, categorize_char)
+}
+
+pub fn next_long_word_end(rope: &Rope, from: usize) -> usize {
+    next_word_end_with(rope, from, long_word_category)
+}
+
+fn next_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, category: F) -> usize {
     let mut chars = rope.chars_at(from);
     let Some(first_char) = chars.next() else {
         return from;
@@ -71,7 +97,7 @@ pub fn next_word_end(rope: &Rope, from: usize) -> usize {
         let Some(ch) = chars.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
         if target && head != head_start {
             return head;
@@ -82,11 +108,23 @@ pub fn next_word_end(rope: &Rope, from: usize) -> usize {
 }
 
 pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
+    prev_word_start_with(rope, from, categorize_char)
+}
+
+pub fn prev_long_word_start(rope: &Rope, from: usize) -> usize {
+    prev_word_start_with(rope, from, long_word_category)
+}
+
+fn prev_word_start_with<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    from: usize,
+    category: F,
+) -> usize {
     if from == 0 {
         return 0;
     }
     let Some(first_char) = rope.chars_at(from).next() else {
-        return prev_word_start_from_end(rope, from);
+        return prev_word_start_from_end(rope, from, &category);
     };
     let head_start = from;
     let mut head = head_start;
@@ -97,7 +135,7 @@ pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
         let Some(ch) = iter.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
         if target && head != head_start {
             return head;
@@ -107,7 +145,11 @@ pub fn prev_word_start(rope: &Rope, from: usize) -> usize {
     }
 }
 
-fn prev_word_start_from_end(rope: &Rope, from: usize) -> usize {
+fn prev_word_start_from_end<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    from: usize,
+    category: &F,
+) -> usize {
     let head_start = from;
     let mut head = head_start;
     let mut iter = rope.reversed_chars_at(from);
@@ -121,7 +163,7 @@ fn prev_word_start_from_end(rope: &Rope, from: usize) -> usize {
         let Some(ch) = iter.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (!prev_ch.is_whitespace() || char_is_line_ending(ch));
         if target && head != head_start - seed.len_utf8() {
             return head;
@@ -132,11 +174,19 @@ fn prev_word_start_from_end(rope: &Rope, from: usize) -> usize {
 }
 
 pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
+    prev_word_end_with(rope, from, categorize_char)
+}
+
+pub fn prev_long_word_end(rope: &Rope, from: usize) -> usize {
+    prev_word_end_with(rope, from, long_word_category)
+}
+
+fn prev_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, category: F) -> usize {
     if from == 0 {
         return 0;
     }
     let Some(first_char) = rope.chars_at(from).next() else {
-        return prev_word_end_from_end(rope, from);
+        return prev_word_end_from_end(rope, from, &category);
     };
     let head_start = from;
     let mut head = head_start;
@@ -147,7 +197,7 @@ pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
         let Some(ch) = iter.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
         if target && head != head_start {
             return head;
@@ -157,7 +207,11 @@ pub fn prev_word_end(rope: &Rope, from: usize) -> usize {
     }
 }
 
-fn prev_word_end_from_end(rope: &Rope, from: usize) -> usize {
+fn prev_word_end_from_end<F: Fn(char) -> CharCategory>(
+    rope: &Rope,
+    from: usize,
+    category: &F,
+) -> usize {
     let head_start = from;
     let mut head = head_start;
     let mut iter = rope.reversed_chars_at(from);
@@ -171,7 +225,7 @@ fn prev_word_end_from_end(rope: &Rope, from: usize) -> usize {
         let Some(ch) = iter.next() else {
             return head;
         };
-        let boundary = is_word_boundary(prev_ch, ch);
+        let boundary = category(prev_ch) != category(ch);
         let target = boundary && (!ch.is_whitespace() || char_is_line_ending(ch));
         if target && head != head_start - seed.len_utf8() {
             return head;
@@ -438,5 +492,96 @@ mod tests {
     fn prev_word_end_all_newlines() {
         let r = rope("\n\n\n\n\n");
         assert_eq!(prev_word_end(&r, 5), 0);
+    }
+
+    #[test]
+    fn next_long_word_start_treats_punctuation_as_word() {
+        let r = rope("foo.bar baz");
+        assert_eq!(next_long_word_start(&r, 0), 8);
+        assert_eq!(next_word_start(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_long_word_start_chained_punctuation() {
+        let r = rope("a!@b cd ef");
+        assert_eq!(next_long_word_start(&r, 0), 5);
+        assert_eq!(next_long_word_start(&r, 5), 8);
+    }
+
+    #[test]
+    fn next_long_word_start_stops_on_newline() {
+        let r = rope("foo.bar\nbaz");
+        assert_eq!(next_long_word_start(&r, 0), 7);
+        assert_eq!(next_long_word_start(&r, 7), 11);
+    }
+
+    #[test]
+    fn next_long_word_start_empty_rope() {
+        let r = rope("");
+        assert_eq!(next_long_word_start(&r, 0), 0);
+    }
+
+    #[test]
+    fn next_long_word_end_treats_punctuation_as_word() {
+        let r = rope("foo.bar baz");
+        assert_eq!(next_long_word_end(&r, 0), 7);
+        assert_eq!(next_word_end(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_long_word_end_chained_punctuation() {
+        let r = rope("a!@b cd");
+        assert_eq!(next_long_word_end(&r, 0), 4);
+    }
+
+    #[test]
+    fn next_long_word_end_multibyte() {
+        let r = rope("foo.héllo wörld");
+        let hello_end = "foo.héllo".len();
+        assert_eq!(next_long_word_end(&r, 0), hello_end);
+    }
+
+    #[test]
+    fn prev_long_word_start_treats_punctuation_as_word() {
+        let r = rope("foo bar.baz");
+        assert_eq!(prev_long_word_start(&r, 11), 4);
+        assert_eq!(prev_word_start(&r, 11), 8);
+    }
+
+    #[test]
+    fn prev_long_word_start_chained_punctuation() {
+        let r = rope("ab cd ef!@g");
+        let len = r.len();
+        assert_eq!(prev_long_word_start(&r, len), 6);
+    }
+
+    #[test]
+    fn prev_long_word_start_at_start_is_noop() {
+        let r = rope("hello");
+        assert_eq!(prev_long_word_start(&r, 0), 0);
+    }
+
+    #[test]
+    fn prev_long_word_end_treats_punctuation_as_word() {
+        let r = rope("foo.bar baz");
+        let len = r.len();
+        assert_eq!(prev_long_word_end(&r, len), 7);
+        assert_eq!(prev_word_end(&r, len), 7);
+    }
+
+    #[test]
+    fn prev_long_word_end_skips_internal_punctuation_boundary() {
+        let r = rope("aa bb.cc dd");
+        assert_eq!(prev_long_word_end(&r, 6), 2);
+        assert_eq!(prev_word_end(&r, 6), 5);
+    }
+
+    #[test]
+    fn long_word_category_collapses_word_and_punctuation() {
+        assert_eq!(long_word_category('a'), CharCategory::Word);
+        assert_eq!(long_word_category('.'), CharCategory::Word);
+        assert_eq!(long_word_category('!'), CharCategory::Word);
+        assert_eq!(long_word_category(' '), CharCategory::Whitespace);
+        assert_eq!(long_word_category('\n'), CharCategory::Eol);
     }
 }

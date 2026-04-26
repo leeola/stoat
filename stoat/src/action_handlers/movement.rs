@@ -7,7 +7,8 @@ use crate::{
     pane::View,
 };
 use stoat_text::{
-    next_word_end, next_word_start, prev_word_end, prev_word_start, Anchor, Bias, Point, Selection,
+    next_long_word_end, next_long_word_start, next_word_end, next_word_start, prev_long_word_end,
+    prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias, Point, Selection,
     SelectionGoal,
 };
 
@@ -136,6 +137,10 @@ pub(super) enum WordTarget {
     NextEnd,
     PrevStart,
     PrevEnd,
+    NextLongStart,
+    NextLongEnd,
+    PrevLongStart,
+    PrevLongEnd,
 }
 
 pub(super) fn add_selection_below(stoat: &mut Stoat) -> UpdateEffect {
@@ -279,6 +284,10 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
             WordTarget::NextEnd => next_word_end(rope, head_offset),
             WordTarget::PrevStart => prev_word_start(rope, head_offset),
             WordTarget::PrevEnd => prev_word_end(rope, head_offset),
+            WordTarget::NextLongStart => next_long_word_start(rope, head_offset),
+            WordTarget::NextLongEnd => next_long_word_end(rope, head_offset),
+            WordTarget::PrevLongStart => prev_long_word_start(rope, head_offset),
+            WordTarget::PrevLongEnd => prev_long_word_end(rope, head_offset),
         };
         if target_offset == head_offset {
             return sel.clone();

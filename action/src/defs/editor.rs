@@ -131,6 +131,46 @@ define_action!(
 );
 
 define_action!(
+    MoveNextLongWordStartDef,
+    MoveNextLongWordStart,
+    "MoveNextLongWordStart",
+    ActionKind::MoveNextLongWordStart,
+    "select to next long-word start",
+    "Select from each cursor head to the start of the next long word. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MoveNextLongWordEndDef,
+    MoveNextLongWordEnd,
+    "MoveNextLongWordEnd",
+    ActionKind::MoveNextLongWordEnd,
+    "select to next long-word end",
+    "Select from each cursor head to the end of the next long word. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MovePrevLongWordStartDef,
+    MovePrevLongWordStart,
+    "MovePrevLongWordStart",
+    ActionKind::MovePrevLongWordStart,
+    "select to previous long-word start",
+    "Select backward from each cursor head to the start of the previous long word. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MovePrevLongWordEndDef,
+    MovePrevLongWordEnd,
+    "MovePrevLongWordEnd",
+    ActionKind::MovePrevLongWordEnd,
+    "select to previous long-word end",
+    "Select backward from each cursor head to the end of the previous long word. Long words are runs of non-whitespace characters; punctuation does not split them.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendLeftDef,
     ExtendLeft,
     "ExtendLeft",
