@@ -110,6 +110,10 @@ struct FakeState {
     /// the next matching `remove_file` call, before symlink
     /// resolution.
     remove_file_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot rename failures keyed by the source path. Drained on
+    /// the next matching `rename` call, before any state mutation;
+    /// the destination path is not part of the match.
+    rename_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -154,6 +158,7 @@ impl FakeFs {
                 canonicalize_failures: HashMap::new(),
                 create_dir_all_failures: HashMap::new(),
                 remove_file_failures: HashMap::new(),
+                rename_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -296,6 +301,18 @@ impl FakeFs {
         state
             .remove_file_failures
             .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot rename failure keyed by the source path. The
+    /// next [`FsHost::rename`] call whose `from` equals `from`
+    /// returns `io::Error::new(kind, ...)` and clears the arm; the
+    /// destination is not part of the match. Source state is left
+    /// intact since the failure fires before any mutation.
+    pub fn fail_next_rename(&self, from: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .rename_failures
+            .insert(from.as_ref().to_path_buf(), kind);
     }
 
     /// Snapshot of every [`FsHost`] method invoked on this fake, in
@@ -523,6 +540,16 @@ impl FsHost for FakeFs {
             from: from.to_path_buf(),
             to: to.to_path_buf(),
         });
+        if let Some(kind) = state.rename_failures.remove(from) {
+            return Err(io::Error::new(
+                kind,
+                format!(
+                    "{} -> {}: injected rename failure",
+                    from.display(),
+                    to.display()
+                ),
+            ));
+        }
         let Some(entry) = state.entries.remove(from) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -890,6 +917,40 @@ mod tests {
             fs.ops(),
             [FakeFsOp::RemoveFile {
                 path: PathBuf::from("/x"),
+            }]
+        );
+    }
+
+    #[test]
+    fn fail_next_rename_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/from.txt", "payload");
+        fs.fail_next_rename("/from.txt", io::ErrorKind::PermissionDenied);
+        let err = fs
+            .rename(Path::new("/from.txt"), Path::new("/to.txt"))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(fs.exists(Path::new("/from.txt")));
+        assert!(!fs.exists(Path::new("/to.txt")));
+        fs.rename(Path::new("/from.txt"), Path::new("/to.txt"))
+            .unwrap();
+        assert!(!fs.exists(Path::new("/from.txt")));
+        let mut buf = Vec::new();
+        fs.read(Path::new("/to.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"payload");
+    }
+
+    #[test]
+    fn fail_next_rename_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_file("/a", "");
+        fs.fail_next_rename("/a", io::ErrorKind::PermissionDenied);
+        let _ = fs.rename(Path::new("/a"), Path::new("/b"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::Rename {
+                from: PathBuf::from("/a"),
+                to: PathBuf::from("/b"),
             }]
         );
     }
