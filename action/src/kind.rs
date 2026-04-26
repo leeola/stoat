@@ -78,6 +78,7 @@ pub enum ActionKind {
     RotateSelectionsForward,
     RotateSelectionsBackward,
     TrimSelections,
+    SplitSelectionOnNewline,
     OpenRun,
     RunSubmit,
     RunInterrupt,

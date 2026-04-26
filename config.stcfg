@@ -162,6 +162,7 @@ on key {
         End -> GotoLineEnd();
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
+        Alt-s -> SplitSelectionOnNewline();
         % -> SelectAll();
         x -> SelectLineBelow();
         , -> KeepPrimarySelection();

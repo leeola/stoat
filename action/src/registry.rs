@@ -21,7 +21,8 @@ use crate::{
             MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
             RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SwitchCase, SwitchToLowercase, SwitchToUppercase, TrimSelections,
+            SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -266,6 +267,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(RotateSelectionsBackward))
     });
     add(TrimSelections::DEF, |_| Ok(Box::new(TrimSelections)));
+    add(SplitSelectionOnNewline::DEF, |_| {
+        Ok(Box::new(SplitSelectionOnNewline))
+    });
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
@@ -615,7 +619,8 @@ mod tests {
         // + 2 case-force (SwitchToUppercase/Lowercase).
         // + 4 long-word motions (MoveNextLongWordStart/End, MovePrevLongWordStart/End).
         // + 1 AddSelectionAbove (mirror of AddSelectionBelow).
-        assert_eq!(all().count(), 162);
+        // + 1 SplitSelectionOnNewline.
+        assert_eq!(all().count(), 163);
     }
 
     #[test]

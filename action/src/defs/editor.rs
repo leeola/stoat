@@ -21,6 +21,16 @@ define_action!(
 );
 
 define_action!(
+    SplitSelectionOnNewlineDef,
+    SplitSelectionOnNewline,
+    "SplitSelectionOnNewline",
+    ActionKind::SplitSelectionOnNewline,
+    "split selections on newlines",
+    "Split each multi-line selection at newline boundaries so every covered line becomes its own selection. Selections without newlines and empty selections are kept as-is.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

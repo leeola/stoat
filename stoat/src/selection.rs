@@ -111,6 +111,30 @@ impl SelectionsCollection {
         self.replace_with(transformed, snapshot);
     }
 
+    /// Flat-map each selection into zero or more replacement pieces. Returning
+    /// an empty vec keeps the original selection unchanged; returning a
+    /// non-empty vec replaces it with the pieces, each receiving a fresh id
+    /// from this collection's allocator.
+    pub(crate) fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, mut split: F)
+    where
+        F: FnMut(&Selection<Anchor>) -> Vec<Selection<Anchor>>,
+    {
+        let mut new_disjoint: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
+        for sel in &self.disjoint {
+            let pieces = split(sel);
+            if pieces.is_empty() {
+                new_disjoint.push(sel.clone());
+                continue;
+            }
+            for mut piece in pieces {
+                piece.id = self.next_selection_id;
+                self.next_selection_id += 1;
+                new_disjoint.push(piece);
+            }
+        }
+        self.replace_with(new_disjoint, snapshot);
+    }
+
     /// Replace selections with `new_disjoint`, sorting by offset and deduping
     /// empty collisions at the same offset (keeping the highest-id survivor).
     /// Asserts non-empty: callers must ensure at least one selection.
@@ -440,6 +464,70 @@ mod tests {
     }
 
     #[test]
+    fn split_each_keeps_original_when_closure_returns_empty() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.insert_cursor(
+            snapshot.anchor_at(3, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        let before_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+
+        collection.split_each(&snapshot, |_| Vec::new());
+
+        let after_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+        assert_eq!(after_ids, before_ids);
+    }
+
+    #[test]
+    fn split_each_replaces_with_pieces_and_allocates_fresh_ids() {
+        let multi = singleton("abcdefghij");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+        collection.set_single_range(
+            snapshot.anchor_at(0, Bias::Right),
+            snapshot.anchor_at(10, Bias::Right),
+            SelectionGoal::None,
+        );
+        let before_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+
+        collection.split_each(&snapshot, |_| {
+            vec![
+                Selection {
+                    id: 0,
+                    start: snapshot.anchor_at(0, Bias::Right),
+                    end: snapshot.anchor_at(3, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                },
+                Selection {
+                    id: 0,
+                    start: snapshot.anchor_at(5, Bias::Right),
+                    end: snapshot.anchor_at(8, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                },
+            ]
+        });
+
+        let after: Vec<(usize, usize)> = collection
+            .all_anchors()
+            .iter()
+            .map(|s| {
+                (
+                    snapshot.resolve_anchor(&s.start),
+                    snapshot.resolve_anchor(&s.end),
+                )
+            })
+            .collect();
+        assert_eq!(after, vec![(0, 3), (5, 8)]);
+        let after_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+        assert!(after_ids.iter().all(|id| !before_ids.contains(id)));
+    }
+
+    #[test]
     fn transform_preserves_ids() {
         let multi = singleton("abcdefghij");
         let snapshot = multi.snapshot();
@@ -493,6 +581,16 @@ mod tests {
         h.open_file(&path);
         h.type_keys("C");
         h.assert_snapshot("add_selection_below");
+    }
+
+    #[test]
+    fn snapshot_split_selection_on_newline() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("sample.txt", "abc\ndef\nghi\n");
+
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        h.assert_snapshot("split_selection_on_newline");
     }
 
     #[test]

@@ -550,6 +550,64 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    editor.selections.split_each(buffer_snapshot, |sel| {
+        let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+        let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+        if start_offset == end_offset {
+            return Vec::new();
+        }
+
+        let mut newline_positions: Vec<usize> = Vec::new();
+        let mut byte_pos = start_offset;
+        for ch in rope.chars_at(start_offset) {
+            if byte_pos >= end_offset {
+                break;
+            }
+            if ch == '\n' {
+                newline_positions.push(byte_pos);
+            }
+            byte_pos += ch.len_utf8();
+        }
+
+        if newline_positions.is_empty() {
+            return Vec::new();
+        }
+
+        let mut pieces: Vec<Selection<Anchor>> = Vec::with_capacity(newline_positions.len() + 1);
+        let mut prev = start_offset;
+        for nl in &newline_positions {
+            if *nl > prev {
+                pieces.push(Selection {
+                    id: 0,
+                    start: buffer_snapshot.anchor_at(prev, Bias::Right),
+                    end: buffer_snapshot.anchor_at(*nl, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                });
+            }
+            prev = nl + 1;
+        }
+        if prev < end_offset {
+            pieces.push(Selection {
+                id: 0,
+                start: buffer_snapshot.anchor_at(prev, Bias::Right),
+                end: buffer_snapshot.anchor_at(end_offset, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            });
+        }
+        pieces
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn switch_case(stoat: &mut Stoat) -> UpdateEffect {
     transform_primary_selection(stoat, toggle_case)
 }
