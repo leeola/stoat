@@ -8,11 +8,12 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    PartialResultParams, Position, Range, ReferenceContext, ReferenceParams, RenameParams,
-    ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    NumberOrString, PartialResultParams, Position, Range, ReferenceContext, ReferenceParams,
+    RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -275,6 +276,19 @@ impl FakeLsp {
             .entry(file_uri(path))
             .or_default()
             .push(diag);
+    }
+
+    /// Append a notification to the queue exposed via
+    /// [`LspHost::recv_notification`]. Lets tests inject server-push
+    /// flows that bypass the existing `did_open` / `did_change` path:
+    /// diagnostics published asynchronously after analysis,
+    /// [`LspNotification::Progress`] frames, etc.
+    pub fn push_notification(&self, notification: LspNotification) {
+        self.state
+            .lock()
+            .unwrap()
+            .notifications
+            .push_back(notification);
     }
 
     // --- Completions ---
@@ -1110,6 +1124,100 @@ mod tests {
                 InlayHintLabel::String(s) => assert_eq!(s, "hint"),
                 _ => panic!("expected string"),
             }
+        });
+    }
+
+    #[test]
+    fn push_notification_round_trips_diagnostics() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let diag = Diagnostic::new_simple(
+                Range::new(Position::new(0, 0), Position::new(0, 4)),
+                "lint".to_string(),
+            );
+            lsp.push_notification(LspNotification::Diagnostics {
+                uri: file_uri("/src/main.rs"),
+                diagnostics: vec![diag.clone()],
+                version: Some(7),
+            });
+
+            let notif = lsp
+                .recv_notification()
+                .await
+                .expect("pushed notification should be receivable");
+            match notif {
+                LspNotification::Diagnostics {
+                    uri,
+                    diagnostics,
+                    version,
+                } => {
+                    assert_eq!(uri, file_uri("/src/main.rs"));
+                    assert_eq!(diagnostics, vec![diag]);
+                    assert_eq!(version, Some(7));
+                },
+                _ => panic!("expected diagnostics notification"),
+            }
+            assert!(lsp.recv_notification().await.is_none());
+        });
+    }
+
+    #[test]
+    fn push_notification_round_trips_progress() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let begin = WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "Indexing".to_string(),
+                cancellable: Some(false),
+                message: Some("3/25 files".to_string()),
+                percentage: Some(12),
+            });
+            lsp.push_notification(LspNotification::Progress {
+                token: NumberOrString::String("idx-1".to_string()),
+                value: begin,
+            });
+
+            let notif = lsp
+                .recv_notification()
+                .await
+                .expect("pushed notification should be receivable");
+            match notif {
+                LspNotification::Progress { token, value } => {
+                    assert_eq!(token, NumberOrString::String("idx-1".to_string()));
+                    let WorkDoneProgress::Begin(begin) = value else {
+                        panic!("expected Begin frame")
+                    };
+                    assert_eq!(begin.title, "Indexing");
+                    assert_eq!(begin.percentage, Some(12));
+                },
+                _ => panic!("expected progress notification"),
+            }
+        });
+    }
+
+    #[test]
+    fn push_notification_preserves_fifo_order() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let make = |path: &str| LspNotification::Diagnostics {
+                uri: file_uri(path),
+                diagnostics: Vec::new(),
+                version: None,
+            };
+            lsp.push_notification(make("/a.rs"));
+            lsp.push_notification(make("/b.rs"));
+            lsp.push_notification(make("/c.rs"));
+
+            let mut received = Vec::new();
+            while let Some(notif) = lsp.recv_notification().await {
+                let LspNotification::Diagnostics { uri, .. } = notif else {
+                    panic!("expected diagnostics")
+                };
+                received.push(uri);
+            }
+            assert_eq!(
+                received,
+                vec![file_uri("/a.rs"), file_uri("/b.rs"), file_uri("/c.rs"),]
+            );
         });
     }
 }
