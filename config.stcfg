@@ -175,6 +175,8 @@ on key {
         Ctrl-a -> Increment();
         Ctrl-x -> Decrement();
         d -> DeleteSelection();
+        > -> IndentSelection();
+        < -> UnindentSelection();
         g -> SetMode(goto);
         z -> SetMode(z);
         R -> OpenReview();

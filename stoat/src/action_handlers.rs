@@ -141,6 +141,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),
         ActionKind::DeleteSelection => movement::delete_selection(stoat),
+        ActionKind::IndentSelection => movement::indent_selection(stoat),
+        ActionKind::UnindentSelection => movement::unindent_selection(stoat),
         ActionKind::MoveLeft => movement::move_horizontal(stoat, -1, false),
         ActionKind::MoveRight => movement::move_horizontal(stoat, 1, false),
         ActionKind::MoveUp => movement::move_vertical(stoat, -1, false),

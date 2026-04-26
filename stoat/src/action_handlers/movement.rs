@@ -802,6 +802,103 @@ pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn indent_selection(stoat: &mut Stoat) -> UpdateEffect {
+    apply_line_indent(stoat, IndentDir::In)
+}
+
+pub(super) fn unindent_selection(stoat: &mut Stoat) -> UpdateEffect {
+    apply_line_indent(stoat, IndentDir::Out)
+}
+
+#[derive(Copy, Clone)]
+enum IndentDir {
+    In,
+    Out,
+}
+
+const INDENT_WIDTH: usize = 4;
+
+fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, mut edits) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+
+        let mut rows: Vec<u32> = Vec::new();
+        for sel in editor.selections.all_anchors() {
+            let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+            let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+            let start_row = rope.offset_to_point(start_offset).row;
+            let end_point = rope.offset_to_point(end_offset);
+            let end_row = if end_offset > start_offset && end_point.column == 0 {
+                end_point.row.saturating_sub(1)
+            } else {
+                end_point.row
+            };
+            for row in start_row..=end_row {
+                rows.push(row);
+            }
+        }
+        rows.sort_unstable();
+        rows.dedup();
+
+        let mut edits: Vec<(usize, usize, &'static str)> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let line_start = rope.point_to_offset(Point::new(row, 0));
+            match dir {
+                IndentDir::In => edits.push((line_start, line_start, "\t")),
+                IndentDir::Out => {
+                    let mut chars = rope.chars_at(line_start);
+                    let first = chars.next();
+                    if first == Some('\t') {
+                        edits.push((line_start, line_start + 1, ""));
+                    } else if first == Some(' ') {
+                        let mut count = 1;
+                        for ch in chars {
+                            if ch == ' ' && count < INDENT_WIDTH {
+                                count += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        edits.push((line_start, line_start + count, ""));
+                    }
+                },
+            }
+        }
+        (buffer_id, edits)
+    };
+
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    edits.sort_by_key(|(start, _, _)| *start);
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (start, end, replacement) in edits.iter().rev() {
+            guard.edit(*start..*end, replacement);
+        }
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| sel.clone());
+    UpdateEffect::Redraw
+}
+
 fn toggle_case(s: &str) -> String {
     s.chars()
         .flat_map(|c| {

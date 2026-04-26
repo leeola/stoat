@@ -69,6 +69,8 @@ pub enum ActionKind {
     Increment,
     Decrement,
     DeleteSelection,
+    IndentSelection,
+    UnindentSelection,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

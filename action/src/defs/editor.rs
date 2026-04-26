@@ -61,6 +61,26 @@ define_action!(
 );
 
 define_action!(
+    IndentSelectionDef,
+    IndentSelection,
+    "IndentSelection",
+    ActionKind::IndentSelection,
+    "indent selected lines",
+    "Insert a tab character at the start of every line covered by any selection. Multi-cursor scope: each distinct row receives the indent at most once.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    UnindentSelectionDef,
+    UnindentSelection,
+    "UnindentSelection",
+    ActionKind::UnindentSelection,
+    "unindent selected lines",
+    "Remove one indent level from the start of every line covered by any selection. Removes a leading tab if present, otherwise up to four leading spaces. Lines without leading whitespace are left untouched.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

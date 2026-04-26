@@ -1277,4 +1277,60 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
         assert_eq!(focused_buffer_text(&mut h), "\n\n\n");
     }
+
+    #[test]
+    fn indent_selection_inserts_tab_at_cursor_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    }
+
+    #[test]
+    fn indent_selection_indents_every_covered_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n\tghi\n");
+    }
+
+    #[test]
+    fn unindent_selection_removes_leading_tab() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "\tabc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn unindent_selection_removes_up_to_four_leading_spaces() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "      abc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "  abc\n");
+    }
+
+    #[test]
+    fn unindent_selection_no_leading_whitespace_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn indent_selection_dedupes_lines_across_multi_cursors() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::IndentSelection);
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n\tghi\n");
+    }
 }
