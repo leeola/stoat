@@ -129,6 +129,46 @@ impl TestHarness {
         &self.fake_env
     }
 
+    /// Assert that every host installed on [`Stoat`] still points at the
+    /// fake originally constructed by this harness. Detects test code that
+    /// swaps a real host (e.g. [`crate::host::LocalFs`]) back in via the
+    /// public `set_*_host` setters; comparison is by `Arc` allocation
+    /// pointer, so a fresh fake of the same type would still trigger the
+    /// panic.
+    ///
+    /// Does not detect direct `std::fs::*` / `std::env::*` calls in
+    /// production code that bypass the `*Host` traits entirely.
+    pub fn assert_no_real_io(&self) {
+        fn alloc_ptr<T: ?Sized>(arc: &Arc<T>) -> *const () {
+            Arc::as_ptr(arc) as *const ()
+        }
+        assert_eq!(
+            alloc_ptr(&self.stoat.fs_host),
+            alloc_ptr(&self.fake_fs),
+            "FsHost was replaced during the test; real filesystem IO may have escaped"
+        );
+        assert_eq!(
+            alloc_ptr(&self.stoat.env_host),
+            alloc_ptr(&self.fake_env),
+            "EnvHost was replaced during the test; real env reads may have escaped"
+        );
+        assert_eq!(
+            alloc_ptr(&self.stoat.git_host),
+            alloc_ptr(&self.fake_git),
+            "GitHost was replaced during the test; real git operations may have escaped"
+        );
+        let claude = self
+            .stoat
+            .claude_host
+            .as_ref()
+            .expect("ClaudeCodeHost was uninstalled during the test");
+        assert_eq!(
+            alloc_ptr(claude),
+            alloc_ptr(&self.fake_claude_host),
+            "ClaudeCodeHost was replaced during the test"
+        );
+    }
+
     /// Stage a working-tree review scenario in one call.
     ///
     /// Registers `workdir` as the active workspace's `git_root`, populates
@@ -1413,5 +1453,43 @@ mod tests {
             result_count, 0,
             "pending() should NOT emit a ToolResult message"
         );
+    }
+
+    #[test]
+    fn assert_no_real_io_passes_for_default_harness() {
+        let h = TestHarness::with_size(80, 24);
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "FsHost was replaced")]
+    fn assert_no_real_io_panics_when_fs_host_swapped() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_fs_host(Arc::new(crate::host::LocalFs));
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "EnvHost was replaced")]
+    fn assert_no_real_io_panics_when_env_host_swapped() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_env_host(Arc::new(crate::host::LocalEnv));
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "GitHost was replaced")]
+    fn assert_no_real_io_panics_when_git_host_swapped() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.set_git_host(Arc::new(crate::host::LocalGit::new()));
+        h.assert_no_real_io();
+    }
+
+    #[test]
+    #[should_panic(expected = "ClaudeCodeHost was uninstalled")]
+    fn assert_no_real_io_panics_when_claude_host_uninstalled() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat.claude_host = None;
+        h.assert_no_real_io();
     }
 }

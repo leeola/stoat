@@ -67,7 +67,7 @@ pub struct Stoat {
     /// workspace's own [`Workspace::badges`]. The tray the badge lives in
     /// is the source of truth for its scope.
     pub(crate) badges: BadgeTray,
-    claude_host: Option<Arc<dyn ClaudeCodeHost>>,
+    pub(crate) claude_host: Option<Arc<dyn ClaudeCodeHost>>,
     claude_sessions: ClaudeCodeSessions,
     pub(crate) claude_tx: Sender<ClaudeNotification>,
     claude_rx: Receiver<ClaudeNotification>,
