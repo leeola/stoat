@@ -207,6 +207,56 @@ fn prev_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, cat
     }
 }
 
+/// Returns the byte range of the decimal number at `offset` in `rope`, or
+/// `None` if the byte at `offset` is not an ASCII digit. The range spans the
+/// run of digits and optionally a leading `-` when the `-` is preceded by
+/// whitespace, the start of the rope, or a non-word character (so `-42`
+/// reads as a signed number, but the `3` in `5-3` does not).
+pub fn find_decimal_number_at(rope: &Rope, offset: usize) -> Option<std::ops::Range<usize>> {
+    let head = rope.chars_at(offset).next()?;
+    if !head.is_ascii_digit() {
+        return None;
+    }
+
+    let mut start = offset;
+    let iter = rope.reversed_chars_at(offset);
+    for prev in iter {
+        if !prev.is_ascii_digit() {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+
+    let mut end = offset + head.len_utf8();
+    let chars = rope.chars_at(end);
+    for next in chars {
+        if !next.is_ascii_digit() {
+            break;
+        }
+        end += next.len_utf8();
+    }
+
+    if start > 0 {
+        let minus_pos = start - 1;
+        if let Some('-') = rope.reversed_chars_at(start).next() {
+            let preceding = if minus_pos == 0 {
+                None
+            } else {
+                rope.reversed_chars_at(minus_pos).next()
+            };
+            let signed = match preceding {
+                None => true,
+                Some(c) => !c.is_alphanumeric() && c != '_',
+            };
+            if signed {
+                start = minus_pos;
+            }
+        }
+    }
+
+    Some(start..end)
+}
+
 fn prev_word_end_from_end<F: Fn(char) -> CharCategory>(
     rope: &Rope,
     from: usize,
@@ -574,6 +624,64 @@ mod tests {
         let r = rope("aa bb.cc dd");
         assert_eq!(prev_long_word_end(&r, 6), 2);
         assert_eq!(prev_word_end(&r, 6), 5);
+    }
+
+    #[test]
+    fn find_decimal_at_returns_digit_run_when_cursor_on_digit() {
+        let r = rope("foo 123 bar");
+        assert_eq!(find_decimal_number_at(&r, 4), Some(4..7));
+        assert_eq!(find_decimal_number_at(&r, 5), Some(4..7));
+        assert_eq!(find_decimal_number_at(&r, 6), Some(4..7));
+    }
+
+    #[test]
+    fn find_decimal_at_returns_none_when_cursor_off_digit() {
+        let r = rope("foo 123 bar");
+        assert_eq!(find_decimal_number_at(&r, 0), None);
+        assert_eq!(find_decimal_number_at(&r, 3), None);
+        assert_eq!(find_decimal_number_at(&r, 7), None);
+    }
+
+    #[test]
+    fn find_decimal_at_includes_leading_minus_when_isolated() {
+        let r = rope("-42");
+        assert_eq!(find_decimal_number_at(&r, 1), Some(0..3));
+    }
+
+    #[test]
+    fn find_decimal_at_includes_minus_after_whitespace() {
+        let r = rope("count: -42");
+        assert_eq!(find_decimal_number_at(&r, 8), Some(7..10));
+    }
+
+    #[test]
+    fn find_decimal_at_excludes_minus_after_alphanumeric() {
+        let r = rope("5-3");
+        assert_eq!(find_decimal_number_at(&r, 2), Some(2..3));
+    }
+
+    #[test]
+    fn find_decimal_at_excludes_minus_after_word_char() {
+        let r = rope("var-42");
+        assert_eq!(find_decimal_number_at(&r, 4), Some(4..6));
+    }
+
+    #[test]
+    fn find_decimal_at_includes_minus_after_punctuation() {
+        let r = rope("(-42)");
+        assert_eq!(find_decimal_number_at(&r, 2), Some(1..4));
+    }
+
+    #[test]
+    fn find_decimal_at_at_start_of_rope() {
+        let r = rope("42 abc");
+        assert_eq!(find_decimal_number_at(&r, 0), Some(0..2));
+    }
+
+    #[test]
+    fn find_decimal_at_empty_rope() {
+        let r = rope("");
+        assert_eq!(find_decimal_number_at(&r, 0), None);
     }
 
     #[test]

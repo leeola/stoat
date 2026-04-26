@@ -12,16 +12,16 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionAbove, AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop,
-            CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
-            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp,
-            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
-            RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            CollapseSelection, Decrement, ExtendDown, ExtendLeft, ExtendNextWordEnd,
+            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+            FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
+            GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown,
+            HalfPageUp, Increment, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
+            PageUp, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TrimSelections,
         },
         file::OpenFile,
@@ -249,6 +249,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SwitchCase::DEF, |_| Ok(Box::new(SwitchCase)));
     add(SwitchToUppercase::DEF, |_| Ok(Box::new(SwitchToUppercase)));
     add(SwitchToLowercase::DEF, |_| Ok(Box::new(SwitchToLowercase)));
+    add(Increment::DEF, |_| Ok(Box::new(Increment)));
+    add(Decrement::DEF, |_| Ok(Box::new(Decrement)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -620,7 +622,8 @@ mod tests {
         // + 4 long-word motions (MoveNextLongWordStart/End, MovePrevLongWordStart/End).
         // + 1 AddSelectionAbove (mirror of AddSelectionBelow).
         // + 1 SplitSelectionOnNewline.
-        assert_eq!(all().count(), 163);
+        // + 2 number ops (Increment/Decrement).
+        assert_eq!(all().count(), 165);
     }
 
     #[test]

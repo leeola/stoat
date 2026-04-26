@@ -66,6 +66,8 @@ pub enum ActionKind {
     SwitchCase,
     SwitchToUppercase,
     SwitchToLowercase,
+    Increment,
+    Decrement,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

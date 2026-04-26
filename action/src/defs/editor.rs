@@ -31,6 +31,26 @@ define_action!(
 );
 
 define_action!(
+    IncrementDef,
+    Increment,
+    "Increment",
+    ActionKind::Increment,
+    "increment number under cursor",
+    "Increment the decimal number under the primary cursor by one. The cursor must rest on a digit; a leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Operates on the primary cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    DecrementDef,
+    Decrement,
+    "Decrement",
+    ActionKind::Decrement,
+    "decrement number under cursor",
+    "Decrement the decimal number under the primary cursor by one. The cursor must rest on a digit; a leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Operates on the primary cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

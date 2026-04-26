@@ -172,6 +172,8 @@ on key {
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();
+        Ctrl-a -> Increment();
+        Ctrl-x -> Decrement();
         g -> SetMode(goto);
         z -> SetMode(z);
         R -> OpenReview();
