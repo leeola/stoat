@@ -25,6 +25,38 @@ use std::{
 enum FakeEntry {
     File { content: Vec<u8>, mtime: SystemTime },
     Dir { mtime: SystemTime },
+    Symlink { target: PathBuf, mtime: SystemTime },
+}
+
+/// Linux's `MAXSYMLINKS` limit. `ErrorKind::FilesystemLoop` would be
+/// the natural kind to return after exceeding this, but it remains
+/// unstable (rust-lang/rust#86442), so callers see [`io::ErrorKind::Other`]
+/// with a `"too many symlinks"` message.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Walks the symlink chain starting at `path`. Returns the first
+/// non-symlink path encountered, or `path` itself if the entry is
+/// missing or already non-symlink. Relative targets resolve against
+/// the symlink's parent directory. Errors with
+/// `ErrorKind::Other` after [`MAX_SYMLINK_HOPS`] hops.
+fn resolve_symlink(state: &FakeState, path: &Path) -> io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        match state.entries.get(&current) {
+            Some(FakeEntry::Symlink { target, .. }) => {
+                current = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    current.parent().unwrap_or(Path::new("/")).join(target)
+                };
+            },
+            _ => return Ok(current),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{}: too many symlinks",
+        path.display()
+    )))
 }
 
 pub struct FakeFs {
@@ -111,12 +143,31 @@ impl FakeFs {
             .entries
             .insert(path.to_path_buf(), FakeEntry::Dir { mtime });
     }
+
+    /// Insert a symlink at `path` pointing at `target`. The target may
+    /// be absolute or relative; relative targets resolve against
+    /// `path`'s parent during operations that follow symlinks. Targets
+    /// are stored verbatim and may dangle.
+    pub fn insert_symlink(&self, path: impl AsRef<Path>, target: impl AsRef<Path>) {
+        let mut state = self.state.lock().unwrap();
+        let path = path.as_ref();
+        state.ensure_ancestors(path);
+        let mtime = state.tick();
+        state.entries.insert(
+            path.to_path_buf(),
+            FakeEntry::Symlink {
+                target: target.as_ref().to_path_buf(),
+                mtime,
+            },
+        );
+    }
 }
 
 impl FsHost for FakeFs {
     fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
         let state = self.state.lock().unwrap();
-        match state.entries.get(path) {
+        let resolved = resolve_symlink(&state, path)?;
+        match state.entries.get(&resolved) {
             Some(FakeEntry::File { content, .. }) => {
                 buf.clear();
                 buf.extend_from_slice(content);
@@ -126,19 +177,21 @@ impl FsHost for FakeFs {
                 io::ErrorKind::InvalidInput,
                 "is a directory",
             )),
+            Some(FakeEntry::Symlink { .. }) => unreachable!("resolve_symlink yields non-symlink"),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{}: not found", path.display()),
+                format!("{}: not found", resolved.display()),
             )),
         }
     }
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.ensure_ancestors(path);
+        let resolved = resolve_symlink(&state, path)?;
+        state.ensure_ancestors(&resolved);
         let mtime = state.tick();
         state.entries.insert(
-            path.to_path_buf(),
+            resolved,
             FakeEntry::File {
                 content: data.to_vec(),
                 mtime,
@@ -162,12 +215,19 @@ impl FsHost for FakeFs {
                 is_dir: true,
                 is_symlink: false,
             },
+            FakeEntry::Symlink { target, mtime } => FsMetadata {
+                len: target.as_os_str().len() as u64,
+                modified: *mtime,
+                is_dir: false,
+                is_symlink: true,
+            },
         }))
     }
 
     fn list_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
         let state = self.state.lock().unwrap();
-        match state.entries.get(path) {
+        let resolved = resolve_symlink(&state, path)?;
+        match state.entries.get(&resolved) {
             Some(FakeEntry::Dir { .. }) => {},
             Some(_) => {
                 return Err(io::Error::new(
@@ -178,17 +238,17 @@ impl FsHost for FakeFs {
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    format!("{}: not found", path.display()),
+                    format!("{}: not found", resolved.display()),
                 ))
             },
         }
 
-        let depth = path.components().count() + 1;
+        let depth = resolved.components().count() + 1;
         let entries = state
             .entries
-            .range(path.to_path_buf()..)
+            .range(resolved.clone()..)
             .skip(1)
-            .take_while(|(k, _)| k.starts_with(path))
+            .take_while(|(k, _)| k.starts_with(&resolved))
             .filter(|(k, _)| k.components().count() == depth)
             .map(|(k, entry)| {
                 let name = k
@@ -198,7 +258,7 @@ impl FsHost for FakeFs {
                 FsDirEntry {
                     name: CompactString::from(name.as_ref()),
                     is_dir: matches!(entry, FakeEntry::Dir { .. }),
-                    is_symlink: false,
+                    is_symlink: matches!(entry, FakeEntry::Symlink { .. }),
                 }
             })
             .collect();
@@ -208,24 +268,24 @@ impl FsHost for FakeFs {
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.ensure_ancestors(path);
-        if !state.entries.contains_key(path) {
+        let resolved = resolve_symlink(&state, path)?;
+        state.ensure_ancestors(&resolved);
+        if !state.entries.contains_key(&resolved) {
             let mtime = state.tick();
-            state
-                .entries
-                .insert(path.to_path_buf(), FakeEntry::Dir { mtime });
+            state.entries.insert(resolved, FakeEntry::Dir { mtime });
         }
         Ok(())
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         let state = self.state.lock().unwrap();
-        if state.entries.contains_key(path) {
-            Ok(path.to_path_buf())
+        let resolved = resolve_symlink(&state, path)?;
+        if state.entries.contains_key(&resolved) {
+            Ok(resolved)
         } else {
             Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{}: not found", path.display()),
+                format!("{}: not found", resolved.display()),
             ))
         }
     }
@@ -233,7 +293,7 @@ impl FsHost for FakeFs {
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
         match state.entries.get(path) {
-            Some(FakeEntry::File { .. }) => {
+            Some(FakeEntry::File { .. } | FakeEntry::Symlink { .. }) => {
                 state.entries.remove(path);
                 Ok(())
             },
@@ -264,6 +324,10 @@ impl FsHost for FakeFs {
                 mtime: new_mtime,
             },
             FakeEntry::Dir { .. } => FakeEntry::Dir { mtime: new_mtime },
+            FakeEntry::Symlink { target, .. } => FakeEntry::Symlink {
+                target,
+                mtime: new_mtime,
+            },
         };
         state.entries.insert(to.to_path_buf(), entry);
         Ok(())
@@ -376,5 +440,79 @@ mod tests {
         fs.insert_file("/yes", "");
         assert!(fs.exists(Path::new("/yes")));
         assert!(!fs.exists(Path::new("/no")));
+    }
+
+    #[test]
+    fn insert_symlink_metadata_reports_is_symlink() {
+        let fs = FakeFs::new();
+        fs.insert_file("/target.txt", "hello");
+        fs.insert_symlink("/link", "/target.txt");
+        let m = fs.metadata(Path::new("/link")).unwrap().unwrap();
+        assert!(m.is_symlink);
+        assert!(!m.is_dir);
+    }
+
+    #[test]
+    fn read_through_symlink() {
+        let fs = FakeFs::new();
+        fs.insert_file("/target.txt", "hello");
+        fs.insert_symlink("/link", "/target.txt");
+        let mut buf = Vec::new();
+        fs.read(Path::new("/link"), &mut buf).unwrap();
+        assert_eq!(buf, b"hello");
+    }
+
+    #[test]
+    fn canonicalize_follows_chain() {
+        let fs = FakeFs::new();
+        fs.insert_file("/target.txt", "");
+        fs.insert_symlink("/a", "/target.txt");
+        fs.insert_symlink("/b", "/a");
+        fs.insert_symlink("/c", "/b");
+        let canon = fs.canonicalize(Path::new("/c")).unwrap();
+        assert_eq!(canon, Path::new("/target.txt"));
+    }
+
+    #[test]
+    fn canonicalize_loop_returns_too_many_symlinks() {
+        let fs = FakeFs::new();
+        fs.insert_symlink("/a", "/b");
+        fs.insert_symlink("/b", "/a");
+        let err = fs.canonicalize(Path::new("/a")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(err.to_string().contains("too many symlinks"));
+    }
+
+    #[test]
+    fn canonicalize_broken_returns_not_found() {
+        let fs = FakeFs::new();
+        fs.insert_symlink("/link", "/missing");
+        let err = fs.canonicalize(Path::new("/link")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn list_dir_reports_symlink_flag() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/root");
+        fs.insert_file("/root/file", "");
+        fs.insert_file("/target", "");
+        fs.insert_symlink("/root/link", "/target");
+        let entries = fs.list_dir(Path::new("/root")).unwrap();
+        let summary: Vec<(&str, bool, bool)> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir, e.is_symlink))
+            .collect();
+        assert_eq!(summary, [("file", false, false), ("link", false, true)]);
+    }
+
+    #[test]
+    fn remove_file_on_symlink_removes_only_link() {
+        let fs = FakeFs::new();
+        fs.insert_file("/target", "keep me");
+        fs.insert_symlink("/link", "/target");
+        fs.remove_file(Path::new("/link")).unwrap();
+        assert!(!fs.exists(Path::new("/link")));
+        assert!(fs.exists(Path::new("/target")));
     }
 }
