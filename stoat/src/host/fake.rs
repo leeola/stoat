@@ -98,6 +98,10 @@ struct FakeState {
     /// One-shot list_dir failures keyed by input path. Drained on the
     /// next matching `list_dir` call, before symlink resolution.
     list_dir_failures: HashMap<PathBuf, io::ErrorKind>,
+    /// One-shot canonicalize failures keyed by input path. Drained on
+    /// the next matching `canonicalize` call, before symlink
+    /// resolution.
+    canonicalize_failures: HashMap<PathBuf, io::ErrorKind>,
     ops: Vec<FakeFsOp>,
 }
 
@@ -139,6 +143,7 @@ impl FakeFs {
                 write_failures: HashMap::new(),
                 metadata_failures: HashMap::new(),
                 list_dir_failures: HashMap::new(),
+                canonicalize_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
         }
@@ -244,6 +249,18 @@ impl FakeFs {
         let mut state = self.state.lock().unwrap();
         state
             .list_dir_failures
+            .insert(path.as_ref().to_path_buf(), kind);
+    }
+
+    /// Arm a one-shot canonicalize failure for `path`. The next
+    /// [`FsHost::canonicalize`] call whose input path equals `path`
+    /// returns `io::Error::new(kind, ...)` and clears the arm;
+    /// subsequent calls behave normally. Matched before symlink
+    /// resolution, so callers inject for the path they invoke with.
+    pub fn fail_next_canonicalize(&self, path: impl AsRef<Path>, kind: io::ErrorKind) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .canonicalize_failures
             .insert(path.as_ref().to_path_buf(), kind);
     }
 
@@ -416,6 +433,12 @@ impl FsHost for FakeFs {
         state.ops.push(FakeFsOp::Canonicalize {
             path: path.to_path_buf(),
         });
+        if let Some(kind) = state.canonicalize_failures.remove(path) {
+            return Err(io::Error::new(
+                kind,
+                format!("{}: injected canonicalize failure", path.display()),
+            ));
+        }
         let resolved = resolve_symlink(&state, path)?;
         if state.entries.contains_key(&resolved) {
             Ok(resolved)
@@ -744,6 +767,32 @@ mod tests {
             fs.ops(),
             [FakeFsOp::ListDir {
                 path: PathBuf::from("/d"),
+            }]
+        );
+    }
+
+    #[test]
+    fn fail_next_canonicalize_fires_once() {
+        let fs = FakeFs::new();
+        fs.insert_file("/target", "");
+        fs.insert_symlink("/link", "/target");
+        fs.fail_next_canonicalize("/link", io::ErrorKind::PermissionDenied);
+        let err = fs.canonicalize(Path::new("/link")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let canon = fs.canonicalize(Path::new("/link")).unwrap();
+        assert_eq!(canon, Path::new("/target"));
+    }
+
+    #[test]
+    fn fail_next_canonicalize_records_op_on_failure() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x", "");
+        fs.fail_next_canonicalize("/x", io::ErrorKind::PermissionDenied);
+        let _ = fs.canonicalize(Path::new("/x"));
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::Canonicalize {
+                path: PathBuf::from("/x"),
             }]
         );
     }
