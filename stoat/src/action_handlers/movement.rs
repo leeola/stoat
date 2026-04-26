@@ -931,6 +931,33 @@ pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+
+    let did_undo = {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        guard.undo()
+    };
+
+    if !did_undo {
+        return UpdateEffect::None;
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| sel.clone());
+    UpdateEffect::Redraw
+}
+
 pub(super) fn indent_selection(stoat: &mut Stoat) -> UpdateEffect {
     apply_line_indent(stoat, IndentDir::In)
 }

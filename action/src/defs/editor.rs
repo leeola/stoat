@@ -71,6 +71,16 @@ define_action!(
 );
 
 define_action!(
+    UndoDef,
+    Undo,
+    "Undo",
+    ActionKind::Undo,
+    "undo last edit",
+    "Reverse the most recent edit on the focused buffer. Repeat to walk further back through edit history; no-ops once history is empty. Anchor-based selections re-validate against the post-undo snapshot.",
+    ActionPriority::Common
+);
+
+define_action!(
     IndentSelectionDef,
     IndentSelection,
     "IndentSelection",

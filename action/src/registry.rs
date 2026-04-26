@@ -23,7 +23,7 @@ use crate::{
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp,
             RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
             SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TrimSelections, UnindentSelection,
+            SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -253,6 +253,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Increment::DEF, |_| Ok(Box::new(Increment)));
     add(Decrement::DEF, |_| Ok(Box::new(Decrement)));
     add(DeleteSelection::DEF, |_| Ok(Box::new(DeleteSelection)));
+    add(Undo::DEF, |_| Ok(Box::new(Undo)));
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
@@ -631,7 +632,8 @@ mod tests {
         // + 1 DeleteSelection.
         // + 2 line indent ops (IndentSelection/UnindentSelection).
         // + 1 AlignSelections.
-        assert_eq!(all().count(), 169);
+        // + 1 Undo.
+        assert_eq!(all().count(), 170);
     }
 
     #[test]

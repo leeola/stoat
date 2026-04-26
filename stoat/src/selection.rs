@@ -1376,4 +1376,43 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignSelections);
         assert_eq!(focused_buffer_text(&mut h), before);
     }
+
+    #[test]
+    fn undo_after_single_edit_restores_text() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
+        assert_eq!(focused_buffer_text(&mut h), "");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    }
+
+    #[test]
+    fn undo_consecutive_walks_history_back_to_origin() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn undo_past_end_of_history_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "stays\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        let after_initial_undo = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
+        assert_eq!(focused_buffer_text(&mut h), after_initial_undo);
+    }
 }
