@@ -368,4 +368,56 @@ mod tests {
         assert_eq!(line_count("a\nb\n"), 2);
         assert_eq!(line_count("\n"), 1);
     }
+
+    #[test]
+    fn emitted_patch_from_chunk_applies_cleanly() {
+        use crate::host::{GitHost, LocalGit};
+        use git2::{Repository, Signature};
+
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_path_buf();
+        let repo = Repository::init(&workdir).unwrap();
+
+        std::fs::write(workdir.join("a.rs"), "line1\nOLD\nline3\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("test", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
+            .unwrap();
+
+        std::fs::write(workdir.join("a.rs"), "line1\nNEW\nline3\n").unwrap();
+
+        let mut session = ReviewSession::new(ReviewSource::WorkingTree {
+            workdir: workdir.clone(),
+        });
+        session.add_file(
+            workdir.join("a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new("line1\nOLD\nline3\n".into()),
+            Arc::new("line1\nNEW\nline3\n".into()),
+        );
+        let id = session.order[0];
+        let chunk = &session.chunks[&id];
+        let file = &session.files[chunk.file_index];
+        let patch = chunk_to_unified_diff(file, chunk, &workdir);
+
+        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        host_repo
+            .apply_to_index(&patch)
+            .expect("emitted patch must apply to real libgit2");
+
+        let mut index = repo.index().unwrap();
+        index.read(true).unwrap();
+        let entry = index.get_path(Path::new("a.rs"), 0).unwrap();
+        let blob = repo.find_blob(entry.id).unwrap();
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "line1\nNEW\nline3\n",
+            "index must reflect the applied change"
+        );
+    }
 }
