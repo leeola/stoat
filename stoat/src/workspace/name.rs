@@ -1,18 +1,25 @@
 use crate::workspace::WorkspaceUid;
 
-/// 32 short adjectives. Index = low 5 bits of the workspace uid.
+/// 64 short adjectives. Index = low 6 bits of the workspace uid.
 const ADJECTIVES: &[&str] = &[
     "brave", "calm", "dusty", "eager", "fancy", "glad", "hazy", "icy", "jolly", "keen", "lazy",
     "mild", "neat", "odd", "prim", "quiet", "rapid", "slim", "tidy", "vast", "wild", "wise",
-    "zany", "plump", "swift", "blue", "gold", "sharp", "sleek", "fuzzy", "rusty", "jumpy",
+    "zany", "plump", "swift", "blue", "gold", "sharp", "sleek", "fuzzy", "rusty", "jumpy", "agile",
+    "alert", "bold", "bright", "brisk", "chill", "clean", "clever", "cool", "cozy", "crisp",
+    "deep", "fierce", "firm", "fresh", "gentle", "grand", "happy", "kind", "light", "lively",
+    "loyal", "lucky", "merry", "nimble", "quick", "rosy", "royal", "silky", "snappy", "spry",
+    "sunny",
 ];
 
-/// 32 short animal names. Index = next 5 bits of the workspace uid.
+/// 64 short animal names. Index = next 6 bits of the workspace uid.
 const ANIMALS: &[&str] = &[
     "otter", "bear", "fox", "owl", "mole", "vole", "lynx", "hare", "deer", "swan", "crane",
     "eagle", "hawk", "robin", "finch", "badger", "raven", "wolf", "lion", "panda", "koala",
     "gecko", "lizard", "crab", "salmon", "trout", "octopus", "manatee", "walrus", "mongoose",
-    "ferret", "beaver",
+    "ferret", "beaver", "cat", "dog", "mouse", "rabbit", "squirrel", "moose", "tiger", "leopard",
+    "cheetah", "jaguar", "weasel", "mink", "seal", "dolphin", "whale", "shark", "orca", "duck",
+    "goose", "heron", "parrot", "magpie", "sparrow", "bat", "lemur", "yak", "bison", "boar",
+    "fawn", "coyote", "dingo", "wombat",
 ];
 
 /// Deterministic short name like `"rapid mongoose"` derived from a workspace
@@ -21,8 +28,8 @@ const ANIMALS: &[&str] = &[
 /// adjective list.
 pub(crate) fn default_workspace_name(uid: WorkspaceUid) -> String {
     let bits = uid.0;
-    let adj = ADJECTIVES[(bits & 0x1F) as usize];
-    let animal = ANIMALS[((bits >> 5) & 0x1F) as usize];
+    let adj = ADJECTIVES[(bits & 0x3F) as usize];
+    let animal = ANIMALS[((bits >> 6) & 0x3F) as usize];
     format!("{adj} {animal}")
 }
 
@@ -32,8 +39,8 @@ mod tests {
 
     #[test]
     fn lists_have_expected_lengths() {
-        assert_eq!(ADJECTIVES.len(), 32);
-        assert_eq!(ANIMALS.len(), 32);
+        assert_eq!(ADJECTIVES.len(), 64);
+        assert_eq!(ANIMALS.len(), 64);
     }
 
     #[test]
@@ -55,9 +62,9 @@ mod tests {
     fn low_bits_pick_adjective_high_bits_pick_animal() {
         assert_eq!(default_workspace_name(WorkspaceUid(0)), "brave otter");
         assert_eq!(default_workspace_name(WorkspaceUid(1)), "calm otter");
-        assert_eq!(default_workspace_name(WorkspaceUid(1 << 5)), "brave bear");
+        assert_eq!(default_workspace_name(WorkspaceUid(1 << 6)), "brave bear");
         assert_eq!(
-            default_workspace_name(WorkspaceUid((1 << 5) | 1)),
+            default_workspace_name(WorkspaceUid((1 << 6) | 1)),
             "calm bear"
         );
     }
