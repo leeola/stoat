@@ -186,6 +186,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ScrollUp => movement::scroll_view(stoat, movement::ScrollDir::Up),
         ActionKind::ScrollDown => movement::scroll_view(stoat, movement::ScrollDir::Down),
         ActionKind::SwitchCase => movement::switch_case(stoat),
+        ActionKind::SwitchToUppercase => movement::switch_to_uppercase(stoat),
+        ActionKind::SwitchToLowercase => movement::switch_to_lowercase(stoat),
         ActionKind::ExtendToLineStart => movement::goto_line_start(stoat, true),
         ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
         ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),

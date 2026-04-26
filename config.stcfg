@@ -168,6 +168,8 @@ on key {
         ) -> RotateSelectionsForward();
         _ -> TrimSelections();
         ~ -> SwitchCase();
+        ` -> SwitchToLowercase();
+        Alt-` -> SwitchToUppercase();
         g -> SetMode(goto);
         z -> SetMode(z);
         R -> OpenReview();

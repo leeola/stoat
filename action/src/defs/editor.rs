@@ -351,6 +351,26 @@ define_action!(
 );
 
 define_action!(
+    SwitchToUppercaseDef,
+    SwitchToUppercase,
+    "SwitchToUppercase",
+    ActionKind::SwitchToUppercase,
+    "uppercase selection",
+    "Uppercase every character in the primary selection. Already-uppercase and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    SwitchToLowercaseDef,
+    SwitchToLowercase,
+    "SwitchToLowercase",
+    ActionKind::SwitchToLowercase,
+    "lowercase selection",
+    "Lowercase every character in the primary selection. Already-lowercase and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToLineStartDef,
     ExtendToLineStart,
     "ExtendToLineStart",

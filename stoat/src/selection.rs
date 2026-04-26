@@ -1109,4 +1109,44 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
         assert_eq!(focused_buffer_text(&mut h), before);
     }
+
+    #[test]
+    fn switch_to_uppercase_lower_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
+        assert_eq!(focused_buffer_text(&mut h), "HELLO\n");
+    }
+
+    #[test]
+    fn switch_to_uppercase_mixed_selection_is_idempotent_for_uppers() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "Hello World!\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
+        assert_eq!(focused_buffer_text(&mut h), "HELLO WORLD!\n");
+    }
+
+    #[test]
+    fn switch_to_lowercase_upper_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "HELLO\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToLowercase);
+        assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    }
+
+    #[test]
+    fn switch_to_lowercase_mixed_selection_is_idempotent_for_lowers() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "Hello World!\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchToLowercase);
+        assert_eq!(focused_buffer_text(&mut h), "hello world!\n");
+    }
 }

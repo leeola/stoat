@@ -19,7 +19,8 @@ use crate::{
             GotoWindowTop, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
             MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
             MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward,
-            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SwitchCase, TrimSelections,
+            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -231,6 +232,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ScrollUp::DEF, |_| Ok(Box::new(ScrollUp)));
     add(ScrollDown::DEF, |_| Ok(Box::new(ScrollDown)));
     add(SwitchCase::DEF, |_| Ok(Box::new(SwitchCase)));
+    add(SwitchToUppercase::DEF, |_| Ok(Box::new(SwitchToUppercase)));
+    add(SwitchToLowercase::DEF, |_| Ok(Box::new(SwitchToLowercase)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -595,7 +598,8 @@ mod tests {
         // + 3 view-alignment ops (AlignViewTop/Center/Bottom).
         // + 2 view-scroll ops (ScrollUp/Down).
         // + 1 case toggle (SwitchCase).
-        assert_eq!(all().count(), 155);
+        // + 2 case-force (SwitchToUppercase/Lowercase).
+        assert_eq!(all().count(), 157);
     }
 
     #[test]

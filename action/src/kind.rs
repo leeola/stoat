@@ -59,6 +59,8 @@ pub enum ActionKind {
     ScrollUp,
     ScrollDown,
     SwitchCase,
+    SwitchToUppercase,
+    SwitchToLowercase,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

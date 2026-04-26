@@ -518,6 +518,21 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn switch_case(stoat: &mut Stoat) -> UpdateEffect {
+    transform_primary_selection(stoat, toggle_case)
+}
+
+pub(super) fn switch_to_uppercase(stoat: &mut Stoat) -> UpdateEffect {
+    transform_primary_selection(stoat, str::to_uppercase)
+}
+
+pub(super) fn switch_to_lowercase(stoat: &mut Stoat) -> UpdateEffect {
+    transform_primary_selection(stoat, str::to_lowercase)
+}
+
+fn transform_primary_selection<F>(stoat: &mut Stoat, transform: F) -> UpdateEffect
+where
+    F: Fn(&str) -> String,
+{
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -538,7 +553,7 @@ pub(super) fn switch_case(stoat: &mut Stoat) -> UpdateEffect {
             return UpdateEffect::None;
         }
         let text = buffer_snapshot.rope().slice(start..end).to_string();
-        let new_text = toggle_case(&text);
+        let new_text = transform(&text);
         if new_text == text {
             return UpdateEffect::None;
         }
