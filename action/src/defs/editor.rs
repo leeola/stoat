@@ -341,6 +341,16 @@ define_action!(
 );
 
 define_action!(
+    SwitchCaseDef,
+    SwitchCase,
+    "SwitchCase",
+    ActionKind::SwitchCase,
+    "toggle case",
+    "Toggle the case of every character in the primary selection: uppercase becomes lowercase and vice versa. Digits, punctuation, and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToLineStartDef,
     ExtendToLineStart,
     "ExtendToLineStart",

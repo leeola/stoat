@@ -167,6 +167,7 @@ on key {
         ( -> RotateSelectionsBackward();
         ) -> RotateSelectionsForward();
         _ -> TrimSelections();
+        ~ -> SwitchCase();
         g -> SetMode(goto);
         z -> SetMode(z);
         R -> OpenReview();

@@ -4,6 +4,7 @@ use crate::{
     display_map::DisplayPoint,
     editor_state::EditorState,
     multi_buffer::MultiBufferSnapshot,
+    pane::View,
 };
 use stoat_text::{
     next_word_end, next_word_start, prev_word_end, prev_word_start, Anchor, Bias, Point, Selection,
@@ -514,6 +515,71 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
         new
     });
     UpdateEffect::Redraw
+}
+
+pub(super) fn switch_case(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, primary_id, start, end, new_text) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let primary_id = sel.id;
+        let start = buffer_snapshot.resolve_anchor(&sel.start);
+        let end = buffer_snapshot.resolve_anchor(&sel.end);
+        if start == end {
+            return UpdateEffect::None;
+        }
+        let text = buffer_snapshot.rope().slice(start..end).to_string();
+        let new_text = toggle_case(&text);
+        if new_text == text {
+            return UpdateEffect::None;
+        }
+        (buffer_id, primary_id, start, end, new_text)
+    };
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        guard.edit(start..end, &new_text);
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    let new_end = start + new_text.len();
+    let start_anchor = new_buf.anchor_at(start, Bias::Left);
+    let end_anchor = new_buf.anchor_at(new_end, Bias::Right);
+    editor.selections.transform(new_buf, |s| {
+        let mut new = s.clone();
+        if new.id == primary_id {
+            new.start = start_anchor;
+            new.end = end_anchor;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+fn toggle_case(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_lowercase() {
+                c.to_uppercase().collect::<Vec<_>>()
+            } else if c.is_uppercase() {
+                c.to_lowercase().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }
 
 pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {

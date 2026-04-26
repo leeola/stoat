@@ -58,6 +58,7 @@ pub enum ActionKind {
     AlignViewBottom,
     ScrollUp,
     ScrollDown,
+    SwitchCase,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

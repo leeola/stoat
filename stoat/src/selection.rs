@@ -1046,4 +1046,67 @@ mod tests {
             "buffer shorter than viewport keeps scroll_row at 0"
         );
     }
+
+    fn focused_buffer_text(h: &mut crate::test_harness::TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        guard.rope().to_string()
+    }
+
+    #[test]
+    fn switch_case_uppercases_lowercase_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "HELLO\n");
+    }
+
+    #[test]
+    fn switch_case_lowercases_uppercase_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "HELLO\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    }
+
+    #[test]
+    fn switch_case_toggles_mixed_case() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "Hello World\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "hELLO wORLD\n");
+    }
+
+    #[test]
+    fn switch_case_passes_through_non_letters() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc 123!\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "ABC 123!\n");
+    }
+
+    #[test]
+    fn switch_case_empty_selection_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        let before = focused_buffer_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), before);
+    }
 }
