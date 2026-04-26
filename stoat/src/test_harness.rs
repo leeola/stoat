@@ -19,6 +19,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write,
     sync::Arc,
+    time::Duration,
 };
 use stoat_config::Settings;
 use stoat_scheduler::TestScheduler;
@@ -274,6 +275,16 @@ impl TestHarness {
 
     pub fn tick(&mut self) -> bool {
         self.scheduler.tick()
+    }
+
+    /// Advance the fake clock by `duration`, firing every timer that
+    /// expires inside the window, then settle the harness so any
+    /// [`crate::host::ClaudeNotification`] or pending commit produced
+    /// by those wake-ups is routed through the main dispatch path
+    /// before returning.
+    pub fn advance_clock(&mut self, duration: Duration) {
+        self.scheduler.advance_clock(duration);
+        self.settle();
     }
 
     /// Drive the scheduler and Claude notification pipeline to a fixed
