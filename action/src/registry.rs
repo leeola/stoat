@@ -15,10 +15,11 @@ use crate::{
             ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
             ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
             FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
-            GotoLineStart, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
-            MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
-            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll,
-            SelectLineBelow, TrimSelections,
+            GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown,
+            HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
+            MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
+            PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll, SelectLineBelow,
+            TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -221,6 +222,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
+    add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
+    add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
+    add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -581,7 +585,8 @@ mod tests {
         // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
-        assert_eq!(all().count(), 146);
+        // + 3 window-relative gotos (GotoWindowTop/Center/Bottom).
+        assert_eq!(all().count(), 149);
     }
 
     #[test]

@@ -261,6 +261,36 @@ define_action!(
 );
 
 define_action!(
+    GotoWindowTopDef,
+    GotoWindowTop,
+    "GotoWindowTop",
+    ActionKind::GotoWindowTop,
+    "goto window top",
+    "Collapse every selection to column 0 of the topmost row currently visible in the focused editor's viewport. Does not scroll the view.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoWindowCenterDef,
+    GotoWindowCenter,
+    "GotoWindowCenter",
+    ActionKind::GotoWindowCenter,
+    "goto window center",
+    "Collapse every selection to column 0 of the row at the vertical midpoint of the focused editor's viewport. Does not scroll the view.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoWindowBottomDef,
+    GotoWindowBottom,
+    "GotoWindowBottom",
+    ActionKind::GotoWindowBottom,
+    "goto window bottom",
+    "Collapse every selection to column 0 of the bottommost row currently visible in the focused editor's viewport. Does not scroll the view.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToLineStartDef,
     ExtendToLineStart,
     "ExtendToLineStart",

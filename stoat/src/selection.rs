@@ -857,4 +857,65 @@ mod tests {
         h.type_keys("ctrl-b");
         h.assert_snapshot("snapshot_page_up_at_top_is_noop");
     }
+
+    #[test]
+    fn goto_window_top_after_scroll_lands_at_scroll_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWindowTop);
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(scroll_row, 0)]);
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_center_lands_at_viewport_midpoint() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWindowCenter);
+        let positions = h.cursor_display_positions();
+        assert!(positions[0].0 > scroll_row);
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_bottom_lands_at_last_visible_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows();
+        let scroll_row = scroll_before[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        let positions = h.cursor_display_positions();
+        assert!(
+            positions[0].0 > scroll_row,
+            "bottom row {} must be below scroll_row {}",
+            positions[0].0,
+            scroll_row
+        );
+        assert_eq!(h.editor_scroll_rows(), scroll_before);
+    }
+
+    #[test]
+    fn goto_window_clamps_to_buffer_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWindowBottom);
+        let positions = h.cursor_display_positions();
+        assert!(
+            positions[0].0 <= 3,
+            "cursor must clamp to last buffer row, got {}",
+            positions[0].0
+        );
+    }
 }

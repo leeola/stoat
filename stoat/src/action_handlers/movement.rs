@@ -746,3 +746,39 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     });
     UpdateEffect::Redraw
 }
+
+#[derive(Copy, Clone, Debug)]
+pub(super) enum WindowAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let scroll_row = editor.scroll_row;
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+
+    let offset = match align {
+        WindowAlign::Top => 0,
+        WindowAlign::Center => viewport / 2,
+        WindowAlign::Bottom => viewport.saturating_sub(1),
+    };
+    let target_row = scroll_row.saturating_add(offset).min(max_row);
+
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    let target_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.collapse_to(target_anchor, SelectionGoal::None);
+        new
+    });
+    UpdateEffect::Redraw
+}

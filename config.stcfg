@@ -175,6 +175,9 @@ on key {
         i -> [GotoFirstNonwhitespace(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
         k -> [GotoFileStart(), SetMode(normal)];
+        t -> [GotoWindowTop(), SetMode(normal)];
+        c -> [GotoWindowCenter(), SetMode(normal)];
+        b -> [GotoWindowBottom(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {
