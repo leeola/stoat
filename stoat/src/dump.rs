@@ -490,6 +490,12 @@ mod tests {
         assert_eq!(rebase.selected, 2);
     }
 
+    /// Intentional real-`std::fs` test: `write_archive` and
+    /// `read_archive` stream through `tar` + `zstd` against real
+    /// `std::fs::File` handles, which `FsHost`'s buffer-based
+    /// `read` / `write` API cannot replace without holding the full
+    /// archive in memory. `TempDir` scopes the workspace and archive
+    /// roots so cleanup is automatic.
     #[test]
     fn save_extract_roundtrip() {
         use crate::workspace::Workspace;
