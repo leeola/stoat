@@ -30,8 +30,8 @@ pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminal},
-    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeFs, FakeGit, FakeLsp,
-    FakeRepoBuilder,
+    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeFs, FakeFsOp, FakeGit,
+    FakeLsp, FakeRepoBuilder,
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use git::{

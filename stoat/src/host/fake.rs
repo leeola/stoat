@@ -28,6 +28,23 @@ enum FakeEntry {
     Symlink { target: PathBuf, mtime: SystemTime },
 }
 
+/// Recorded against the input path, before symlink resolution and
+/// before error-injection checks, so the log captures every method
+/// invocation -- including ones that the fake fails on purpose.
+/// Write payloads are summarised as a byte length to keep the log
+/// cheap; tests that need exact bytes should read the final state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeFsOp {
+    Read { path: PathBuf },
+    Write { path: PathBuf, len: usize },
+    Metadata { path: PathBuf },
+    ListDir { path: PathBuf },
+    CreateDirAll { path: PathBuf },
+    Canonicalize { path: PathBuf },
+    RemoveFile { path: PathBuf },
+    Rename { from: PathBuf, to: PathBuf },
+}
+
 /// Linux's `MAXSYMLINKS` limit. `ErrorKind::FilesystemLoop` would be
 /// the natural kind to return after exceeding this, but it remains
 /// unstable (rust-lang/rust#86442), so callers see [`io::ErrorKind::Other`]
@@ -73,6 +90,7 @@ struct FakeState {
     /// matching `write` call until the entry is cleared; this commit
     /// has no removal API, matching the short-lived test fakes.
     write_failures: HashMap<PathBuf, io::ErrorKind>,
+    ops: Vec<FakeFsOp>,
 }
 
 impl FakeState {
@@ -111,6 +129,7 @@ impl FakeFs {
                 clock: 0,
                 read_failures: HashMap::new(),
                 write_failures: HashMap::new(),
+                ops: Vec::new(),
             }),
         }
     }
@@ -193,11 +212,23 @@ impl FakeFs {
             .write_failures
             .insert(path.as_ref().to_path_buf(), kind);
     }
+
+    /// Snapshot of every [`FsHost`] method invoked on this fake, in
+    /// call order. Recorded against the input path before symlink
+    /// resolution and before error-injection checks, so failed and
+    /// successful calls both appear. Returns a clone so callers do
+    /// not hold the internal mutex.
+    pub fn ops(&self) -> Vec<FakeFsOp> {
+        self.state.lock().unwrap().ops.clone()
+    }
 }
 
 impl FsHost for FakeFs {
     fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::Read {
+            path: path.to_path_buf(),
+        });
         if let Some(kind) = state.read_failures.remove(path) {
             return Err(io::Error::new(
                 kind,
@@ -225,6 +256,10 @@ impl FsHost for FakeFs {
 
     fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::Write {
+            path: path.to_path_buf(),
+            len: data.len(),
+        });
         if let Some(kind) = state.write_failures.get(path) {
             return Err(io::Error::new(
                 *kind,
@@ -245,7 +280,10 @@ impl FsHost for FakeFs {
     }
 
     fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::Metadata {
+            path: path.to_path_buf(),
+        });
         Ok(state.entries.get(path).map(|entry| match entry {
             FakeEntry::File { content, mtime } => FsMetadata {
                 len: content.len() as u64,
@@ -269,7 +307,10 @@ impl FsHost for FakeFs {
     }
 
     fn list_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::ListDir {
+            path: path.to_path_buf(),
+        });
         let resolved = resolve_symlink(&state, path)?;
         match state.entries.get(&resolved) {
             Some(FakeEntry::Dir { .. }) => {},
@@ -312,6 +353,9 @@ impl FsHost for FakeFs {
 
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::CreateDirAll {
+            path: path.to_path_buf(),
+        });
         let resolved = resolve_symlink(&state, path)?;
         state.ensure_ancestors(&resolved);
         if !state.entries.contains_key(&resolved) {
@@ -322,7 +366,10 @@ impl FsHost for FakeFs {
     }
 
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::Canonicalize {
+            path: path.to_path_buf(),
+        });
         let resolved = resolve_symlink(&state, path)?;
         if state.entries.contains_key(&resolved) {
             Ok(resolved)
@@ -336,6 +383,9 @@ impl FsHost for FakeFs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::RemoveFile {
+            path: path.to_path_buf(),
+        });
         match state.entries.get(path) {
             Some(FakeEntry::File { .. } | FakeEntry::Symlink { .. }) => {
                 state.entries.remove(path);
@@ -354,6 +404,10 @@ impl FsHost for FakeFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
+        state.ops.push(FakeFsOp::Rename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+        });
         let Some(entry) = state.entries.remove(from) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -594,5 +648,65 @@ mod tests {
         assert_eq!(first.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(second.kind(), io::ErrorKind::PermissionDenied);
         assert!(!fs.exists(Path::new("/locked")));
+    }
+
+    #[test]
+    fn ops_records_call_sequence() {
+        let fs = FakeFs::new();
+        fs.write(Path::new("/a"), b"hi").unwrap();
+        let mut buf = Vec::new();
+        fs.read(Path::new("/a"), &mut buf).unwrap();
+        fs.rename(Path::new("/a"), Path::new("/b")).unwrap();
+        assert_eq!(
+            fs.ops(),
+            [
+                FakeFsOp::Write {
+                    path: PathBuf::from("/a"),
+                    len: 2,
+                },
+                FakeFsOp::Read {
+                    path: PathBuf::from("/a"),
+                },
+                FakeFsOp::Rename {
+                    from: PathBuf::from("/a"),
+                    to: PathBuf::from("/b"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ops_captures_atomic_write_then_rename() {
+        let fs = FakeFs::new();
+        fs.write(Path::new("/data.tmp"), b"payload").unwrap();
+        fs.rename(Path::new("/data.tmp"), Path::new("/data"))
+            .unwrap();
+        assert_eq!(
+            fs.ops(),
+            [
+                FakeFsOp::Write {
+                    path: PathBuf::from("/data.tmp"),
+                    len: 7,
+                },
+                FakeFsOp::Rename {
+                    from: PathBuf::from("/data.tmp"),
+                    to: PathBuf::from("/data"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ops_records_injected_read_failure_attempt() {
+        let fs = FakeFs::new();
+        fs.insert_file("/x", "ok");
+        fs.fail_next_read("/x", io::ErrorKind::PermissionDenied);
+        let _ = fs.read(Path::new("/x"), &mut Vec::new());
+        assert_eq!(
+            fs.ops(),
+            [FakeFsOp::Read {
+                path: PathBuf::from("/x"),
+            }]
+        );
     }
 }
