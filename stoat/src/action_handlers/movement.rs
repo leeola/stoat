@@ -754,6 +754,37 @@ pub(super) enum WindowAlign {
     Bottom,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ViewAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let max_row = rope.max_point().row;
+
+    let head = editor.selections.newest_anchor().head();
+    let cursor_row = buffer_snapshot.point_for_anchor(&head).row;
+
+    let desired_scroll = match align {
+        ViewAlign::Top => cursor_row,
+        ViewAlign::Center => cursor_row.saturating_sub(viewport / 2),
+        ViewAlign::Bottom => cursor_row.saturating_sub(viewport.saturating_sub(1)),
+    };
+    let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+    editor.scroll_row = desired_scroll.min(max_scroll);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

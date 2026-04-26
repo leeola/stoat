@@ -11,15 +11,15 @@ use crate::{
         },
         dump::Dump,
         editor::{
-            AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-            FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd,
-            GotoLineStart, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown,
-            HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
-            PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll, SelectLineBelow,
-            TrimSelections,
+            AddSelectionBelow, AlignViewBottom, AlignViewCenter, AlignViewTop, CollapseSelection,
+            ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
+            ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace,
+            GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
+            GotoWindowTop, HalfPageDown, HalfPageUp, KeepPrimarySelection, MoveDown, MoveLeft,
+            MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
+            MoveUp, PageDown, PageUp, RotateSelectionsBackward, RotateSelectionsForward, SelectAll,
+            SelectLineBelow, TrimSelections,
         },
         file::OpenFile,
         file_finder::{
@@ -225,6 +225,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
+    add(AlignViewTop::DEF, |_| Ok(Box::new(AlignViewTop)));
+    add(AlignViewCenter::DEF, |_| Ok(Box::new(AlignViewCenter)));
+    add(AlignViewBottom::DEF, |_| Ok(Box::new(AlignViewBottom)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -586,7 +589,8 @@ mod tests {
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
         // + 3 window-relative gotos (GotoWindowTop/Center/Bottom).
-        assert_eq!(all().count(), 149);
+        // + 3 view-alignment ops (AlignViewTop/Center/Bottom).
+        assert_eq!(all().count(), 152);
     }
 
     #[test]

@@ -291,6 +291,36 @@ define_action!(
 );
 
 define_action!(
+    AlignViewTopDef,
+    AlignViewTop,
+    "AlignViewTop",
+    ActionKind::AlignViewTop,
+    "align view top",
+    "Scroll the focused editor so the cursor's row sits at the top of the viewport. Cursor position is unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    AlignViewCenterDef,
+    AlignViewCenter,
+    "AlignViewCenter",
+    ActionKind::AlignViewCenter,
+    "align view center",
+    "Scroll the focused editor so the cursor's row sits at the vertical midpoint of the viewport. Cursor position is unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    AlignViewBottomDef,
+    AlignViewBottom,
+    "AlignViewBottom",
+    ActionKind::AlignViewBottom,
+    "align view bottom",
+    "Scroll the focused editor so the cursor's row sits at the bottom of the viewport. Cursor position is unchanged.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendToLineStartDef,
     ExtendToLineStart,
     "ExtendToLineStart",

@@ -918,4 +918,74 @@ mod tests {
             positions[0].0
         );
     }
+
+    #[test]
+    fn align_view_top_scrolls_so_cursor_at_top() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignViewTop);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert_eq!(
+            scroll, head_before[0].0,
+            "scroll_row should equal cursor row"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_center_puts_cursor_at_midpoint() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        let cursor_row = head_before[0].0;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignViewCenter);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert!(
+            scroll < cursor_row,
+            "scroll {scroll} should be above cursor {cursor_row}"
+        );
+        assert!(
+            cursor_row - scroll <= 5,
+            "cursor at row {cursor_row}, scroll {scroll}: viewport midpoint should be roughly half a viewport up"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_bottom_puts_cursor_at_last_visible_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let head_before = h.cursor_display_positions();
+        let cursor_row = head_before[0].0;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignViewBottom);
+        let scroll = h.editor_scroll_rows()[0];
+        let head_after = h.cursor_display_positions();
+        assert!(
+            scroll <= cursor_row,
+            "scroll {scroll} should be at or above cursor {cursor_row}"
+        );
+        assert_eq!(head_after, head_before, "cursor row must not move");
+    }
+
+    #[test]
+    fn align_view_clamps_to_max_scroll() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::AlignViewBottom);
+        let scroll = h.editor_scroll_rows()[0];
+        assert_eq!(
+            scroll, 0,
+            "buffer shorter than viewport must clamp scroll_row to 0"
+        );
+    }
 }

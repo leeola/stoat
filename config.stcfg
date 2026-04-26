@@ -168,6 +168,7 @@ on key {
         ) -> RotateSelectionsForward();
         _ -> TrimSelections();
         g -> SetMode(goto);
+        z -> SetMode(z);
         R -> OpenReview();
     }
     mode == goto {
@@ -178,6 +179,13 @@ on key {
         t -> [GotoWindowTop(), SetMode(normal)];
         c -> [GotoWindowCenter(), SetMode(normal)];
         b -> [GotoWindowBottom(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == z {
+        Escape -> SetMode(normal);
+        z -> [AlignViewCenter(), SetMode(normal)];
+        t -> [AlignViewTop(), SetMode(normal)];
+        b -> [AlignViewBottom(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {

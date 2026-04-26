@@ -1194,7 +1194,7 @@ mod tests {
     fn harness_no_duplicate_frame() {
         let mut h = Stoat::test();
         let before = h.frames().len();
-        h.type_keys("z");
+        h.type_keys("f12");
         assert_eq!(h.frames().len(), before);
     }
 
