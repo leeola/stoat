@@ -19,6 +19,7 @@ pub struct FakeClaudeCode {
     tx: Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>,
     rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<AgentMessage>>,
     sent: Mutex<Vec<String>>,
+    next_send_failure: Mutex<Option<io::ErrorKind>>,
 }
 
 impl Default for FakeClaudeCode {
@@ -34,6 +35,7 @@ impl FakeClaudeCode {
             tx: Mutex::new(Some(tx)),
             rx: tokio::sync::Mutex::new(rx),
             sent: Mutex::new(Vec::new()),
+            next_send_failure: Mutex::new(None),
         }
     }
 
@@ -217,6 +219,16 @@ impl FakeClaudeCode {
         fake
     }
 
+    // --- Transport-error injection ---
+
+    /// Arm a one-shot send failure. The next [`ClaudeCodeSession::send`]
+    /// call returns `io::Error::new(kind, ...)` and clears the arm;
+    /// subsequent sends behave normally. The `sent` log records the
+    /// attempted content regardless of injected failure.
+    pub fn fail_next_send(&self, kind: io::ErrorKind) {
+        *self.next_send_failure.lock().unwrap() = Some(kind);
+    }
+
     // --- Assertion helpers ---
 
     pub fn sent_messages(&self) -> Vec<String> {
@@ -242,6 +254,9 @@ impl FakeClaudeCode {
 impl ClaudeCodeSession for FakeClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
         self.sent.lock().unwrap().push(content.to_string());
+        if let Some(kind) = self.next_send_failure.lock().unwrap().take() {
+            return Err(io::Error::new(kind, "injected send failure"));
+        }
         Ok(())
     }
 
@@ -455,6 +470,30 @@ mod tests {
 
             let sent = agent.sent_messages();
             assert_eq!(sent, ["hello", "world"]);
+        });
+    }
+
+    #[test]
+    fn fail_next_send_fires_once() {
+        rt().block_on(async {
+            let agent = FakeClaudeCode::new();
+            agent.fail_next_send(io::ErrorKind::ConnectionAborted);
+
+            let err = agent.send("first").await.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+
+            agent.send("second").await.unwrap();
+        });
+    }
+
+    #[test]
+    fn fail_next_send_records_in_sent_on_failure() {
+        rt().block_on(async {
+            let agent = FakeClaudeCode::new();
+            agent.fail_next_send(io::ErrorKind::ConnectionAborted);
+            let _ = agent.send("attempt").await;
+
+            assert_eq!(agent.sent_messages(), ["attempt"]);
         });
     }
 
