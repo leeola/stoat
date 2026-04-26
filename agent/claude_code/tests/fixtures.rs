@@ -23,6 +23,16 @@
 //!
 //! This keeps the fixture set grounded in real wire data without
 //! requiring a separate capture script.
+//!
+//! # Why this lives in `tests/` and walks real disk
+//!
+//! Living under `tests/` (rather than a `#[cfg(test)] mod tests`
+//! inside `src/`) marks this as an integration test. The discovery
+//! pattern requires reading whatever fixture files exist on disk
+//! at run time, so routing through a `FakeFs` (or freezing the
+//! list at compile time via `include_str!`) would defeat the
+//! "drop a `.jsonl`, watch the test fail until the wire model
+//! catches up" workflow above.
 
 use std::{
     fs::{self, File},
