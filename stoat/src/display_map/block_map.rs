@@ -1268,13 +1268,9 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
                 start: right_start,
                 end: right_end,
             },
-        ) => {
-            if *right_start <= *left_end {
-                *left_end = (*left_end).max(*right_end);
-                true
-            } else {
-                false
-            }
+        ) if *right_start <= *left_end => {
+            *left_end = (*left_end).max(*right_end);
+            true
         },
         _ => false,
     });
