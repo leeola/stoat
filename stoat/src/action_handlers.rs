@@ -215,6 +215,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::MoveParentNodeEnd => {
             movement::move_to_parent_bound(stoat, movement::NodeBound::End)
         },
+        ActionKind::SaveSelection => movement::save_selection(stoat),
+        ActionKind::JumpBackward => movement::jump_backward(stoat),
+        ActionKind::JumpForward => movement::jump_forward(stoat),
         ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),
         ActionKind::GotoWindowCenter => movement::goto_window(stoat, movement::WindowAlign::Center),
         ActionKind::GotoWindowBottom => movement::goto_window(stoat, movement::WindowAlign::Bottom),

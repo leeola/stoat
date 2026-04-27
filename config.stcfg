@@ -345,6 +345,9 @@ on key {
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
         p -> OpenFileFinder();
+        s -> [SaveSelection(), SetMode(normal)];
+        j -> [JumpBackward(), SetMode(normal)];
+        k -> [JumpForward(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

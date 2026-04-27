@@ -14,6 +14,7 @@ pub mod file_finder;
 pub mod help;
 pub mod host;
 mod input_view;
+mod jumplist;
 pub mod keymap;
 mod keymap_state;
 pub mod multi_buffer;

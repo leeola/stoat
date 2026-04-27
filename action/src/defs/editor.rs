@@ -391,6 +391,36 @@ define_action!(
 );
 
 define_action!(
+    SaveSelectionDef,
+    SaveSelection,
+    "SaveSelection",
+    ActionKind::SaveSelection,
+    "save current position to jumplist",
+    "Push the primary selection's start byte offset onto the focused editor's jumplist. Truncates any forward history (anything reachable via JumpForward) before pushing.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    JumpBackwardDef,
+    JumpBackward,
+    "JumpBackward",
+    ActionKind::JumpBackward,
+    "jump backward in jumplist",
+    "Walk one entry backward through the focused editor's jumplist and collapse the primary selection to a cursor at that byte offset. No-op when at the start of the list.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    JumpForwardDef,
+    JumpForward,
+    "JumpForward",
+    ActionKind::JumpForward,
+    "jump forward in jumplist",
+    "Walk one entry forward through the focused editor's jumplist and collapse the primary selection to a cursor at that byte offset. No-op when at the end of the list.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",

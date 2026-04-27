@@ -1668,6 +1668,72 @@ mod tests {
     }
 
     #[test]
+    fn jump_backward_restores_saved_position() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        let saved = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l l");
+        assert_ne!(h.primary_head_offset(), saved);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), saved);
+    }
+
+    #[test]
+    fn jump_forward_walks_back_after_jump_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l l");
+        let a = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l l");
+        let b = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), b);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), a);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(h.primary_head_offset(), b);
+    }
+
+    #[test]
+    fn jump_with_empty_jumplist_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), before);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn save_selection_truncates_forward_history() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        let after_save = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(
+            h.primary_head_offset(),
+            after_save,
+            "JumpForward after a fresh save should be a no-op (forward history was truncated)"
+        );
+    }
+
+    #[test]
     fn move_to_parent_bound_no_op_without_syntax_map() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "alpha beta gamma\n");

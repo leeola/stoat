@@ -18,12 +18,13 @@ use crate::{
             ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
             GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, KeepPrimarySelection, MoveDown,
-            MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
-            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
-            PageUp, Redo, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp,
-            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward, JumpForward,
+            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
             SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TrimSelections, Undo, UnindentSelection,
         },
@@ -238,6 +239,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(MoveParentNodeStart))
     });
     add(MoveParentNodeEnd::DEF, |_| Ok(Box::new(MoveParentNodeEnd)));
+    add(SaveSelection::DEF, |_| Ok(Box::new(SaveSelection)));
+    add(JumpBackward::DEF, |_| Ok(Box::new(JumpBackward)));
+    add(JumpForward::DEF, |_| Ok(Box::new(JumpForward)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
@@ -652,7 +656,8 @@ mod tests {
         // + 1 ShrinkSelection.
         // + 2 SelectNextSibling/SelectPrevSibling.
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
-        assert_eq!(all().count(), 179);
+        // + 3 SaveSelection/JumpBackward/JumpForward.
+        assert_eq!(all().count(), 182);
     }
 
     #[test]
