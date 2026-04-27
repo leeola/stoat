@@ -1714,6 +1714,49 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_repeats_move_down() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        h.type_keys("4 j");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(4, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_resets_after_motion() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        h.type_keys("4 j");
+        let after_count = h.cursor_display_positions();
+        assert_eq!(after_count, vec![(4, 0)]);
+        h.type_keys("j");
+        let after_plain = h.cursor_display_positions();
+        assert_eq!(after_plain, vec![(5, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_zero_alone_is_zero_motion() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("0 j");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_no_op_when_binding_exists() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+        h.open_file(&path);
+        h.type_keys("j");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(1, 0)]);
+    }
+
+    #[test]
     fn save_selection_truncates_forward_history() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "abcdefghij\n");

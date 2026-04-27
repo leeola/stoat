@@ -250,6 +250,8 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
 }
 
 pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    let delta = (delta as i64).saturating_mul(count as i64);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -264,7 +266,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
             SelectionGoal::Column(c) => c,
             SelectionGoal::None => head_display.column,
         };
-        let new_row_i = head_display.row as i64 + delta as i64;
+        let new_row_i = (head_display.row as i64).saturating_add(delta);
         if new_row_i < 0 || new_row_i > max_row as i64 {
             return sel.clone();
         }

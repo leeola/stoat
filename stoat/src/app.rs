@@ -75,6 +75,11 @@ pub struct Stoat {
     pty_rx: Receiver<PtyNotification>,
     pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
+    /// Accumulated digit prefix for the next motion (Vim-style
+    /// `<count>j` etc.). Filled by `handle_key` when a digit press
+    /// hits an unbound key in normal mode; consumed once via
+    /// `take_pending_count` and cleared after every action dispatch.
+    pub(crate) pending_count: Option<u32>,
     /// Filesystem the UI layer reads through. Swapped to
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
@@ -197,6 +202,7 @@ impl Stoat {
             pty_rx,
             modal_run: None,
             render_tick: 0,
+            pending_count: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
@@ -535,10 +541,24 @@ impl Stoat {
         }
 
         let state = StoatKeymapState::from_stoat(self);
-        let Some(actions) = self.keymap.lookup(&state, &key) else {
+        let actions = self.keymap.lookup(&state, &key).map(|a| a.to_vec());
+        let Some(actions) = actions else {
+            if self.mode == "normal" {
+                if let KeyCode::Char(ch) = key.code {
+                    if ch.is_ascii_digit() && key.modifiers.is_empty() {
+                        let digit = ch.to_digit(10).expect("ascii digit");
+                        let new_count = self
+                            .pending_count
+                            .unwrap_or(0)
+                            .saturating_mul(10)
+                            .saturating_add(digit);
+                        self.pending_count = Some(new_count);
+                        return UpdateEffect::Redraw;
+                    }
+                }
+            }
             return UpdateEffect::None;
         };
-        let actions = actions.to_vec();
 
         let mut effect = UpdateEffect::None;
         for ra in &actions {
@@ -558,7 +578,12 @@ impl Stoat {
                 }
             }
         }
+        self.pending_count = None;
         effect
+    }
+
+    pub(crate) fn take_pending_count(&mut self) -> Option<u32> {
+        self.pending_count.take()
     }
 
     fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
