@@ -1615,6 +1615,74 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ParaDir {
+    Next,
+    Prev,
+}
+
+pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let head = editor.selections.newest_anchor().head();
+    let cursor_row = buffer_snapshot.point_for_anchor(&head).row;
+    let mut last_content_row = rope.max_point().row;
+    if last_content_row > 0 && rope.line_len(last_content_row) == 0 {
+        last_content_row -= 1;
+    }
+    let is_empty = |r: u32| rope.line_len(r) == 0;
+
+    let target_row = match dir {
+        ParaDir::Next => {
+            if cursor_row >= last_content_row {
+                return UpdateEffect::None;
+            }
+            let mut row = cursor_row;
+            while row <= last_content_row && !is_empty(row) {
+                row += 1;
+            }
+            if row > last_content_row {
+                return UpdateEffect::None;
+            }
+            while row <= last_content_row && is_empty(row) {
+                row += 1;
+            }
+            if row > last_content_row {
+                return UpdateEffect::None;
+            }
+            row
+        },
+        ParaDir::Prev => {
+            if cursor_row == 0 {
+                return UpdateEffect::None;
+            }
+            let mut row = cursor_row - 1;
+            while row > 0 && is_empty(row) {
+                row -= 1;
+            }
+            while row > 0 && !is_empty(row) {
+                row -= 1;
+            }
+            if is_empty(row) && row < last_content_row {
+                row += 1;
+            }
+            if row == cursor_row {
+                return UpdateEffect::None;
+            }
+            row
+        },
+    };
+
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    apply_primary_range(editor, target_offset..target_offset);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     let Some(count) = stoat.take_pending_count() else {
         return goto_last_line(stoat, false);

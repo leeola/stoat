@@ -2017,6 +2017,78 @@ mod tests {
     }
 
     #[test]
+    fn goto_next_paragraph_jumps_from_paragraph_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
+        h.open_file(&path);
+        h.type_keys("] p");
+        assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+    }
+
+    #[test]
+    fn goto_next_paragraph_jumps_from_middle_of_paragraph() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
+        h.open_file(&path);
+        h.type_keys("j ] p");
+        assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+    }
+
+    #[test]
+    fn goto_next_paragraph_no_op_at_buffer_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n");
+        h.open_file(&path);
+        h.type_keys("j ] p");
+        assert_eq!(h.cursor_display_positions(), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn goto_next_paragraph_walks_through_multiple_blanks() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\n\n\n\nbeta\n");
+        h.open_file(&path);
+        h.type_keys("] p");
+        assert_eq!(h.cursor_display_positions(), vec![(4, 0)]);
+    }
+
+    #[test]
+    fn goto_prev_paragraph_jumps_from_paragraph_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
+        h.open_file(&path);
+        h.type_keys("j j j [ p");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn goto_prev_paragraph_jumps_from_middle_of_paragraph() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\ndelta\n");
+        h.open_file(&path);
+        h.type_keys("j j j j [ p");
+        assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+    }
+
+    #[test]
+    fn goto_prev_paragraph_no_op_at_buffer_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\nbeta\n\ngamma\n");
+        h.open_file(&path);
+        h.type_keys("[ p");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn goto_next_paragraph_from_empty_line_lands_on_following_paragraph() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "alpha\n\nbeta\n");
+        h.open_file(&path);
+        h.type_keys("j ] p");
+        assert_eq!(h.cursor_display_positions(), vec![(2, 0)]);
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");

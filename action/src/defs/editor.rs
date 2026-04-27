@@ -581,6 +581,26 @@ define_action!(
 );
 
 define_action!(
+    GotoNextParagraphDef,
+    GotoNextParagraph,
+    "GotoNextParagraph",
+    ActionKind::GotoNextParagraph,
+    "goto next paragraph",
+    "Move the primary cursor to the start of the next paragraph. A paragraph is a run of lines whose byte length is non-zero; lines with zero bytes (purely a line ending) are paragraph separators. Walks forward over the rest of the current paragraph, then over any empty lines, landing at the first non-empty row that follows. No-op when no further paragraph exists in the buffer. Primary-cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevParagraphDef,
+    GotoPrevParagraph,
+    "GotoPrevParagraph",
+    ActionKind::GotoPrevParagraph,
+    "goto previous paragraph",
+    "Move the primary cursor to the start of the previous paragraph. From the row above the cursor, walks backward over any empty lines, then over the run of non-empty lines, landing at the row after the empty separator (or row 0 when the buffer begins with the run). No-op when the cursor is already at row 0. Primary-cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoWindowTopDef,
     GotoWindowTop,
     "GotoWindowTop",

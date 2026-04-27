@@ -224,11 +224,13 @@ on key {
     mode == bracket_next {
         Escape -> SetMode(normal);
         g -> [GotoNextChange(), SetMode(normal)];
+        p -> [GotoNextParagraph(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == bracket_prev {
         Escape -> SetMode(normal);
         g -> [GotoPrevChange(), SetMode(normal)];
+        p -> [GotoPrevParagraph(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {

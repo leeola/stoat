@@ -73,6 +73,8 @@ pub enum ActionKind {
     GotoColumn,
     GotoNextChange,
     GotoPrevChange,
+    GotoNextParagraph,
+    GotoPrevParagraph,
     GotoWindowTop,
     GotoWindowCenter,
     GotoWindowBottom,
