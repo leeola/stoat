@@ -228,6 +228,158 @@ pub fn find_decimal_number_seeking(rope: &Rope, offset: usize) -> Option<std::op
     None
 }
 
+/// Classification of a number literal recognised by [`find_number_at`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NumberKind {
+    Decimal,
+    Hex,
+    Binary,
+    Octal,
+}
+
+impl NumberKind {
+    pub fn radix(self) -> u32 {
+        match self {
+            NumberKind::Decimal => 10,
+            NumberKind::Hex => 16,
+            NumberKind::Binary => 2,
+            NumberKind::Octal => 8,
+        }
+    }
+}
+
+/// A number literal found in a [`Rope`]: byte range plus its category.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumberMatch {
+    pub range: std::ops::Range<usize>,
+    pub kind: NumberKind,
+}
+
+/// Returns the literal at `offset` -- a `0x`/`0X` hex, `0b`/`0B` binary,
+/// `0o`/`0O` octal literal, or a decimal number (with optional leading
+/// `-`). Underscore-separated forms (`0xff_ff`) are rejected because the
+/// caller would need a separator-aware re-format on overflow. Falls
+/// through to [`find_decimal_number_at`] when the surrounding text does
+/// not form a radix literal.
+pub fn find_number_at(rope: &Rope, offset: usize) -> Option<NumberMatch> {
+    match find_radix_literal_at(rope, offset) {
+        RadixResult::Match(m) => Some(m),
+        RadixResult::Rejected => None,
+        RadixResult::NoRadix => {
+            let range = find_decimal_number_at(rope, offset)?;
+            Some(NumberMatch {
+                range,
+                kind: NumberKind::Decimal,
+            })
+        },
+    }
+}
+
+enum RadixResult {
+    NoRadix,
+    Rejected,
+    Match(NumberMatch),
+}
+
+fn find_radix_literal_at(rope: &Rope, offset: usize) -> RadixResult {
+    let Some(head) = rope.chars_at(offset).next() else {
+        return RadixResult::NoRadix;
+    };
+    let head_potential = head == '0'
+        || matches!(head, 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
+        || head.is_ascii_hexdigit();
+    if !head_potential {
+        return RadixResult::NoRadix;
+    }
+
+    let mut start = offset;
+    let mut saw_underscore_back = false;
+    for prev in rope.reversed_chars_at(offset) {
+        if prev == '_' {
+            saw_underscore_back = true;
+            break;
+        }
+        if !prev.is_ascii_hexdigit() && !matches!(prev, 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
+            break;
+        }
+        start -= prev.len_utf8();
+    }
+
+    let mut prefix_iter = rope.chars_at(start);
+    let Some(zero) = prefix_iter.next() else {
+        return RadixResult::NoRadix;
+    };
+    let Some(marker) = prefix_iter.next() else {
+        return RadixResult::NoRadix;
+    };
+    if zero != '0' {
+        if saw_underscore_back {
+            return RadixResult::Rejected;
+        }
+        return RadixResult::NoRadix;
+    }
+    let kind = match marker {
+        'x' | 'X' => NumberKind::Hex,
+        'b' | 'B' => NumberKind::Binary,
+        'o' | 'O' => NumberKind::Octal,
+        _ => {
+            if saw_underscore_back {
+                return RadixResult::Rejected;
+            }
+            return RadixResult::NoRadix;
+        },
+    };
+
+    if saw_underscore_back {
+        return RadixResult::Rejected;
+    }
+
+    let body_start = start + zero.len_utf8() + marker.len_utf8();
+    let mut body_end = body_start;
+    let radix = kind.radix();
+    for ch in rope.chars_at(body_start) {
+        if ch == '_' {
+            return RadixResult::Rejected;
+        }
+        if !ch.is_digit(radix) {
+            break;
+        }
+        body_end += ch.len_utf8();
+    }
+
+    if body_end == body_start {
+        return RadixResult::Rejected;
+    }
+    if offset < start || offset >= body_end {
+        return RadixResult::NoRadix;
+    }
+
+    RadixResult::Match(NumberMatch {
+        range: start..body_end,
+        kind,
+    })
+}
+
+/// Like [`find_number_at`], but when nothing is found at `offset`, scans
+/// forward within the same line for the next digit and tries again.
+/// Never crosses a line ending.
+pub fn find_number_seeking(rope: &Rope, offset: usize) -> Option<NumberMatch> {
+    if let Some(m) = find_number_at(rope, offset) {
+        return Some(m);
+    }
+    let mut cursor = offset;
+    for ch in rope.chars_at(offset) {
+        if ch == '\n' || ch == '\r' {
+            return None;
+        }
+        if ch.is_ascii_digit() {
+            return find_number_at(rope, cursor);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
+}
+
 /// Returns the byte range of the decimal number at `offset` in `rope`, or
 /// `None` if the byte at `offset` is not an ASCII digit. The range spans the
 /// run of digits and optionally a leading `-` when the `-` is preceded by
@@ -748,6 +900,118 @@ mod tests {
     fn find_decimal_seeking_picks_signed_minus_when_present() {
         let r = rope("let x = -42");
         assert_eq!(find_decimal_number_seeking(&r, 6), Some(8..11));
+    }
+
+    #[test]
+    fn find_number_at_recognises_hex_literal_from_each_position() {
+        let r = rope("0xff");
+        for offset in 0..4 {
+            assert_eq!(
+                find_number_at(&r, offset),
+                Some(NumberMatch {
+                    range: 0..4,
+                    kind: NumberKind::Hex
+                }),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_number_at_recognises_uppercase_hex_marker() {
+        let r = rope("0XFF");
+        assert_eq!(
+            find_number_at(&r, 1),
+            Some(NumberMatch {
+                range: 0..4,
+                kind: NumberKind::Hex
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_at_recognises_binary_literal() {
+        let r = rope("0b1010");
+        assert_eq!(
+            find_number_at(&r, 3),
+            Some(NumberMatch {
+                range: 0..6,
+                kind: NumberKind::Binary
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_at_recognises_octal_literal() {
+        let r = rope("0o17");
+        assert_eq!(
+            find_number_at(&r, 2),
+            Some(NumberMatch {
+                range: 0..4,
+                kind: NumberKind::Octal
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_at_falls_through_to_decimal() {
+        let r = rope("foo 42 bar");
+        assert_eq!(
+            find_number_at(&r, 4),
+            Some(NumberMatch {
+                range: 4..6,
+                kind: NumberKind::Decimal
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_at_rejects_underscored_radix_literal() {
+        let r = rope("0xff_ff");
+        assert_eq!(find_number_at(&r, 0), None);
+        assert_eq!(find_number_at(&r, 5), None);
+    }
+
+    #[test]
+    fn find_number_at_rejects_hex_without_prefix() {
+        let r = rope("foo abcdef bar");
+        assert_eq!(find_number_at(&r, 4), None);
+    }
+
+    #[test]
+    fn find_number_at_rejects_when_outside_body() {
+        let r = rope("0b10ab");
+        assert_eq!(find_number_at(&r, 4), None);
+    }
+
+    #[test]
+    fn find_number_at_isolated_in_surrounding_text() {
+        let r = rope("(0xff)");
+        assert_eq!(
+            find_number_at(&r, 3),
+            Some(NumberMatch {
+                range: 1..5,
+                kind: NumberKind::Hex
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_seeking_jumps_to_hex_literal() {
+        let r = rope("let x = 0xff");
+        assert_eq!(
+            find_number_seeking(&r, 0),
+            Some(NumberMatch {
+                range: 8..12,
+                kind: NumberKind::Hex
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_seeking_does_not_cross_newline() {
+        let r = rope("foo\n0xff");
+        assert_eq!(find_number_seeking(&r, 0), None);
     }
 
     #[test]

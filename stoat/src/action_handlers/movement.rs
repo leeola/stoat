@@ -7,9 +7,9 @@ use crate::{
     pane::View,
 };
 use stoat_text::{
-    find_decimal_number_seeking, next_long_word_end, next_long_word_start, next_word_end,
-    next_word_start, prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start,
-    Anchor, Bias, Point, Selection, SelectionGoal,
+    find_number_seeking, next_long_word_end, next_long_word_start, next_word_end, next_word_start,
+    prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias,
+    NumberKind, Point, Selection, SelectionGoal,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -817,14 +817,14 @@ where
 }
 
 pub(super) fn increment(stoat: &mut Stoat) -> UpdateEffect {
-    apply_decimal_delta(stoat, 1)
+    apply_number_delta(stoat, 1)
 }
 
 pub(super) fn decrement(stoat: &mut Stoat) -> UpdateEffect {
-    apply_decimal_delta(stoat, -1)
+    apply_number_delta(stoat, -1)
 }
 
-fn apply_decimal_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
+fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -841,18 +841,25 @@ fn apply_decimal_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         let primary_id = sel.id;
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let rope = buffer_snapshot.rope();
-        let Some(range) = find_decimal_number_seeking(rope, head_offset) else {
+        let Some(num_match) = find_number_seeking(rope, head_offset) else {
             return UpdateEffect::None;
         };
-        let text = rope.slice(range.start..range.end).to_string();
-        let Ok(parsed) = text.parse::<i64>() else {
+        let text = rope
+            .slice(num_match.range.start..num_match.range.end)
+            .to_string();
+        let Some(new_text) = compute_number_delta(&text, num_match.kind, delta) else {
             return UpdateEffect::None;
         };
-        let new_text = parsed.saturating_add(delta).to_string();
         if new_text == text {
             return UpdateEffect::None;
         }
-        (buffer_id, primary_id, range.start, range.end, new_text)
+        (
+            buffer_id,
+            primary_id,
+            num_match.range.start,
+            num_match.range.end,
+            new_text,
+        )
     };
 
     {
@@ -876,6 +883,45 @@ fn apply_decimal_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         new
     });
     UpdateEffect::Redraw
+}
+
+fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
+    match kind {
+        NumberKind::Decimal => {
+            let parsed = text.parse::<i64>().ok()?;
+            Some(parsed.saturating_add(delta).to_string())
+        },
+        _ => {
+            let mut chars = text.chars();
+            chars.next()?;
+            let marker = chars.next()?;
+            let body = &text[2..];
+            let parsed = u64::from_str_radix(body, kind.radix()).ok()?;
+            let new_value = if delta < 0 {
+                parsed.saturating_sub(delta.unsigned_abs())
+            } else {
+                parsed.saturating_add(delta as u64)
+            };
+            let body_uppercase = matches!(kind, NumberKind::Hex)
+                && (marker.is_ascii_uppercase()
+                    || body
+                        .chars()
+                        .any(|c| c.is_ascii_uppercase() && c.is_ascii_alphabetic()));
+            let new_body = match (kind, body_uppercase) {
+                (NumberKind::Hex, true) => format!("{new_value:X}"),
+                (NumberKind::Hex, false) => format!("{new_value:x}"),
+                (NumberKind::Binary, _) => format!("{new_value:b}"),
+                (NumberKind::Octal, _) => format!("{new_value:o}"),
+                _ => unreachable!(),
+            };
+            let padded = if new_body.len() < body.len() {
+                format!("{new_body:0>width$}", width = body.len())
+            } else {
+                new_body
+            };
+            Some(format!("0{marker}{padded}"))
+        },
+    }
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {

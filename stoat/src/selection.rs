@@ -1221,6 +1221,60 @@ mod tests {
     }
 
     #[test]
+    fn increment_hex_preserves_lowercase_and_width() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0x0f\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x10\n");
+    }
+
+    #[test]
+    fn increment_hex_grows_width_on_overflow() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0xff\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x100\n");
+    }
+
+    #[test]
+    fn increment_hex_uses_uppercase_when_input_was_uppercase() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0xFE\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0xFF\n");
+    }
+
+    #[test]
+    fn decrement_binary_preserves_width() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0b1010\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Decrement);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0b1001\n");
+    }
+
+    #[test]
+    fn increment_octal_preserves_width() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0o17\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0o20\n");
+    }
+
+    #[test]
+    fn decrement_hex_saturates_at_zero() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0x00\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Decrement);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x00\n");
+    }
+
+    #[test]
     fn switch_case_empty_selection_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
