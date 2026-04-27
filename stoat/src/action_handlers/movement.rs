@@ -300,6 +300,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
 }
 
 pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -308,16 +309,23 @@ pub(super) fn move_word(stoat: &mut Stoat, target: WordTarget, extend: bool) -> 
     let rope = buffer_snapshot.rope();
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
-        let target_offset = match target {
-            WordTarget::NextStart => next_word_start(rope, head_offset),
-            WordTarget::NextEnd => next_word_end(rope, head_offset),
-            WordTarget::PrevStart => prev_word_start(rope, head_offset),
-            WordTarget::PrevEnd => prev_word_end(rope, head_offset),
-            WordTarget::NextLongStart => next_long_word_start(rope, head_offset),
-            WordTarget::NextLongEnd => next_long_word_end(rope, head_offset),
-            WordTarget::PrevLongStart => prev_long_word_start(rope, head_offset),
-            WordTarget::PrevLongEnd => prev_long_word_end(rope, head_offset),
-        };
+        let mut target_offset = head_offset;
+        for _ in 0..count {
+            let next = match target {
+                WordTarget::NextStart => next_word_start(rope, target_offset),
+                WordTarget::NextEnd => next_word_end(rope, target_offset),
+                WordTarget::PrevStart => prev_word_start(rope, target_offset),
+                WordTarget::PrevEnd => prev_word_end(rope, target_offset),
+                WordTarget::NextLongStart => next_long_word_start(rope, target_offset),
+                WordTarget::NextLongEnd => next_long_word_end(rope, target_offset),
+                WordTarget::PrevLongStart => prev_long_word_start(rope, target_offset),
+                WordTarget::PrevLongEnd => prev_long_word_end(rope, target_offset),
+            };
+            if next == target_offset {
+                break;
+            }
+            target_offset = next;
+        }
         if target_offset == head_offset {
             return sel.clone();
         }

@@ -1767,6 +1767,49 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_repeats_next_word_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "alpha beta gamma delta\n");
+        h.open_file(&path);
+        h.type_keys("3 w");
+        // "alpha beta gamma " is 16 bytes; "delta" starts at offset 17.
+        // After three next_word_start jumps, head sits at the end of
+        // the third word. With shift_to_prev_char, head lands on the
+        // last char before "delta" -- which is the space at offset 16.
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(0, 16)]);
+    }
+
+    #[test]
+    fn count_prefix_repeats_prev_word_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "alpha beta gamma delta\n");
+        h.open_file(&path);
+        h.type_keys("g j");
+        h.type_keys("3 b");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions[0].0, 0, "should be back on row 0");
+        assert!(
+            positions[0].1 < 16,
+            "3b from end should land before delta (got col {})",
+            positions[0].1
+        );
+    }
+
+    #[test]
+    fn count_prefix_word_clamps_at_buffer_edge() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("9 9 w");
+        let offset = h.primary_head_offset();
+        assert!(
+            offset <= 4,
+            "huge word count should clamp at buffer end (got {offset})"
+        );
+    }
+
+    #[test]
     fn count_prefix_clamps_at_end_of_buffer() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abc\n");
