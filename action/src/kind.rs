@@ -70,6 +70,7 @@ pub enum ActionKind {
     GotoFileStart,
     GotoLastLine,
     GotoLineNumber,
+    GotoColumn,
     GotoNextChange,
     GotoPrevChange,
     GotoWindowTop,

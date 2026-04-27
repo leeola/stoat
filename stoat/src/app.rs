@@ -589,6 +589,7 @@ impl Stoat {
         };
 
         let mut effect = UpdateEffect::None;
+        let mut dispatched_action = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -598,6 +599,7 @@ impl Stoat {
                 continue;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
+                dispatched_action = true;
                 let e = action_handlers::dispatch(self, &*action);
                 match e {
                     UpdateEffect::Quit => return UpdateEffect::Quit,
@@ -606,7 +608,9 @@ impl Stoat {
                 }
             }
         }
-        self.pending_count = None;
+        if dispatched_action {
+            self.pending_count = None;
+        }
         effect
     }
 

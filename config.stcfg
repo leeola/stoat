@@ -209,6 +209,7 @@ on key {
         t -> [GotoWindowTop(), SetMode(normal)];
         c -> [GotoWindowCenter(), SetMode(normal)];
         b -> [GotoWindowBottom(), SetMode(normal)];
+        | -> [GotoColumn(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == z {

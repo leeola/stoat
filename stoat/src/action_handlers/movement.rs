@@ -1636,6 +1636,35 @@ pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn goto_column(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let head = editor.selections.newest_anchor().head();
+    let head_point = buffer_snapshot.point_for_anchor(&head);
+    let row = head_point.row;
+    let line_start = rope.point_to_offset(Point::new(row, 0));
+    let line_end = rope.point_to_offset(Point::new(row, rope.line_len(row)));
+
+    let steps = count.saturating_sub(1) as usize;
+    let mut target_offset = line_start;
+    for ch in rope.chars_at(line_start).take(steps) {
+        let next = target_offset + ch.len_utf8();
+        if next > line_end {
+            break;
+        }
+        target_offset = next;
+    }
+
+    apply_primary_range(editor, target_offset..target_offset);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

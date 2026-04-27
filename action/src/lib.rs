@@ -21,7 +21,7 @@ pub use defs::{
         CollapseSelection, DeleteSelection, ExpandSelection, ExtendDown, ExtendLeft,
         ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
         ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart,
-        ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoFileStart,
+        ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn, GotoFileStart,
         GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart,
         GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
         HalfPageDown, HalfPageUp, IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection,

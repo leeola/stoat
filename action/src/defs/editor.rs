@@ -551,6 +551,16 @@ define_action!(
 );
 
 define_action!(
+    GotoColumnDef,
+    GotoColumn,
+    "GotoColumn",
+    ActionKind::GotoColumn,
+    "goto column from count",
+    "Move the primary cursor to the n-th character of its current line, where n is the pending count prefix (1-indexed). With no pending count, lands at column 1 (line start). Counts beyond the line's character count clamp to the line end. Walks by `char`, so UTF-8 multibyte characters count as one column.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoNextChangeDef,
     GotoNextChange,
     "GotoNextChange",

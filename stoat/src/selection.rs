@@ -1951,6 +1951,72 @@ mod tests {
     }
 
     #[test]
+    fn goto_column_jumps_to_count_column() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefgh\n");
+        h.open_file(&path);
+        h.type_keys("5 g |");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 4)]);
+    }
+
+    #[test]
+    fn goto_column_without_count_lands_at_line_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefgh\n");
+        h.open_file(&path);
+        h.type_keys("l l l l g |");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn goto_column_clamps_to_line_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("9 9 g |");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn goto_column_stays_on_current_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdef\nghijkl\nmnopqr\n");
+        h.open_file(&path);
+        h.type_keys("j 4 g |");
+        assert_eq!(h.cursor_display_positions(), vec![(1, 3)]);
+    }
+
+    #[test]
+    fn goto_column_walks_chars_not_bytes() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "αβγδε\n");
+        h.open_file(&path);
+        h.type_keys("3 g |");
+        let offset = h.primary_head_offset();
+        assert_eq!(
+            offset, 4,
+            "third column on a 2-byte-per-char line is byte 4"
+        );
+    }
+
+    #[test]
+    fn count_survives_setmode_chord() {
+        let mut split = crate::test_harness::TestHarness::with_size(20, 5);
+        let split_path = split.write_file("s.txt", "abcdefgh\n");
+        split.open_file(&split_path);
+        split.type_keys("5 g");
+        split.type_keys("|");
+        let mut chord = crate::test_harness::TestHarness::with_size(20, 5);
+        let chord_path = chord.write_file("s.txt", "abcdefgh\n");
+        chord.open_file(&chord_path);
+        chord.type_keys("5 g |");
+        assert_eq!(
+            split.cursor_display_positions(),
+            chord.cursor_display_positions()
+        );
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
