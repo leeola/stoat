@@ -7,7 +7,7 @@ use crate::{
     pane::View,
 };
 use stoat_text::{
-    find_decimal_number_at, next_long_word_end, next_long_word_start, next_word_end,
+    find_decimal_number_seeking, next_long_word_end, next_long_word_start, next_word_end,
     next_word_start, prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start,
     Anchor, Bias, Point, Selection, SelectionGoal,
 };
@@ -841,7 +841,7 @@ fn apply_decimal_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         let primary_id = sel.id;
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let rope = buffer_snapshot.rope();
-        let Some(range) = find_decimal_number_at(rope, head_offset) else {
+        let Some(range) = find_decimal_number_seeking(rope, head_offset) else {
             return UpdateEffect::None;
         };
         let text = rope.slice(range.start..range.end).to_string();

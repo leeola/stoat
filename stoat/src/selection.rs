@@ -1199,6 +1199,28 @@ mod tests {
     }
 
     #[test]
+    fn increment_seeks_forward_to_next_digit_on_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 42\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 43\n");
+    }
+
+    #[test]
+    fn increment_no_op_when_line_has_no_digit() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n42\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "abc\n42\n",
+            "seek should not cross newline"
+        );
+    }
+
+    #[test]
     fn switch_case_empty_selection_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");

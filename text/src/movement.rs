@@ -207,6 +207,27 @@ fn prev_word_end_with<F: Fn(char) -> CharCategory>(rope: &Rope, from: usize, cat
     }
 }
 
+/// Like [`find_decimal_number_at`], but when the byte at `offset` is not a
+/// digit, scans forward within the same line for the next ASCII digit and
+/// returns the range of the number that begins there. Returns `None` when
+/// no digit appears between `offset` and the next line ending.
+pub fn find_decimal_number_seeking(rope: &Rope, offset: usize) -> Option<std::ops::Range<usize>> {
+    if let Some(range) = find_decimal_number_at(rope, offset) {
+        return Some(range);
+    }
+    let mut cursor = offset;
+    for ch in rope.chars_at(offset) {
+        if ch == '\n' || ch == '\r' {
+            return None;
+        }
+        if ch.is_ascii_digit() {
+            return find_decimal_number_at(rope, cursor);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
+}
+
 /// Returns the byte range of the decimal number at `offset` in `rope`, or
 /// `None` if the byte at `offset` is not an ASCII digit. The range spans the
 /// run of digits and optionally a leading `-` when the `-` is preceded by
@@ -682,6 +703,51 @@ mod tests {
     fn find_decimal_at_empty_rope() {
         let r = rope("");
         assert_eq!(find_decimal_number_at(&r, 0), None);
+    }
+
+    #[test]
+    fn find_decimal_seeking_uses_existing_match_when_on_digit() {
+        let r = rope("foo 123 bar");
+        assert_eq!(find_decimal_number_seeking(&r, 4), Some(4..7));
+        assert_eq!(find_decimal_number_seeking(&r, 6), Some(4..7));
+    }
+
+    #[test]
+    fn find_decimal_seeking_jumps_forward_to_next_digit() {
+        let r = rope("let x = 42");
+        assert_eq!(find_decimal_number_seeking(&r, 0), Some(8..10));
+        assert_eq!(find_decimal_number_seeking(&r, 6), Some(8..10));
+        assert_eq!(find_decimal_number_seeking(&r, 7), Some(8..10));
+    }
+
+    #[test]
+    fn find_decimal_seeking_picks_first_digit_when_multiple() {
+        let r = rope("a 5 b 7");
+        assert_eq!(find_decimal_number_seeking(&r, 0), Some(2..3));
+    }
+
+    #[test]
+    fn find_decimal_seeking_no_op_after_last_digit_on_line() {
+        let r = rope("42 abc");
+        assert_eq!(find_decimal_number_seeking(&r, 3), None);
+    }
+
+    #[test]
+    fn find_decimal_seeking_no_op_when_line_has_no_digit() {
+        let r = rope("abcdef");
+        assert_eq!(find_decimal_number_seeking(&r, 0), None);
+    }
+
+    #[test]
+    fn find_decimal_seeking_does_not_cross_newline() {
+        let r = rope("abc\n42");
+        assert_eq!(find_decimal_number_seeking(&r, 0), None);
+    }
+
+    #[test]
+    fn find_decimal_seeking_picks_signed_minus_when_present() {
+        let r = rope("let x = -42");
+        assert_eq!(find_decimal_number_seeking(&r, 6), Some(8..11));
     }
 
     #[test]
