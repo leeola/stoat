@@ -1737,13 +1737,25 @@ mod tests {
     }
 
     #[test]
-    fn count_prefix_zero_alone_is_zero_motion() {
-        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
-        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+    fn bare_zero_jumps_to_line_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc def\n");
         h.open_file(&path);
-        h.type_keys("0 j");
+        h.type_keys("l l l l");
+        assert_eq!(h.primary_head_offset(), 4);
+        h.type_keys("0");
+        assert_eq!(h.primary_head_offset(), 0);
+    }
+
+    #[test]
+    fn zero_accumulates_into_pending_count() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 50);
+        let body: String = (0..50).map(|i| format!("line{i}\n")).collect();
+        let path = h.write_file("s.txt", &body);
+        h.open_file(&path);
+        h.type_keys("4 0 j");
         let positions = h.cursor_display_positions();
-        assert_eq!(positions, vec![(0, 0)]);
+        assert_eq!(positions[0].0, 40);
     }
 
     #[test]

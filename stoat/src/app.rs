@@ -540,6 +540,21 @@ impl Stoat {
             }
         }
 
+        if self.mode == "normal" && self.pending_count.is_some() && key.modifiers.is_empty() {
+            if let KeyCode::Char(ch) = key.code {
+                if ch.is_ascii_digit() {
+                    let digit = ch.to_digit(10).expect("ascii digit");
+                    let new_count = self
+                        .pending_count
+                        .unwrap_or(0)
+                        .saturating_mul(10)
+                        .saturating_add(digit);
+                    self.pending_count = Some(new_count);
+                    return UpdateEffect::Redraw;
+                }
+            }
+        }
+
         let state = StoatKeymapState::from_stoat(self);
         let actions = self.keymap.lookup(&state, &key).map(|a| a.to_vec());
         let Some(actions) = actions else {
@@ -547,12 +562,7 @@ impl Stoat {
                 if let KeyCode::Char(ch) = key.code {
                     if ch.is_ascii_digit() && key.modifiers.is_empty() {
                         let digit = ch.to_digit(10).expect("ascii digit");
-                        let new_count = self
-                            .pending_count
-                            .unwrap_or(0)
-                            .saturating_mul(10)
-                            .saturating_add(digit);
-                        self.pending_count = Some(new_count);
+                        self.pending_count = Some(digit);
                         return UpdateEffect::Redraw;
                     }
                 }

@@ -159,6 +159,7 @@ on key {
         W -> ExtendNextWordStart();
         E -> ExtendNextWordEnd();
         Home -> GotoLineStart();
+        0 -> GotoLineStart();
         End -> GotoLineEnd();
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
