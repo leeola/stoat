@@ -1273,7 +1273,8 @@ pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
         let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
             return UpdateEffect::None;
         };
-        let Some(layer) = syntax_map.snapshot().iter_layers().next() else {
+        let snapshot = syntax_map.snapshot();
+        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
             return UpdateEffect::None;
         };
         let root = layer.tree.root_node();
@@ -1300,6 +1301,25 @@ pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
     editor.expansion_tip = Some(target.clone());
     apply_primary_range(editor, target);
     UpdateEffect::Redraw
+}
+
+fn deepest_containing_layer(
+    snapshot: &stoat_language::SyntaxSnapshot,
+    sel_start: usize,
+    sel_end: usize,
+) -> Option<&stoat_language::SyntaxLayer> {
+    snapshot.iter_layers().fold(None, |acc, layer| {
+        let start = layer.start_offset as usize;
+        let end = layer.end_offset as usize;
+        if start <= sel_start && end >= sel_end {
+            match acc {
+                Some(prev) if prev.depth >= layer.depth => acc,
+                _ => Some(layer),
+            }
+        } else {
+            acc
+        }
+    })
 }
 
 pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {

@@ -1525,6 +1525,31 @@ mod tests {
     }
 
     #[test]
+    fn expand_selection_dives_into_injection_layer() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 10);
+        let path = h.write_file("s.md", "# Title\n\nSome **bold** text\n");
+        h.open_file(&path);
+        h.type_keys("j j 7 l");
+        assert_eq!(
+            h.primary_head_offset(),
+            16,
+            "test setup: cursor should be on 'b' in 'bold'"
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let snippet = "# Title\n\nSome **bold** text\n";
+        let (start, end, _) = h.selection_spans()[0];
+        assert!(end > start, "expansion produced empty range");
+        let selected = &snippet[start..end];
+        let inline_text = "Some **bold** text";
+        assert!(
+            selected.contains("bold") && selected.len() < inline_text.len(),
+            "expected inner-grammar node containing 'bold' but tighter than the inline node \"{inline_text}\" ({}..{}), got {start}..{end} = {selected:?}",
+            snippet.find(inline_text).unwrap(),
+            snippet.find(inline_text).unwrap() + inline_text.len(),
+        );
+    }
+
+    #[test]
     fn expand_selection_no_op_without_syntax_map() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "plain text content\n");
