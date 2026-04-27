@@ -1747,6 +1747,39 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_repeats_move_right() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("4 l");
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn count_prefix_repeats_move_left() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("5 l");
+        assert_eq!(h.primary_head_offset(), 5);
+        h.type_keys("3 h");
+        assert_eq!(h.primary_head_offset(), 2);
+    }
+
+    #[test]
+    fn count_prefix_clamps_at_end_of_buffer() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("9 9 l");
+        let offset = h.primary_head_offset();
+        assert!(
+            offset <= 4,
+            "move_right with huge count should clamp at buffer end (got {offset})"
+        );
+    }
+
+    #[test]
     fn count_prefix_no_op_when_binding_exists() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\n");

@@ -209,6 +209,7 @@ fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEff
 }
 
 pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -218,15 +219,17 @@ pub(super) fn move_horizontal(stoat: &mut Stoat, delta: i32, extend: bool) -> Up
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let new_offset = if delta > 0 {
-            match rope.chars_at(head_offset).next() {
-                Some(ch) => head_offset + ch.len_utf8(),
-                None => head_offset,
+            let mut offset = head_offset;
+            for ch in rope.chars_at(head_offset).take(count) {
+                offset += ch.len_utf8();
             }
+            offset
         } else {
-            match rope.reversed_chars_at(head_offset).next() {
-                Some(ch) => head_offset - ch.len_utf8(),
-                None => head_offset,
+            let mut offset = head_offset;
+            for ch in rope.reversed_chars_at(head_offset).take(count) {
+                offset -= ch.len_utf8();
             }
+            offset
         };
         if new_offset == head_offset {
             return sel.clone();
