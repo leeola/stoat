@@ -55,6 +55,8 @@ pub enum ActionKind {
     GotoFirstNonwhitespace,
     GotoFileStart,
     GotoLastLine,
+    GotoNextChange,
+    GotoPrevChange,
     GotoWindowTop,
     GotoWindowCenter,
     GotoWindowBottom,

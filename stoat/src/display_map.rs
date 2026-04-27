@@ -455,7 +455,9 @@ impl DisplayMap {
             self.highlights_dirty = false;
         }
         let buffer_version = self.multi_buffer.buffer_version();
+        let diff_version_now = self.multi_buffer.diff_version();
         if buffer_version == self.last_buffer_version
+            && diff_version_now == self.last_diff_version
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
             && companion_wrap_data.is_none()
@@ -720,6 +722,14 @@ impl DisplaySnapshot {
             .as_ref()
             .map(|dm| dm.status_for_line(buffer_line))
             .unwrap_or_default()
+    }
+
+    /// Snapshot's freshly-cloned diff map. Prefer this over reaching for
+    /// `buffer_snapshot().diff_map`, which is read through the inlay/fold/
+    /// tab/wrap cache chain and can lag behind buffer mutations that don't
+    /// bump the buffer's edit version.
+    pub fn diff_map(&self) -> Option<&DiffMap> {
+        self.diff_map.as_ref()
     }
 
     pub fn write_display_line(&self, buf: &mut String, display_row: u32) {

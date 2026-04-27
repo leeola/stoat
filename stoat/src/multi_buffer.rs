@@ -321,6 +321,15 @@ impl MultiBuffer {
         buffer.version()
     }
 
+    /// Version of the first excerpt's buffer's diff_map, or 0 if none.
+    /// Used by the display_map snapshot cache to detect diff-map mutations
+    /// that don't bump the buffer's edit version.
+    pub fn diff_version(&self) -> usize {
+        let excerpt = &self.live_excerpts[0];
+        let buffer = excerpt.buffer.read().expect("buffer lock poisoned");
+        buffer.diff_map.as_ref().map(|d| d.version()).unwrap_or(0)
+    }
+
     pub fn snapshot(&self) -> MultiBufferSnapshot {
         if self.singleton {
             let excerpt = &self.live_excerpts[0];

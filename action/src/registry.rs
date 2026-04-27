@@ -16,13 +16,13 @@ use crate::{
             ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
             ExtendPrevWordStart, ExtendRight, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
             ExtendToLineStart, ExtendUp, FlipSelections, GotoFileStart, GotoFirstNonwhitespace,
-            GotoLastLine, GotoLineEnd, GotoLineStart, GotoWindowBottom, GotoWindowCenter,
-            GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
-            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo,
-            RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            GotoLastLine, GotoLineEnd, GotoLineStart, GotoNextChange, GotoPrevChange,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
+            PageUp, Redo, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
@@ -239,6 +239,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
+    add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
+    add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
@@ -635,7 +637,8 @@ mod tests {
         // + 1 AlignSelections.
         // + 1 Undo.
         // + 1 Redo.
-        assert_eq!(all().count(), 171);
+        // + 2 GotoNextChange/GotoPrevChange.
+        assert_eq!(all().count(), 173);
     }
 
     #[test]

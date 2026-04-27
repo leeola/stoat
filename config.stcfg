@@ -182,6 +182,8 @@ on key {
         < -> UnindentSelection();
         g -> SetMode(goto);
         z -> SetMode(z);
+        ] -> SetMode(bracket_next);
+        [ -> SetMode(bracket_prev);
         R -> OpenReview();
     }
     mode == goto {
@@ -201,6 +203,16 @@ on key {
         b -> [AlignViewBottom(), SetMode(normal)];
         j -> [ScrollDown(), SetMode(normal)];
         k -> [ScrollUp(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == bracket_next {
+        Escape -> SetMode(normal);
+        g -> [GotoNextChange(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == bracket_prev {
+        Escape -> SetMode(normal);
+        g -> [GotoPrevChange(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {

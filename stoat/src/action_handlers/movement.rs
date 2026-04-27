@@ -1231,6 +1231,54 @@ fn trim_whitespace(rope: &stoat_text::Rope, start: usize, end: usize) -> Option<
     Some((new_start?, last_non_ws_end?))
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(super) enum ChangeDir {
+    Next,
+    Prev,
+}
+
+pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+
+    let head = editor.selections.newest_anchor().head();
+    let cursor_row = buffer_snapshot.point_for_anchor(&head).row;
+
+    let Some(diff_map) = display_snapshot.diff_map() else {
+        return UpdateEffect::None;
+    };
+
+    let target_row = match dir {
+        ChangeDir::Next => diff_map
+            .hunks_in_range(cursor_row.saturating_add(1)..u32::MAX)
+            .into_iter()
+            .find(|h| h.buffer_start_line > cursor_row)
+            .map(|h| h.buffer_start_line),
+        ChangeDir::Prev => diff_map
+            .hunks_in_range(0..cursor_row)
+            .into_iter()
+            .rfind(|h| h.buffer_start_line < cursor_row)
+            .map(|h| h.buffer_start_line),
+    };
+    let Some(target_row) = target_row else {
+        return UpdateEffect::None;
+    };
+
+    let target_offset = buffer_snapshot
+        .rope()
+        .point_to_offset(Point::new(target_row, 0));
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
+        let mut new = sel.clone();
+        new.collapse_to(anchor, SelectionGoal::None);
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

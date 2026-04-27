@@ -1439,4 +1439,71 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Redo);
         assert_eq!(focused_buffer_text(&mut h), before);
     }
+
+    fn install_diff_hunks(h: &mut crate::test_harness::TestHarness, line_starts: &[u32]) {
+        use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
+        let hunks: Vec<DiffHunk> = line_starts
+            .iter()
+            .map(|&start| DiffHunk {
+                status: DiffHunkStatus::Added,
+                buffer_start_line: start,
+                buffer_line_range: start..(start + 1),
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: None,
+            })
+            .collect();
+        let dm = DiffMap::from_hunks(hunks, None);
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            crate::pane::View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        guard.diff_map = Some(dm);
+    }
+
+    #[test]
+    fn goto_next_change_jumps_forward() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5]);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(h.primary_head_offset(), 4);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(h.primary_head_offset(), 10);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(h.primary_head_offset(), 10);
+    }
+
+    #[test]
+    fn goto_prev_change_jumps_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5]);
+        h.type_keys("g j");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        assert_eq!(h.primary_head_offset(), 10);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        assert_eq!(h.primary_head_offset(), 4);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn goto_next_change_no_op_without_diff_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(h.primary_head_offset(), before);
+    }
 }
