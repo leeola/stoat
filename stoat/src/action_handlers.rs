@@ -209,6 +209,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SelectPrevSibling => {
             movement::select_sibling(stoat, movement::SiblingDir::Prev)
         },
+        ActionKind::MoveParentNodeStart => {
+            movement::move_to_parent_bound(stoat, movement::NodeBound::Start)
+        },
+        ActionKind::MoveParentNodeEnd => {
+            movement::move_to_parent_bound(stoat, movement::NodeBound::End)
+        },
         ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),
         ActionKind::GotoWindowCenter => movement::goto_window(stoat, movement::WindowAlign::Center),
         ActionKind::GotoWindowBottom => movement::goto_window(stoat, movement::WindowAlign::Bottom),

@@ -12,22 +12,22 @@ size: 80x24
   [0m[36m┌ help: active (normal) ───────────────────────────────────────────────────┐[0m
   [0m[36m│[0m[33m> [0m[97mmove[0m[30m[107m [0m                                                                   [0m[36m│[0m
   [0m[36m│[0m[1m[30m[42m INS [0m[97m[100m                                                                     [0m[36m│[0m
-  [0m[36m│[0m[30m[46m    j  MoveDown  move cursor do[0m[90m│[0m [0m[1m[33mMoveDown[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   h[0m[97m  MoveLeft  [0m[90mmove cursor le│[0m [0m[36mbound: j[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   e[0m[97m  MoveNextWordEnd  [0m[90mselect │[0m [0m[97mmove cursor down[0m                         [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   w[0m[97m  MoveNextWordStart  [0m[90mselec│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   b[0m[97m  MovePrevWordStart  [0m[90mselec│[0m [0m[97mMove every cursor one display line down,[0m [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   l[0m[97m  MoveRight  [0m[90mmove cursor r│[0m [0m[97mpreserving the goal column.[0m              [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m  [0m[90m│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m C-d[0m[97m  HalfPageDown  [0m[90mmove curso│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m C-u[0m[97m  HalfPageUp  [0m[90mmove cursor │[0m [0m[90m  MoveDown()[0m                             [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m C-f[0m[97m  PageDown  [0m[90mmove cursor do│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m C-b[0m[97m  PageUp  [0m[90mmove cursor up o│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m   J[0m[97m  ExtendDown  [0m[90mextend selec│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m   H[0m[97m  ExtendLeft  [0m[90mextend selec│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m   L[0m[97m  ExtendRight  [0m[90mextend sele│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m   K[0m[97m  ExtendUp  [0m[90mextend selecti│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-Dn[0m[97m  ShrinkSelection  [0m[90mshrink │[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
+  [0m[36m│[0m[30m[46m   j  MoveDown  move cursor dow[0m[90m│[0m [0m[1m[33mMoveDown[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  h[0m[97m  MoveLeft  [0m[90mmove cursor lef│[0m [0m[36mbound: j[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  e[0m[97m  MoveNextWordEnd  [0m[90mselect t│[0m [0m[97mmove cursor down[0m                         [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  w[0m[97m  MoveNextWordStart  [0m[90mselect│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mA-e[0m[97m  MoveParentNodeEnd  [0m[90mmove c│[0m [0m[97mMove every cursor one display line down,[0m [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mA-b[0m[97m  MoveParentNodeStart  [0m[90mmove│[0m [0m[97mpreserving the goal column.[0m              [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  b[0m[97m  MovePrevWordStart  [0m[90mselect│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  l[0m[97m  MoveRight  [0m[90mmove cursor ri│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  k[0m[97m  MoveUp  [0m[90mmove cursor up[0m[97m   [0m[90m│[0m [0m[90m  MoveDown()[0m                             [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mC-d[0m[97m  HalfPageDown  [0m[90mmove cursor│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mC-u[0m[97m  HalfPageUp  [0m[90mmove cursor u│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36mC-f[0m[97m  PageDown  [0m[90mmove cursor dow│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
+  [0m[36m│[0m[97m [0m[36mC-b[0m[97m  PageUp  [0m[90mmove cursor up on│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  J[0m[97m  ExtendDown  [0m[90mextend select│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  H[0m[97m  ExtendLeft  [0m[90mextend select│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  L[0m[97m  ExtendRight  [0m[90mextend selec│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
   [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m────┘[0m [0m[33m│[0m
                                            [0m[33m└───────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

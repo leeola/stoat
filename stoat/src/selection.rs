@@ -1632,6 +1632,52 @@ mod tests {
     }
 
     #[test]
+    fn move_parent_node_start_collapses_to_parent_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveParentNodeStart);
+        let after_offset = h.primary_head_offset();
+        assert!(
+            after_offset < before_offset,
+            "MoveParentNodeStart should move cursor left from {before_offset} to a smaller offset (got {after_offset})"
+        );
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].0, spans[0].1, "selection collapsed to cursor");
+    }
+
+    #[test]
+    fn move_parent_node_end_collapses_to_parent_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
+        let after_offset = h.primary_head_offset();
+        assert!(
+            after_offset > before_offset,
+            "MoveParentNodeEnd should move cursor right from {before_offset} to a larger offset (got {after_offset})"
+        );
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].0, spans[0].1, "selection collapsed to cursor");
+    }
+
+    #[test]
+    fn move_to_parent_bound_no_op_without_syntax_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "alpha beta gamma\n");
+        h.open_file(&path);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveParentNodeStart);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
     fn shrink_after_cursor_move_does_not_restore_old_chain() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn main() {}\n");

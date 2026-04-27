@@ -20,12 +20,12 @@ use crate::{
             GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             HalfPageDown, HalfPageUp, Increment, IndentSelection, KeepPrimarySelection, MoveDown,
             MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
-            RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, ShrinkSelection, SplitSelectionOnNewline,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TrimSelections, Undo,
-            UnindentSelection,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
+            PageUp, Redo, RotateSelectionsBackward, RotateSelectionsForward, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -234,6 +234,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShrinkSelection::DEF, |_| Ok(Box::new(ShrinkSelection)));
     add(SelectNextSibling::DEF, |_| Ok(Box::new(SelectNextSibling)));
     add(SelectPrevSibling::DEF, |_| Ok(Box::new(SelectPrevSibling)));
+    add(MoveParentNodeStart::DEF, |_| {
+        Ok(Box::new(MoveParentNodeStart))
+    });
+    add(MoveParentNodeEnd::DEF, |_| Ok(Box::new(MoveParentNodeEnd)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
@@ -647,7 +651,8 @@ mod tests {
         // + 1 ExpandSelection.
         // + 1 ShrinkSelection.
         // + 2 SelectNextSibling/SelectPrevSibling.
-        assert_eq!(all().count(), 177);
+        // + 2 MoveParentNodeStart/MoveParentNodeEnd.
+        assert_eq!(all().count(), 179);
     }
 
     #[test]

@@ -371,6 +371,26 @@ define_action!(
 );
 
 define_action!(
+    MoveParentNodeStartDef,
+    MoveParentNodeStart,
+    "MoveParentNodeStart",
+    ActionKind::MoveParentNodeStart,
+    "move cursor to parent node start",
+    "Collapse the primary selection to a cursor at the start byte of the enclosing tree-sitter node's parent. No-op when the buffer has no syntax tree or the current node is at the root.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    MoveParentNodeEndDef,
+    MoveParentNodeEnd,
+    "MoveParentNodeEnd",
+    ActionKind::MoveParentNodeEnd,
+    "move cursor to parent node end",
+    "Collapse the primary selection to a cursor at the end byte of the enclosing tree-sitter node's parent. No-op when the buffer has no syntax tree or the current node is at the root.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",

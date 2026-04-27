@@ -169,6 +169,8 @@ on key {
         Alt-Down -> ShrinkSelection();
         Alt-n -> SelectNextSibling();
         Alt-p -> SelectPrevSibling();
+        Alt-b -> MoveParentNodeStart();
+        Alt-e -> MoveParentNodeEnd();
         & -> AlignSelections();
         % -> SelectAll();
         x -> SelectLineBelow();
