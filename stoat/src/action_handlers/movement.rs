@@ -1306,6 +1306,57 @@ pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(super) enum SiblingDir {
+    Next,
+    Prev,
+}
+
+pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, sel_start, sel_end) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buffer_snapshot.resolve_anchor(&sel.start);
+        let end = buffer_snapshot.resolve_anchor(&sel.end);
+        (buffer_id, start, end)
+    };
+
+    let target = {
+        let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
+            return UpdateEffect::None;
+        };
+        let Some(layer) = syntax_map.snapshot().iter_layers().next() else {
+            return UpdateEffect::None;
+        };
+        let root = layer.tree.root_node();
+        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
+            return UpdateEffect::None;
+        };
+        let sibling = match dir {
+            SiblingDir::Next => node.next_named_sibling(),
+            SiblingDir::Prev => node.prev_named_sibling(),
+        };
+        match sibling {
+            Some(s) => s.byte_range(),
+            None => return UpdateEffect::None,
+        }
+    };
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    apply_primary_range(editor, target);
+    UpdateEffect::Redraw
+}
+
 fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>) {
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();

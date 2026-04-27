@@ -1577,6 +1577,61 @@ mod tests {
     }
 
     #[test]
+    fn select_next_sibling_jumps_to_next_named_node() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let on_first_fn = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        let on_second_fn = h.selection_spans();
+        assert_ne!(on_second_fn, on_first_fn);
+        assert!(
+            on_second_fn[0].0 >= on_first_fn[0].1,
+            "next sibling should start at or after first sibling end ({on_first_fn:?} -> {on_second_fn:?})"
+        );
+    }
+
+    #[test]
+    fn select_prev_sibling_walks_back() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let on_first_fn = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectPrevSibling);
+        assert_eq!(h.selection_spans(), on_first_fn);
+    }
+
+    #[test]
+    fn select_sibling_no_op_without_syntax_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "alpha beta gamma\n");
+        h.open_file(&path);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
+    fn select_sibling_no_op_at_tree_edge() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn only() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
     fn shrink_after_cursor_move_does_not_restore_old_chain() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn main() {}\n");

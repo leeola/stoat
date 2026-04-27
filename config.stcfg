@@ -167,6 +167,8 @@ on key {
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();
         Alt-Down -> ShrinkSelection();
+        Alt-n -> SelectNextSibling();
+        Alt-p -> SelectPrevSibling();
         & -> AlignSelections();
         % -> SelectAll();
         x -> SelectLineBelow();

@@ -203,6 +203,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
         ActionKind::ExpandSelection => movement::expand_selection(stoat),
         ActionKind::ShrinkSelection => movement::shrink_selection(stoat),
+        ActionKind::SelectNextSibling => {
+            movement::select_sibling(stoat, movement::SiblingDir::Next)
+        },
+        ActionKind::SelectPrevSibling => {
+            movement::select_sibling(stoat, movement::SiblingDir::Prev)
+        },
         ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),
         ActionKind::GotoWindowCenter => movement::goto_window(stoat, movement::WindowAlign::Center),
         ActionKind::GotoWindowBottom => movement::goto_window(stoat, movement::WindowAlign::Bottom),

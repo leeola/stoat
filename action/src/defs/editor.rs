@@ -351,6 +351,26 @@ define_action!(
 );
 
 define_action!(
+    SelectNextSiblingDef,
+    SelectNextSibling,
+    "SelectNextSibling",
+    ActionKind::SelectNextSibling,
+    "select next syntax sibling",
+    "Set the primary selection to the next named tree-sitter sibling of the smallest node containing the current selection. Anonymous tokens (punctuation, keywords) are skipped. No-op when the buffer has no syntax tree or the current node has no next sibling.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    SelectPrevSiblingDef,
+    SelectPrevSibling,
+    "SelectPrevSibling",
+    ActionKind::SelectPrevSibling,
+    "select previous syntax sibling",
+    "Set the primary selection to the previous named tree-sitter sibling of the smallest node containing the current selection. Anonymous tokens (punctuation, keywords) are skipped. No-op when the buffer has no syntax tree or the current node has no previous sibling.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",
