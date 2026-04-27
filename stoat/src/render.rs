@@ -49,6 +49,11 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) mode: &'a str,
     pub(crate) theme: &'a crate::theme::Theme,
     pub(crate) render_tick: u64,
+    /// Mid-typing count prefix waiting on a motion (e.g. `4` between
+    /// keypresses on the way to `4j`). The status bar shows it so the
+    /// user knows a partial count is in flight; cleared after every
+    /// action dispatch.
+    pub(crate) pending_count: Option<u32>,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -111,6 +116,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         mode: &stoat.mode,
         theme: &stoat.theme,
         render_tick: stoat.render_tick,
+        pending_count: stoat.pending_count,
     };
 
     let split_focused = ws.panes.focus();

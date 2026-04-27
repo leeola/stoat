@@ -231,12 +231,31 @@ fn render_pane_status(
         cursor = paint_segment(buf, y, cursor, end_x, &text, base_style);
     }
 
+    let mut right_anchor = end_x;
     if let Some((line, col)) = cursor_pos {
         let text = format!(" {line}:{col} ");
         let width = text.chars().count() as u16;
-        let start = end_x.saturating_sub(width);
+        let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            paint_segment(buf, y, start, end_x, &text, base_style);
+            paint_segment(buf, y, start, right_anchor, &text, base_style);
+            right_anchor = start;
+        }
+    }
+    if is_focused {
+        if let Some(count) = frame.pending_count {
+            let text = format!(" {count} ");
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                paint_segment(
+                    buf,
+                    y,
+                    start,
+                    right_anchor,
+                    &text,
+                    base_style.add_modifier(Modifier::BOLD),
+                );
+            }
         }
     }
     let _ = cursor;

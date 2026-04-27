@@ -1737,6 +1737,15 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_pending_count_appears_in_status_bar() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("4");
+        h.assert_snapshot("snapshot_pending_count_appears_in_status_bar");
+    }
+
+    #[test]
     fn bare_zero_jumps_to_line_start() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc def\n");
