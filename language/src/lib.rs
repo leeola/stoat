@@ -13,3 +13,4 @@ pub use highlight::{
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use language::{Language, LanguageRegistry};
 pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};
+pub use tree_sitter::{Node, Tree};

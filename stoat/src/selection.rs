@@ -2188,6 +2188,55 @@ mod tests {
     }
 
     #[test]
+    fn match_brackets_skips_brace_in_string() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 5);
+        let path = h.write_file("s.rs", "fn f() { \"}\" ; }\n");
+        h.open_file(&path);
+        h.type_keys("7 l");
+        assert_eq!(h.primary_head_offset(), 7, "cursor on the opening `{{`");
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            15,
+            "naive scan would land on the `}}` inside the string at offset 10"
+        );
+    }
+
+    #[test]
+    fn match_brackets_skips_brace_in_block_comment() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 5);
+        let path = h.write_file("s.rs", "fn f() { /* } */ }\n");
+        h.open_file(&path);
+        h.type_keys("7 l");
+        assert_eq!(h.primary_head_offset(), 7, "cursor on the opening `{{`");
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            17,
+            "naive scan would land on the `}}` inside the block comment at offset 12"
+        );
+    }
+
+    #[test]
+    fn match_brackets_no_op_when_cursor_in_string() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 5);
+        let path = h.write_file("s.rs", "fn f() { let s = \"()\"; }\n");
+        h.open_file(&path);
+        h.type_keys("1 8 l");
+        assert_eq!(
+            h.primary_head_offset(),
+            18,
+            "cursor on the `(` inside the string"
+        );
+        h.type_keys("m m");
+        assert_eq!(
+            h.primary_head_offset(),
+            18,
+            "cursor in string should not match brackets"
+        );
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
